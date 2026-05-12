@@ -1,0 +1,57 @@
+# PolarCode - Production Deployment
+#
+# Quick Start:
+#   1. Copy this file to your server
+#   2. Fill in your RDS connection string and Redis password below
+#   3. docker compose -f docker-compose.prod.yml up -d
+#   4. Access at http://<your-server-ip>:3000
+#
+# Default admin: root / 123456 (change immediately after first login)
+
+services:
+  polarcode:
+    image: ghcr.io/boelroy/polarcode:latest
+    container_name: polarcode
+    restart: always
+    command: --log-dir /app/logs
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/data
+      - ./logs:/app/logs
+    environment:
+      - SQL_DSN=postgresql://user:password@your-rds-host:5432/polarcode
+      - REDIS_CONN_STRING=redis://:CHANGEME_REDIS_PASSWORD@redis:6379
+      - TZ=Asia/Shanghai
+      - ERROR_LOG_ENABLED=true
+      - BATCH_UPDATE_ENABLED=true
+      - NODE_NAME=polarcode-node-1
+#      - SESSION_SECRET=CHANGEME_RANDOM_STRING  # Required for multi-node deployment
+#      - STREAMING_TIMEOUT=300
+    depends_on:
+      redis:
+        condition: service_started
+    networks:
+      - polarcode-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/status | grep -o '\"success\":\\s*true' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: polarcode-redis
+    restart: always
+    command: ["redis-server", "--requirepass", "CHANGEME_REDIS_PASSWORD"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - polarcode-network
+
+volumes:
+  redis_data:
+
+networks:
+  polarcode-network:
+    driver: bridge

@@ -1,8 +1,11 @@
-name: Publish Docker image (Multi-arch)
+name: Publish Docker image (Multi-arch) (disabled)
 
 on:
-  push:
-    tags:
+  workflow_dispatch:
+
+# on:
+#   push:
+#     tags:
       - '*'
       - '!nightly*'
   workflow_dispatch:

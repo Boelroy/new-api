@@ -50,12 +50,11 @@ jobs:
           MAJOR="${{ steps.version.outputs.major }}"
           MINOR="${{ steps.version.outputs.minor }}"
           OWNER="${{ steps.lowercase.outputs.owner }}"
-          REPO_NAME="${{ github.event.repository.name }}"
 
-          TAGS="ghcr.io/${OWNER}/${REPO_NAME}:${TAG_NAME}"
-          TAGS="${TAGS},ghcr.io/${OWNER}/${REPO_NAME}:${MINOR}"
-          TAGS="${TAGS},ghcr.io/${OWNER}/${REPO_NAME}:${MAJOR}"
-          TAGS="${TAGS},ghcr.io/${OWNER}/${REPO_NAME}:latest"
+          TAGS="ghcr.io/${OWNER}/polarcode:${TAG_NAME}"
+          TAGS="${TAGS},ghcr.io/${OWNER}/polarcode:${MINOR}"
+          TAGS="${TAGS},ghcr.io/${OWNER}/polarcode:${MAJOR}"
+          TAGS="${TAGS},ghcr.io/${OWNER}/polarcode:latest"
 
           echo "tags=$TAGS" >> $GITHUB_OUTPUT
 

@@ -1,8 +1,11 @@
-name: Build Electron App
+name: Build Electron App (disabled)
 
 on:
-  push:
-    tags:
+  workflow_dispatch:
+
+# on:
+#   push:
+#     tags:
       - '*'  # Triggers on version tags like v1.0.0
       - '!*-*'  # Ignore pre-release tags like v1.0.0-beta
       - '!*-alpha*' # Ignore alpha tags like v1.0.0-alpha

@@ -1,15 +1,18 @@
-name: Release (Linux, macOS, Windows)
+name: Release (Linux, macOS, Windows) (disabled)
 permissions:
   contents: write
 
 on:
   workflow_dispatch:
-    inputs:
-      name:
-        description: 'reason'
-        required: false
-  push:
-    tags:
+
+# on_disabled:
+#   workflow_dispatch:
+#     inputs:
+#       name:
+#         description: 'reason'
+#         required: false
+#   push:
+#     tags:
       - '*'
       - '!*-alpha*'
 
