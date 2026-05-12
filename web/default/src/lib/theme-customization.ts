@@ -64,6 +64,11 @@ export const THEME_PRESETS = [
     name: 'Lavender Dream',
     swatches: ['oklch(0.5709 0.1808 306.89)', 'oklch(0.811 0.0589 201.14)'],
   },
+  {
+    value: 'raven-night',
+    name: 'Raven Night',
+    swatches: ['oklch(0.40 0.18 280)', 'oklch(0.75 0.15 85)'],
+  },
 ] as const
 
 export type ThemePreset = (typeof THEME_PRESETS)[number]['value']
@@ -79,7 +84,7 @@ export type ThemeCustomization = {
 }
 
 export const DEFAULT_THEME_CUSTOMIZATION: ThemeCustomization = {
-  preset: 'default',
+  preset: 'raven-night',
   radius: 'default',
   scale: 'default',
   contentLayout: 'full',

@@ -125,7 +125,7 @@ export function ThemeCustomizationProvider(props: {
   useEffect(() => {
     applyAttribute(
       'data-theme-preset',
-      preset === DEFAULT_THEME_CUSTOMIZATION.preset ? null : preset
+      preset === 'default' ? null : preset
     )
   }, [preset])
 

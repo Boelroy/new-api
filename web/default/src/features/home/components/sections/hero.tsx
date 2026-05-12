@@ -34,15 +34,15 @@ export function Hero(props: HeroProps) {
 
   return (
     <section className='relative z-10 flex flex-col items-center overflow-hidden px-6 pt-28 pb-16 md:pt-36 md:pb-24'>
-      {/* Radial gradient background */}
+      {/* Radial gradient background — raven night: purple/indigo/gold */}
       <div
         aria-hidden
         className='pointer-events-none absolute inset-0 -z-10 opacity-25 dark:opacity-[0.12]'
         style={{
           background: [
-            'radial-gradient(ellipse 60% 50% at 20% 20%, oklch(0.72 0.18 250 / 80%) 0%, transparent 70%)',
-            'radial-gradient(ellipse 50% 40% at 80% 15%, oklch(0.65 0.15 200 / 60%) 0%, transparent 70%)',
-            'radial-gradient(ellipse 40% 35% at 40% 80%, oklch(0.70 0.12 280 / 40%) 0%, transparent 70%)',
+            'radial-gradient(ellipse 60% 50% at 20% 20%, oklch(0.45 0.22 280 / 80%) 0%, transparent 70%)',
+            'radial-gradient(ellipse 50% 40% at 80% 15%, oklch(0.55 0.20 260 / 60%) 0%, transparent 70%)',
+            'radial-gradient(ellipse 40% 35% at 60% 75%, oklch(0.70 0.15 85 / 35%) 0%, transparent 70%)',
           ].join(', '),
         }}
       />
@@ -59,7 +59,7 @@ export function Hero(props: HeroProps) {
         >
           {t('Unified API Gateway for')}
           <br />
-          <span className='bg-gradient-to-r from-blue-400 via-violet-400 to-purple-500 bg-clip-text text-transparent'>
+          <span className='bg-gradient-to-r from-violet-500 via-blue-400 to-amber-400 bg-clip-text text-transparent'>
             {t('All Your AI Models')}
           </span>
         </h1>
