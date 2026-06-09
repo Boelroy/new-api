@@ -352,7 +352,7 @@ button:hover{opacity:.85}
 }
 
 func queryLogs(startDate, endDate string) ([]LogRow, error) {
-	loc, _ := time.LoadLocation("Asia/Shanghai")
+	loc := time.UTC
 	startTime, err := time.ParseInLocation("2006-01-02", startDate, loc)
 	if err != nil {
 		return nil, fmt.Errorf("invalid start date: %v", err)
@@ -765,7 +765,7 @@ function getDimId(d, row) {
 }
 
 // ---- date range ----
-document.getElementById("dateRange").textContent = REPORT_START + " ~ " + REPORT_END + " (Asia/Shanghai)";
+document.getElementById("dateRange").textContent = REPORT_START + " ~ " + REPORT_END + " (UTC)";
 
 // ---- weeks ----
 var allDates=[], dateSet=new Set();
