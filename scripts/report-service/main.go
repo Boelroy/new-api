@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/csv"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	_ "github.com/lib/pq"
 )
 
@@ -29,10 +29,9 @@ var db *sql.DB
 // ---- Auth ----
 
 var (
-	sessions   = map[string]time.Time{}
-	sessionsMu sync.Mutex
-	adminUser  string
-	adminPass  string
+	adminUser string
+	adminPass string
+	jwtSecret []byte
 )
 
 // ---- Lark Notification ----
@@ -116,7 +115,7 @@ func checkAndNotify() {
 	if notifyHoursThreshold > 0 && hasETA && etaHours < notifyHoursThreshold {
 		if canNotify("hours") {
 			sendLark(fmt.Sprintf(
-				"⚠️ Key 余量预警\n剩余额度：$%.2f / $%.2f\n上小时消耗：$%.4f\n预计剩余时长：%s（低于阈值 %.0f 小时）",
+				"⚠️ Key 余量预警\n剩余额度：$%.2f / $%.2f\n最近1小时消耗：$%.4f\n预计剩余时长：%s（低于阈值 %.0f 小时）",
 				totalRemaining, totalQuota, totalLastHour, fmtHours(etaHours), notifyHoursThreshold,
 			))
 		}
@@ -126,7 +125,7 @@ func checkAndNotify() {
 	if notifyUSDThreshold > 0 && totalRemaining < notifyUSDThreshold {
 		if canNotify("usd") {
 			sendLark(fmt.Sprintf(
-				"🚨 Key 余额不足\n剩余额度：$%.2f（低于阈值 $%.2f）\n上小时消耗：$%.4f\n预计剩余时长：%s",
+				"🚨 Key 余额不足\n剩余额度：$%.2f（低于阈值 $%.2f）\n最近1小时消耗：$%.4f\n预计剩余时长：%s",
 				totalRemaining, notifyUSDThreshold, totalLastHour,
 				func() string {
 					if hasETA {
@@ -148,33 +147,29 @@ func startNotifyLoop() {
 	}()
 }
 
-func newSession() string {
-	b := make([]byte, 16)
-	rand.Read(b)
-	token := hex.EncodeToString(b)
-	sessionsMu.Lock()
-	sessions[token] = time.Now().Add(24 * time.Hour)
-	sessionsMu.Unlock()
-	return token
-}
-
-func validSession(token string) bool {
-	sessionsMu.Lock()
-	defer sessionsMu.Unlock()
-	exp, ok := sessions[token]
-	if !ok {
-		return false
-	}
-	if time.Now().After(exp) {
-		delete(sessions, token)
-		return false
-	}
-	return true
+func newJWT() (string, error) {
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+		Subject:   adminUser,
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+		IssuedAt:  jwt.NewNumericDate(time.Now()),
+	})
+	return token.SignedString(jwtSecret)
 }
 
 func authMiddleware(c *gin.Context) {
-	token, err := c.Cookie("session")
-	if err != nil || !validSession(token) {
+	tokenStr, err := c.Cookie("token")
+	if err != nil {
+		c.Redirect(http.StatusFound, "/login?next="+c.Request.URL.RequestURI())
+		c.Abort()
+		return
+	}
+	_, err = jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method")
+		}
+		return jwtSecret, nil
+	})
+	if err != nil {
 		c.Redirect(http.StatusFound, "/login?next="+c.Request.URL.RequestURI())
 		c.Abort()
 		return
@@ -223,6 +218,14 @@ func main() {
 	adminPass = os.Getenv("ADMIN_PASSWORD")
 	if adminPass == "" {
 		log.Fatal("ADMIN_PASSWORD environment variable is required")
+	}
+
+	if secret := os.Getenv("JWT_SECRET"); secret != "" {
+		jwtSecret = []byte(secret)
+	} else {
+		jwtSecret = make([]byte, 32)
+		rand.Read(jwtSecret)
+		log.Println("JWT_SECRET not set, using random secret (sessions reset on restart)")
 	}
 
 	larkWebhook = os.Getenv("LARK_WEBHOOK")
@@ -295,8 +298,12 @@ func handleLoginPost(c *gin.Context) {
 	password := c.PostForm("password")
 	next := c.DefaultPostForm("next", "/")
 	if username == adminUser && password == adminPass {
-		token := newSession()
-		c.SetCookie("session", token, 86400, "/", "", false, true)
+		tokenStr, err := newJWT()
+		if err != nil {
+			c.Redirect(http.StatusFound, "/login?next="+next+"&error=1")
+			return
+		}
+		c.SetCookie("token", tokenStr, 86400, "/", "", false, true)
 		c.Redirect(http.StatusFound, next)
 		return
 	}
@@ -304,13 +311,7 @@ func handleLoginPost(c *gin.Context) {
 }
 
 func handleLogout(c *gin.Context) {
-	token, err := c.Cookie("session")
-	if err == nil {
-		sessionsMu.Lock()
-		delete(sessions, token)
-		sessionsMu.Unlock()
-	}
-	c.SetCookie("session", "", -1, "/", "", false, true)
+	c.SetCookie("token", "", -1, "/", "", false, true)
 	c.Redirect(http.StatusFound, "/login")
 }
 
@@ -1137,7 +1138,7 @@ sk-ant-api03-zzzz    100"></textarea>
           <th class="num">额度 ($)</th>
           <th class="num">剩余 ($)</th>
           <th>剩余%</th>
-          <th class="num">上小时消耗 ($)</th>
+          <th class="num">最近1小时消耗 ($)</th>
           <th>预计剩余时长</th>
         </tr></thead>
         <tbody id="tableBody"></tbody>
@@ -1252,7 +1253,7 @@ function render() {
     {l:"总额度",v: totalQuota ? "$"+totalQuota.toFixed(2) : "未配置",c:"var(--text)"},
     {l:"总已用",v:"$"+totalUsed.toFixed(2),c:"var(--rose)"},
     {l:"总剩余",v: totalRemaining !== null ? "$"+totalRemaining.toFixed(2) : "—",c: totalRemaining !== null && totalRemaining < totalQuota*0.2 ? "var(--amber)" : "var(--green)"},
-    {l:"上小时消耗",v: totalLastHour > 0 ? "$"+totalLastHour.toFixed(4) : "$0",c:"var(--text-muted)"},
+    {l:"最近1小时消耗",v: totalLastHour > 0 ? "$"+totalLastHour.toFixed(4) : "$0",c:"var(--text-muted)"},
     {l:"预计剩余时长",v:etaText(totalETA),c:etaColor(totalETA)}
   ].map(function(x){return '<div class="card"><div class="label">'+x.l+'</div><div class="value" style="color:'+x.c+'">'+x.v+'</div></div>'}).join("");
 
