@@ -978,6 +978,10 @@ func queryKeyData() ([]ChannelRow, error) {
 			v := roundTo(quotaUSD.Float64, 4)
 			r.QuotaUSD = &v
 		}
+		// mask key: only expose last 8 chars
+		if len(r.Key) > 8 {
+			r.Key = "…" + r.Key[len(r.Key)-8:]
+		}
 		idxMap[r.ID] = len(channels)
 		channels = append(channels, r)
 	}
@@ -1005,26 +1009,33 @@ func queryKeyData() ([]ChannelRow, error) {
 
 func handleSaveQuotas(c *gin.Context) {
 	var payload []struct {
-		ChannelID int     `json:"channel_id"`
-		QuotaUSD  float64 `json:"quota_usd"`
+		Key      string  `json:"key"`
+		QuotaUSD float64 `json:"quota_usd"`
 	}
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	now := time.Now().Unix()
+	saved := 0
 	for _, p := range payload {
-		_, err := db.Exec(`
+		var channelID int
+		err := db.QueryRow(`SELECT id FROM channels WHERE key = $1 LIMIT 1`, p.Key).Scan(&channelID)
+		if err != nil {
+			continue // key not found, skip
+		}
+		_, err = db.Exec(`
 			INSERT INTO report_key_quotas (channel_id, quota_usd, updated_at)
 			VALUES ($1, $2, $3)
 			ON CONFLICT (channel_id) DO UPDATE SET quota_usd=$2, updated_at=$3`,
-			p.ChannelID, p.QuotaUSD, now)
+			channelID, p.QuotaUSD, now)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		saved++
 	}
-	c.JSON(http.StatusOK, gin.H{"saved": len(payload)})
+	c.JSON(http.StatusOK, gin.H{"saved": saved})
 }
 
 func handleKeysData(c *gin.Context) {
@@ -1155,12 +1166,8 @@ function parseQuotas() {
 
 function applyAndRefresh() {
   parseQuotas();
-  // build payload: match key -> channel_id from rawData
-  var payload = [];
-  rawData.forEach(function(r) {
-    if (quotaMap[r.key] !== undefined) {
-      payload.push({channel_id: r.id, quota_usd: quotaMap[r.key]});
-    }
+  var payload = Object.entries(quotaMap).map(function(e) {
+    return {key: e[0], quota_usd: e[1]};
   });
   fetch("/api/keys/quota", {
     method: "POST",
@@ -1169,15 +1176,6 @@ function applyAndRefresh() {
   }).then(function() {
     loadData();
   }).catch(function(e) { alert("保存失败: "+e); });
-}
-
-function fillTextareaFromData() {
-  var lines = rawData.map(function(r) {
-    var q = r.quota_usd !== null && r.quota_usd !== undefined ? r.quota_usd : "";
-    return r.key + (q !== "" ? "\t" + q : "");
-  });
-  document.getElementById("quotaInput").value = lines.join("\n");
-  parseQuotas();
 }
 
 function statusBadge(s) {
@@ -1277,7 +1275,6 @@ function loadData() {
   fetch("/api/keys/data").then(function(r){return r.json()}).then(function(data) {
     rawData = data;
     document.getElementById("refreshedAt").textContent = "最后更新：" + new Date().toLocaleTimeString("zh-CN");
-    fillTextareaFromData();
     render();
   }).catch(function(e){alert("加载失败: "+e)});
 }
