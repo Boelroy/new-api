@@ -90,15 +90,19 @@ func checkAndNotify() {
 		return
 	}
 
-	var totalUsed, totalQuota, totalLastHour float64
+	var totalUsed, totalQuota float64
 	hasQuota := false
 	for _, ch := range channels {
 		totalUsed += ch.UsedUSD
-		totalLastHour += ch.LastHourUSD
 		if ch.QuotaUSD != nil {
 			totalQuota += *ch.QuotaUSD
 			hasQuota = true
 		}
+	}
+	totalLastHour, err := queryTotalLastHour()
+	if err != nil {
+		log.Printf("checkAndNotify totalLastHour error: %v", err)
+		return
 	}
 	if !hasQuota {
 		return
@@ -953,6 +957,11 @@ type ChannelRow struct {
 	QuotaUSD    *float64 `json:"quota_usd"`
 }
 
+type KeySummary struct {
+	Channels      []ChannelRow `json:"channels"`
+	TotalLastHour float64      `json:"total_last_hour"`
+}
+
 func queryKeyData() ([]ChannelRow, error) {
 	rows, err := db.Query(`
 		SELECT c.id, COALESCE(c.name,''), c.key, COALESCE(c.status,1), COALESCE(c.used_quota,0), q.quota_usd
@@ -987,7 +996,7 @@ func queryKeyData() ([]ChannelRow, error) {
 		channels = append(channels, r)
 	}
 
-	// last hour usage per channel
+	// last hour usage per channel (all channels, regardless of status)
 	now := time.Now().Unix()
 	oneHourAgo := now - 3600
 	lhRows, err := db.Query(`SELECT channel_id, COALESCE(SUM(quota),0) FROM logs WHERE type=2 AND created_at>=$1 AND created_at<$2 GROUP BY channel_id`, oneHourAgo, now)
@@ -1006,6 +1015,17 @@ func queryKeyData() ([]ChannelRow, error) {
 		}
 	}
 	return channels, nil
+}
+
+func queryTotalLastHour() (float64, error) {
+	now := time.Now().Unix()
+	oneHourAgo := now - 3600
+	var total int64
+	err := db.QueryRow(`SELECT COALESCE(SUM(quota),0) FROM logs WHERE type=2 AND created_at>=$1 AND created_at<$2`, oneHourAgo, now).Scan(&total)
+	if err != nil {
+		return 0, err
+	}
+	return roundTo(float64(total)/quotaPerUnit, 6), nil
 }
 
 func handleSaveQuotas(c *gin.Context) {
@@ -1040,12 +1060,17 @@ func handleSaveQuotas(c *gin.Context) {
 }
 
 func handleKeysData(c *gin.Context) {
-	data, err := queryKeyData()
+	channels, err := queryKeyData()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, data)
+	totalLastHour, err := queryTotalLastHour()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, KeySummary{Channels: channels, TotalLastHour: totalLastHour})
 }
 
 func handleKeysPage(c *gin.Context) {
@@ -1149,6 +1174,7 @@ sk-ant-api03-zzzz    100"></textarea>
 <script>
 var quotaMap = {};
 var rawData = [];
+var totalLastHourAll = 0;
 
 function parseQuotas() {
   quotaMap = {};
@@ -1226,8 +1252,8 @@ function render() {
 
   if (!totalQuota) totalRemaining = null;
   var totalETA = null;
-  if (totalRemaining !== null && totalLastHour > 0) {
-    totalETA = totalRemaining / totalLastHour;
+  if (totalRemaining !== null && totalLastHourAll > 0) {
+    totalETA = totalRemaining / totalLastHourAll;
   } else if (totalRemaining !== null && totalRemaining > 0) {
     totalETA = Infinity;
   }
@@ -1253,7 +1279,7 @@ function render() {
     {l:"总额度",v: totalQuota ? "$"+totalQuota.toFixed(2) : "未配置",c:"var(--text)"},
     {l:"总已用",v:"$"+totalUsed.toFixed(2),c:"var(--rose)"},
     {l:"总剩余",v: totalRemaining !== null ? "$"+totalRemaining.toFixed(2) : "—",c: totalRemaining !== null && totalRemaining < totalQuota*0.2 ? "var(--amber)" : "var(--green)"},
-    {l:"最近1小时消耗",v: totalLastHour > 0 ? "$"+totalLastHour.toFixed(4) : "$0",c:"var(--text-muted)"},
+    {l:"最近1小时消耗",v: totalLastHourAll > 0 ? "$"+totalLastHourAll.toFixed(4) : "$0",c:"var(--text-muted)"},
     {l:"预计剩余时长",v:etaText(totalETA),c:etaColor(totalETA)}
   ].map(function(x){return '<div class="card"><div class="label">'+x.l+'</div><div class="value" style="color:'+x.c+'">'+x.v+'</div></div>'}).join("");
 
@@ -1273,8 +1299,9 @@ function render() {
 }
 
 function loadData() {
-  fetch("/api/keys/data").then(function(r){return r.json()}).then(function(data) {
-    rawData = data;
+  fetch("/api/keys/data").then(function(r){return r.json()}).then(function(resp) {
+    rawData = resp.channels;
+    totalLastHourAll = resp.total_last_hour;
     document.getElementById("refreshedAt").textContent = "最后更新：" + new Date().toLocaleTimeString("zh-CN");
     render();
   }).catch(function(e){alert("加载失败: "+e)});
