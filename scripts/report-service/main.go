@@ -153,7 +153,7 @@ func newSession() string {
 	rand.Read(b)
 	token := hex.EncodeToString(b)
 	sessionsMu.Lock()
-	sessions[token] = time.Now().Add(12 * time.Hour)
+	sessions[token] = time.Now().Add(24 * time.Hour)
 	sessionsMu.Unlock()
 	return token
 }
@@ -296,7 +296,7 @@ func handleLoginPost(c *gin.Context) {
 	next := c.DefaultPostForm("next", "/")
 	if username == adminUser && password == adminPass {
 		token := newSession()
-		c.SetCookie("session", token, 43200, "/", "", false, true)
+		c.SetCookie("session", token, 86400, "/", "", false, true)
 		c.Redirect(http.StatusFound, next)
 		return
 	}
