@@ -126,6 +126,14 @@ func main() {
 	}
 	log.Println("Connected to database")
 
+	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS report_key_quotas (
+		channel_id BIGINT PRIMARY KEY,
+		quota_usd  NUMERIC(12,4) NOT NULL,
+		updated_at BIGINT NOT NULL
+	)`); err != nil {
+		log.Fatalf("Failed to create report_key_quotas table: %v", err)
+	}
+
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 
@@ -140,6 +148,7 @@ func main() {
 	auth.GET("/api/export/html", handleExportHTML)
 	auth.GET("/api/export/csv", handleExportCSV)
 	auth.GET("/api/keys/data", handleKeysData)
+	auth.POST("/api/keys/quota", handleSaveQuotas)
 
 	log.Printf("Report service listening on :%s", port)
 	if err := r.Run(":" + port); err != nil {
@@ -807,16 +816,22 @@ refresh();
 // ---- Key Capacity Page ----
 
 type ChannelRow struct {
-	ID          int     `json:"id"`
-	Name        string  `json:"name"`
-	Key         string  `json:"key"`
-	Status      int     `json:"status"`
-	UsedUSD     float64 `json:"used_usd"`
-	LastHourUSD float64 `json:"last_hour_usd"`
+	ID          int      `json:"id"`
+	Name        string   `json:"name"`
+	Key         string   `json:"key"`
+	Status      int      `json:"status"`
+	UsedUSD     float64  `json:"used_usd"`
+	LastHourUSD float64  `json:"last_hour_usd"`
+	QuotaUSD    *float64 `json:"quota_usd"`
 }
 
 func queryKeyData() ([]ChannelRow, error) {
-	rows, err := db.Query(`SELECT id, COALESCE(name,''), key, COALESCE(status,1), COALESCE(used_quota,0) FROM channels WHERE status = 1 ORDER BY id`)
+	rows, err := db.Query(`
+		SELECT c.id, COALESCE(c.name,''), c.key, COALESCE(c.status,1), COALESCE(c.used_quota,0), q.quota_usd
+		FROM channels c
+		LEFT JOIN report_key_quotas q ON q.channel_id = c.id
+		WHERE c.status = 1
+		ORDER BY c.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -827,10 +842,15 @@ func queryKeyData() ([]ChannelRow, error) {
 	for rows.Next() {
 		var r ChannelRow
 		var usedQuota int64
-		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &usedQuota); err != nil {
+		var quotaUSD sql.NullFloat64
+		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &usedQuota, &quotaUSD); err != nil {
 			return nil, err
 		}
 		r.UsedUSD = roundTo(float64(usedQuota)/quotaPerUnit, 4)
+		if quotaUSD.Valid {
+			v := roundTo(quotaUSD.Float64, 4)
+			r.QuotaUSD = &v
+		}
 		idxMap[r.ID] = len(channels)
 		channels = append(channels, r)
 	}
@@ -854,6 +874,30 @@ func queryKeyData() ([]ChannelRow, error) {
 		}
 	}
 	return channels, nil
+}
+
+func handleSaveQuotas(c *gin.Context) {
+	var payload []struct {
+		ChannelID int     `json:"channel_id"`
+		QuotaUSD  float64 `json:"quota_usd"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	now := time.Now().Unix()
+	for _, p := range payload {
+		_, err := db.Exec(`
+			INSERT INTO report_key_quotas (channel_id, quota_usd, updated_at)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (channel_id) DO UPDATE SET quota_usd=$2, updated_at=$3`,
+			p.ChannelID, p.QuotaUSD, now)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"saved": len(payload)})
 }
 
 func handleKeysData(c *gin.Context) {
@@ -964,15 +1008,8 @@ sk-ant-api03-zzzz    100"></textarea>
   </div>
 </div>
 <script>
-var STORAGE_KEY = "key_capacity_quotas";
 var quotaMap = {};
 var rawData = [];
-
-function loadStorage() {
-  var v = localStorage.getItem(STORAGE_KEY);
-  document.getElementById("quotaInput").value = v || "";
-  parseQuotas();
-}
 
 function parseQuotas() {
   quotaMap = {};
@@ -989,14 +1026,31 @@ function parseQuotas() {
   });
 }
 
-function saveStorage() {
-  localStorage.setItem(STORAGE_KEY, document.getElementById("quotaInput").value);
+function applyAndRefresh() {
+  parseQuotas();
+  // build payload: match key -> channel_id from rawData
+  var payload = [];
+  rawData.forEach(function(r) {
+    if (quotaMap[r.key] !== undefined) {
+      payload.push({channel_id: r.id, quota_usd: quotaMap[r.key]});
+    }
+  });
+  fetch("/api/keys/quota", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload)
+  }).then(function() {
+    loadData();
+  }).catch(function(e) { alert("保存失败: "+e); });
 }
 
-function applyAndRefresh() {
-  saveStorage();
+function fillTextareaFromData() {
+  var lines = rawData.map(function(r) {
+    var q = r.quota_usd !== null && r.quota_usd !== undefined ? r.quota_usd : "";
+    return r.key + (q !== "" ? "\t" + q : "");
+  });
+  document.getElementById("quotaInput").value = lines.join("\n");
   parseQuotas();
-  render();
 }
 
 function statusBadge(s) {
@@ -1025,7 +1079,7 @@ function barHTML(pct) {
 function render() {
   var totalUsed = 0, totalQuota = 0, totalLastHour = 0, warnCount = 0;
   var rows = rawData.map(function(r) {
-    var quota = quotaMap[r.key] || null;
+    var quota = (r.quota_usd !== null && r.quota_usd !== undefined) ? r.quota_usd : null;
     var remaining = quota !== null ? quota - r.used_usd : null;
     var pct = quota ? (remaining / quota * 100) : null;
     var eta = null;
@@ -1093,11 +1147,11 @@ function loadData() {
   fetch("/api/keys/data").then(function(r){return r.json()}).then(function(data) {
     rawData = data;
     document.getElementById("refreshedAt").textContent = "最后更新：" + new Date().toLocaleTimeString("zh-CN");
+    fillTextareaFromData();
     render();
   }).catch(function(e){alert("加载失败: "+e)});
 }
 
-loadStorage();
 loadData();
 setInterval(loadData, 60000);
 </script></body></html>`
