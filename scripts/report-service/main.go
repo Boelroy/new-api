@@ -1204,7 +1204,7 @@ function barHTML(pct) {
 }
 
 function render() {
-  var totalUsed = 0, totalQuota = 0, totalLastHour = 0, warnCount = 0;
+  var totalUsed = 0, totalQuota = 0, totalLastHour = 0, totalRemaining = 0, warnCount = 0;
   var rows = rawData.map(function(r) {
     var quota = (r.quota_usd !== null && r.quota_usd !== undefined) ? r.quota_usd : null;
     var remaining = quota !== null ? quota - r.used_usd : null;
@@ -1218,11 +1218,14 @@ function render() {
     if (pct !== null && pct < 20) warnCount++;
     totalUsed += r.used_usd;
     totalLastHour += r.last_hour_usd;
-    if (quota) totalQuota += quota;
+    if (quota) {
+      totalQuota += quota;
+      totalRemaining += Math.max(0, remaining); // clamp: over-used keys don't drag total negative
+    }
     return {r:r, quota:quota, remaining:remaining, pct:pct, eta:eta};
   });
 
-  var totalRemaining = totalQuota ? totalQuota - totalUsed : null;
+  if (!totalQuota) totalRemaining = null;
   var totalETA = null;
   if (totalRemaining !== null && totalLastHour > 0) {
     totalETA = totalRemaining / totalLastHour;
