@@ -816,7 +816,7 @@ type ChannelRow struct {
 }
 
 func queryKeyData() ([]ChannelRow, error) {
-	rows, err := db.Query(`SELECT id, COALESCE(name,''), key, COALESCE(status,1), COALESCE(used_quota,0) FROM channels ORDER BY id`)
+	rows, err := db.Query(`SELECT id, COALESCE(name,''), key, COALESCE(status,1), COALESCE(used_quota,0) FROM channels WHERE status = 1 ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -951,7 +951,6 @@ sk-ant-api03-zzzz    100"></textarea>
           <th>ID</th>
           <th>名称</th>
           <th>Key 末尾</th>
-          <th>状态</th>
           <th class="num">已用 ($)</th>
           <th class="num">额度 ($)</th>
           <th class="num">剩余 ($)</th>
@@ -1024,7 +1023,7 @@ function barHTML(pct) {
 }
 
 function render() {
-  var totalUsed = 0, totalQuota = 0, enabledCount = 0, warnCount = 0;
+  var totalUsed = 0, totalQuota = 0, totalLastHour = 0, warnCount = 0;
   var rows = rawData.map(function(r) {
     var quota = quotaMap[r.key] || null;
     var remaining = quota !== null ? quota - r.used_usd : null;
@@ -1035,19 +1034,44 @@ function render() {
     } else if (remaining !== null && r.last_hour_usd === 0 && remaining > 0) {
       eta = Infinity;
     }
-    if (r.status === 1) enabledCount++;
-    if (pct !== null && pct < 20 && r.status === 1) warnCount++;
+    if (pct !== null && pct < 20) warnCount++;
     totalUsed += r.used_usd;
+    totalLastHour += r.last_hour_usd;
     if (quota) totalQuota += quota;
     return {r:r, quota:quota, remaining:remaining, pct:pct, eta:eta};
   });
 
+  var totalRemaining = totalQuota ? totalQuota - totalUsed : null;
+  var totalETA = null;
+  if (totalRemaining !== null && totalLastHour > 0) {
+    totalETA = totalRemaining / totalLastHour;
+  } else if (totalRemaining !== null && totalRemaining > 0) {
+    totalETA = Infinity;
+  }
+
+  function etaText(h) {
+    if (h === null) return "—";
+    if (h === Infinity) return "无限";
+    if (h < 0) return "已超额";
+    if (h >= 24*30) return ">30天";
+    if (h >= 24) return Math.floor(h/24)+"天"+Math.floor(h%24)+"小时";
+    return h.toFixed(1)+"小时";
+  }
+  function etaColor(h) {
+    if (h === null) return "var(--text-muted)";
+    if (h === Infinity || h >= 48) return "var(--green)";
+    if (h >= 12) return "var(--amber)";
+    return "var(--rose)";
+  }
+
   // summary
   document.getElementById("summaryCards").innerHTML = [
+    {l:"启用 Key 数",v:rawData.length,c:"var(--blue)"},
+    {l:"总额度",v: totalQuota ? "$"+totalQuota.toFixed(2) : "未配置",c:"var(--text)"},
     {l:"总已用",v:"$"+totalUsed.toFixed(2),c:"var(--rose)"},
-    {l:"总额度",v: totalQuota ? "$"+totalQuota.toFixed(2) : "—",c:"var(--blue)"},
-    {l:"启用 Key",v:enabledCount,c:"var(--green)"},
-    {l:"余量告警",v:warnCount,c:"var(--amber)"}
+    {l:"总剩余",v: totalRemaining !== null ? "$"+totalRemaining.toFixed(2) : "—",c: totalRemaining !== null && totalRemaining < totalQuota*0.2 ? "var(--amber)" : "var(--green)"},
+    {l:"上小时消耗",v: totalLastHour > 0 ? "$"+totalLastHour.toFixed(4) : "$0",c:"var(--text-muted)"},
+    {l:"预计剩余时长",v:etaText(totalETA),c:etaColor(totalETA)}
   ].map(function(x){return '<div class="card"><div class="label">'+x.l+'</div><div class="value" style="color:'+x.c+'">'+x.v+'</div></div>'}).join("");
 
   // table
@@ -1060,7 +1084,7 @@ function render() {
     var pctBar = x.pct !== null ? x.pct.toFixed(1)+"%" + barHTML(x.pct) : '<span style="color:var(--text-muted)">—</span>';
     var lhStr = r.last_hour_usd > 0 ? "$"+r.last_hour_usd.toFixed(4) : '<span style="color:var(--text-muted)">0</span>';
     var etaStr = x.eta === Infinity ? '<span class="eta-ok">无限</span>' : fmtETA(x.eta);
-    return "<tr><td>"+r.id+"</td><td>"+r.name+"</td><td class='key-text'>"+keyTail+"</td><td>"+statusBadge(r.status)+"</td><td class='num'>"+usedStr+"</td><td class='num'>"+quotaStr+"</td><td class='num'>"+remStr+"</td><td>"+pctBar+"</td><td class='num'>"+lhStr+"</td><td>"+etaStr+"</td></tr>";
+    return "<tr><td>"+r.id+"</td><td>"+r.name+"</td><td class='key-text'>"+keyTail+"</td><td class='num'>"+usedStr+"</td><td class='num'>"+quotaStr+"</td><td class='num'>"+remStr+"</td><td>"+pctBar+"</td><td class='num'>"+lhStr+"</td><td>"+etaStr+"</td></tr>";
   }).join("");
   document.getElementById("tableBody").innerHTML = html;
 }
