@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"database/sql"
 	"encoding/csv"
@@ -33,6 +34,119 @@ var (
 	adminUser  string
 	adminPass  string
 )
+
+// ---- Lark Notification ----
+
+var (
+	larkWebhook          string
+	notifyHoursThreshold float64
+	notifyUSDThreshold   float64
+	notifyMu             sync.Mutex
+	lastNotified         = map[string]time.Time{}
+)
+
+func canNotify(key string) bool {
+	notifyMu.Lock()
+	defer notifyMu.Unlock()
+	if t, ok := lastNotified[key]; ok && time.Since(t) < time.Hour {
+		return false
+	}
+	lastNotified[key] = time.Now()
+	return true
+}
+
+func sendLark(msg string) {
+	if larkWebhook == "" {
+		return
+	}
+	body, _ := json.Marshal(map[string]any{
+		"msg_type": "text",
+		"content":  map[string]string{"text": msg},
+	})
+	resp, err := http.Post(larkWebhook, "application/json", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("lark notify error: %v", err)
+		return
+	}
+	resp.Body.Close()
+}
+
+func fmtHours(h float64) string {
+	if h >= 24*30 {
+		return ">30天"
+	}
+	if h >= 24 {
+		return fmt.Sprintf("%d天%d小时", int(h/24), int(h)%24)
+	}
+	return fmt.Sprintf("%.1f小时", h)
+}
+
+func checkAndNotify() {
+	if larkWebhook == "" {
+		return
+	}
+	channels, err := queryKeyData()
+	if err != nil {
+		log.Printf("checkAndNotify query error: %v", err)
+		return
+	}
+
+	var totalUsed, totalQuota, totalLastHour float64
+	hasQuota := false
+	for _, ch := range channels {
+		totalUsed += ch.UsedUSD
+		totalLastHour += ch.LastHourUSD
+		if ch.QuotaUSD != nil {
+			totalQuota += *ch.QuotaUSD
+			hasQuota = true
+		}
+	}
+	if !hasQuota {
+		return
+	}
+
+	totalRemaining := totalQuota - totalUsed
+	var etaHours float64
+	hasETA := totalLastHour > 0
+	if hasETA {
+		etaHours = totalRemaining / totalLastHour
+	}
+
+	// hours threshold alert
+	if notifyHoursThreshold > 0 && hasETA && etaHours < notifyHoursThreshold {
+		if canNotify("hours") {
+			sendLark(fmt.Sprintf(
+				"⚠️ Key 余量预警\n剩余额度：$%.2f / $%.2f\n上小时消耗：$%.4f\n预计剩余时长：%s（低于阈值 %.0f 小时）",
+				totalRemaining, totalQuota, totalLastHour, fmtHours(etaHours), notifyHoursThreshold,
+			))
+		}
+	}
+
+	// usd threshold alert
+	if notifyUSDThreshold > 0 && totalRemaining < notifyUSDThreshold {
+		if canNotify("usd") {
+			sendLark(fmt.Sprintf(
+				"🚨 Key 余额不足\n剩余额度：$%.2f（低于阈值 $%.2f）\n上小时消耗：$%.4f\n预计剩余时长：%s",
+				totalRemaining, notifyUSDThreshold, totalLastHour,
+				func() string {
+					if hasETA {
+						return fmtHours(etaHours)
+					}
+					return "未知"
+				}(),
+			))
+		}
+	}
+}
+
+func startNotifyLoop() {
+	ticker := time.NewTicker(10 * time.Minute)
+	go func() {
+		for range ticker.C {
+			checkAndNotify()
+		}
+	}()
+}
 
 func newSession() string {
 	b := make([]byte, 16)
@@ -111,6 +225,17 @@ func main() {
 		log.Fatal("ADMIN_PASSWORD environment variable is required")
 	}
 
+	larkWebhook = os.Getenv("LARK_WEBHOOK")
+	if v := os.Getenv("NOTIFY_HOURS_THRESHOLD"); v != "" {
+		notifyHoursThreshold, _ = strconv.ParseFloat(v, 64)
+	}
+	if notifyHoursThreshold == 0 {
+		notifyHoursThreshold = 24
+	}
+	if v := os.Getenv("NOTIFY_USD_THRESHOLD"); v != "" {
+		notifyUSDThreshold, _ = strconv.ParseFloat(v, 64)
+	}
+
 	var err error
 	db, err = sql.Open("postgres", dsn)
 	if err != nil {
@@ -149,6 +274,8 @@ func main() {
 	auth.GET("/api/export/csv", handleExportCSV)
 	auth.GET("/api/keys/data", handleKeysData)
 	auth.POST("/api/keys/quota", handleSaveQuotas)
+
+	startNotifyLoop()
 
 	log.Printf("Report service listening on :%s", port)
 	if err := r.Run(":" + port); err != nil {
