@@ -281,6 +281,8 @@ func main() {
 	auth.GET("/api/export/csv", handleExportCSV)
 	auth.GET("/api/keys/data", handleKeysData)
 	auth.POST("/api/keys/quota", handleSaveQuotas)
+	auth.GET("/allkeys", handleAllKeysPage)
+	auth.GET("/api/allkeys/data", handleAllKeysData)
 
 	startNotifyLoop()
 
@@ -703,6 +705,7 @@ tr.summary-row td.sticky-col{background:#f0fdf4}
 		sb.WriteString(`<nav style="display:flex;gap:16px;margin-bottom:20px;padding-bottom:12px;border-bottom:1px solid #e5e7eb;font-size:.8125rem">
   <a href="/" style="color:#111827;font-weight:600;text-decoration:none">Report</a>
   <a href="/keys" style="color:#6b7280;text-decoration:none">Key Capacity</a>
+  <a href="/allkeys" style="color:#6b7280;text-decoration:none">All Keys</a>
   <a href="/logout" style="margin-left:auto;color:#6b7280;text-decoration:none">退出</a>
 </nav>
 <div class="controls" id="dateControls">
@@ -1017,6 +1020,50 @@ func queryKeyData() ([]ChannelRow, error) {
 	return channels, nil
 }
 
+func queryAllKeys(startTS, endTS int64) ([]ChannelRow, error) {
+	query := `
+		SELECT c.id, COALESCE(c.name,''), c.key, COALESCE(c.status,1), COALESCE(c.used_quota,0), q.quota_usd
+		FROM channels c
+		LEFT JOIN report_key_quotas q ON q.channel_id = c.id`
+	args := []any{}
+	if startTS > 0 && endTS > 0 {
+		query += ` WHERE c.created_time >= $1 AND c.created_time < $2`
+		args = append(args, startTS, endTS)
+	} else if startTS > 0 {
+		query += ` WHERE c.created_time >= $1`
+		args = append(args, startTS)
+	} else if endTS > 0 {
+		query += ` WHERE c.created_time < $1`
+		args = append(args, endTS)
+	}
+	query += ` ORDER BY c.id`
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	channels := make([]ChannelRow, 0)
+	for rows.Next() {
+		var r ChannelRow
+		var usedQuota int64
+		var quotaUSD sql.NullFloat64
+		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &usedQuota, &quotaUSD); err != nil {
+			return nil, err
+		}
+		r.UsedUSD = roundTo(float64(usedQuota)/quotaPerUnit, 4)
+		if quotaUSD.Valid {
+			v := roundTo(quotaUSD.Float64, 4)
+			r.QuotaUSD = &v
+		}
+		if len(r.Key) > 8 {
+			r.Key = "…" + r.Key[len(r.Key)-8:]
+		}
+		channels = append(channels, r)
+	}
+	return channels, nil
+}
+
 func queryTotalLastHour() (float64, error) {
 	now := time.Now().Unix()
 	oneHourAgo := now - 3600
@@ -1078,6 +1125,147 @@ func handleKeysPage(c *gin.Context) {
 	c.Writer.WriteString(generateKeysHTML())
 }
 
+func handleAllKeysData(c *gin.Context) {
+	var startTS, endTS int64
+	if s := c.Query("start"); s != "" {
+		if t, err := time.ParseInLocation("2006-01-02", s, time.UTC); err == nil {
+			startTS = t.Unix()
+		}
+	}
+	if e := c.Query("end"); e != "" {
+		if t, err := time.ParseInLocation("2006-01-02", e, time.UTC); err == nil {
+			endTS = t.AddDate(0, 0, 1).Unix()
+		}
+	}
+	channels, err := queryAllKeys(startTS, endTS)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, channels)
+}
+
+func handleAllKeysPage(c *gin.Context) {
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.Writer.WriteString(generateAllKeysHTML())
+}
+
+func generateAllKeysHTML() string {
+	today := time.Now().UTC().Format("2006-01-02")
+	return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>All Keys</title>
+<style>
+:root{--bg:#fafafa;--surface:#fff;--border:#e5e7eb;--text:#1f2937;--text-muted:#6b7280;--accent:#111827;--green:#059669;--amber:#d97706;--rose:#e11d48;--blue:#2563eb}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,Inter,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);padding:32px 40px;max-width:1400px;margin:0 auto;line-height:1.5}
+h1{font-size:1.25rem;font-weight:600;letter-spacing:-.02em;margin-bottom:4px}
+.subtitle{color:var(--text-muted);font-size:.8125rem;margin-bottom:24px}
+nav{display:flex;gap:16px;margin-bottom:28px;border-bottom:1px solid var(--border);padding-bottom:12px}
+nav a{font-size:.8125rem;color:var(--text-muted);text-decoration:none}nav a:hover,nav a.active{color:var(--accent);font-weight:600}
+.controls{display:flex;gap:12px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+.controls label{font-size:.8125rem;color:var(--text-muted)}
+input[type=date]{background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:.8125rem;outline:0}
+input[type=date]:focus{border-color:var(--accent)}
+button{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:.8125rem;cursor:pointer}
+button:hover{opacity:.85}
+.cards{display:flex;gap:20px;margin-bottom:16px;flex-wrap:wrap}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 16px;min-width:120px}
+.card .label{font-size:.6875rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;font-weight:500}
+.card .value{font-size:1.125rem;font-weight:600;margin-top:2px;font-variant-numeric:tabular-nums}
+.table-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:8px;background:var(--surface)}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:.75rem;white-space:nowrap}
+th{background:var(--bg);position:sticky;top:0;z-index:1;text-align:left;padding:8px 12px;color:var(--text-muted);font-weight:500;text-transform:uppercase;font-size:.625rem;letter-spacing:.06em;border-bottom:1px solid var(--border)}
+td{padding:7px 12px;border-bottom:1px solid #f3f4f6}tr:last-child td{border-bottom:0}tr:hover td{background:#f9fafb}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:.625rem;font-weight:600}
+.badge-on{background:#dcfce7;color:#166534}.badge-off{background:#fee2e2;color:#991b1b}.badge-auto{background:#fef3c7;color:#92400e}
+.key-text{font-family:monospace;font-size:.6875rem;color:var(--text-muted)}
+.bar-wrap{width:80px;display:inline-block;vertical-align:middle;margin-left:6px}
+.bar-bg{height:5px;background:#e5e7eb;border-radius:3px;overflow:hidden}
+.bar-fill{height:100%;border-radius:3px}
+@media(max-width:900px){body{padding:16px}}
+</style></head><body>
+<h1>All Keys</h1>
+<div class="subtitle">所有 Key 的总用量与容量（按创建时间筛选）</div>
+<nav>
+  <a href="/">Report</a>
+  <a href="/keys">Key Capacity</a>
+  <a href="/allkeys" class="active">All Keys</a>
+  <a href="/logout" style="margin-left:auto">退出</a>
+</nav>
+<div class="controls">
+  <label>创建时间 起：<input type="date" id="startDate" value="` + today + `"></label>
+  <label>止：<input type="date" id="endDate" value="` + today + `"></label>
+  <button onclick="loadData()">查询</button>
+  <button onclick="clearFilter()" style="background:var(--surface);color:var(--text);border:1px solid var(--border)">全部</button>
+  <span style="font-size:.75rem;color:var(--text-muted);margin-left:4px" id="refreshedAt"></span>
+</div>
+<div class="cards" id="summaryCards"></div>
+<div class="table-wrap">
+  <table>
+    <thead><tr>
+      <th>ID</th><th>名称</th><th>Key 末尾</th><th>状态</th>
+      <th class="num">总已用 ($)</th><th class="num">额度 ($)</th>
+      <th class="num">总剩余 ($)</th><th>剩余%</th>
+    </tr></thead>
+    <tbody id="tableBody"></tbody>
+  </table>
+</div>
+<script>
+var rawData = [];
+
+function statusBadge(s){
+  if(s===1)return'<span class="badge badge-on">启用</span>';
+  if(s===2)return'<span class="badge badge-off">手动禁用</span>';
+  return'<span class="badge badge-auto">自动禁用</span>';
+}
+function barHTML(pct){
+  var color=pct>20?"#059669":pct>5?"#d97706":"#e11d48";
+  return'<span class="bar-wrap"><div class="bar-bg"><div class="bar-fill" style="width:'+Math.min(100,Math.max(0,pct))+'%;background:'+color+'"></div></div></span>';
+}
+
+function render(){
+  var totalUsed=0,totalQuota=0,totalRemaining=0,count=rawData.length;
+  var html=rawData.map(function(r){
+    var quota=r.quota_usd!==null&&r.quota_usd!==undefined?r.quota_usd:null;
+    var remaining=quota!==null?quota-r.used_usd:null;
+    var pct=quota&&quota>0?remaining/quota*100:null;
+    totalUsed+=r.used_usd;
+    if(quota){totalQuota+=quota;totalRemaining+=Math.max(0,remaining);}
+    var remStr=remaining!==null?'$'+remaining.toFixed(4):'<span style="color:var(--text-muted)">—</span>';
+    var quotaStr=quota!==null?'$'+quota.toFixed(2):'<span style="color:var(--text-muted)">未设置</span>';
+    var pctBar=pct!==null?pct.toFixed(1)+'%'+barHTML(pct):'<span style="color:var(--text-muted)">—</span>';
+    return'<tr><td>'+r.id+'</td><td>'+r.name+'</td><td class="key-text">'+r.key+'</td><td>'+statusBadge(r.status)+'</td><td class="num">$'+r.used_usd.toFixed(4)+'</td><td class="num">'+quotaStr+'</td><td class="num">'+remStr+'</td><td>'+pctBar+'</td></tr>';
+  }).join('');
+  document.getElementById('tableBody').innerHTML=html;
+  document.getElementById('summaryCards').innerHTML=[
+    {l:'Key 总数',v:count,c:'var(--blue)'},
+    {l:'总已用',v:'$'+totalUsed.toFixed(2),c:'var(--rose)'},
+    {l:'总额度',v:totalQuota?'$'+totalQuota.toFixed(2):'未配置',c:'var(--text)'},
+    {l:'总剩余',v:totalRemaining?'$'+totalRemaining.toFixed(2):'—',c:'var(--green)'}
+  ].map(function(x){return'<div class="card"><div class="label">'+x.l+'</div><div class="value" style="color:'+x.c+'">'+x.v+'</div></div>'}).join('');
+}
+
+function loadData(){
+  var s=document.getElementById('startDate').value;
+  var e=document.getElementById('endDate').value;
+  var url='/api/allkeys/data'+(s||e?'?start='+s+'&end='+e:'');
+  fetch(url).then(function(r){return r.json();}).then(function(data){
+    rawData=data;
+    document.getElementById('refreshedAt').textContent='更新于 '+new Date().toLocaleTimeString('zh-CN');
+    render();
+  }).catch(function(e){alert('加载失败: '+e);});
+}
+
+function clearFilter(){
+  document.getElementById('startDate').value='';
+  document.getElementById('endDate').value='';
+  loadData();
+}
+
+loadData();
+</script></body></html>`
+}
+
 func generateKeysHTML() string {
 	return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Key Capacity</title>
 <style>
@@ -1127,6 +1315,7 @@ tr:hover td{background:#f9fafb}
 <nav>
   <a href="/">Report</a>
   <a href="/keys" class="active">Key Capacity</a>
+  <a href="/allkeys">All Keys</a>
   <a href="/logout" style="margin-left:auto">退出</a>
 </nav>
 <div class="layout">
