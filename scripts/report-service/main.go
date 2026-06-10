@@ -1197,6 +1197,7 @@ td{padding:7px 12px;border-bottom:1px solid #f3f4f6}tr:last-child td{border-bott
   <label>止：<input type="date" id="endDate" value="` + today + `"></label>
   <button onclick="loadData()">查询</button>
   <button onclick="clearFilter()" style="background:var(--surface);color:var(--text);border:1px solid var(--border)">全部</button>
+  <button onclick="exportCSV()" style="background:var(--surface);color:var(--text);border:1px solid var(--border)">导出 CSV</button>
   <span style="font-size:.75rem;color:var(--text-muted);margin-left:4px" id="refreshedAt"></span>
 </div>
 <div class="cards" id="summaryCards"></div>
@@ -1224,6 +1225,7 @@ function barHTML(pct){
 }
 
 function render(){
+  rawData.sort(function(a,b){return a.id-b.id;});
   var totalUsed=0,totalQuota=0,totalRemaining=0,count=rawData.length;
   var html=rawData.map(function(r){
     var quota=r.quota_usd!==null&&r.quota_usd!==undefined?r.quota_usd:null;
@@ -1260,6 +1262,23 @@ function clearFilter(){
   document.getElementById('startDate').value='';
   document.getElementById('endDate').value='';
   loadData();
+}
+
+function exportCSV(){
+  var rows=[['ID','名称','Key末尾','状态','总已用($)','额度($)','总剩余($)']];
+  rawData.forEach(function(r){
+    var statusStr=r.status===1?'启用':r.status===2?'手动禁用':'自动禁用';
+    var quota=r.quota_usd!==null&&r.quota_usd!==undefined?r.quota_usd:'';
+    var remaining=quota!==''?(quota-r.used_usd).toFixed(4):'';
+    rows.push([r.id,r.name,r.key,statusStr,r.used_usd.toFixed(4),quota!==''?quota.toFixed(2):'',remaining]);
+  });
+  var csv=rows.map(function(r){return r.join(',');}).join('\n');
+  var a=document.createElement('a');
+  a.href='data:text/csv;charset=utf-8,﻿'+encodeURIComponent(csv);
+  var s=document.getElementById('startDate').value;
+  var e=document.getElementById('endDate').value;
+  a.download='allkeys'+(s?'_'+s:'')+(e?'_'+e:'')+'.csv';
+  a.click();
 }
 
 loadData();
