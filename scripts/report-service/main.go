@@ -34,10 +34,11 @@ var db *sql.DB
 // ---- Auth ----
 
 var (
-	adminUser      string
-	adminPass      string
-	jwtSecret      []byte
-	mainServiceURL string // e.g. http://localhost:3000
+	adminUser        string
+	adminPass        string
+	jwtSecret        []byte
+	mainServiceURL   string
+	mainServiceUID   string // New-Api-User header value for SSO requests
 )
 
 // SSO session cache: maps session cookie value → expiry
@@ -64,7 +65,7 @@ func checkMainServiceSession(rawCookieHeader string) bool {
 		return false
 	}
 	req.Header.Set("Cookie", rawCookieHeader)
-	req.Header.Set("New-Api-User", "1")
+	req.Header.Set("New-Api-User", mainServiceUID)
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -921,6 +922,10 @@ func main() {
 	}
 
 	mainServiceURL = strings.TrimRight(os.Getenv("MAIN_SERVICE_URL"), "/")
+	mainServiceUID = os.Getenv("MAIN_SERVICE_USER_ID")
+	if mainServiceUID == "" {
+		mainServiceUID = "1"
+	}
 	larkWebhook = os.Getenv("LARK_WEBHOOK")
 	if v := os.Getenv("NOTIFY_HOURS_THRESHOLD"); v != "" {
 		notifyHoursThreshold, _ = strconv.ParseFloat(v, 64)
