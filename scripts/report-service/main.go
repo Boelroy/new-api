@@ -59,15 +59,21 @@ func checkMainServiceSession(sessionCookie string) bool {
 
 	req, err := http.NewRequest("GET", mainServiceURL+"/api/user/self", nil)
 	if err != nil {
+		log.Printf("[sso] build request error: %v", err)
 		return false
 	}
 	req.AddCookie(&http.Cookie{Name: "session", Value: sessionCookie})
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
+	if err != nil {
+		log.Printf("[sso] request error: %v", err)
 		return false
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[sso] main service returned %d", resp.StatusCode)
+		return false
+	}
 
 	var body struct {
 		Data struct {
@@ -75,9 +81,10 @@ func checkMainServiceSession(sessionCookie string) bool {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		log.Printf("[sso] decode error: %v", err)
 		return false
 	}
-	// role >= 10 means admin or root
+	log.Printf("[sso] user role=%d", body.Data.Role)
 	if body.Data.Role < 10 {
 		return false
 	}
@@ -104,6 +111,8 @@ func authMiddleware(c *gin.Context) {
 			c.Next()
 			return
 		}
+	} else {
+		log.Printf("[sso] no session cookie on %s %s", c.Request.Method, c.Request.URL.Path)
 	}
 	// Fall back to local JWT
 	tokenStr, err := c.Cookie("token")
