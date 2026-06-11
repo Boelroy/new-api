@@ -34,10 +34,59 @@ var db *sql.DB
 // ---- Auth ----
 
 var (
-	adminUser string
-	adminPass string
-	jwtSecret []byte
+	adminUser      string
+	adminPass      string
+	jwtSecret      []byte
+	mainServiceURL string // e.g. http://localhost:3000
 )
+
+// SSO session cache: maps session cookie value → expiry
+var (
+	ssoCache   = map[string]time.Time{}
+	ssoCacheMu sync.Mutex
+)
+
+func checkMainServiceSession(sessionCookie string) bool {
+	if mainServiceURL == "" || sessionCookie == "" {
+		return false
+	}
+	ssoCacheMu.Lock()
+	if exp, ok := ssoCache[sessionCookie]; ok && time.Now().Before(exp) {
+		ssoCacheMu.Unlock()
+		return true
+	}
+	ssoCacheMu.Unlock()
+
+	req, err := http.NewRequest("GET", mainServiceURL+"/api/user/self", nil)
+	if err != nil {
+		return false
+	}
+	req.AddCookie(&http.Cookie{Name: "session", Value: sessionCookie})
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return false
+	}
+	defer resp.Body.Close()
+
+	var body struct {
+		Data struct {
+			Role int `json:"role"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return false
+	}
+	// role >= 10 means admin or root
+	if body.Data.Role < 10 {
+		return false
+	}
+
+	ssoCacheMu.Lock()
+	ssoCache[sessionCookie] = time.Now().Add(5 * time.Minute)
+	ssoCacheMu.Unlock()
+	return true
+}
 
 func newJWT() (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
@@ -49,6 +98,14 @@ func newJWT() (string, error) {
 }
 
 func authMiddleware(c *gin.Context) {
+	// Try main service SSO first
+	if sessionCookie, err := c.Cookie("session"); err == nil {
+		if checkMainServiceSession(sessionCookie) {
+			c.Next()
+			return
+		}
+	}
+	// Fall back to local JWT
 	tokenStr, err := c.Cookie("token")
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
@@ -555,6 +612,14 @@ func roundTo(f float64, places int) float64 {
 
 // ---- Handlers ----
 
+func handleAuthConfig(c *gin.Context) {
+	if mainServiceURL != "" {
+		c.JSON(http.StatusOK, gin.H{"sso_url": mainServiceURL + "/login"})
+	} else {
+		c.JSON(http.StatusOK, gin.H{"sso_url": nil})
+	}
+}
+
 func handleLogin(c *gin.Context) {
 	var body struct {
 		Username string `json:"username"`
@@ -842,6 +907,7 @@ func main() {
 		log.Println("JWT_SECRET not set, using random secret (sessions reset on restart)")
 	}
 
+	mainServiceURL = strings.TrimRight(os.Getenv("MAIN_SERVICE_URL"), "/")
 	larkWebhook = os.Getenv("LARK_WEBHOOK")
 	if v := os.Getenv("NOTIFY_HOURS_THRESHOLD"); v != "" {
 		notifyHoursThreshold, _ = strconv.ParseFloat(v, 64)
@@ -913,6 +979,7 @@ func main() {
 	// Auth (no middleware)
 	r.POST("/api/login", handleLogin)
 	r.POST("/api/logout", handleLogout)
+	r.GET("/api/auth/config", handleAuthConfig)
 
 	// Protected API
 	api := r.Group("/api", authMiddleware)
