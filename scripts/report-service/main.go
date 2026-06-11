@@ -64,7 +64,7 @@ func checkMainServiceSession(rawCookieHeader string) bool {
 		return false
 	}
 	req.Header.Set("Cookie", rawCookieHeader)
-	req.Header.Set("New-Api-User", "0")
+	req.Header.Set("New-Api-User", "1")
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -73,6 +73,9 @@ func checkMainServiceSession(rawCookieHeader string) bool {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		bodyBytes := make([]byte, 200)
+		n, _ := resp.Body.Read(bodyBytes)
+		log.Printf("[sso] %d: %s", resp.StatusCode, bodyBytes[:n])
 		return false
 	}
 
