@@ -63,9 +63,8 @@ func checkMainServiceSession(rawCookieHeader string) bool {
 		log.Printf("[sso] build request error: %v", err)
 		return false
 	}
-	// Forward the raw Cookie header intact to avoid any encoding issues
 	req.Header.Set("Cookie", rawCookieHeader)
-	log.Printf("[sso] forwarding cookie (len=%d): %.80s...", len(rawCookieHeader), rawCookieHeader)
+	req.Header.Set("New-Api-User", "0")
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -74,9 +73,6 @@ func checkMainServiceSession(rawCookieHeader string) bool {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes := make([]byte, 256)
-		n, _ := resp.Body.Read(bodyBytes)
-		log.Printf("[sso] main service returned %d: %s", resp.StatusCode, string(bodyBytes[:n]))
 		return false
 	}
 
