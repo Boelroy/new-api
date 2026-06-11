@@ -46,12 +46,13 @@ var (
 	ssoCacheMu sync.Mutex
 )
 
-func checkMainServiceSession(sessionCookie string) bool {
-	if mainServiceURL == "" || sessionCookie == "" {
+func checkMainServiceSession(rawCookieHeader string) bool {
+	if mainServiceURL == "" || rawCookieHeader == "" {
 		return false
 	}
+
 	ssoCacheMu.Lock()
-	if exp, ok := ssoCache[sessionCookie]; ok && time.Now().Before(exp) {
+	if exp, ok := ssoCache[rawCookieHeader]; ok && time.Now().Before(exp) {
 		ssoCacheMu.Unlock()
 		return true
 	}
@@ -62,7 +63,8 @@ func checkMainServiceSession(sessionCookie string) bool {
 		log.Printf("[sso] build request error: %v", err)
 		return false
 	}
-	req.AddCookie(&http.Cookie{Name: "session", Value: sessionCookie})
+	// Forward the raw Cookie header intact to avoid any encoding issues
+	req.Header.Set("Cookie", rawCookieHeader)
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -90,7 +92,7 @@ func checkMainServiceSession(sessionCookie string) bool {
 	}
 
 	ssoCacheMu.Lock()
-	ssoCache[sessionCookie] = time.Now().Add(5 * time.Minute)
+	ssoCache[rawCookieHeader] = time.Now().Add(5 * time.Minute)
 	ssoCacheMu.Unlock()
 	return true
 }
@@ -106,8 +108,8 @@ func newJWT() (string, error) {
 
 func authMiddleware(c *gin.Context) {
 	// Try main service SSO first
-	if sessionCookie, err := c.Cookie("session"); err == nil {
-		if checkMainServiceSession(sessionCookie) {
+	if rawCookie := c.GetHeader("Cookie"); rawCookie != "" && strings.Contains(rawCookie, "session=") {
+		if checkMainServiceSession(rawCookie) {
 			c.Next()
 			return
 		}
