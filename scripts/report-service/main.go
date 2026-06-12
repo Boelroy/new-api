@@ -382,11 +382,12 @@ WHERE l.type = 2 AND l.created_at >= $1 AND l.created_at < $2`
 	for _, row := range aggMap {
 		_, err = db.Exec(`
 			INSERT INTO report_daily_agg
-			(date, user_id, username, token_id, token_name, channel_id, channel_name, model,
+			(date, hour, user_id, username, token_id, token_name, channel_id, channel_name, model,
 			 request_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
 			 total_tokens, input_cost, output_cost, cache_read_cost, cache_write_cost, total_cost)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
-			dateStr, row.UserID, row.Username, row.TokenID, row.TokenName,
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+			ON CONFLICT DO NOTHING`,
+			dateStr, row.Hour, row.UserID, row.Username, row.TokenID, row.TokenName,
 			row.ChannelID, row.ChannelName, row.Model,
 			row.RequestCount, row.InputTokens, row.OutputTokens,
 			row.CacheReadTokens, row.CacheWriteTokens, row.TotalTokens,
@@ -961,6 +962,7 @@ func main() {
 		)`,
 		`CREATE TABLE IF NOT EXISTS report_daily_agg (
 			date              TEXT NOT NULL,
+			hour              TEXT NOT NULL DEFAULT '',
 			user_id           BIGINT NOT NULL,
 			username          TEXT NOT NULL DEFAULT '',
 			token_id          BIGINT NOT NULL,
@@ -979,9 +981,11 @@ func main() {
 			cache_read_cost   NUMERIC(14,6) NOT NULL DEFAULT 0,
 			cache_write_cost  NUMERIC(14,6) NOT NULL DEFAULT 0,
 			total_cost        NUMERIC(14,6) NOT NULL DEFAULT 0,
-			PRIMARY KEY (date, user_id, token_id, channel_id, model)
+			PRIMARY KEY (date, hour, user_id, token_id, channel_id, model)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_report_daily_date ON report_daily_agg(date)`,
+		// migration: add hour column if missing (table existed before this fix)
+		`ALTER TABLE report_daily_agg ADD COLUMN IF NOT EXISTS hour TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
