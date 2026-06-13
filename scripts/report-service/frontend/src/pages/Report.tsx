@@ -71,7 +71,7 @@ export default function Report() {
       const map: Record<string, LogRow & { day: string }> = {}
       data.forEach(r => {
         const day = r.hour.slice(0, 10)
-        const k = `${day}|${r.token_id}|${r.channel_id}`
+        const k = `${day}|${r.token_id}|${r.model}`
         if (!map[k]) map[k] = { ...r, day, hour: day }
         else {
           const e = map[k]
@@ -81,10 +81,30 @@ export default function Report() {
           e.total_tokens += r.total_tokens; e.total_cost += r.total_cost
         }
       })
-      return Object.values(map).sort((a, b) => a.day.localeCompare(b.day))
+      return Object.values(map).sort((a, b) =>
+        a.day.localeCompare(b.day) ||
+        (a.token_name || '').localeCompare(b.token_name || '') ||
+        a.model.localeCompare(b.model)
+      )
     }
     if (view === 'hourly') {
-      return [...data].sort((a, b) => a.hour.localeCompare(b.hour))
+      const map: Record<string, LogRow> = {}
+      data.forEach(r => {
+        const k = `${r.hour}|${r.token_id}|${r.model}`
+        if (!map[k]) map[k] = { ...r }
+        else {
+          const e = map[k]
+          e.request_count += r.request_count
+          e.input_tokens += r.input_tokens; e.output_tokens += r.output_tokens
+          e.cache_read_tokens += r.cache_read_tokens; e.cache_write_tokens += r.cache_write_tokens
+          e.total_tokens += r.total_tokens; e.total_cost += r.total_cost
+        }
+      })
+      return Object.values(map).sort((a, b) =>
+        a.hour.localeCompare(b.hour) ||
+        (a.token_name || '').localeCompare(b.token_name || '') ||
+        a.model.localeCompare(b.model)
+      )
     }
     if (view === 'key') {
       const map: Record<number, typeof data[0]> = {}
