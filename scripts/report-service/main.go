@@ -281,15 +281,17 @@ type DailyRow struct {
 	TotalCost        float64 `json:"total_cost"`
 }
 
-func aggregateDay(dateStr string) error {
-	loc := time.UTC
-	day, err := time.ParseInLocation("2006-01-02", dateStr, loc)
-	if err != nil {
-		return err
-	}
-	startTS := day.Unix()
-	endTS := day.AddDate(0, 0, 1).Unix()
+// aggKey matches the DB PRIMARY KEY exactly to avoid ON CONFLICT drops
+type aggKey struct {
+	hour                       string
+	userID, tokenID, channelID int
+	model                      string
+}
 
+// aggregateHour processes a single UTC hour and merges into aggMap.
+// Splitting by hour avoids loading 100k+ rows in a single query
+// which caused silent iteration failures with large daily volumes.
+func aggregateHour(startTS, endTS int64, aggMap map[aggKey]*DailyRow) error {
 	query := `
 SELECT
   l.created_at, l.user_id, COALESCE(l.username,''), l.token_id, COALESCE(l.token_name,''),
@@ -304,14 +306,6 @@ WHERE l.type = 2 AND l.created_at >= $1 AND l.created_at < $2`
 		return err
 	}
 	defer rows.Close()
-
-	// aggKey matches the DB PRIMARY KEY exactly to avoid ON CONFLICT drops
-	type aggKey struct {
-		hour  string
-		userID, tokenID, channelID int
-		model string
-	}
-	aggMap := make(map[aggKey]*DailyRow)
 
 	for rows.Next() {
 		var createdAt int64
@@ -375,21 +369,52 @@ WHERE l.type = 2 AND l.created_at >= $1 AND l.created_at < $2`
 		row.CacheWriteCost += cacheWriteCost
 		row.TotalCost += totalCost
 	}
+	// MUST check rows.Err() — silent iteration failures otherwise drop data
+	return rows.Err()
+}
 
-	// Delete existing rows for this date then upsert
-	_, err = db.Exec(`DELETE FROM report_daily_agg WHERE date = $1`, dateStr)
+func aggregateDay(dateStr string) error {
+	loc := time.UTC
+	day, err := time.ParseInLocation("2006-01-02", dateStr, loc)
 	if err != nil {
 		return err
 	}
 
+	aggMap := make(map[aggKey]*DailyRow)
+
+	// Process each UTC hour separately to keep per-query row counts bounded
+	for h := 0; h < 24; h++ {
+		hourStart := day.Add(time.Duration(h) * time.Hour).Unix()
+		hourEnd := hourStart + 3600
+		if err := aggregateHour(hourStart, hourEnd, aggMap); err != nil {
+			return fmt.Errorf("hour %d: %w", h, err)
+		}
+	}
+
+	// Replace existing rows for this date atomically
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err = tx.Exec(`DELETE FROM report_daily_agg WHERE date = $1`, dateStr); err != nil {
+		return err
+	}
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO report_daily_agg
+		(date, hour, user_id, username, token_id, token_name, channel_id, channel_name, model,
+		 request_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+		 total_tokens, input_cost, output_cost, cache_read_cost, cache_write_cost, total_cost)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
 	for _, row := range aggMap {
-		_, err = db.Exec(`
-			INSERT INTO report_daily_agg
-			(date, hour, user_id, username, token_id, token_name, channel_id, channel_name, model,
-			 request_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-			 total_tokens, input_cost, output_cost, cache_read_cost, cache_write_cost, total_cost)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
-			ON CONFLICT DO NOTHING`,
+		if _, err = stmt.Exec(
 			dateStr, row.Hour, row.UserID, row.Username, row.TokenID, row.TokenName,
 			row.ChannelID, row.ChannelName, row.Model,
 			row.RequestCount, row.InputTokens, row.OutputTokens,
@@ -397,11 +422,14 @@ WHERE l.type = 2 AND l.created_at >= $1 AND l.created_at < $2`
 			roundTo(row.InputCost, 6), roundTo(row.OutputCost, 6),
 			roundTo(row.CacheReadCost, 6), roundTo(row.CacheWriteCost, 6),
 			roundTo(row.TotalCost, 6),
-		)
-		if err != nil {
+		); err != nil {
 			return err
 		}
 	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	log.Printf("aggregated %s: %d rows", dateStr, len(aggMap))
 	return nil
 }
 
