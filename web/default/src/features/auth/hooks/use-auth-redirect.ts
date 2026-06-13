@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useNavigate } from '@tanstack/react-router'
 import i18n from 'i18next'
 import { useAuthStore } from '@/stores/auth-store'
-import { getSelf } from '@/lib/api'
+import { getSelf, api } from '@/lib/api'
 import type { User } from '@/features/users/types'
 import { saveUserId } from '../lib/storage'
 
@@ -87,6 +87,40 @@ export function useAuthRedirect() {
 
     // Navigate to target page
     const targetPath = redirectTo || '/dashboard'
+
+    // External URL (cross-port SSO): only allow same hostname, different port
+    if (targetPath.startsWith('http://') || targetPath.startsWith('https://')) {
+      let allowed = false
+      try {
+        const target = new URL(targetPath)
+        const current = new URL(window.location.href)
+        // Only allow same hostname (IP or domain), port may differ
+        allowed = target.hostname === current.hostname
+      } catch {
+        allowed = false
+      }
+
+      if (!allowed) {
+        // Reject external redirect — fall back to dashboard
+        navigate({ to: '/dashboard', replace: true })
+        return
+      }
+
+      try {
+        const resp = await api.get<{ success: boolean; token: string }>('/api/user/sso-token')
+        if (resp.data?.success && resp.data.token) {
+          const sep = targetPath.includes('?') ? '&' : '?'
+          window.location.href = `${targetPath}${sep}sso_token=${resp.data.token}`
+          return
+        }
+      } catch {
+        // SSO not configured — do not redirect with empty token
+      }
+      // SSO failed: go to dashboard, don't leak anything
+      navigate({ to: '/dashboard', replace: true })
+      return
+    }
+
     navigate({ to: targetPath, replace: true })
   }
 

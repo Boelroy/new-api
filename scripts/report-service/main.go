@@ -38,7 +38,8 @@ var (
 	adminPass        string
 	jwtSecret        []byte
 	mainServiceURL   string
-	mainServiceUID   string // New-Api-User header value for SSO requests
+	mainServiceUID   string
+	ssoSecret        []byte
 )
 
 // SSO session cache: maps session cookie value → expiry
@@ -627,6 +628,56 @@ func roundTo(f float64, places int) float64 {
 
 // ---- Handlers ----
 
+const minAdminRole = 10 // mirrors common.RoleAdminUser in the main service
+
+func handleSSOCallback(c *gin.Context) {
+	tokenStr := c.Query("sso_token")
+	if tokenStr == "" || len(ssoSecret) == 0 {
+		log.Printf("[sso-callback] rejected: token=%v secret_set=%v", tokenStr != "", len(ssoSecret) > 0)
+		c.Redirect(http.StatusFound, "/login?error=sso_failed")
+		return
+	}
+	parsed, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method")
+		}
+		return ssoSecret, nil
+	})
+	if err != nil || !parsed.Valid {
+		log.Printf("[sso-callback] token validation failed: %v", err)
+		c.Redirect(http.StatusFound, "/login?error=sso_failed")
+		return
+	}
+	claims, ok := parsed.Claims.(jwt.MapClaims)
+	if !ok {
+		c.Redirect(http.StatusFound, "/login?error=sso_failed")
+		return
+	}
+	if iss, _ := claims["iss"].(string); iss != "new-api" {
+		log.Printf("[sso-callback] unexpected issuer")
+		c.Redirect(http.StatusFound, "/login?error=sso_failed")
+		return
+	}
+	roleRaw, ok := claims["role"].(float64)
+	if !ok {
+		log.Printf("[sso-callback] missing or invalid role claim")
+		c.Redirect(http.StatusFound, "/login?error=sso_failed")
+		return
+	}
+	if int(roleRaw) < minAdminRole {
+		c.Redirect(http.StatusFound, "/login?error=sso_failed")
+		return
+	}
+	localToken, err := newJWT()
+	if err != nil {
+		c.Redirect(http.StatusFound, "/login?error=sso_failed")
+		return
+	}
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie("token", localToken, 86400, "/", "", false, true)
+	c.Redirect(http.StatusFound, "/")
+}
+
 func handleAuthConfig(c *gin.Context) {
 	if mainServiceURL != "" {
 		c.JSON(http.StatusOK, gin.H{"sso_url": mainServiceURL + "/login"})
@@ -927,6 +978,9 @@ func main() {
 	if mainServiceUID == "" {
 		mainServiceUID = "1"
 	}
+	if s := os.Getenv("SSO_SECRET"); s != "" {
+		ssoSecret = []byte(s)
+	}
 	larkWebhook = os.Getenv("LARK_WEBHOOK")
 	if v := os.Getenv("NOTIFY_HOURS_THRESHOLD"); v != "" {
 		notifyHoursThreshold, _ = strconv.ParseFloat(v, 64)
@@ -1002,6 +1056,7 @@ func main() {
 	r.POST("/api/login", handleLogin)
 	r.POST("/api/logout", handleLogout)
 	r.GET("/api/auth/config", handleAuthConfig)
+	r.GET("/api/auth/callback", handleSSOCallback)
 
 	// Protected API
 	api := r.Group("/api", authMiddleware)

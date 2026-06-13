@@ -51,7 +51,7 @@ export default function Login() {
         {ssoUrl && (
           <>
             <a
-              href={ssoUrl + `?redirect=${encodeURIComponent(window.location.origin + next)}`}
+              href={ssoUrl + `?redirect=${encodeURIComponent(window.location.origin + '/api/auth/callback')}`}
               className="flex items-center justify-center w-full bg-gray-900 text-white rounded-md py-2 text-sm font-medium hover:opacity-85 mb-4"
             >
               使用主服务账号登录

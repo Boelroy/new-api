@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 type LoginRequest struct {
@@ -423,6 +426,40 @@ func GetSelf(c *gin.Context) {
 		"data":    responseData,
 	})
 	return
+}
+
+var ssoSecretBytes []byte
+
+func init() {
+	if s := os.Getenv("SSO_SECRET"); s != "" {
+		ssoSecretBytes = []byte(s)
+	}
+}
+
+// GetSSOToken generates a short-lived (60s) token for same-hostname cross-port SSO.
+func GetSSOToken(c *gin.Context) {
+	if len(ssoSecretBytes) == 0 {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "SSO not configured"})
+		return
+	}
+	userID := c.GetInt("id")
+	username := c.GetString("username")
+	role := c.GetInt("role")
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"iss":      "new-api",
+		"sub":      strconv.Itoa(userID),
+		"username": username,
+		"role":     role,
+		"iat":      time.Now().Unix(),
+		"exp":      time.Now().Add(60 * time.Second).Unix(),
+	})
+	tokenStr, err := token.SignedString(ssoSecretBytes)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "token generation failed"})
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, gin.H{"success": true, "token": tokenStr})
 }
 
 // 计算用户权限的辅助函数
