@@ -680,7 +680,7 @@ func handleSSOCallback(c *gin.Context) {
 
 func handleAuthConfig(c *gin.Context) {
 	if mainServiceURL != "" {
-		c.JSON(http.StatusOK, gin.H{"sso_url": mainServiceURL + "/login"})
+		c.JSON(http.StatusOK, gin.H{"sso_url": mainServiceURL + "/sign-in"})
 	} else {
 		c.JSON(http.StatusOK, gin.H{"sso_url": nil})
 	}
