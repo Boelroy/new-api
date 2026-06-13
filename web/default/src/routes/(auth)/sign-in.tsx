@@ -20,6 +20,7 @@ import { z } from 'zod'
 import { createFileRoute, redirect } from '@tanstack/react-router'
 import { useAuthStore } from '@/stores/auth-store'
 import { SignIn } from '@/features/auth/sign-in'
+import { api } from '@/lib/api'
 
 const searchSchema = z.object({
   redirect: z.string().optional(),
@@ -31,11 +32,29 @@ export const Route = createFileRoute('/(auth)/sign-in')({
   beforeLoad: async ({ search }) => {
     const { auth } = useAuthStore.getState()
 
-    // 如果已经有用户信息，说明已登录
     if (auth.user) {
-      // 优先使用 redirect 参数（用户之前想去的地方）
-      // 否则跳转到 dashboard
-      throw redirect({ to: search?.redirect || '/dashboard' })
+      const redirectTo = search?.redirect || '/dashboard'
+
+      // External same-hostname redirect (cross-port SSO): fetch token first
+      if (redirectTo.startsWith('http://') || redirectTo.startsWith('https://')) {
+        try {
+          const target = new URL(redirectTo)
+          const current = new URL(window.location.href)
+          if (target.hostname === current.hostname) {
+            const resp = await api.get<{ success: boolean; token: string }>('/api/user/sso-token')
+            if (resp.data?.success && resp.data.token) {
+              const sep = redirectTo.includes('?') ? '&' : '?'
+              window.location.href = `${redirectTo}${sep}sso_token=${resp.data.token}`
+              return // browser is navigating away
+            }
+          }
+        } catch {
+          // SSO failed — fall through to dashboard
+        }
+        throw redirect({ to: '/dashboard' })
+      }
+
+      throw redirect({ to: redirectTo })
     }
   },
 })
