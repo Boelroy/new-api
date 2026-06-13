@@ -1070,6 +1070,18 @@ func main() {
 		`CREATE INDEX IF NOT EXISTS idx_report_daily_date ON report_daily_agg(date)`,
 		// migration: add hour column if missing (table existed before this fix)
 		`ALTER TABLE report_daily_agg ADD COLUMN IF NOT EXISTS hour TEXT NOT NULL DEFAULT ''`,
+		// migration: rebuild PK to include hour (old PK was missing hour)
+		`DO $$ BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_index i
+				JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+				WHERE i.indrelid = 'report_daily_agg'::regclass
+				  AND i.indisprimary AND a.attname = 'hour'
+			) THEN
+				ALTER TABLE report_daily_agg DROP CONSTRAINT IF EXISTS report_daily_agg_pkey;
+				ALTER TABLE report_daily_agg ADD PRIMARY KEY (date, hour, user_id, token_id, channel_id, model);
+			END IF;
+		END $$`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
