@@ -305,9 +305,11 @@ WHERE l.type = 2 AND l.created_at >= $1 AND l.created_at < $2`
 	}
 	defer rows.Close()
 
+	// aggKey matches the DB PRIMARY KEY exactly to avoid ON CONFLICT drops
 	type aggKey struct {
-		hour, username, tokenName, channelName, model string
-		userID, tokenID, channelID                    int
+		hour  string
+		userID, tokenID, channelID int
+		model string
 	}
 	aggMap := make(map[aggKey]*DailyRow)
 
@@ -351,7 +353,7 @@ WHERE l.type = 2 AND l.created_at >= $1 AND l.created_at < $2`
 			inputCost = totalCost
 		}
 
-		k := aggKey{hour, username, tokenName, channelName, modelName, userID, tokenID, channelID}
+		k := aggKey{hour, userID, tokenID, channelID, modelName}
 		row, ok := aggMap[k]
 		if !ok {
 			row = &DailyRow{
