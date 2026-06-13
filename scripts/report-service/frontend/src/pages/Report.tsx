@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
-import { BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts'
+import { BarChart, Bar, Cell, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts'
 import NavBar from '../components/NavBar'
 import SummaryCards from '../components/SummaryCards'
 import { api, LogRow } from '../api'
@@ -160,9 +160,11 @@ export default function Report() {
               <XAxis dataKey="model" tick={{ fontSize: 9 }} />
               <YAxis tick={{ fontSize: 10 }} tickFormatter={v => '$' + v} />
               <Tooltip formatter={(v: number) => ['$' + v.toFixed(2), 'Cost']} />
-              {modelChartData.map((_, i) => (
-                <Bar key={i} dataKey="cost" fill={COLORS[i % COLORS.length]} radius={[2,2,0,0]} />
-              ))}
+              <Bar dataKey="cost" radius={[2,2,0,0]}>
+                {modelChartData.map((_, i) => (
+                  <Cell key={i} fill={COLORS[i % COLORS.length]} />
+                ))}
+              </Bar>
             </BarChart>
           </ResponsiveContainer>
         </div>
