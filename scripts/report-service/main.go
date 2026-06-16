@@ -974,6 +974,147 @@ func handleBatchCreateChannels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"created": results, "count": len(results)})
 }
 
+// ---- Key tester ----
+
+var supportedTestModels = map[string]bool{
+	"claude-opus-4-7":            true,
+	"claude-sonnet-4-6":          true,
+	"claude-opus-4-6":            true,
+	"claude-haiku-4-5-20251001":  true,
+	"claude-sonnet-4-5-20250929": true,
+	"claude-opus-4-5-20251101":   true,
+	"claude-opus-4-8":            true,
+	"claude-fable-5":             true,
+}
+
+const anthropicTestEndpoint = "https://api.anthropic.com/v1/messages"
+
+type keyTestResult struct {
+	Key       string `json:"key"`
+	OK        bool   `json:"ok"`
+	Status    int    `json:"status"`
+	LatencyMS int64  `json:"latency_ms"`
+	Error     string `json:"error,omitempty"`
+	Message   string `json:"message,omitempty"`
+}
+
+func testSingleKey(key, model string) keyTestResult {
+	res := keyTestResult{Key: key}
+	body := map[string]any{
+		"model":      model,
+		"max_tokens": 1,
+		"messages": []map[string]any{
+			{"role": "user", "content": "hi"},
+		},
+	}
+	buf, _ := json.Marshal(body)
+
+	start := time.Now()
+	req, err := http.NewRequest("POST", anthropicTestEndpoint, bytes.NewReader(buf))
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", key)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	client := &http.Client{Timeout: 25 * time.Second}
+	resp, err := client.Do(req)
+	res.LatencyMS = time.Since(start).Milliseconds()
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	defer resp.Body.Close()
+	res.Status = resp.StatusCode
+
+	buf2 := make([]byte, 2048)
+	n, _ := resp.Body.Read(buf2)
+	payload := string(buf2[:n])
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		res.OK = true
+		res.Message = "OK"
+		return res
+	}
+
+	// Extract a friendlier message from common Anthropic error shape.
+	var errEnv struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(payload), &errEnv); err == nil && errEnv.Error.Message != "" {
+		res.Error = errEnv.Error.Message
+		if errEnv.Error.Type != "" {
+			res.Message = errEnv.Error.Type
+		}
+	} else {
+		// Truncate raw body for readability.
+		if len(payload) > 200 {
+			payload = payload[:200] + "…"
+		}
+		res.Error = payload
+	}
+	return res
+}
+
+func handleTestKeys(c *gin.Context) {
+	var payload struct {
+		Keys  []string `json:"keys"`
+		Model string   `json:"model"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	model := strings.TrimSpace(payload.Model)
+	if !supportedTestModels[model] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported model"})
+		return
+	}
+
+	// Dedup + cleanup
+	seen := map[string]bool{}
+	keys := make([]string, 0, len(payload.Keys))
+	for _, k := range payload.Keys {
+		k = strings.TrimSpace(k)
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no keys provided"})
+		return
+	}
+	const maxKeys = 200
+	if len(keys) > maxKeys {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("too many keys (max %d)", maxKeys)})
+		return
+	}
+
+	results := make([]keyTestResult, len(keys))
+	const concurrency = 8
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for i, k := range keys {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, k string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			results[i] = testSingleKey(k, model)
+		}(i, k)
+	}
+	wg.Wait()
+
+	c.JSON(http.StatusOK, gin.H{"results": results})
+}
+
 func handleAllKeysData(c *gin.Context) {
 	var startTS, endTS int64
 	if s := c.Query("start"); s != "" {
@@ -1215,6 +1356,7 @@ func main() {
 	api.POST("/keys/quota", handleSaveQuotas)
 	api.POST("/channels/batch-create", handleBatchCreateChannels)
 	api.GET("/allkeys/data", handleAllKeysData)
+	api.POST("/keys/test", handleTestKeys)
 
 	// SPA — serve for all non-API routes
 	r.NoRoute(spaHandler())

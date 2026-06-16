@@ -35,6 +35,15 @@ export type KeySummary = {
   total_last_hour: number
 }
 
+export type KeyTestResult = {
+  key: string
+  ok: boolean
+  status: number
+  latency_ms: number
+  error?: string
+  message?: string
+}
+
 async function request<T>(url: string, opts?: RequestInit): Promise<T> {
   const res = await fetch(url, opts)
   if (res.status === 401) {
@@ -88,4 +97,11 @@ export const api = {
   exportCSV: (start: string, end: string) => {
     window.location.href = `/api/export/csv?start=${start}&end=${end}`
   },
+
+  testKeys: (keys: string[], model: string) =>
+    request<{ results: KeyTestResult[] }>('/api/keys/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keys, model }),
+    }),
 }

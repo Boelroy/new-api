@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import NavBar from '../components/NavBar'
+import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
 import { api, ChannelRow } from '../api'
 
@@ -67,7 +67,7 @@ function BatchCreatePanel({ onCreated }: { onCreated: () => void }) {
   }
 
   return (
-    <div className="bg-white border border-gray-200 rounded-lg p-4">
+    <div className="bg-white border border-gray-200 rounded-xl p-4">
       <h2 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">批量创建渠道</h2>
       <div className="mb-2">
         <label className="block text-[11px] text-gray-500 mb-1">后缀</label>
@@ -144,7 +144,6 @@ export default function KeyCapacity() {
     } finally { setSaving(false) }
   }
 
-  // aggregate stats
   let totalUsed = 0, totalQuota = 0, totalRemaining = 0
   channels.forEach(ch => {
     totalUsed += ch.used_usd
@@ -153,12 +152,18 @@ export default function KeyCapacity() {
   const totalETA = totalLastHour > 0 && totalQuota > 0 ? totalRemaining / totalLastHour : totalRemaining > 0 ? Infinity : null
   const etaFmt = fmtETA(totalETA)
 
-  return (
-    <div className="max-w-[1400px] mx-auto px-10 py-8">
-      <h1 className="text-xl font-semibold tracking-tight mb-1">Key Capacity</h1>
-      <p className="text-xs text-gray-400 mb-5">每个 Key 的用量与剩余寿命估算</p>
-      <NavBar />
+  const actions = (
+    <button onClick={load} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85">
+      刷新数据
+    </button>
+  )
 
+  return (
+    <Layout
+      title="Key Capacity"
+      subtitle={`每个 Key 的用量与剩余寿命估算${refreshedAt ? ` · 最后更新：${refreshedAt}` : ''}`}
+      actions={actions}
+    >
       <SummaryCards cards={[
         { label: '启用 Key 数', value: String(channels.length), color: 'text-blue-600' },
         { label: '总额度', value: totalQuota ? '$' + totalQuota.toFixed(2) : '未配置' },
@@ -169,9 +174,8 @@ export default function KeyCapacity() {
       ]} />
 
       <div className="grid grid-cols-[300px_1fr] gap-6 items-start">
-        {/* Quota input + Create channels */}
         <div className="space-y-4">
-          <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <div className="bg-white border border-gray-200 rounded-xl p-4">
             <h2 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">Key 额度配置</h2>
             <textarea
               value={quotaInput}
@@ -190,13 +194,8 @@ export default function KeyCapacity() {
           <BatchCreatePanel onCreated={load} />
         </div>
 
-        {/* Table */}
-        <div>
-          <div className="flex items-center gap-3 mb-3">
-            <button onClick={load} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85">刷新数据</button>
-            {refreshedAt && <span className="text-xs text-gray-400">最后更新：{refreshedAt}</span>}
-          </div>
-          <div className="overflow-x-auto border border-gray-200 rounded-lg bg-white max-h-[70vh] overflow-y-auto">
+        <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+          <div className="overflow-x-auto max-h-[70vh] overflow-y-auto">
             <table className="w-full text-xs whitespace-nowrap border-separate border-spacing-0">
               <thead>
                 <tr>
@@ -231,6 +230,6 @@ export default function KeyCapacity() {
           </div>
         </div>
       </div>
-    </div>
+    </Layout>
   )
 }
