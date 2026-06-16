@@ -1,11 +1,13 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
 import { api, KeyTestResult } from '../api'
 
+const DEFAULT_MODEL = 'claude-sonnet-4-6'
+
 const MODELS = [
-  'claude-opus-4-7',
   'claude-sonnet-4-6',
+  'claude-opus-4-7',
   'claude-opus-4-6',
   'claude-haiku-4-5-20251001',
   'claude-sonnet-4-5-20250929',
@@ -20,11 +22,13 @@ function maskKey(k: string) {
 }
 
 export default function KeyTester() {
-  const [model, setModel] = useState(MODELS[0])
+  const [model, setModel] = useState(DEFAULT_MODEL)
   const [input, setInput] = useState('')
   const [running, setRunning] = useState(false)
   const [results, setResults] = useState<KeyTestResult[]>([])
+  const [progress, setProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 })
   const [error, setError] = useState<string | null>(null)
+  const cancelRef = useRef(false)
 
   const parsedKeys = useMemo(() => {
     const set = new Set<string>()
@@ -43,21 +47,40 @@ export default function KeyTester() {
       setError('请填写至少一个 Key')
       return
     }
+    cancelRef.current = false
     setRunning(true)
     setResults([])
+    setProgress({ done: 0, total: parsedKeys.length })
     try {
-      const res = await api.testKeys(parsedKeys, model)
-      setResults(res.results)
-    } catch (e: any) {
-      setError(e.message || String(e))
+      for (let i = 0; i < parsedKeys.length; i++) {
+        if (cancelRef.current) break
+        const k = parsedKeys[i]
+        try {
+          const res = await api.testKeys([k], model)
+          const r = res.results[0]
+          if (r) setResults(prev => [...prev, r])
+        } catch (e: any) {
+          setResults(prev => [
+            ...prev,
+            { key: k, ok: false, status: 0, latency_ms: 0, error: e.message || String(e) },
+          ])
+        } finally {
+          setProgress(p => ({ done: i + 1, total: p.total }))
+        }
+      }
     } finally {
       setRunning(false)
     }
   }
 
+  const handleCancel = () => {
+    cancelRef.current = true
+  }
+
   const handleClear = () => {
     setInput('')
     setResults([])
+    setProgress({ done: 0, total: 0 })
     setError(null)
   }
 
@@ -80,13 +103,22 @@ export default function KeyTester() {
       >
         清空
       </button>
-      <button
-        onClick={handleRun}
-        disabled={running || parsedKeys.length === 0}
-        className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-50"
-      >
-        {running ? `测试中… (${parsedKeys.length})` : `开始测试 (${parsedKeys.length})`}
-      </button>
+      {running ? (
+        <button
+          onClick={handleCancel}
+          className="bg-rose-600 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85"
+        >
+          停止 ({progress.done}/{progress.total})
+        </button>
+      ) : (
+        <button
+          onClick={handleRun}
+          disabled={parsedKeys.length === 0}
+          className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-50"
+        >
+          开始测试 ({parsedKeys.length})
+        </button>
+      )}
     </>
   )
 
@@ -140,6 +172,12 @@ export default function KeyTester() {
         </div>
 
         <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+          {running && (
+            <div className="px-4 py-2 bg-blue-50 border-b border-blue-100 text-[11px] text-blue-700 flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+              顺序测试中 ({progress.done} / {progress.total})
+            </div>
+          )}
           {results.length === 0 && !running ? (
             <div className="text-center text-gray-400 text-xs py-16">
               填入 Key 并点击「开始测试」
@@ -183,10 +221,10 @@ export default function KeyTester() {
                       </td>
                     </tr>
                   ))}
-                  {running && results.length === 0 && (
+                  {running && (
                     <tr>
-                      <td colSpan={6} className="text-center py-10 text-xs text-gray-400">
-                        正在测试 {parsedKeys.length} 个 Key…
+                      <td colSpan={6} className="px-3 py-2 text-xs text-gray-400 italic">
+                        正在测试 #{progress.done + 1} / {progress.total} …
                       </td>
                     </tr>
                   )}

@@ -1098,19 +1098,9 @@ func handleTestKeys(c *gin.Context) {
 	}
 
 	results := make([]keyTestResult, len(keys))
-	const concurrency = 8
-	sem := make(chan struct{}, concurrency)
-	var wg sync.WaitGroup
 	for i, k := range keys {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(i int, k string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			results[i] = testSingleKey(k, model)
-		}(i, k)
+		results[i] = testSingleKey(k, model)
 	}
-	wg.Wait()
 
 	c.JSON(http.StatusOK, gin.H{"results": results})
 }
