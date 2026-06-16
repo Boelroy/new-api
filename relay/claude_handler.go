@@ -103,14 +103,6 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		info.UpstreamModelName = request.Model
 	}
 
-	// budget_tokens is required when thinking.type="enabled"; auto-fill if missing.
-	if request.Thinking != nil && request.Thinking.Type == "enabled" && request.Thinking.BudgetTokens == nil {
-		if request.MaxTokens == nil || *request.MaxTokens < 1280 {
-			request.MaxTokens = common.GetPointer[uint](1280)
-		}
-		request.Thinking.BudgetTokens = common.GetPointer[int](int(float64(*request.MaxTokens) * model_setting.GetClaudeSettings().ThinkingAdapterBudgetTokensPercentage))
-	}
-
 	if info.ChannelSetting.SystemPrompt != "" {
 		if request.System == nil {
 			request.SetStringSystem(info.ChannelSetting.SystemPrompt)

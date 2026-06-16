@@ -239,14 +239,6 @@ func RequestOpenAI2ClaudeMessage(c *gin.Context, textRequest dto.GeneralOpenAIRe
 		}
 	}
 
-	// budget_tokens is required when thinking.type="enabled"; auto-fill if missing.
-	if claudeRequest.Thinking != nil && claudeRequest.Thinking.Type == "enabled" && claudeRequest.Thinking.BudgetTokens == nil {
-		if claudeRequest.MaxTokens == nil || *claudeRequest.MaxTokens < 1280 {
-			claudeRequest.MaxTokens = common.GetPointer[uint](1280)
-		}
-		claudeRequest.Thinking.BudgetTokens = common.GetPointer[int](int(float64(*claudeRequest.MaxTokens) * model_setting.GetClaudeSettings().ThinkingAdapterBudgetTokensPercentage))
-	}
-
 	if textRequest.Stop != nil {
 		// stop maybe string/array string, convert to array string
 		switch textRequest.Stop.(type) {
