@@ -25,6 +25,83 @@ function ProgressBar({ pct }: { pct: number }) {
   )
 }
 
+function BatchCreatePanel({ onCreated }: { onCreated: () => void }) {
+  const [suffix, setSuffix] = useState('')
+  const [input, setInput] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [result, setResult] = useState<string | null>(null)
+
+  const handleSubmit = async () => {
+    setResult(null)
+    if (!suffix.trim()) {
+      setResult('请填写后缀')
+      return
+    }
+    const channels: { key: string; quota_usd: number }[] = []
+    input.split('\n').forEach(line => {
+      const t = line.trim()
+      if (!t || t.startsWith('#')) return
+      const parts = t.split(/[\s,]+/)
+      if (parts.length >= 2) {
+        const q = parseFloat(parts[1])
+        if (parts[0] && !isNaN(q) && q > 0) {
+          channels.push({ key: parts[0], quota_usd: q })
+        }
+      }
+    })
+    if (channels.length === 0) {
+      setResult('未解析到有效行')
+      return
+    }
+    setSubmitting(true)
+    try {
+      const res = await api.batchCreateChannels(suffix.trim(), channels)
+      setResult(`成功创建 ${res.count} 个渠道`)
+      setInput('')
+      onCreated()
+    } catch (e: any) {
+      setResult(`失败: ${e.message || e}`)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg p-4">
+      <h2 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">批量创建渠道</h2>
+      <div className="mb-2">
+        <label className="block text-[11px] text-gray-500 mb-1">后缀</label>
+        <input
+          value={suffix}
+          onChange={e => setSuffix(e.target.value)}
+          placeholder="例如：1"
+          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
+        />
+      </div>
+      <textarea
+        value={input}
+        onChange={e => setInput(e.target.value)}
+        rows={8}
+        placeholder={'每行 Key 和额度（USD）：\n\nsk-ant-api03-xxxx 220\nsk-ant-api03-yyyy 500'}
+        className="w-full border border-gray-200 rounded-md p-2.5 text-xs font-mono resize-y bg-gray-50 focus:outline-none focus:border-gray-900"
+      />
+      <p className="text-[10px] text-gray-400 mt-2 leading-relaxed">
+        命名：MMDD-pipi-后缀-容量；类型：Anthropic；模型：claude-opus-4-7 等 8 个
+      </p>
+      <button
+        onClick={handleSubmit}
+        disabled={submitting}
+        className="mt-3 w-full bg-emerald-600 text-white rounded-md py-1.5 text-sm font-medium hover:opacity-85 disabled:opacity-50"
+      >
+        {submitting ? '创建中...' : '批量创建'}
+      </button>
+      {result && (
+        <p className={`text-[11px] mt-2 ${result.startsWith('成功') ? 'text-emerald-600' : 'text-rose-600'}`}>{result}</p>
+      )}
+    </div>
+  )
+}
+
 export default function KeyCapacity() {
   const [channels, setChannels] = useState<ChannelRow[]>([])
   const [totalLastHour, setTotalLastHour] = useState(0)
@@ -92,21 +169,25 @@ export default function KeyCapacity() {
       ]} />
 
       <div className="grid grid-cols-[300px_1fr] gap-6 items-start">
-        {/* Quota input */}
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <h2 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">Key 额度配置</h2>
-          <textarea
-            value={quotaInput}
-            onChange={e => setQuotaInput(e.target.value)}
-            rows={16}
-            placeholder={'每行一个 Key 及其额度（USD）：\n\nsk-ant-api03-xxxx    150\nsk-ant-api03-yyyy    200\n\n# 井号开头为注释'}
-            className="w-full border border-gray-200 rounded-md p-2.5 text-xs font-mono resize-y bg-gray-50 focus:outline-none focus:border-gray-900"
-          />
-          <p className="text-[10px] text-gray-400 mt-2 leading-relaxed">空格/Tab/逗号分隔，# 行为注释</p>
-          <button onClick={handleApply} disabled={saving}
-            className="mt-3 w-full bg-gray-900 text-white rounded-md py-1.5 text-sm font-medium hover:opacity-85 disabled:opacity-50">
-            {saving ? '保存中...' : '应用并保存'}
-          </button>
+        {/* Quota input + Create channels */}
+        <div className="space-y-4">
+          <div className="bg-white border border-gray-200 rounded-lg p-4">
+            <h2 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">Key 额度配置</h2>
+            <textarea
+              value={quotaInput}
+              onChange={e => setQuotaInput(e.target.value)}
+              rows={10}
+              placeholder={'每行一个 Key 及其额度（USD）：\n\nsk-ant-api03-xxxx    150\nsk-ant-api03-yyyy    200\n\n# 井号开头为注释'}
+              className="w-full border border-gray-200 rounded-md p-2.5 text-xs font-mono resize-y bg-gray-50 focus:outline-none focus:border-gray-900"
+            />
+            <p className="text-[10px] text-gray-400 mt-2 leading-relaxed">空格/Tab/逗号分隔，# 行为注释</p>
+            <button onClick={handleApply} disabled={saving}
+              className="mt-3 w-full bg-gray-900 text-white rounded-md py-1.5 text-sm font-medium hover:opacity-85 disabled:opacity-50">
+              {saving ? '保存中...' : '应用并保存'}
+            </button>
+          </div>
+
+          <BatchCreatePanel onCreated={load} />
         </div>
 
         {/* Table */}

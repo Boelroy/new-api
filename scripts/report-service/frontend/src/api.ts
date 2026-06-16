@@ -70,6 +70,13 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  batchCreateChannels: (suffix: string, channels: { key: string; quota_usd: number }[]) =>
+    request<{ created: { id: number; name: string }[]; count: number }>('/api/channels/batch-create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ suffix, channels }),
+    }),
+
   getAllKeys: (start?: string, end?: string) => {
     const params = new URLSearchParams()
     if (start) params.set('start', start)

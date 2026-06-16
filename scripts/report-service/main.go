@@ -868,6 +868,112 @@ func handleSaveQuotas(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"saved": saved})
 }
 
+// Default model list for new Anthropic channels.
+var defaultAnthropicModels = strings.Join([]string{
+	"claude-opus-4-7",
+	"claude-sonnet-4-6",
+	"claude-opus-4-6",
+	"claude-haiku-4-5-20251001",
+	"claude-sonnet-4-5-20250929",
+	"claude-opus-4-5-20251101",
+	"claude-opus-4-8",
+	"claude-fable-5",
+}, ",")
+
+const channelInfoDefault = `{"is_multi_key":false,"multi_key_size":0,"multi_key_status_list":null,"multi_key_polling_index":0,"multi_key_mode":""}`
+
+func handleBatchCreateChannels(c *gin.Context) {
+	var payload struct {
+		Suffix   string `json:"suffix"`
+		Channels []struct {
+			Key      string  `json:"key"`
+			QuotaUSD float64 `json:"quota_usd"`
+		} `json:"channels"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	suffix := strings.TrimSpace(payload.Suffix)
+	if suffix == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "suffix is required"})
+		return
+	}
+	if len(payload.Channels) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no channels provided"})
+		return
+	}
+
+	dateStr := time.Now().UTC().Format("0102")
+	models := strings.Split(defaultAnthropicModels, ",")
+	now := time.Now().Unix()
+
+	tx, err := db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	type created struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	}
+	results := make([]created, 0, len(payload.Channels))
+
+	for _, ch := range payload.Channels {
+		key := strings.TrimSpace(ch.Key)
+		if key == "" || ch.QuotaUSD <= 0 {
+			continue
+		}
+		quotaInt := int(ch.QuotaUSD)
+		name := fmt.Sprintf("%s-pipi-%s-%d", dateStr, suffix, quotaInt)
+
+		var channelID int
+		err := tx.QueryRow(`
+			INSERT INTO channels
+			(type, key, status, name, weight, created_time, base_url, "group", models,
+			 model_mapping, status_code_mapping, priority, auto_ban, used_quota, channel_info)
+			VALUES (14, $1, 1, $2, 0, $3, '', 'default', $4,
+			        '', '', 1001, 1, 0, $5::json)
+			RETURNING id`,
+			key, name, now, defaultAnthropicModels, channelInfoDefault).Scan(&channelID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("insert channel: %v", err)})
+			return
+		}
+
+		for _, m := range models {
+			_, err = tx.Exec(`
+				INSERT INTO abilities ("group", model, channel_id, enabled, priority, weight)
+				VALUES ('default', $1, $2, true, 1001, 0)
+				ON CONFLICT DO NOTHING`,
+				strings.TrimSpace(m), channelID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("insert ability: %v", err)})
+				return
+			}
+		}
+
+		_, err = tx.Exec(`
+			INSERT INTO report_key_quotas (channel_id, quota_usd, updated_at)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (channel_id) DO UPDATE SET quota_usd=$2, updated_at=$3`,
+			channelID, ch.QuotaUSD, now)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("insert quota: %v", err)})
+			return
+		}
+
+		results = append(results, created{ID: channelID, Name: name})
+	}
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"created": results, "count": len(results)})
+}
+
 func handleAllKeysData(c *gin.Context) {
 	var startTS, endTS int64
 	if s := c.Query("start"); s != "" {
@@ -1107,6 +1213,7 @@ func main() {
 	api.GET("/export/html", handleExportHTML)
 	api.GET("/keys/data", handleKeysData)
 	api.POST("/keys/quota", handleSaveQuotas)
+	api.POST("/channels/batch-create", handleBatchCreateChannels)
 	api.GET("/allkeys/data", handleAllKeysData)
 
 	// SPA — serve for all non-API routes
