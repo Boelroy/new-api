@@ -135,7 +135,7 @@ export default function KeyTester() {
         { label: '平均延迟', value: stats.avgLatency ? `${stats.avgLatency} ms` : '—', color: 'text-blue-600' },
       ]} />
 
-      <div className="grid grid-cols-[340px_1fr] gap-6 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-6 items-start">
         <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
           <div>
             <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">模型</label>

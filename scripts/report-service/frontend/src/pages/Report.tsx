@@ -156,7 +156,7 @@ export default function Report() {
         { label: 'Keys', value: String(summary.keys), color: 'text-purple-600' },
       ]} />
 
-      <div className="grid grid-cols-2 gap-4 mb-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
         <div className="bg-white border border-gray-200 rounded-xl p-4">
           <h3 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">Cost Over Time ($)</h3>
           <ResponsiveContainer width="100%" height={180}>

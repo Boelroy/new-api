@@ -173,7 +173,7 @@ export default function KeyCapacity() {
         { label: '预计剩余时长', value: etaFmt.text, color: etaFmt.cls },
       ]} />
 
-      <div className="grid grid-cols-[300px_1fr] gap-6 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-6 items-start">
         <div className="space-y-4">
           <div className="bg-white border border-gray-200 rounded-xl p-4">
             <h2 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">Key 额度配置</h2>
