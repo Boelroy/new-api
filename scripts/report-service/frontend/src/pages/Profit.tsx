@@ -122,6 +122,8 @@ export default function Profit() {
 
   const submitDownstream = async () => {
     const payload: { group: string; unit_price_cny: number; note: string }[] = []
+    const seen = new Set<string>()
+
     // Existing rows with edits
     for (const d of downstream) {
       const e = dsEdits[d.group]
@@ -133,8 +135,19 @@ export default function Profit() {
         unit_price_cny: price,
         note: e.note ?? d.note,
       })
+      seen.add(d.group)
     }
-    // New row
+
+    // Edits on groups not in `downstream` (e.g. missing-pricing rows from the warning banner)
+    for (const [g, e] of Object.entries(dsEdits)) {
+      if (g === '__new__' || seen.has(g)) continue
+      if (e.price === undefined || e.price === '') continue
+      const price = parseFloat(e.price)
+      if (Number.isNaN(price)) continue
+      payload.push({ group: g, unit_price_cny: price, note: e.note ?? '' })
+    }
+
+    // New row (manual add)
     const newG = dsNewGroup.trim()
     if (newG) {
       const e = dsEdits['__new__']
@@ -143,14 +156,16 @@ export default function Profit() {
         payload.push({ group: newG, unit_price_cny: price, note: e?.note ?? '' })
       }
     }
+
     if (payload.length === 0) {
-      alert('没有改动')
+      alert('没有改动（请检查价格是否填写）')
       return
     }
     try {
-      await api.saveDownstreamPricing(payload)
+      const res = await api.saveDownstreamPricing(payload)
       setDsNewGroup('')
       await load()
+      alert(`已保存 ${res.saved} 条`)
     } catch (err) {
       alert('保存失败：' + (err as Error).message)
     }
