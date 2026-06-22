@@ -86,7 +86,9 @@ export default function Profit() {
     }
   }
 
-  // Verify auth (X-API-Key in localStorage) before loading any data.
+  // Verify auth before loading any data. The gate only shows when neither
+  // cookie/SSO auth nor a valid X-API-Key works — System 1 users who are
+  // already SSO'd via the main newapi will bypass it transparently.
   useEffect(() => {
     // Accept ?key=... once and clean it out of the URL.
     const params = new URLSearchParams(window.location.search)
@@ -99,15 +101,16 @@ export default function Profit() {
     }
 
     void (async () => {
-      if (!getProfitApiKey()) {
-        setAuthChecked(true)
-        return
-      }
       try {
         await api.getPipiStatus()
         setAuthOk(true)
-      } catch {
-        setProfitApiKey('')
+      } catch (err) {
+        if ((err as Error).message === 'Unauthorized') {
+          // Stored key (if any) didn't work — clear it so the gate doesn't
+          // silently keep re-trying a bad value.
+          if (getProfitApiKey()) setProfitApiKey('')
+        }
+        // Stay on the gate; any non-auth error also lands here.
       }
       setAuthChecked(true)
     })()
