@@ -18,8 +18,7 @@ const defaultFXRate = 6.79
 // Claude in newapi's constants:
 //   14 = Anthropic direct
 //   33 = AWS Bedrock (serving Claude)
-//   41 = Google Vertex AI (serving Claude)
-const anthropicChannelTypesSQL = "(14, 33, 41)"
+const anthropicChannelTypesSQL = "(14, 33)"
 
 // getDefaultFXRate reads the configurable default from report_config and
 // returns the hardcoded fallback if unset or malformed.

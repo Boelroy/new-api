@@ -85,8 +85,8 @@ export default function Profit() {
   }, [profit])
 
   // Profit report is scoped to Claude-serving channels on the backend
-  // (14 direct / 33 Bedrock / 41 Vertex). Mirror that filter here.
-  const anthropicKeys = useMemo(() => keys.filter(k => k.type === 14 || k.type === 33 || k.type === 41), [keys])
+  // (14 Anthropic direct / 33 AWS Bedrock). Mirror that filter here.
+  const anthropicKeys = useMemo(() => keys.filter(k => k.type === 14 || k.type === 33), [keys])
   const filteredKeys = useMemo(() => {
     if (!keyOnlyUnpriced) return anthropicKeys
     return anthropicKeys.filter(k => k.unit_price_cny == null)
