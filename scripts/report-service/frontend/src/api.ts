@@ -26,6 +26,7 @@ export type ChannelRow = {
   name: string
   key: string
   status: number
+  type: number
   tag: string
   used_usd: number
   last_hour_usd: number
@@ -79,6 +80,14 @@ export type ProfitByGroup = {
   revenue_usd: number
 }
 
+export type ProfitByTag = {
+  tag: string
+  source: 'system1' | 'pipi'
+  used_usd: number
+  cost_usd: number
+  key_count: number
+}
+
 export type ProfitSummary = {
   start: string
   end: string
@@ -89,6 +98,7 @@ export type ProfitSummary = {
   profit_rate: number
   daily: ProfitDailyRow[]
   by_key: ProfitByKey[]
+  by_tag: ProfitByTag[]
   by_group: ProfitByGroup[]
   missing_pricing: { channel_ids: number[] | null; groups: string[] | null }
 }

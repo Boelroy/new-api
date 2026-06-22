@@ -84,12 +84,15 @@ export default function Profit() {
       .map(k => ({ name: k.channel_name || `#${k.channel_id}`, cost: k.cost_usd, tag: k.tag }))
   }, [profit])
 
+  // Profit report is scoped to Anthropic (channel type 14) on the backend.
+  // Mirror that here so the upstream pricing table only shows actionable rows.
+  const anthropicKeys = useMemo(() => keys.filter(k => k.type === 14), [keys])
   const filteredKeys = useMemo(() => {
-    if (!keyOnlyUnpriced) return keys
-    return keys.filter(k => k.unit_price_cny == null)
-  }, [keys, keyOnlyUnpriced])
+    if (!keyOnlyUnpriced) return anthropicKeys
+    return anthropicKeys.filter(k => k.unit_price_cny == null)
+  }, [anthropicKeys, keyOnlyUnpriced])
 
-  const unpricedKeyCount = useMemo(() => keys.filter(k => k.unit_price_cny == null).length, [keys])
+  const unpricedKeyCount = useMemo(() => anthropicKeys.filter(k => k.unit_price_cny == null).length, [anthropicKeys])
 
   const missing = profit?.missing_pricing
   const hasMissing = !!(missing && ((missing.channel_ids && missing.channel_ids.length) || (missing.groups && missing.groups.length)))
@@ -326,6 +329,49 @@ export default function Profit() {
               </Bar>
             </BarChart>
           </ResponsiveContainer>
+        </div>
+      </div>
+
+      <div className="bg-white border border-gray-200 rounded-xl mb-4">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+          <div>
+            <div className="text-sm font-semibold">按供应商（Tag）分组</div>
+            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">每个上游供应商的用量与成本</div>
+          </div>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs whitespace-nowrap">
+            <thead>
+              <tr className="bg-gray-50">
+                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">来源</th>
+                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Tag</th>
+                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">Key 数</th>
+                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">用量 USD</th>
+                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">上游成本 USD</th>
+                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">占比</th>
+              </tr>
+            </thead>
+            <tbody>
+              {profit && [...profit.by_tag].sort((a, b) => b.cost_usd - a.cost_usd).map((t, i) => {
+                const share = profit.cost_usd > 0 ? t.cost_usd / profit.cost_usd : 0
+                return (
+                  <tr key={i} className="hover:bg-gray-50 border-t border-gray-100">
+                    <td className="px-3 py-1.5">
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] ${t.source === 'pipi' ? 'bg-violet-100 text-violet-700' : 'bg-blue-100 text-blue-700'}`}>{t.source}</span>
+                    </td>
+                    <td className="px-3 py-1.5 font-mono">{t.tag || <span className="text-gray-400">(无)</span>}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-gray-500">{t.key_count}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{t.used_usd.toFixed(2)}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-rose-600">{t.cost_usd.toFixed(4)}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{fmtPct(share)}</td>
+                  </tr>
+                )
+              })}
+              {(!profit || profit.by_tag.length === 0) && (
+                <tr><td colSpan={6} className="px-3 py-3 text-center text-gray-400 text-[11px]">暂无数据</td></tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
 

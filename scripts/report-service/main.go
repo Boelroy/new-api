@@ -537,6 +537,7 @@ type ChannelRow struct {
 	Name          string   `json:"name"`
 	Key           string   `json:"key"`
 	Status        int      `json:"status"`
+	Type          int      `json:"type"`
 	Tag           string   `json:"tag"`
 	UsedUSD       float64  `json:"used_usd"`
 	LastHourUSD   float64  `json:"last_hour_usd"`
@@ -552,7 +553,7 @@ type KeySummary struct {
 
 func queryKeyData() ([]ChannelRow, error) {
 	rows, err := db.Query(`
-		SELECT c.id, COALESCE(c.name,''), c.key, COALESCE(c.status,1), COALESCE(c.tag,''),
+		SELECT c.id, COALESCE(c.name,''), c.key, COALESCE(c.status,1), COALESCE(c.type,0), COALESCE(c.tag,''),
 		       COALESCE(c.used_quota,0), q.quota_usd, q.unit_price_cny, COALESCE(q.note,'')
 		FROM channels c
 		LEFT JOIN report_key_quotas q ON q.channel_id = c.id
@@ -569,7 +570,7 @@ func queryKeyData() ([]ChannelRow, error) {
 		var r ChannelRow
 		var usedQuota int64
 		var quotaUSD, unitPrice sql.NullFloat64
-		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &r.Tag, &usedQuota, &quotaUSD, &unitPrice, &r.Note); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &r.Type, &r.Tag, &usedQuota, &quotaUSD, &unitPrice, &r.Note); err != nil {
 			return nil, err
 		}
 		r.UsedUSD = roundTo(float64(usedQuota)/quotaPerUnit, 4)
@@ -621,7 +622,7 @@ func queryTotalLastHour() (float64, error) {
 
 func queryAllKeys(startTS, endTS int64) ([]ChannelRow, error) {
 	query := `
-		SELECT c.id, COALESCE(c.name,''), c.key, COALESCE(c.status,1), COALESCE(c.tag,''),
+		SELECT c.id, COALESCE(c.name,''), c.key, COALESCE(c.status,1), COALESCE(c.type,0), COALESCE(c.tag,''),
 		       COALESCE(c.used_quota,0), q.quota_usd, q.unit_price_cny, COALESCE(q.note,'')
 		FROM channels c
 		LEFT JOIN report_key_quotas q ON q.channel_id = c.id`
@@ -648,7 +649,7 @@ func queryAllKeys(startTS, endTS int64) ([]ChannelRow, error) {
 		var r ChannelRow
 		var usedQuota int64
 		var quotaUSD, unitPrice sql.NullFloat64
-		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &r.Tag, &usedQuota, &quotaUSD, &unitPrice, &r.Note); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &r.Type, &r.Tag, &usedQuota, &quotaUSD, &unitPrice, &r.Note); err != nil {
 			return nil, err
 		}
 		r.UsedUSD = roundTo(float64(usedQuota)/quotaPerUnit, 4)

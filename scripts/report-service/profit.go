@@ -14,6 +14,11 @@ import (
 // report_config['default_fx_rate'] has been configured.
 const defaultFXRate = 6.79
 
+// anthropicChannelType filters the profit report to channels of this type.
+// 14 = direct Anthropic in newapi's constants. Adjust if AWS Bedrock (33) or
+// Vertex (41) Anthropic channels should be included.
+const anthropicChannelType = 14
+
 // getDefaultFXRate reads the configurable default from report_config and
 // returns the hardcoded fallback if unset or malformed.
 func getDefaultFXRate() float64 {
@@ -348,6 +353,14 @@ type ProfitByGroup struct {
 	RevenueUSD float64 `json:"revenue_usd"`
 }
 
+type ProfitByTag struct {
+	Tag        string  `json:"tag"`
+	Source     string  `json:"source"` // 'system1' or 'pipi'
+	UsedUSD    float64 `json:"used_usd"`
+	CostUSD    float64 `json:"cost_usd"`
+	KeyCount   int     `json:"key_count"`
+}
+
 type MissingPricing struct {
 	ChannelIDs []int    `json:"channel_ids"`
 	Groups     []string `json:"groups"`
@@ -363,6 +376,7 @@ type ProfitSummary struct {
 	ProfitRate     float64         `json:"profit_rate"`
 	Daily          []ProfitDaily   `json:"daily"`
 	ByKey          []ProfitByKey   `json:"by_key"`
+	ByTag          []ProfitByTag   `json:"by_tag"`
 	ByGroup        []ProfitByGroup `json:"by_group"`
 	MissingPricing MissingPricing  `json:"missing_pricing"`
 }
@@ -597,6 +611,32 @@ func handleProfitDaily(c *gin.Context) {
 		summary.ByGroup = append(summary.ByGroup, *v)
 	}
 
+	// Roll up by_tag from per-key. Bucket by (source, tag) since pipi and
+	// system1 tag namespaces are distinct.
+	tagAgg := map[string]*ProfitByTag{}
+	bumpTag := func(k *ProfitByKey) {
+		bucket := k.Source + "|" + k.Tag
+		v, ok := tagAgg[bucket]
+		if !ok {
+			v = &ProfitByTag{Tag: k.Tag, Source: k.Source}
+			tagAgg[bucket] = v
+		}
+		v.UsedUSD += k.UsedUSD
+		v.CostUSD += k.CostUSD
+		v.KeyCount++
+	}
+	for _, k := range byKey {
+		bumpTag(k)
+	}
+	for _, k := range byKeyPipi {
+		bumpTag(k)
+	}
+	for _, v := range tagAgg {
+		v.UsedUSD = roundTo(v.UsedUSD, 4)
+		v.CostUSD = roundTo(v.CostUSD, 4)
+		summary.ByTag = append(summary.ByTag, *v)
+	}
+
 	summary.UsedUSD = roundTo(summary.UsedUSD, 4)
 	summary.CostUSD = roundTo(summary.CostUSD, 4)
 	summary.RevenueUSD = roundTo(summary.RevenueUSD, 4)
@@ -626,14 +666,15 @@ func loadStep1(startDate, endDate string) ([]step1Row, error) {
 		    SUM(r.total_cost) AS used_usd,
 		    q.unit_price_cny
 		FROM report_daily_agg r
-		LEFT JOIN channels c ON c.id = r.channel_id
+		JOIN channels c ON c.id = r.channel_id
 		LEFT JOIN report_key_quotas q ON q.channel_id = r.channel_id
 		WHERE LEFT(r.hour,10) BETWEEN $1 AND $2
 		  AND COALESCE(c.tag,'') <> 'pipi'
+		  AND c.type = $3
 		GROUP BY LEFT(r.hour,10), r.channel_id, COALESCE(r.channel_name,''),
 		         COALESCE(c.tag,''), COALESCE(r."group",''), q.unit_price_cny
 	`
-	rows, err := db.Query(q, startDate, endDate)
+	rows, err := db.Query(q, startDate, endDate, anthropicChannelType)
 	if err != nil {
 		return nil, err
 	}
@@ -653,12 +694,13 @@ func loadStep2(startDate, endDate string) ([]step2Row, error) {
 	q := `
 		SELECT LEFT(r.hour,10) AS date, COALESCE(r."group",'') AS token_group, SUM(r.total_cost) AS used_usd
 		FROM report_daily_agg r
-		LEFT JOIN channels c ON c.id = r.channel_id
+		JOIN channels c ON c.id = r.channel_id
 		WHERE LEFT(r.hour,10) BETWEEN $1 AND $2
 		  AND COALESCE(c.tag,'') = 'pipi'
+		  AND c.type = $3
 		GROUP BY LEFT(r.hour,10), COALESCE(r."group",'')
 	`
-	rows, err := db.Query(q, startDate, endDate)
+	rows, err := db.Query(q, startDate, endDate, anthropicChannelType)
 	if err != nil {
 		return nil, err
 	}
