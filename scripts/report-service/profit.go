@@ -359,6 +359,9 @@ type ProfitByTag struct {
 	Source     string  `json:"source"` // 'main' or 'pipi'
 	UsedUSD    float64 `json:"used_usd"`
 	CostUSD    float64 `json:"cost_usd"`
+	RevenueUSD float64 `json:"revenue_usd"`
+	ProfitUSD  float64 `json:"profit_usd"`
+	ProfitRate float64 `json:"profit_rate"`
 	KeyCount   int     `json:"key_count"`
 }
 
@@ -476,6 +479,22 @@ func handleProfitDaily(c *gin.Context) {
 	byKey := map[int]*ProfitByKey{}
 	byKeyPipi := map[int]*ProfitByKey{}
 	byGroup := map[string]*ProfitByGroup{}
+	// by_tag: bucketed independently of by_key so revenue can be attributed
+	// per-tag (main side) and pipi gets a single explicit "pipi" tag bucket.
+	type tagBucket struct {
+		usedUSD, costUSD, revenueUSD float64
+		channels                     map[int]struct{}
+	}
+	mainTagAgg := map[string]*tagBucket{} // keyed by channel.tag
+	pipiTagAgg := &tagBucket{channels: map[int]struct{}{}}
+	bumpTagBucket := func(b *tagBucket, channelID int) {
+		if b.channels == nil {
+			b.channels = map[int]struct{}{}
+		}
+		if channelID > 0 {
+			b.channels[channelID] = struct{}{}
+		}
+	}
 
 	getDay := func(d string) *ProfitDaily {
 		if v, ok := daily[d]; ok {
@@ -531,6 +550,16 @@ func handleProfitDaily(c *gin.Context) {
 		g := getGroup(r.tokenGroup, dis)
 		g.UsedUSD += r.usedUSD
 		g.RevenueUSD += revUSD
+
+		tb, ok := mainTagAgg[r.channelTag]
+		if !ok {
+			tb = &tagBucket{}
+			mainTagAgg[r.channelTag] = tb
+		}
+		tb.usedUSD += r.usedUSD
+		tb.costUSD += costUSD
+		tb.revenueUSD += revUSD
+		bumpTagBucket(tb, r.channelID)
 	}
 
 	// Step 2 — pipi revenue side (downstream group lives in System 1's logs)
@@ -548,6 +577,10 @@ func handleProfitDaily(c *gin.Context) {
 		g := getGroup(r.tokenGroup, dis)
 		g.UsedUSD += r.revenueUSD
 		g.RevenueUSD += revUSD
+
+		// pipi tag bucket: used + revenue from System 1's perspective
+		pipiTagAgg.usedUSD += r.revenueUSD
+		pipiTagAgg.revenueUSD += revUSD
 	}
 
 	// Step 3 — pipi cost side (per-sub-key with its own CNY price, converted by daily FX)
@@ -567,6 +600,11 @@ func handleProfitDaily(c *gin.Context) {
 		k := getKey(byKeyPipi, r.channelID, r.channelName, r.channelTag, "pipi", upP)
 		k.UsedUSD += r.costUSD
 		k.CostUSD += costUSD
+
+		// pipi tag bucket: cost comes from System 2 sync, distinct channels
+		// counted for key_count
+		pipiTagAgg.costUSD += costUSD
+		bumpTagBucket(pipiTagAgg, r.channelID)
 	}
 
 	summary := ProfitSummary{Start: startDate, End: endDate}
@@ -612,30 +650,29 @@ func handleProfitDaily(c *gin.Context) {
 		summary.ByGroup = append(summary.ByGroup, *v)
 	}
 
-	// Roll up by_tag from per-key. Bucket by (source, tag) since pipi and
-	// main tag namespaces are distinct.
-	tagAgg := map[string]*ProfitByTag{}
-	bumpTag := func(k *ProfitByKey) {
-		bucket := k.Source + "|" + k.Tag
-		v, ok := tagAgg[bucket]
-		if !ok {
-			v = &ProfitByTag{Tag: k.Tag, Source: k.Source}
-			tagAgg[bucket] = v
+	// Emit by_tag from the dedicated buckets (independent of by_key so we
+	// can attribute revenue per main-side tag and force "pipi" as the tag
+	// label for the System 2 sync bucket).
+	emit := func(tag, source string, b *tagBucket) {
+		out := ProfitByTag{
+			Tag:        tag,
+			Source:     source,
+			UsedUSD:    roundTo(b.usedUSD, 4),
+			CostUSD:    roundTo(b.costUSD, 4),
+			RevenueUSD: roundTo(b.revenueUSD, 4),
+			KeyCount:   len(b.channels),
 		}
-		v.UsedUSD += k.UsedUSD
-		v.CostUSD += k.CostUSD
-		v.KeyCount++
+		out.ProfitUSD = roundTo(out.RevenueUSD-out.CostUSD, 4)
+		if out.RevenueUSD > 0 {
+			out.ProfitRate = roundTo(out.ProfitUSD/out.RevenueUSD, 4)
+		}
+		summary.ByTag = append(summary.ByTag, out)
 	}
-	for _, k := range byKey {
-		bumpTag(k)
+	for tag, b := range mainTagAgg {
+		emit(tag, "main", b)
 	}
-	for _, k := range byKeyPipi {
-		bumpTag(k)
-	}
-	for _, v := range tagAgg {
-		v.UsedUSD = roundTo(v.UsedUSD, 4)
-		v.CostUSD = roundTo(v.CostUSD, 4)
-		summary.ByTag = append(summary.ByTag, *v)
+	if pipiTagAgg.usedUSD > 0 || pipiTagAgg.costUSD > 0 || pipiTagAgg.revenueUSD > 0 {
+		emit("pipi", "pipi", pipiTagAgg)
 	}
 
 	summary.UsedUSD = roundTo(summary.UsedUSD, 4)

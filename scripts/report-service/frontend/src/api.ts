@@ -85,6 +85,9 @@ export type ProfitByTag = {
   source: 'main' | 'pipi'
   used_usd: number
   cost_usd: number
+  revenue_usd: number
+  profit_usd: number
+  profit_rate: number
   key_count: number
 }
 

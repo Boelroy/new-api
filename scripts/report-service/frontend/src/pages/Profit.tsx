@@ -396,27 +396,28 @@ export default function Profit() {
                 <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">Key 数</th>
                 <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">用量 USD</th>
                 <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">上游成本 USD</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">占比</th>
+                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">下游收入 USD</th>
+                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">毛利 USD</th>
+                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">毛利率</th>
               </tr>
             </thead>
             <tbody>
-              {profit && [...profit.by_tag].sort((a, b) => b.cost_usd - a.cost_usd).map((t, i) => {
-                const share = profit.cost_usd > 0 ? t.cost_usd / profit.cost_usd : 0
-                return (
-                  <tr key={i} className="hover:bg-gray-50 border-t border-gray-100">
-                    <td className="px-3 py-1.5">
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] ${t.source === 'pipi' ? 'bg-violet-100 text-violet-700' : 'bg-blue-100 text-blue-700'}`}>{t.source}</span>
-                    </td>
-                    <td className="px-3 py-1.5 font-mono">{t.tag || <span className="text-gray-400">(无)</span>}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums text-gray-500">{t.key_count}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{t.used_usd.toFixed(2)}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums text-rose-600">{t.cost_usd.toFixed(4)}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{fmtPct(share)}</td>
-                  </tr>
-                )
-              })}
+              {profit && [...profit.by_tag].sort((a, b) => b.cost_usd - a.cost_usd).map((t, i) => (
+                <tr key={i} className="hover:bg-gray-50 border-t border-gray-100">
+                  <td className="px-3 py-1.5">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] ${t.source === 'pipi' ? 'bg-violet-100 text-violet-700' : 'bg-blue-100 text-blue-700'}`}>{t.source}</span>
+                  </td>
+                  <td className="px-3 py-1.5 font-mono">{t.tag || <span className="text-gray-400">(无)</span>}</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums text-gray-500">{t.key_count}</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">{t.used_usd.toFixed(2)}</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums text-rose-600">{t.cost_usd.toFixed(4)}</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums text-blue-600">{t.revenue_usd.toFixed(4)}</td>
+                  <td className={`px-3 py-1.5 text-right tabular-nums font-medium ${t.profit_usd >= 0 ? 'text-emerald-600' : 'text-rose-700'}`}>{t.profit_usd.toFixed(4)}</td>
+                  <td className={`px-3 py-1.5 text-right tabular-nums ${t.profit_rate >= 0 ? '' : 'text-rose-700'}`}>{fmtPct(t.profit_rate)}</td>
+                </tr>
+              ))}
               {(!profit || profit.by_tag.length === 0) && (
-                <tr><td colSpan={6} className="px-3 py-3 text-center text-gray-400 text-[11px]">暂无数据</td></tr>
+                <tr><td colSpan={8} className="px-3 py-3 text-center text-gray-400 text-[11px]">暂无数据</td></tr>
               )}
             </tbody>
           </table>
