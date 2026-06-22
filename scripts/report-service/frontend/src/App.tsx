@@ -4,6 +4,7 @@ import Report from './pages/Report'
 import KeyCapacity from './pages/KeyCapacity'
 import AllKeys from './pages/AllKeys'
 import KeyTester from './pages/KeyTester'
+import Profit from './pages/Profit'
 
 export default function App() {
   return (
@@ -11,6 +12,7 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<Report />} />
+        <Route path="/profit" element={<Profit />} />
         <Route path="/keys" element={<KeyCapacity />} />
         <Route path="/allkeys" element={<AllKeys />} />
         <Route path="/tester" element={<KeyTester />} />

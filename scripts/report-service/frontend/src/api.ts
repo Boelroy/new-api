@@ -26,9 +26,59 @@ export type ChannelRow = {
   name: string
   key: string
   status: number
+  tag: string
   used_usd: number
   last_hour_usd: number
   quota_usd: number | null
+  unit_price_cny: number | null
+  note: string
+}
+
+export type DownstreamPricing = {
+  group: string
+  unit_price_cny: number
+  note: string
+  updated_at: number
+}
+
+export type ProfitDailyRow = {
+  date: string
+  used_usd: number
+  revenue_cny: number
+  cost_cny: number
+  profit_usd: number
+  profit_rate: number
+}
+
+export type ProfitByKey = {
+  channel_id: number
+  channel_name: string
+  tag: string
+  source: 'system1' | 'pipi'
+  used_usd: number
+  unit_price_cny: number
+  cost_cny: number
+}
+
+export type ProfitByGroup = {
+  group: string
+  used_usd: number
+  unit_price_cny: number
+  revenue_cny: number
+}
+
+export type ProfitSummary = {
+  start: string
+  end: string
+  used_usd: number
+  revenue_cny: number
+  cost_cny: number
+  profit_usd: number
+  profit_rate: number
+  daily: ProfitDailyRow[]
+  by_key: ProfitByKey[]
+  by_group: ProfitByGroup[]
+  missing_pricing: { channel_ids: number[] | null; groups: string[] | null }
 }
 
 export type KeySummary = {
@@ -105,4 +155,29 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ keys, model }),
     }),
+
+  saveKeyPricing: (payload: { channel_id: number; quota_usd?: number; unit_price_cny?: number; note?: string }[]) =>
+    request<{ saved: number }>('/api/profit/keys/pricing', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  getDownstreamPricing: () =>
+    request<DownstreamPricing[]>('/api/profit/downstream/pricing'),
+
+  saveDownstreamPricing: (payload: { group: string; unit_price_cny: number; note: string }[]) =>
+    request<{ saved: number }>('/api/profit/downstream/pricing', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  deleteDownstreamPricing: (group: string) =>
+    request<{ ok: boolean }>(`/api/profit/downstream/pricing/${encodeURIComponent(group)}`, {
+      method: 'DELETE',
+    }),
+
+  getProfitDaily: (start: string, end: string) =>
+    request<ProfitSummary>(`/api/profit/daily?start=${start}&end=${end}`),
 }

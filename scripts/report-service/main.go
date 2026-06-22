@@ -40,6 +40,7 @@ var (
 	mainServiceURL   string
 	mainServiceUID   string
 	ssoSecret        []byte
+	reportAPIKey     string
 )
 
 // SSO session cache: maps session cookie value → expiry
@@ -111,6 +112,13 @@ func newJWT() (string, error) {
 }
 
 func authMiddleware(c *gin.Context) {
+	// Service-to-service: X-API-Key short-circuit (used by cross-system sync)
+	if reportAPIKey != "" {
+		if k := c.GetHeader("X-API-Key"); k != "" && k == reportAPIKey {
+			c.Next()
+			return
+		}
+	}
 	// Try main service SSO first
 	if rawCookie := c.GetHeader("Cookie"); rawCookie != "" && strings.Contains(rawCookie, "session=") {
 		if checkMainServiceSession(rawCookie) {
@@ -525,13 +533,16 @@ func startDailyRefresh() {
 // ---- Key data ----
 
 type ChannelRow struct {
-	ID          int      `json:"id"`
-	Name        string   `json:"name"`
-	Key         string   `json:"key"`
-	Status      int      `json:"status"`
-	UsedUSD     float64  `json:"used_usd"`
-	LastHourUSD float64  `json:"last_hour_usd"`
-	QuotaUSD    *float64 `json:"quota_usd"`
+	ID            int      `json:"id"`
+	Name          string   `json:"name"`
+	Key           string   `json:"key"`
+	Status        int      `json:"status"`
+	Tag           string   `json:"tag"`
+	UsedUSD       float64  `json:"used_usd"`
+	LastHourUSD   float64  `json:"last_hour_usd"`
+	QuotaUSD      *float64 `json:"quota_usd"`
+	UnitPriceCNY  *float64 `json:"unit_price_cny"`
+	Note          string   `json:"note"`
 }
 
 type KeySummary struct {
@@ -541,7 +552,8 @@ type KeySummary struct {
 
 func queryKeyData() ([]ChannelRow, error) {
 	rows, err := db.Query(`
-		SELECT c.id, COALESCE(c.name,''), c.key, COALESCE(c.status,1), COALESCE(c.used_quota,0), q.quota_usd
+		SELECT c.id, COALESCE(c.name,''), c.key, COALESCE(c.status,1), COALESCE(c.tag,''),
+		       COALESCE(c.used_quota,0), q.quota_usd, q.unit_price_cny, COALESCE(q.note,'')
 		FROM channels c
 		LEFT JOIN report_key_quotas q ON q.channel_id = c.id
 		WHERE c.status = 1
@@ -556,14 +568,18 @@ func queryKeyData() ([]ChannelRow, error) {
 	for rows.Next() {
 		var r ChannelRow
 		var usedQuota int64
-		var quotaUSD sql.NullFloat64
-		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &usedQuota, &quotaUSD); err != nil {
+		var quotaUSD, unitPrice sql.NullFloat64
+		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &r.Tag, &usedQuota, &quotaUSD, &unitPrice, &r.Note); err != nil {
 			return nil, err
 		}
 		r.UsedUSD = roundTo(float64(usedQuota)/quotaPerUnit, 4)
 		if quotaUSD.Valid {
 			v := roundTo(quotaUSD.Float64, 4)
 			r.QuotaUSD = &v
+		}
+		if unitPrice.Valid {
+			v := roundTo(unitPrice.Float64, 4)
+			r.UnitPriceCNY = &v
 		}
 		if len(r.Key) > 8 {
 			r.Key = "…" + r.Key[len(r.Key)-8:]
@@ -605,7 +621,8 @@ func queryTotalLastHour() (float64, error) {
 
 func queryAllKeys(startTS, endTS int64) ([]ChannelRow, error) {
 	query := `
-		SELECT c.id, COALESCE(c.name,''), c.key, COALESCE(c.status,1), COALESCE(c.used_quota,0), q.quota_usd
+		SELECT c.id, COALESCE(c.name,''), c.key, COALESCE(c.status,1), COALESCE(c.tag,''),
+		       COALESCE(c.used_quota,0), q.quota_usd, q.unit_price_cny, COALESCE(q.note,'')
 		FROM channels c
 		LEFT JOIN report_key_quotas q ON q.channel_id = c.id`
 	args := []any{}
@@ -630,14 +647,18 @@ func queryAllKeys(startTS, endTS int64) ([]ChannelRow, error) {
 	for rows.Next() {
 		var r ChannelRow
 		var usedQuota int64
-		var quotaUSD sql.NullFloat64
-		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &usedQuota, &quotaUSD); err != nil {
+		var quotaUSD, unitPrice sql.NullFloat64
+		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &r.Tag, &usedQuota, &quotaUSD, &unitPrice, &r.Note); err != nil {
 			return nil, err
 		}
 		r.UsedUSD = roundTo(float64(usedQuota)/quotaPerUnit, 4)
 		if quotaUSD.Valid {
 			v := roundTo(quotaUSD.Float64, 4)
 			r.QuotaUSD = &v
+		}
+		if unitPrice.Valid {
+			v := roundTo(unitPrice.Float64, 4)
+			r.UnitPriceCNY = &v
 		}
 		if len(r.Key) > 8 {
 			r.Key = "…" + r.Key[len(r.Key)-8:]
@@ -1282,6 +1303,9 @@ func main() {
 	if s := os.Getenv("SSO_SECRET"); s != "" {
 		ssoSecret = []byte(s)
 	}
+	reportAPIKey = os.Getenv("REPORT_API_KEY")
+	pipiReportURL = os.Getenv("PIPI_REPORT_URL")
+	pipiReportAPIKey = os.Getenv("PIPI_REPORT_API_KEY")
 	larkWebhook = os.Getenv("LARK_WEBHOOK")
 	if v := os.Getenv("NOTIFY_HOURS_THRESHOLD"); v != "" {
 		notifyHoursThreshold, _ = strconv.ParseFloat(v, 64)
@@ -1356,6 +1380,29 @@ func main() {
 				ALTER TABLE report_daily_agg ADD PRIMARY KEY (date, hour, user_id, token_id, channel_id, model);
 			END IF;
 		END $$`,
+		// profit reporting: per-key upstream unit price (CNY per USD of usage)
+		`ALTER TABLE report_key_quotas ADD COLUMN IF NOT EXISTS unit_price_cny NUMERIC(8,4)`,
+		`ALTER TABLE report_key_quotas ADD COLUMN IF NOT EXISTS note TEXT NOT NULL DEFAULT ''`,
+		// downstream sales price (CNY per USD of usage), keyed by token group
+		`CREATE TABLE IF NOT EXISTS report_downstream_pricing (
+			"group"         TEXT PRIMARY KEY,
+			unit_price_cny  NUMERIC(8,4) NOT NULL,
+			note            TEXT NOT NULL DEFAULT '',
+			updated_at      BIGINT NOT NULL
+		)`,
+		// pipi daily sync: cost snapshot pulled from System 2
+		`CREATE TABLE IF NOT EXISTS report_pipi_daily (
+			date              TEXT NOT NULL,
+			channel_id        BIGINT NOT NULL,
+			channel_name      TEXT NOT NULL DEFAULT '',
+			channel_tag       TEXT NOT NULL DEFAULT '',
+			request_count     INT NOT NULL DEFAULT 0,
+			total_cost_usd    NUMERIC(14,6) NOT NULL DEFAULT 0,
+			unit_price_cny    NUMERIC(8,4),
+			updated_at        BIGINT NOT NULL,
+			PRIMARY KEY (date, channel_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_report_pipi_date ON report_pipi_daily(date)`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
@@ -1364,6 +1411,7 @@ func main() {
 
 	startDailyRefresh()
 	startNotifyLoop()
+	startPipiSync()
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
@@ -1384,6 +1432,13 @@ func main() {
 	api.POST("/channels/batch-create", handleBatchCreateChannels)
 	api.GET("/allkeys/data", handleAllKeysData)
 	api.POST("/keys/test", handleTestKeys)
+
+	// Profit reporting
+	api.POST("/profit/keys/pricing", handleSaveKeyPricing)
+	api.GET("/profit/downstream/pricing", handleListDownstreamPricing)
+	api.POST("/profit/downstream/pricing", handleSaveDownstreamPricing)
+	api.DELETE("/profit/downstream/pricing/:group", handleDeleteDownstreamPricing)
+	api.GET("/profit/daily", handleProfitDaily)
 
 	// SPA — serve for all non-API routes
 	r.NoRoute(spaHandler())
