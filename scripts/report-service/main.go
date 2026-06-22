@@ -1468,6 +1468,8 @@ func main() {
 	api.POST("/profit/fx/default", handleSaveDefaultFXRate)
 	api.DELETE("/profit/fx/:date", handleDeleteFXRate)
 	api.GET("/profit/daily", handleProfitDaily)
+	api.POST("/profit/pipi/sync", handleSyncPipi)
+	api.GET("/profit/pipi/status", handlePipiStatus)
 
 	// SPA — serve for all non-API routes
 	r.NoRoute(spaHandler())

@@ -67,7 +67,7 @@ export type ProfitByKey = {
   channel_id: number
   channel_name: string
   tag: string
-  source: 'system1' | 'pipi'
+  source: 'main' | 'pipi'
   used_usd: number
   unit_price_cny: number
   cost_usd: number
@@ -82,7 +82,7 @@ export type ProfitByGroup = {
 
 export type ProfitByTag = {
   tag: string
-  source: 'system1' | 'pipi'
+  source: 'main' | 'pipi'
   used_usd: number
   cost_usd: number
   key_count: number
@@ -230,4 +230,16 @@ export const api = {
 
   getProfitDaily: (start: string, end: string) =>
     request<ProfitSummary>(`/api/profit/daily?start=${start}&end=${end}`),
+
+  syncPipi: (payload?: { start?: string; end?: string; days?: number }) =>
+    request<{ ok: boolean; start: string; end: string }>('/api/profit/pipi/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload ?? {}),
+    }),
+
+  getPipiStatus: () =>
+    request<{ configured: boolean; start?: string; end?: string; status?: string; last_sync_at?: number }>(
+      '/api/profit/pipi/status'
+    ),
 }

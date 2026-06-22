@@ -7,7 +7,10 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 // Pipi sync pulls daily usage + per-key pricing from System 2's report-service
@@ -17,7 +20,15 @@ import (
 var (
 	pipiReportURL    string
 	pipiReportAPIKey string
+
+	pipiLastSyncMu     sync.Mutex
+	pipiLastSyncAt     time.Time
+	pipiLastSyncStart  string
+	pipiLastSyncEnd    string
+	pipiLastSyncStatus string // "ok" / "error: <msg>" / ""
 )
+
+const defaultPipiSyncWindowDays = 30
 
 // pipiLogRow mirrors LogRow returned by /api/report on System 2.
 type pipiLogRow struct {
@@ -149,6 +160,56 @@ func syncPipiOnce(start, end string) error {
 	return tx.Commit()
 }
 
+// handleSyncPipi runs a one-shot pipi sync. Optional body: {start, end}.
+// Defaults: end = today UTC, start = end - 30 days.
+func handleSyncPipi(c *gin.Context) {
+	if pipiReportURL == "" || pipiReportAPIKey == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "pipi sync not configured (PIPI_REPORT_URL / PIPI_REPORT_API_KEY)"})
+		return
+	}
+	var body struct {
+		Start string `json:"start"`
+		End   string `json:"end"`
+		Days  int    `json:"days"`
+	}
+	_ = c.ShouldBindJSON(&body) // optional payload
+	end := body.End
+	if end == "" {
+		end = time.Now().UTC().Format("2006-01-02")
+	}
+	start := body.Start
+	if start == "" {
+		days := body.Days
+		if days <= 0 {
+			days = defaultPipiSyncWindowDays
+		}
+		if t, err := time.ParseInLocation("2006-01-02", end, time.UTC); err == nil {
+			start = t.AddDate(0, 0, -days).Format("2006-01-02")
+		}
+	}
+	if _, err := runPipiSyncRange(start, end); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error(), "start": start, "end": end})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "start": start, "end": end})
+}
+
+// handlePipiStatus reports the last sync attempt for the UI.
+func handlePipiStatus(c *gin.Context) {
+	pipiLastSyncMu.Lock()
+	defer pipiLastSyncMu.Unlock()
+	resp := gin.H{
+		"configured": pipiReportURL != "" && pipiReportAPIKey != "",
+		"start":      pipiLastSyncStart,
+		"end":        pipiLastSyncEnd,
+		"status":     pipiLastSyncStatus,
+	}
+	if !pipiLastSyncAt.IsZero() {
+		resp["last_sync_at"] = pipiLastSyncAt.Unix()
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
 func startPipiSync() {
 	if pipiReportURL == "" || pipiReportAPIKey == "" {
 		log.Println("pipi sync disabled (PIPI_REPORT_URL or PIPI_REPORT_API_KEY not set)")
@@ -166,12 +227,26 @@ func startPipiSync() {
 }
 
 func runPipiSync() {
-	// Cover today + the prior 7 days so backfills and late writes from System 2 catch up.
 	end := time.Now().UTC().Format("2006-01-02")
-	start := time.Now().UTC().AddDate(0, 0, -7).Format("2006-01-02")
-	if err := syncPipiOnce(start, end); err != nil {
-		log.Printf("pipi sync error (%s..%s): %v", start, end, err)
-		return
+	start := time.Now().UTC().AddDate(0, 0, -defaultPipiSyncWindowDays).Format("2006-01-02")
+	runPipiSyncRange(start, end)
+}
+
+// runPipiSyncRange runs syncPipiOnce and records the result for /api/profit/pipi/status.
+func runPipiSyncRange(start, end string) (saved int, syncErr error) {
+	syncErr = syncPipiOnce(start, end)
+	status := "ok"
+	if syncErr != nil {
+		status = "error: " + syncErr.Error()
+		log.Printf("pipi sync error (%s..%s): %v", start, end, syncErr)
+	} else {
+		log.Printf("pipi sync ok (%s..%s)", start, end)
 	}
-	log.Printf("pipi sync ok (%s..%s)", start, end)
+	pipiLastSyncMu.Lock()
+	pipiLastSyncAt = time.Now()
+	pipiLastSyncStart = start
+	pipiLastSyncEnd = end
+	pipiLastSyncStatus = status
+	pipiLastSyncMu.Unlock()
+	return saved, syncErr
 }

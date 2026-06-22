@@ -24,6 +24,8 @@ export default function Profit() {
   const [fxRates, setFxRates] = useState<FXRate[]>([])
   const [defaultFxRate, setDefaultFxRate] = useState(6.79)
   const [defaultFxEdit, setDefaultFxEdit] = useState<string>('')
+  const [pipiStatus, setPipiStatus] = useState<{ configured: boolean; start?: string; end?: string; status?: string; last_sync_at?: number } | null>(null)
+  const [pipiSyncing, setPipiSyncing] = useState(false)
   const [loading, setLoading] = useState(false)
   const [refreshedAt, setRefreshedAt] = useState('')
 
@@ -45,11 +47,12 @@ export default function Profit() {
   const load = async () => {
     setLoading(true)
     try {
-      const [p, k, d, fx] = await Promise.all([
+      const [p, k, d, fx, ps] = await Promise.all([
         api.getProfitDaily(start, end),
         api.getAllKeys(),
         api.getDownstreamPricing(),
         api.getFXRates(),
+        api.getPipiStatus().catch(() => null),
       ])
       setProfit(p)
       setKeys(k.sort((a, b) => a.id - b.id))
@@ -57,6 +60,7 @@ export default function Profit() {
       setFxRates(fx.rates)
       setDefaultFxRate(fx.default_rate)
       setDefaultFxEdit('')
+      setPipiStatus(ps)
       setRefreshedAt(new Date().toLocaleTimeString('zh-CN'))
       setKeyEdits({})
       setDsEdits({})
@@ -222,6 +226,22 @@ export default function Profit() {
     }
   }
 
+  const runPipiSync = async (full = false) => {
+    setPipiSyncing(true)
+    try {
+      // Default to backfilling the queried [start, end] window so the chart
+      // matches; "full" flag does 30-day rolling default.
+      const payload = full ? {} : { start, end }
+      const res = await api.syncPipi(payload)
+      await load()
+      alert(`pipi 同步完成：${res.start} → ${res.end}`)
+    } catch (err) {
+      alert('pipi 同步失败：' + (err as Error).message)
+    } finally {
+      setPipiSyncing(false)
+    }
+  }
+
   const saveDefaultFx = async () => {
     const rate = parseFloat(defaultFxEdit)
     if (Number.isNaN(rate) || rate <= 0) {
@@ -333,11 +353,39 @@ export default function Profit() {
       </div>
 
       <div className="bg-white border border-gray-200 rounded-xl mb-4">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 gap-3 flex-wrap">
           <div>
             <div className="text-sm font-semibold">按供应商（Tag）分组</div>
             <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">每个上游供应商的用量与成本</div>
           </div>
+          {pipiStatus?.configured && (
+            <div className="flex items-center gap-2">
+              {pipiStatus.last_sync_at ? (
+                <span className="text-[10px] text-gray-400 tabular-nums">
+                  pipi {pipiStatus.start}~{pipiStatus.end}
+                  {pipiStatus.status === 'ok' ? '' : ` · ${pipiStatus.status ?? ''}`}
+                  · {new Date(pipiStatus.last_sync_at * 1000).toLocaleString('zh-CN', { hour12: false })}
+                </span>
+              ) : (
+                <span className="text-[10px] text-gray-400">pipi 未同步</span>
+              )}
+              <button
+                onClick={() => runPipiSync(false)}
+                disabled={pipiSyncing}
+                className="border border-gray-200 rounded-md px-2.5 py-1 text-[11px] bg-white hover:bg-gray-50 disabled:opacity-40"
+              >
+                {pipiSyncing ? '同步中…' : '同步当前区间'}
+              </button>
+              <button
+                onClick={() => runPipiSync(true)}
+                disabled={pipiSyncing}
+                className="border border-gray-200 rounded-md px-2.5 py-1 text-[11px] bg-white hover:bg-gray-50 disabled:opacity-40"
+                title="同步近 30 天"
+              >
+                30天回填
+              </button>
+            </div>
+          )}
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-xs whitespace-nowrap">

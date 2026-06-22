@@ -341,7 +341,7 @@ type ProfitByKey struct {
 	ChannelID    int     `json:"channel_id"`
 	ChannelName  string  `json:"channel_name"`
 	Tag          string  `json:"tag"`
-	Source       string  `json:"source"` // 'system1' or 'pipi'
+	Source       string  `json:"source"` // 'main' or 'pipi'
 	UsedUSD      float64 `json:"used_usd"`
 	UnitPriceCNY float64 `json:"unit_price_cny"`
 	CostUSD      float64 `json:"cost_usd"`
@@ -356,7 +356,7 @@ type ProfitByGroup struct {
 
 type ProfitByTag struct {
 	Tag        string  `json:"tag"`
-	Source     string  `json:"source"` // 'system1' or 'pipi'
+	Source     string  `json:"source"` // 'main' or 'pipi'
 	UsedUSD    float64 `json:"used_usd"`
 	CostUSD    float64 `json:"cost_usd"`
 	KeyCount   int     `json:"key_count"`
@@ -524,7 +524,7 @@ func handleProfitDaily(c *gin.Context) {
 		d.CostUSD += costUSD
 		d.RevenueUSD += revUSD
 
-		k := getKey(byKey, r.channelID, r.channelName, r.channelTag, "system1", upP)
+		k := getKey(byKey, r.channelID, r.channelName, r.channelTag, "main", upP)
 		k.UsedUSD += r.usedUSD
 		k.CostUSD += costUSD
 
@@ -613,7 +613,7 @@ func handleProfitDaily(c *gin.Context) {
 	}
 
 	// Roll up by_tag from per-key. Bucket by (source, tag) since pipi and
-	// system1 tag namespaces are distinct.
+	// main tag namespaces are distinct.
 	tagAgg := map[string]*ProfitByTag{}
 	bumpTag := func(k *ProfitByKey) {
 		bucket := k.Source + "|" + k.Tag
