@@ -11,6 +11,11 @@ function daysAgo(n: number) {
   const d = new Date(); d.setUTCDate(d.getUTCDate() - n)
   return d.toISOString().slice(0, 10)
 }
+function dayBefore(ymd: string): string {
+  const d = new Date(ymd + 'T00:00:00Z')
+  d.setUTCDate(d.getUTCDate() - 1)
+  return d.toISOString().slice(0, 10)
+}
 
 function fmtUSD(v: number) { return '$' + v.toFixed(2) }
 function fmtPct(v: number) { return (v * 100).toFixed(2) + '%' }
@@ -47,9 +52,11 @@ export default function Profit() {
   const load = async () => {
     setLoading(true)
     try {
+      // 上游单价配置表只看创建时间落在 [start-1天, end] 的 channel
+      const keysStart = dayBefore(start)
       const [p, k, d, fx, ps] = await Promise.all([
         api.getProfitDaily(start, end),
-        api.getAllKeys(),
+        api.getAllKeys(keysStart, end),
         api.getDownstreamPricing(),
         api.getFXRates(),
         api.getPipiStatus().catch(() => null),
