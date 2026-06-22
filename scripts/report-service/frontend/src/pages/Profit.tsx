@@ -7,8 +7,9 @@ import { api, ChannelRow, DownstreamPricing, FXRate, ProfitSummary, getProfitApi
 const COLORS = ['#2563eb','#059669','#d97706','#e11d48','#7c3aed','#ea580c','#0d9488','#c026d3','#3b82f6','#10b981']
 
 function today() { return new Date().toISOString().slice(0, 10) }
-function daysAgo(n: number) {
-  const d = new Date(); d.setUTCDate(d.getUTCDate() - n)
+function firstOfMonth() {
+  const d = new Date()
+  d.setUTCDate(1)
   return d.toISOString().slice(0, 10)
 }
 function dayBefore(ymd: string): string {
@@ -21,7 +22,7 @@ function fmtUSD(v: number) { return '$' + v.toFixed(2) }
 function fmtPct(v: number) { return (v * 100).toFixed(2) + '%' }
 
 export default function Profit() {
-  const [start, setStart] = useState(daysAgo(6))
+  const [start, setStart] = useState(firstOfMonth())
   const [end, setEnd] = useState(today())
   const [profit, setProfit] = useState<ProfitSummary | null>(null)
   const [keys, setKeys] = useState<ChannelRow[]>([])

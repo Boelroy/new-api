@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import { api } from '../api'
 
@@ -55,12 +56,38 @@ const NAV_ITEMS: Item[] = [
   },
 ]
 
+// Shown only when the server reports profit_gate_required=false, i.e. the
+// /profit page is directly accessible on this deployment.
+const PROFIT_ITEM: Item = {
+  to: '/profit',
+  label: 'Profit Report',
+  icon: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="12" y1="2" x2="12" y2="22" />
+      <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+    </svg>
+  ),
+}
+
 type Props = {
   open: boolean
   onClose: () => void
 }
 
 export default function Sidebar({ open, onClose }: Props) {
+  const [showProfit, setShowProfit] = useState(false)
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const cfg = await fetch('/api/auth/config').then(r => r.json())
+        if (cfg.profit_gate_required === false) setShowProfit(true)
+      } catch { /* keep hidden on error */ }
+    })()
+  }, [])
+
+  const items = showProfit ? [NAV_ITEMS[0], PROFIT_ITEM, ...NAV_ITEMS.slice(1)] : NAV_ITEMS
+
   const handleLogout = async () => {
     await api.logout()
     window.location.href = '/login'
@@ -103,7 +130,7 @@ export default function Sidebar({ open, onClose }: Props) {
 
         <nav className="flex-1 px-3 space-y-0.5 overflow-y-auto">
           <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-gray-400 font-medium">Overview</div>
-          {NAV_ITEMS.map(item => (
+          {items.map(item => (
             <NavLink
               key={item.to}
               to={item.to}
