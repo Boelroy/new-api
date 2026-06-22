@@ -84,9 +84,9 @@ export default function Profit() {
       .map(k => ({ name: k.channel_name || `#${k.channel_id}`, cost: k.cost_usd, tag: k.tag }))
   }, [profit])
 
-  // Profit report is scoped to Anthropic (channel type 14) on the backend.
-  // Mirror that here so the upstream pricing table only shows actionable rows.
-  const anthropicKeys = useMemo(() => keys.filter(k => k.type === 14), [keys])
+  // Profit report is scoped to Claude-serving channels on the backend
+  // (14 direct / 33 Bedrock / 41 Vertex). Mirror that filter here.
+  const anthropicKeys = useMemo(() => keys.filter(k => k.type === 14 || k.type === 33 || k.type === 41), [keys])
   const filteredKeys = useMemo(() => {
     if (!keyOnlyUnpriced) return anthropicKeys
     return anthropicKeys.filter(k => k.unit_price_cny == null)

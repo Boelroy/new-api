@@ -14,10 +14,12 @@ import (
 // report_config['default_fx_rate'] has been configured.
 const defaultFXRate = 6.79
 
-// anthropicChannelType filters the profit report to channels of this type.
-// 14 = direct Anthropic in newapi's constants. Adjust if AWS Bedrock (33) or
-// Vertex (41) Anthropic channels should be included.
-const anthropicChannelType = 14
+// anthropicChannelTypesSQL filters the profit report to channels that serve
+// Claude in newapi's constants:
+//   14 = Anthropic direct
+//   33 = AWS Bedrock (serving Claude)
+//   41 = Google Vertex AI (serving Claude)
+const anthropicChannelTypesSQL = "(14, 33, 41)"
 
 // getDefaultFXRate reads the configurable default from report_config and
 // returns the hardcoded fallback if unset or malformed.
@@ -670,11 +672,11 @@ func loadStep1(startDate, endDate string) ([]step1Row, error) {
 		LEFT JOIN report_key_quotas q ON q.channel_id = r.channel_id
 		WHERE LEFT(r.hour,10) BETWEEN $1 AND $2
 		  AND COALESCE(c.tag,'') <> 'pipi'
-		  AND c.type = $3
+		  AND c.type IN ` + anthropicChannelTypesSQL + `
 		GROUP BY LEFT(r.hour,10), r.channel_id, COALESCE(r.channel_name,''),
 		         COALESCE(c.tag,''), COALESCE(r."group",''), q.unit_price_cny
 	`
-	rows, err := db.Query(q, startDate, endDate, anthropicChannelType)
+	rows, err := db.Query(q, startDate, endDate)
 	if err != nil {
 		return nil, err
 	}
@@ -697,10 +699,10 @@ func loadStep2(startDate, endDate string) ([]step2Row, error) {
 		JOIN channels c ON c.id = r.channel_id
 		WHERE LEFT(r.hour,10) BETWEEN $1 AND $2
 		  AND COALESCE(c.tag,'') = 'pipi'
-		  AND c.type = $3
+		  AND c.type IN ` + anthropicChannelTypesSQL + `
 		GROUP BY LEFT(r.hour,10), COALESCE(r."group",'')
 	`
-	rows, err := db.Query(q, startDate, endDate, anthropicChannelType)
+	rows, err := db.Query(q, startDate, endDate)
 	if err != nil {
 		return nil, err
 	}
