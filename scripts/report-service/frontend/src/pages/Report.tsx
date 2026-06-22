@@ -17,19 +17,24 @@ function daysAgo(n: number) {
 function fmtCost(v: number) { return '$' + v.toFixed(4) }
 function fmtNum(v: number) { return v.toLocaleString() }
 
+const ALL = '__all__'
+
 export default function Report() {
   const [start, setStart] = useState(daysAgo(6))
   const [end, setEnd] = useState(today())
-  const [data, setData] = useState<LogRow[]>([])
+  const [rawData, setRawData] = useState<LogRow[]>([])
   const [loading, setLoading] = useState(false)
   const [view, setView] = useState<View>('daily')
   const [refreshedAt, setRefreshedAt] = useState('')
+  const [filterUser, setFilterUser] = useState(ALL)
+  const [filterToken, setFilterToken] = useState(ALL)
+  const [filterGroup, setFilterGroup] = useState(ALL)
 
   const load = async (s: string, e: string) => {
     setLoading(true)
     try {
       const rows = await api.getReport(s, e)
-      setData(rows)
+      setRawData(rows)
       setRefreshedAt(new Date().toLocaleTimeString('zh-CN'))
     } catch (err) {
       console.error(err)
@@ -39,6 +44,39 @@ export default function Report() {
   }
 
   useEffect(() => { load(start, end) }, [])
+
+  const filterOptions = useMemo(() => {
+    const users = new Map<string, string>()
+    const tokens = new Map<string, string>()
+    const groups = new Set<string>()
+    rawData.forEach(r => {
+      const uid = String(r.user_id)
+      if (!users.has(uid)) users.set(uid, r.username || `user#${r.user_id}`)
+      const tid = String(r.token_id)
+      if (!tokens.has(tid)) tokens.set(tid, r.token_name || `key#${r.token_id}`)
+      groups.add(r.group || '(空)')
+    })
+    return {
+      users: Array.from(users.entries()).sort((a, b) => a[1].localeCompare(b[1])),
+      tokens: Array.from(tokens.entries()).sort((a, b) => a[1].localeCompare(b[1])),
+      groups: Array.from(groups).sort(),
+    }
+  }, [rawData])
+
+  const data = useMemo(() => {
+    return rawData.filter(r => {
+      if (filterUser !== ALL && String(r.user_id) !== filterUser) return false
+      if (filterToken !== ALL && String(r.token_id) !== filterToken) return false
+      if (filterGroup !== ALL) {
+        const g = r.group || '(空)'
+        if (g !== filterGroup) return false
+      }
+      return true
+    })
+  }, [rawData, filterUser, filterToken, filterGroup])
+
+  const filtersActive = filterUser !== ALL || filterToken !== ALL || filterGroup !== ALL
+  const resetFilters = () => { setFilterUser(ALL); setFilterToken(ALL); setFilterGroup(ALL) }
 
   const summary = useMemo(() => {
     const totalCost = data.reduce((s, r) => s + r.total_cost, 0)
@@ -149,6 +187,60 @@ export default function Report() {
       subtitle={`${start} ~ ${end} (UTC)${refreshedAt ? ` · 更新于 ${refreshedAt}` : ''}`}
       actions={actions}
     >
+      <div className="bg-white border border-gray-200 rounded-xl px-3 py-3 mb-4 flex flex-wrap items-center gap-3 text-xs">
+        <span className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">Filters</span>
+        <label className="flex items-center gap-1.5">
+          <span className="text-gray-500">用户</span>
+          <select
+            value={filterUser}
+            onChange={e => setFilterUser(e.target.value)}
+            className="border border-gray-200 rounded-md px-2 py-1 bg-white focus:outline-none focus:border-gray-900 max-w-[140px]"
+          >
+            <option value={ALL}>全部</option>
+            {filterOptions.users.map(([id, name]) => (
+              <option key={id} value={id}>{name}</option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-1.5">
+          <span className="text-gray-500">Key</span>
+          <select
+            value={filterToken}
+            onChange={e => setFilterToken(e.target.value)}
+            className="border border-gray-200 rounded-md px-2 py-1 bg-white focus:outline-none focus:border-gray-900 max-w-[180px]"
+          >
+            <option value={ALL}>全部</option>
+            {filterOptions.tokens.map(([id, name]) => (
+              <option key={id} value={id}>{name}</option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-1.5">
+          <span className="text-gray-500">分组</span>
+          <select
+            value={filterGroup}
+            onChange={e => setFilterGroup(e.target.value)}
+            className="border border-gray-200 rounded-md px-2 py-1 bg-white focus:outline-none focus:border-gray-900 max-w-[140px]"
+          >
+            <option value={ALL}>全部</option>
+            {filterOptions.groups.map(g => (
+              <option key={g} value={g}>{g}</option>
+            ))}
+          </select>
+        </label>
+        {filtersActive && (
+          <button
+            onClick={resetFilters}
+            className="text-rose-600 hover:text-rose-700 underline-offset-2 hover:underline"
+          >
+            清除筛选
+          </button>
+        )}
+        <span className="ml-auto text-gray-400 tabular-nums">
+          {data.length} / {rawData.length} 行
+        </span>
+      </div>
+
       <SummaryCards cards={[
         { label: 'Total Cost', value: '$' + summary.totalCost.toFixed(2), color: 'text-emerald-600' },
         { label: 'Total Tokens', value: fmtNum(summary.totalTokens) },

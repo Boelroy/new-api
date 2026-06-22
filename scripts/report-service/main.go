@@ -267,6 +267,7 @@ type DailyRow struct {
 	TokenName        string  `json:"token_name"`
 	ChannelID        int     `json:"channel_id"`
 	ChannelName      string  `json:"channel_name"`
+	Group            string  `json:"group"`
 	Model            string  `json:"model"`
 	RequestCount     int     `json:"request_count"`
 	InputTokens      int64   `json:"input_tokens"`
@@ -295,7 +296,7 @@ func aggregateHour(startTS, endTS int64, aggMap map[aggKey]*DailyRow) error {
 	query := `
 SELECT
   l.created_at, l.user_id, COALESCE(l.username,''), l.token_id, COALESCE(l.token_name,''),
-  l.channel_id, COALESCE(c.name,'') as channel_name, l.model_name,
+  l.channel_id, COALESCE(c.name,'') as channel_name, COALESCE(l."group",''), l.model_name,
   l.prompt_tokens, l.completion_tokens, l.quota, COALESCE(l.other, '{}') as other_json
 FROM logs l
 LEFT JOIN channels c ON l.channel_id = c.id
@@ -310,11 +311,11 @@ WHERE l.type = 2 AND l.created_at >= $1 AND l.created_at < $2`
 	for rows.Next() {
 		var createdAt int64
 		var userID, tokenID, channelID int
-		var username, tokenName, channelName, modelName, otherJSON string
+		var username, tokenName, channelName, groupName, modelName, otherJSON string
 		var promptTokens, completionTokens, quota int64
 
 		if err := rows.Scan(&createdAt, &userID, &username, &tokenID, &tokenName,
-			&channelID, &channelName, &modelName, &promptTokens, &completionTokens, &quota, &otherJSON); err != nil {
+			&channelID, &channelName, &groupName, &modelName, &promptTokens, &completionTokens, &quota, &otherJSON); err != nil {
 			return err
 		}
 
@@ -353,9 +354,12 @@ WHERE l.type = 2 AND l.created_at >= $1 AND l.created_at < $2`
 			row = &DailyRow{
 				Hour: hour, UserID: userID, Username: username,
 				TokenID: tokenID, TokenName: tokenName,
-				ChannelID: channelID, ChannelName: channelName, Model: modelName,
+				ChannelID: channelID, ChannelName: channelName,
+				Group: groupName, Model: modelName,
 			}
 			aggMap[k] = row
+		} else if row.Group == "" && groupName != "" {
+			row.Group = groupName
 		}
 		row.RequestCount++
 		row.InputTokens += promptTokens
@@ -404,10 +408,10 @@ func aggregateDay(dateStr string) error {
 
 	stmt, err := tx.Prepare(`
 		INSERT INTO report_daily_agg
-		(date, hour, user_id, username, token_id, token_name, channel_id, channel_name, model,
+		(date, hour, user_id, username, token_id, token_name, channel_id, channel_name, "group", model,
 		 request_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
 		 total_tokens, input_cost, output_cost, cache_read_cost, cache_write_cost, total_cost)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`)
 	if err != nil {
 		return err
 	}
@@ -416,7 +420,7 @@ func aggregateDay(dateStr string) error {
 	for _, row := range aggMap {
 		if _, err = stmt.Exec(
 			dateStr, row.Hour, row.UserID, row.Username, row.TokenID, row.TokenName,
-			row.ChannelID, row.ChannelName, row.Model,
+			row.ChannelID, row.ChannelName, row.Group, row.Model,
 			row.RequestCount, row.InputTokens, row.OutputTokens,
 			row.CacheReadTokens, row.CacheWriteTokens, row.TotalTokens,
 			roundTo(row.InputCost, 6), roundTo(row.OutputCost, 6),
@@ -468,6 +472,36 @@ func backfillMissingDays() {
 			}
 		}
 	}
+
+	// one-time retrofill: re-aggregate recent days that have no group column populated
+	// (covers data written before the `group` column existed)
+	retroCutoff := time.Now().UTC().AddDate(0, 0, -30).Format("2006-01-02")
+	retroRows, err := db.Query(`
+		SELECT date FROM report_daily_agg
+		WHERE date >= $1
+		GROUP BY date
+		HAVING MAX("group") = ''
+		ORDER BY date`, retroCutoff)
+	if err == nil {
+		var retroDates []string
+		for retroRows.Next() {
+			var d string
+			if err := retroRows.Scan(&d); err == nil {
+				retroDates = append(retroDates, d)
+			}
+		}
+		retroRows.Close()
+		for _, d := range retroDates {
+			if d == today {
+				continue
+			}
+			log.Printf("retrofilling group for %s...", d)
+			if err := aggregateDay(d); err != nil {
+				log.Printf("retrofill %s error: %v", d, err)
+			}
+		}
+	}
+
 	// Always refresh today
 	log.Printf("refreshing today (%s)...", today)
 	if err := aggregateDay(today); err != nil {
@@ -748,7 +782,7 @@ func handleReport(c *gin.Context) {
 	endDate := c.DefaultQuery("end", time.Now().UTC().Format("2006-01-02"))
 
 	rows, err := db.Query(`
-		SELECT hour, user_id, username, token_id, token_name, channel_id, channel_name, model,
+		SELECT hour, user_id, username, token_id, token_name, channel_id, channel_name, COALESCE("group",''), model,
 		       request_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
 		       total_tokens, input_cost, output_cost, cache_read_cost, cache_write_cost, total_cost
 		FROM report_daily_agg
@@ -764,7 +798,7 @@ func handleReport(c *gin.Context) {
 	for rows.Next() {
 		var r DailyRow
 		if err := rows.Scan(&r.Hour, &r.UserID, &r.Username, &r.TokenID, &r.TokenName,
-			&r.ChannelID, &r.ChannelName, &r.Model, &r.RequestCount,
+			&r.ChannelID, &r.ChannelName, &r.Group, &r.Model, &r.RequestCount,
 			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens,
 			&r.TotalTokens, &r.InputCost, &r.OutputCost, &r.CacheReadCost, &r.CacheWriteCost, &r.TotalCost); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -780,7 +814,7 @@ func handleExportCSV(c *gin.Context) {
 	endDate := c.DefaultQuery("end", time.Now().UTC().Format("2006-01-02"))
 
 	rows, err := db.Query(`
-		SELECT hour, user_id, username, token_id, token_name, channel_id, channel_name, model,
+		SELECT hour, user_id, username, token_id, token_name, channel_id, channel_name, COALESCE("group",''), model,
 		       request_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
 		       total_tokens, input_cost, output_cost, cache_read_cost, cache_write_cost, total_cost
 		FROM report_daily_agg WHERE date >= $1 AND date <= $2 ORDER BY hour, model`, startDate, endDate)
@@ -797,20 +831,20 @@ func handleExportCSV(c *gin.Context) {
 
 	w := csv.NewWriter(c.Writer)
 	w.Write([]string{"Hour", "User ID", "Username", "Token ID", "Token Name",
-		"Channel ID", "Channel Name", "Model",
+		"Channel ID", "Channel Name", "Group", "Model",
 		"Requests", "Input Tokens", "Output Tokens",
 		"Cache Read Tokens", "Cache Write Tokens", "Total Tokens",
 		"Input Cost", "Output Cost", "Cache Read Cost", "Cache Write Cost", "Total Cost"})
 	for rows.Next() {
 		var r DailyRow
 		rows.Scan(&r.Hour, &r.UserID, &r.Username, &r.TokenID, &r.TokenName,
-			&r.ChannelID, &r.ChannelName, &r.Model, &r.RequestCount,
+			&r.ChannelID, &r.ChannelName, &r.Group, &r.Model, &r.RequestCount,
 			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens,
 			&r.TotalTokens, &r.InputCost, &r.OutputCost, &r.CacheReadCost, &r.CacheWriteCost, &r.TotalCost)
 		w.Write([]string{
 			r.Hour, strconv.Itoa(r.UserID), r.Username,
 			strconv.Itoa(r.TokenID), r.TokenName,
-			strconv.Itoa(r.ChannelID), r.ChannelName, r.Model,
+			strconv.Itoa(r.ChannelID), r.ChannelName, r.Group, r.Model,
 			strconv.Itoa(r.RequestCount),
 			strconv.FormatInt(r.InputTokens, 10), strconv.FormatInt(r.OutputTokens, 10),
 			strconv.FormatInt(r.CacheReadTokens, 10), strconv.FormatInt(r.CacheWriteTokens, 10),
@@ -1155,7 +1189,7 @@ func handleExportHTML(c *gin.Context) {
 	endDate := c.DefaultQuery("end", time.Now().UTC().Format("2006-01-02"))
 
 	rows, err := db.Query(`
-		SELECT hour, user_id, username, token_id, token_name, channel_id, channel_name, model,
+		SELECT hour, user_id, username, token_id, token_name, channel_id, channel_name, COALESCE("group",''), model,
 		       request_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
 		       total_tokens, input_cost, output_cost, cache_read_cost, cache_write_cost, total_cost
 		FROM report_daily_agg WHERE date >= $1 AND date <= $2 ORDER BY hour, model`, startDate, endDate)
@@ -1169,7 +1203,7 @@ func handleExportHTML(c *gin.Context) {
 	for rows.Next() {
 		var r DailyRow
 		rows.Scan(&r.Hour, &r.UserID, &r.Username, &r.TokenID, &r.TokenName,
-			&r.ChannelID, &r.ChannelName, &r.Model, &r.RequestCount,
+			&r.ChannelID, &r.ChannelName, &r.Group, &r.Model, &r.RequestCount,
 			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens,
 			&r.TotalTokens, &r.InputCost, &r.OutputCost, &r.CacheReadCost, &r.CacheWriteCost, &r.TotalCost)
 		result = append(result, r)
@@ -1290,6 +1324,7 @@ func main() {
 			token_name        TEXT NOT NULL DEFAULT '',
 			channel_id        BIGINT NOT NULL,
 			channel_name      TEXT NOT NULL DEFAULT '',
+			"group"           TEXT NOT NULL DEFAULT '',
 			model             TEXT NOT NULL,
 			request_count     INT NOT NULL DEFAULT 0,
 			input_tokens      BIGINT NOT NULL DEFAULT 0,
@@ -1307,6 +1342,8 @@ func main() {
 		`CREATE INDEX IF NOT EXISTS idx_report_daily_date ON report_daily_agg(date)`,
 		// migration: add hour column if missing (table existed before this fix)
 		`ALTER TABLE report_daily_agg ADD COLUMN IF NOT EXISTS hour TEXT NOT NULL DEFAULT ''`,
+		// migration: add group column (filter dimension)
+		`ALTER TABLE report_daily_agg ADD COLUMN IF NOT EXISTS "group" TEXT NOT NULL DEFAULT ''`,
 		// migration: rebuild PK to include hour (old PK was missing hour)
 		`DO $$ BEGIN
 			IF NOT EXISTS (

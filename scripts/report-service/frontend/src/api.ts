@@ -6,6 +6,7 @@ export type LogRow = {
   token_name: string
   channel_id: number
   channel_name: string
+  group: string
   model: string
   request_count: number
   input_tokens: number
