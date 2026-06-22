@@ -162,12 +162,15 @@ export default function Profit() {
     return profit.daily.map(d => ({ date: d.date.slice(5), profit: d.profit_usd, rev: d.revenue_usd, cost: d.cost_usd }))
   }, [profit])
 
-  const keyChart = useMemo(() => {
+  const tagRateChart = useMemo(() => {
     if (!profit) return []
-    return [...profit.by_key]
-      .sort((a, b) => b.cost_usd - a.cost_usd)
-      .slice(0, 10)
-      .map(k => ({ name: k.channel_name || `#${k.channel_id}`, cost: k.cost_usd, tag: k.tag }))
+    return [...profit.by_tag]
+      .filter(t => t.revenue_usd > 0 || t.cost_usd > 0)
+      .sort((a, b) => b.profit_rate - a.profit_rate)
+      .map(t => ({
+        name: (t.tag || '(无)') + (t.source === 'pipi' ? ' ·pipi' : ''),
+        rate: t.profit_rate * 100,
+      }))
   }, [profit])
 
   // Profit report is scoped to Claude-serving channels on the backend
@@ -456,16 +459,16 @@ export default function Profit() {
           </ResponsiveContainer>
         </div>
         <div className="bg-white border border-gray-200 rounded-xl p-4">
-          <h3 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">Top Keys by Cost (¥)</h3>
+          <h3 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">Profit Rate by Tag (%)</h3>
           <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={keyChart} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
+            <BarChart data={tagRateChart} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
               <XAxis dataKey="name" tick={{ fontSize: 9 }} />
-              <YAxis tick={{ fontSize: 10 }} tickFormatter={v => '¥' + v} />
-              <Tooltip formatter={(v: number) => ['¥' + v.toFixed(2), 'Cost']} />
-              <Bar dataKey="cost" radius={[3,3,0,0]}>
-                {keyChart.map((_, i) => (
-                  <Cell key={i} fill={COLORS[i % COLORS.length]} />
+              <YAxis tick={{ fontSize: 10 }} tickFormatter={v => v.toFixed(0) + '%'} />
+              <Tooltip formatter={(v: number) => [v.toFixed(2) + '%', '毛利率']} />
+              <Bar dataKey="rate" radius={[3,3,0,0]}>
+                {tagRateChart.map((d, i) => (
+                  <Cell key={i} fill={d.rate >= 0 ? '#10b981' : '#e11d48'} />
                 ))}
               </Bar>
             </BarChart>
