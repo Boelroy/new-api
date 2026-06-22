@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from 'recharts'
 import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
-import { api, ChannelRow, DownstreamPricing, ProfitSummary } from '../api'
+import { api, ChannelRow, DownstreamPricing, FXRate, ProfitSummary } from '../api'
 
 const COLORS = ['#2563eb','#059669','#d97706','#e11d48','#7c3aed','#ea580c','#0d9488','#c026d3','#3b82f6','#10b981']
 
@@ -12,7 +12,6 @@ function daysAgo(n: number) {
   return d.toISOString().slice(0, 10)
 }
 
-function fmtCNY(v: number) { return '¥' + v.toFixed(2) }
 function fmtUSD(v: number) { return '$' + v.toFixed(2) }
 function fmtPct(v: number) { return (v * 100).toFixed(2) + '%' }
 
@@ -22,14 +21,21 @@ export default function Profit() {
   const [profit, setProfit] = useState<ProfitSummary | null>(null)
   const [keys, setKeys] = useState<ChannelRow[]>([])
   const [downstream, setDownstream] = useState<DownstreamPricing[]>([])
+  const [fxRates, setFxRates] = useState<FXRate[]>([])
+  const [defaultFxRate, setDefaultFxRate] = useState(6.77)
   const [loading, setLoading] = useState(false)
   const [refreshedAt, setRefreshedAt] = useState('')
 
   // Local edits buffer for per-key prices.
   const [keyEdits, setKeyEdits] = useState<Record<number, { price?: string; note?: string }>>({})
+  const [keyOnlyUnpriced, setKeyOnlyUnpriced] = useState(false)
   // Local edits for downstream group prices.
   const [dsEdits, setDsEdits] = useState<Record<string, { price?: string; note?: string }>>({})
   const [dsNewGroup, setDsNewGroup] = useState('')
+  // FX rate edits.
+  const [fxEdits, setFxEdits] = useState<Record<string, string>>({})
+  const [fxNewDate, setFxNewDate] = useState(today())
+  const [fxNewRate, setFxNewRate] = useState('')
   // Bulk-import textarea state.
   const [bulkText, setBulkText] = useState('')
   const [bulkResult, setBulkResult] = useState<{ saved: number; not_found: string[]; errors: { line: number; reason: string }[] } | null>(null)
@@ -38,17 +44,21 @@ export default function Profit() {
   const load = async () => {
     setLoading(true)
     try {
-      const [p, k, d] = await Promise.all([
+      const [p, k, d, fx] = await Promise.all([
         api.getProfitDaily(start, end),
         api.getAllKeys(),
         api.getDownstreamPricing(),
+        api.getFXRates(),
       ])
       setProfit(p)
       setKeys(k.sort((a, b) => a.id - b.id))
       setDownstream(d)
+      setFxRates(fx.rates)
+      setDefaultFxRate(fx.default_rate)
       setRefreshedAt(new Date().toLocaleTimeString('zh-CN'))
       setKeyEdits({})
       setDsEdits({})
+      setFxEdits({})
     } catch (err) {
       console.error(err)
       alert('加载失败：' + (err as Error).message)
@@ -61,16 +71,23 @@ export default function Profit() {
 
   const dailyChart = useMemo(() => {
     if (!profit) return []
-    return profit.daily.map(d => ({ date: d.date.slice(5), profit: d.profit_usd, rev: d.revenue_cny, cost: d.cost_cny }))
+    return profit.daily.map(d => ({ date: d.date.slice(5), profit: d.profit_usd, rev: d.revenue_usd, cost: d.cost_usd }))
   }, [profit])
 
   const keyChart = useMemo(() => {
     if (!profit) return []
     return [...profit.by_key]
-      .sort((a, b) => b.cost_cny - a.cost_cny)
+      .sort((a, b) => b.cost_usd - a.cost_usd)
       .slice(0, 10)
-      .map(k => ({ name: k.channel_name || `#${k.channel_id}`, cost: k.cost_cny, tag: k.tag }))
+      .map(k => ({ name: k.channel_name || `#${k.channel_id}`, cost: k.cost_usd, tag: k.tag }))
   }, [profit])
+
+  const filteredKeys = useMemo(() => {
+    if (!keyOnlyUnpriced) return keys
+    return keys.filter(k => k.unit_price_cny == null)
+  }, [keys, keyOnlyUnpriced])
+
+  const unpricedKeyCount = useMemo(() => keys.filter(k => k.unit_price_cny == null).length, [keys])
 
   const missing = profit?.missing_pricing
   const hasMissing = !!(missing && ((missing.channel_ids && missing.channel_ids.length) || (missing.groups && missing.groups.length)))
@@ -121,18 +138,18 @@ export default function Profit() {
   }
 
   const submitDownstream = async () => {
-    const payload: { group: string; unit_price_cny: number; note: string }[] = []
+    const payload: { group: string; discount: number; note: string }[] = []
     const seen = new Set<string>()
 
     // Existing rows with edits
     for (const d of downstream) {
       const e = dsEdits[d.group]
       if (!e) continue
-      const price = e.price !== undefined ? parseFloat(e.price) : d.unit_price_cny
-      if (Number.isNaN(price)) continue
+      const discount = e.price !== undefined ? parseFloat(e.price) : d.discount
+      if (Number.isNaN(discount)) continue
       payload.push({
         group: d.group,
-        unit_price_cny: price,
+        discount,
         note: e.note ?? d.note,
       })
       seen.add(d.group)
@@ -142,18 +159,18 @@ export default function Profit() {
     for (const [g, e] of Object.entries(dsEdits)) {
       if (g === '__new__' || seen.has(g)) continue
       if (e.price === undefined || e.price === '') continue
-      const price = parseFloat(e.price)
-      if (Number.isNaN(price)) continue
-      payload.push({ group: g, unit_price_cny: price, note: e.note ?? '' })
+      const discount = parseFloat(e.price)
+      if (Number.isNaN(discount)) continue
+      payload.push({ group: g, discount, note: e.note ?? '' })
     }
 
     // New row (manual add)
     const newG = dsNewGroup.trim()
     if (newG) {
       const e = dsEdits['__new__']
-      const price = e?.price !== undefined ? parseFloat(e.price) : NaN
-      if (!Number.isNaN(price)) {
-        payload.push({ group: newG, unit_price_cny: price, note: e?.note ?? '' })
+      const discount = e?.price !== undefined ? parseFloat(e.price) : NaN
+      if (!Number.isNaN(discount)) {
+        payload.push({ group: newG, discount, note: e?.note ?? '' })
       }
     }
 
@@ -168,6 +185,45 @@ export default function Profit() {
       alert(`已保存 ${res.saved} 条`)
     } catch (err) {
       alert('保存失败：' + (err as Error).message)
+    }
+  }
+
+  const submitFXRates = async () => {
+    const payload: { date: string; rate: number }[] = []
+    // Edited existing rows
+    for (const f of fxRates) {
+      const v = fxEdits[f.date]
+      if (v === undefined) continue
+      const rate = parseFloat(v)
+      if (Number.isNaN(rate) || rate <= 0) continue
+      payload.push({ date: f.date, rate })
+    }
+    // New entry
+    const newRate = parseFloat(fxNewRate)
+    if (fxNewDate && !Number.isNaN(newRate) && newRate > 0) {
+      payload.push({ date: fxNewDate, rate: newRate })
+    }
+    if (payload.length === 0) {
+      alert('没有改动')
+      return
+    }
+    try {
+      const res = await api.saveFXRates(payload)
+      setFxNewRate('')
+      await load()
+      alert(`已保存 ${res.saved} 条`)
+    } catch (err) {
+      alert('保存失败：' + (err as Error).message)
+    }
+  }
+
+  const deleteFXRate = async (date: string) => {
+    if (!confirm(`删除 ${date} 的汇率？`)) return
+    try {
+      await api.deleteFXRate(date)
+      await load()
+    } catch (err) {
+      alert('删除失败：' + (err as Error).message)
     }
   }
 
@@ -217,11 +273,11 @@ export default function Profit() {
       {profit && (
         <SummaryCards cards={[
           { label: '总用量', value: fmtUSD(profit.used_usd) },
-          { label: '上游成本', value: fmtCNY(profit.cost_cny), color: 'text-rose-600' },
-          { label: '下游收入', value: fmtCNY(profit.revenue_cny), color: 'text-blue-600' },
+          { label: '上游成本', value: fmtUSD(profit.cost_usd), color: 'text-rose-600' },
+          { label: '下游收入', value: fmtUSD(profit.revenue_usd), color: 'text-blue-600' },
           { label: '毛利', value: fmtUSD(profit.profit_usd), color: 'text-emerald-600' },
           { label: '毛利率', value: fmtPct(profit.profit_rate), color: 'text-emerald-600' },
-          { label: '汇率', value: '7 CNY/USD', color: 'text-gray-500' },
+          { label: '默认汇率', value: defaultFxRate.toFixed(2) + ' CNY/USD', color: 'text-gray-500' },
         ]} />
       )}
 
@@ -268,9 +324,10 @@ export default function Profit() {
             <thead>
               <tr className="bg-gray-50">
                 <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">日期</th>
+                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">汇率</th>
                 <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">用量 USD</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">上游成本 CNY</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">下游收入 CNY</th>
+                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">上游成本 USD</th>
+                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">下游收入 USD</th>
                 <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">毛利 USD</th>
                 <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">毛利率</th>
               </tr>
@@ -279,9 +336,10 @@ export default function Profit() {
               {profit?.daily.map(d => (
                 <tr key={d.date} className="hover:bg-gray-50 border-t border-gray-100">
                   <td className="px-3 py-1.5">{d.date}</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums text-gray-500">{d.fx_rate.toFixed(2)}</td>
                   <td className="px-3 py-1.5 text-right tabular-nums">{d.used_usd.toFixed(2)}</td>
-                  <td className="px-3 py-1.5 text-right tabular-nums text-rose-600">{d.cost_cny.toFixed(2)}</td>
-                  <td className="px-3 py-1.5 text-right tabular-nums text-blue-600">{d.revenue_cny.toFixed(2)}</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums text-rose-600">{d.cost_usd.toFixed(4)}</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums text-blue-600">{d.revenue_usd.toFixed(4)}</td>
                   <td className="px-3 py-1.5 text-right tabular-nums font-medium text-emerald-600">{d.profit_usd.toFixed(4)}</td>
                   <td className="px-3 py-1.5 text-right tabular-nums">{fmtPct(d.profit_rate)}</td>
                 </tr>
@@ -289,12 +347,77 @@ export default function Profit() {
               {profit && (
                 <tr className="bg-emerald-50 font-semibold border-t-2 border-emerald-200">
                   <td className="px-3 py-1.5">TOTAL</td>
+                  <td className="px-3 py-1.5"></td>
                   <td className="px-3 py-1.5 text-right tabular-nums">{profit.used_usd.toFixed(2)}</td>
-                  <td className="px-3 py-1.5 text-right tabular-nums">{profit.cost_cny.toFixed(2)}</td>
-                  <td className="px-3 py-1.5 text-right tabular-nums">{profit.revenue_cny.toFixed(2)}</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">{profit.cost_usd.toFixed(4)}</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">{profit.revenue_usd.toFixed(4)}</td>
                   <td className="px-3 py-1.5 text-right tabular-nums text-emerald-700">{profit.profit_usd.toFixed(4)}</td>
                   <td className="px-3 py-1.5 text-right tabular-nums">{fmtPct(profit.profit_rate)}</td>
                 </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="bg-white border border-gray-200 rounded-xl mb-4">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+          <div>
+            <div className="text-sm font-semibold">每日汇率</div>
+            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">CNY per USD · 未配置日期使用 {defaultFxRate.toFixed(2)}</div>
+          </div>
+          <button onClick={submitFXRates} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85">保存改动</button>
+        </div>
+        <div className="overflow-x-auto max-h-[260px] overflow-y-auto">
+          <table className="w-full text-xs whitespace-nowrap">
+            <thead className="sticky top-0 bg-gray-50">
+              <tr>
+                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">日期</th>
+                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">汇率</th>
+                <th className="px-3 py-2 w-12"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr className="border-t border-gray-100 bg-gray-50/60">
+                <td className="px-3 py-1.5">
+                  <input
+                    type="date"
+                    value={fxNewDate}
+                    onChange={ev => setFxNewDate(ev.target.value)}
+                    className="border border-gray-200 rounded px-1.5 py-0.5 text-xs"
+                  />
+                </td>
+                <td className="px-3 py-1.5 text-right">
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={fxNewRate}
+                    onChange={ev => setFxNewRate(ev.target.value)}
+                    placeholder={defaultFxRate.toFixed(2)}
+                    className="w-24 border border-gray-200 rounded px-1.5 py-0.5 text-right text-xs"
+                  />
+                </td>
+                <td className="px-3 py-1.5 text-[10px] text-gray-400">新增</td>
+              </tr>
+              {fxRates.map(f => (
+                <tr key={f.date} className="border-t border-gray-100 hover:bg-gray-50">
+                  <td className="px-3 py-1.5 font-mono">{f.date}</td>
+                  <td className="px-3 py-1.5 text-right">
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={fxEdits[f.date] ?? String(f.rate)}
+                      onChange={ev => setFxEdits(prev => ({ ...prev, [f.date]: ev.target.value }))}
+                      className="w-24 border border-gray-200 rounded px-1.5 py-0.5 text-right text-xs"
+                    />
+                  </td>
+                  <td className="px-3 py-1.5">
+                    <button onClick={() => deleteFXRate(f.date)} className="text-rose-500 hover:text-rose-700 text-[11px]">删</button>
+                  </td>
+                </tr>
+              ))}
+              {fxRates.length === 0 && (
+                <tr><td colSpan={3} className="px-3 py-3 text-center text-gray-400 text-[11px]">尚未配置任何汇率，全部使用默认 {defaultFxRate.toFixed(2)}</td></tr>
               )}
             </tbody>
           </table>
@@ -348,12 +471,24 @@ export default function Profit() {
       </div>
 
       <div className="bg-white border border-gray-200 rounded-xl mb-4">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 gap-3 flex-wrap">
           <div>
             <div className="text-sm font-semibold">上游单价配置</div>
             <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">Per-Key CNY / USD of usage</div>
           </div>
-          <button onClick={submitKeyPricing} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85">保存改动</button>
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-1.5 text-xs text-gray-600">
+              <input
+                type="checkbox"
+                checked={keyOnlyUnpriced}
+                onChange={ev => setKeyOnlyUnpriced(ev.target.checked)}
+                className="rounded border-gray-300"
+              />
+              仅显示未配价（{unpricedKeyCount}）
+            </label>
+            <span className="text-[10px] text-gray-400 tabular-nums">{filteredKeys.length}/{keys.length}</span>
+            <button onClick={submitKeyPricing} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85">保存改动</button>
+          </div>
         </div>
         <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
           <table className="w-full text-xs whitespace-nowrap">
@@ -361,6 +496,7 @@ export default function Profit() {
               <tr>
                 <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">ID</th>
                 <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">名称</th>
+                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Key</th>
                 <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Tag</th>
                 <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">已用 USD</th>
                 <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">额度 USD</th>
@@ -369,7 +505,7 @@ export default function Profit() {
               </tr>
             </thead>
             <tbody>
-              {keys.map(k => {
+              {filteredKeys.map(k => {
                 const e = keyEdits[k.id] || {}
                 const priceVal = e.price !== undefined ? e.price : (k.unit_price_cny != null ? String(k.unit_price_cny) : '')
                 const noteVal = e.note !== undefined ? e.note : k.note
@@ -378,6 +514,7 @@ export default function Profit() {
                   <tr key={k.id} className={`border-t border-gray-100 hover:bg-gray-50 ${isMissing ? 'bg-amber-50/50' : ''}`}>
                     <td className="px-3 py-1.5 font-mono text-gray-500">{k.id}</td>
                     <td className="px-3 py-1.5">{k.name}</td>
+                    <td className="px-3 py-1.5 font-mono text-[10px] text-gray-500">{k.key}</td>
                     <td className="px-3 py-1.5">
                       {k.tag && <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 text-[10px]">{k.tag}</span>}
                     </td>
@@ -413,7 +550,7 @@ export default function Profit() {
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
           <div>
             <div className="text-sm font-semibold">下游售价配置</div>
-            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">Per-Group CNY / USD of usage</div>
+            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">Per-Group discount (revenue_usd = used_usd × discount)</div>
           </div>
           <button onClick={submitDownstream} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85">保存改动</button>
         </div>
@@ -422,7 +559,7 @@ export default function Profit() {
             <thead className="bg-gray-50">
               <tr>
                 <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Group</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">单价 CNY</th>
+                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">折扣</th>
                 <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">备注</th>
                 <th className="px-3 py-2 w-12"></th>
               </tr>
@@ -430,7 +567,7 @@ export default function Profit() {
             <tbody>
               {downstream.map(d => {
                 const e = dsEdits[d.group] || {}
-                const priceVal = e.price !== undefined ? e.price : String(d.unit_price_cny)
+                const priceVal = e.price !== undefined ? e.price : String(d.discount)
                 const noteVal = e.note !== undefined ? e.note : d.note
                 const isMissing = missingGroupSet.has(d.group)
                 return (
@@ -505,7 +642,7 @@ export default function Profit() {
                     step="0.01"
                     value={dsEdits['__new__']?.price ?? ''}
                     onChange={ev => setDsEdits(prev => ({ ...prev, __new__: { ...prev['__new__'], price: ev.target.value } }))}
-                    placeholder="4.50"
+                    placeholder="0.85"
                     className="w-20 border border-gray-200 rounded px-1.5 py-0.5 text-right text-xs"
                   />
                 </td>

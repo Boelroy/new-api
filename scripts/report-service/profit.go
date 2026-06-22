@@ -10,9 +10,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// fxRate is the CNY/USD rate used to convert (revenue_cny - cost_cny) -> USD profit.
-// Hardcoded for v1 per design doc; can be lifted to env/config later.
-const fxRate = 7.0
+// defaultFXRate is the CNY/USD fallback when a date has no row in report_fx_rate.
+const defaultFXRate = 6.77
 
 // ---- Upstream per-key pricing ----
 
@@ -131,17 +130,17 @@ func handleBulkSaveKeyPricing(c *gin.Context) {
 	})
 }
 
-// ---- Downstream group pricing ----
+// ---- Downstream group pricing (discount = direct USD multiplier) ----
 
 type DownstreamPricing struct {
-	Group        string  `json:"group"`
-	UnitPriceCNY float64 `json:"unit_price_cny"`
-	Note         string  `json:"note"`
-	UpdatedAt    int64   `json:"updated_at"`
+	Group     string  `json:"group"`
+	Discount  float64 `json:"discount"`
+	Note      string  `json:"note"`
+	UpdatedAt int64   `json:"updated_at"`
 }
 
 func handleListDownstreamPricing(c *gin.Context) {
-	rows, err := db.Query(`SELECT "group", unit_price_cny, COALESCE(note,''), updated_at FROM report_downstream_pricing ORDER BY "group"`)
+	rows, err := db.Query(`SELECT "group", discount, COALESCE(note,''), updated_at FROM report_downstream_pricing ORDER BY "group"`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -150,7 +149,7 @@ func handleListDownstreamPricing(c *gin.Context) {
 	out := make([]DownstreamPricing, 0)
 	for rows.Next() {
 		var d DownstreamPricing
-		if err := rows.Scan(&d.Group, &d.UnitPriceCNY, &d.Note, &d.UpdatedAt); err != nil {
+		if err := rows.Scan(&d.Group, &d.Discount, &d.Note, &d.UpdatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -161,9 +160,9 @@ func handleListDownstreamPricing(c *gin.Context) {
 
 func handleSaveDownstreamPricing(c *gin.Context) {
 	var payload []struct {
-		Group        string  `json:"group"`
-		UnitPriceCNY float64 `json:"unit_price_cny"`
-		Note         string  `json:"note"`
+		Group    string  `json:"group"`
+		Discount float64 `json:"discount"`
+		Note     string  `json:"note"`
 	}
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -181,10 +180,10 @@ func handleSaveDownstreamPricing(c *gin.Context) {
 			continue
 		}
 		_, err := db.Exec(`
-			INSERT INTO report_downstream_pricing ("group", unit_price_cny, note, updated_at)
+			INSERT INTO report_downstream_pricing ("group", discount, note, updated_at)
 			VALUES ($1,$2,$3,$4)
-			ON CONFLICT ("group") DO UPDATE SET unit_price_cny=$2, note=$3, updated_at=$4`,
-			g, p.UnitPriceCNY, p.Note, now)
+			ON CONFLICT ("group") DO UPDATE SET discount=$2, note=$3, updated_at=$4`,
+			g, p.Discount, p.Note, now)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -192,6 +191,79 @@ func handleSaveDownstreamPricing(c *gin.Context) {
 		saved++
 	}
 	c.JSON(http.StatusOK, gin.H{"saved": saved})
+}
+
+// ---- FX rate (CNY per USD), per date ----
+
+type FXRate struct {
+	Date      string  `json:"date"`
+	Rate      float64 `json:"rate"`
+	UpdatedAt int64   `json:"updated_at"`
+}
+
+func handleListFXRate(c *gin.Context) {
+	rows, err := db.Query(`SELECT date, rate, updated_at FROM report_fx_rate ORDER BY date DESC`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	out := make([]FXRate, 0)
+	for rows.Next() {
+		var f FXRate
+		if err := rows.Scan(&f.Date, &f.Rate, &f.UpdatedAt); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		out = append(out, f)
+	}
+	c.JSON(http.StatusOK, gin.H{"rates": out, "default_rate": defaultFXRate})
+}
+
+func handleSaveFXRate(c *gin.Context) {
+	var payload []struct {
+		Date string  `json:"date"`
+		Rate float64 `json:"rate"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(payload) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "empty payload"})
+		return
+	}
+	now := time.Now().Unix()
+	saved := 0
+	for _, p := range payload {
+		d := strings.TrimSpace(p.Date)
+		if d == "" || p.Rate <= 0 {
+			continue
+		}
+		_, err := db.Exec(`
+			INSERT INTO report_fx_rate (date, rate, updated_at) VALUES ($1,$2,$3)
+			ON CONFLICT (date) DO UPDATE SET rate=$2, updated_at=$3`,
+			d, p.Rate, now)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		saved++
+	}
+	c.JSON(http.StatusOK, gin.H{"saved": saved})
+}
+
+func handleDeleteFXRate(c *gin.Context) {
+	date := c.Param("date")
+	if date == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "date required"})
+		return
+	}
+	if _, err := db.Exec(`DELETE FROM report_fx_rate WHERE date=$1`, date); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func handleDeleteDownstreamPricing(c *gin.Context) {
@@ -210,12 +282,13 @@ func handleDeleteDownstreamPricing(c *gin.Context) {
 // ---- Daily profit calculation ----
 
 type ProfitDaily struct {
-	Date        string  `json:"date"`
-	UsedUSD     float64 `json:"used_usd"`
-	RevenueCNY  float64 `json:"revenue_cny"`
-	CostCNY     float64 `json:"cost_cny"`
-	ProfitUSD   float64 `json:"profit_usd"`
-	ProfitRate  float64 `json:"profit_rate"` // (revenue - cost) / revenue
+	Date       string  `json:"date"`
+	FXRate     float64 `json:"fx_rate"`
+	UsedUSD    float64 `json:"used_usd"`
+	RevenueUSD float64 `json:"revenue_usd"`
+	CostUSD    float64 `json:"cost_usd"`
+	ProfitUSD  float64 `json:"profit_usd"`
+	ProfitRate float64 `json:"profit_rate"` // (revenue - cost) / revenue
 }
 
 type ProfitByKey struct {
@@ -225,14 +298,14 @@ type ProfitByKey struct {
 	Source       string  `json:"source"` // 'system1' or 'pipi'
 	UsedUSD      float64 `json:"used_usd"`
 	UnitPriceCNY float64 `json:"unit_price_cny"`
-	CostCNY      float64 `json:"cost_cny"`
+	CostUSD      float64 `json:"cost_usd"`
 }
 
 type ProfitByGroup struct {
-	Group        string  `json:"group"`
-	UsedUSD      float64 `json:"used_usd"`
-	UnitPriceCNY float64 `json:"unit_price_cny"`
-	RevenueCNY   float64 `json:"revenue_cny"`
+	Group      string  `json:"group"`
+	UsedUSD    float64 `json:"used_usd"`
+	Discount   float64 `json:"discount"`
+	RevenueUSD float64 `json:"revenue_usd"`
 }
 
 type MissingPricing struct {
@@ -241,17 +314,17 @@ type MissingPricing struct {
 }
 
 type ProfitSummary struct {
-	Start          string           `json:"start"`
-	End            string           `json:"end"`
-	UsedUSD        float64          `json:"used_usd"`
-	RevenueCNY     float64          `json:"revenue_cny"`
-	CostCNY        float64          `json:"cost_cny"`
-	ProfitUSD      float64          `json:"profit_usd"`
-	ProfitRate     float64          `json:"profit_rate"`
-	Daily          []ProfitDaily    `json:"daily"`
-	ByKey          []ProfitByKey    `json:"by_key"`
-	ByGroup        []ProfitByGroup  `json:"by_group"`
-	MissingPricing MissingPricing   `json:"missing_pricing"`
+	Start          string          `json:"start"`
+	End            string          `json:"end"`
+	UsedUSD        float64         `json:"used_usd"`
+	RevenueUSD     float64         `json:"revenue_usd"`
+	CostUSD        float64         `json:"cost_usd"`
+	ProfitUSD      float64         `json:"profit_usd"`
+	ProfitRate     float64         `json:"profit_rate"`
+	Daily          []ProfitDaily   `json:"daily"`
+	ByKey          []ProfitByKey   `json:"by_key"`
+	ByGroup        []ProfitByGroup `json:"by_group"`
+	MissingPricing MissingPricing  `json:"missing_pricing"`
 }
 
 // step1Row holds a non-pipi (date, channel_id, group) aggregation row.
@@ -286,9 +359,9 @@ func handleProfitDaily(c *gin.Context) {
 	startDate := c.DefaultQuery("start", time.Now().UTC().AddDate(0, 0, -6).Format("2006-01-02"))
 	endDate := c.DefaultQuery("end", time.Now().UTC().Format("2006-01-02"))
 
-	// Load downstream pricing into memory for O(1) lookup.
-	downPrice := map[string]float64{}
-	dpRows, err := db.Query(`SELECT "group", unit_price_cny FROM report_downstream_pricing`)
+	// --- Downstream discount lookup (group -> multiplier) ---
+	discount := map[string]float64{}
+	dpRows, err := db.Query(`SELECT "group", discount FROM report_downstream_pricing`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "load downstream pricing: " + err.Error()})
 		return
@@ -297,47 +370,62 @@ func handleProfitDaily(c *gin.Context) {
 		var g string
 		var p float64
 		if err := dpRows.Scan(&g, &p); err == nil {
-			downPrice[g] = p
+			discount[g] = p
 		}
 	}
 	dpRows.Close()
 
-	// --- Step 1: non-pipi rows from System 1 ---
+	// --- FX rate lookup (date -> CNY/USD) ---
+	fx := map[string]float64{}
+	fxRows, err := db.Query(`SELECT date, rate FROM report_fx_rate WHERE date BETWEEN $1 AND $2`, startDate, endDate)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "load fx: " + err.Error()})
+		return
+	}
+	for fxRows.Next() {
+		var d string
+		var r float64
+		if err := fxRows.Scan(&d, &r); err == nil {
+			fx[d] = r
+		}
+	}
+	fxRows.Close()
+	getFX := func(d string) float64 {
+		if r, ok := fx[d]; ok && r > 0 {
+			return r
+		}
+		return defaultFXRate
+	}
+
 	step1, err := loadStep1(startDate, endDate)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "step1: " + err.Error()})
 		return
 	}
-
-	// --- Step 2: pipi revenue side (System 1 logs for tag=pipi) ---
 	step2, err := loadStep2(startDate, endDate)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "step2: " + err.Error()})
 		return
 	}
-
-	// --- Step 3: pipi cost side (synced from System 2) ---
 	step3, err := loadStep3(startDate, endDate)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "step3: " + err.Error()})
 		return
 	}
 
-	// Track missing pricing for UI warning.
 	missingChIDs := map[int]bool{}
 	missingGroups := map[string]bool{}
 
-	// Per-day accumulators.
 	daily := map[string]*ProfitDaily{}
-	byKey := map[int]*ProfitByKey{}    // channel_id -> agg (system1 + pipi share same channel_id space? no — use composite key)
-	byKeyPipi := map[int]*ProfitByKey{} // separate map for pipi to avoid collision
+	byKey := map[int]*ProfitByKey{}
+	byKeyPipi := map[int]*ProfitByKey{}
 	byGroup := map[string]*ProfitByGroup{}
 
 	getDay := func(d string) *ProfitDaily {
 		if v, ok := daily[d]; ok {
 			return v
 		}
-		v := &ProfitDaily{Date: d}
+		v := &ProfitDaily{Date: d, FXRate: getFX(d)}
 		daily[d] = v
 		return v
 	}
@@ -349,18 +437,18 @@ func handleProfitDaily(c *gin.Context) {
 		m[id] = v
 		return v
 	}
-	getGroup := func(g string, price float64) *ProfitByGroup {
+	getGroup := func(g string, dis float64) *ProfitByGroup {
 		if v, ok := byGroup[g]; ok {
 			return v
 		}
-		v := &ProfitByGroup{Group: g, UnitPriceCNY: price}
+		v := &ProfitByGroup{Group: g, Discount: dis}
 		byGroup[g] = v
 		return v
 	}
 
-	// Step 1 — non-pipi: revenue + cost both from System 1
+	// Step 1 — non-pipi: revenue + cost both anchored on System 1's used_usd
 	for _, r := range step1 {
-		dp, dok := downPrice[r.tokenGroup]
+		dis, dok := discount[r.tokenGroup]
 		if !dok {
 			missingGroups[r.tokenGroup] = true
 		}
@@ -370,42 +458,43 @@ func handleProfitDaily(c *gin.Context) {
 		} else {
 			missingChIDs[r.channelID] = true
 		}
+		rate := getFX(r.date)
 
-		costCNY := r.usedUSD * upP
-		revCNY := r.usedUSD * dp
+		costUSD := r.usedUSD * upP / rate
+		revUSD := r.usedUSD * dis
 
 		d := getDay(r.date)
 		d.UsedUSD += r.usedUSD
-		d.CostCNY += costCNY
-		d.RevenueCNY += revCNY
+		d.CostUSD += costUSD
+		d.RevenueUSD += revUSD
 
 		k := getKey(byKey, r.channelID, r.channelName, r.channelTag, "system1", upP)
 		k.UsedUSD += r.usedUSD
-		k.CostCNY += costCNY
+		k.CostUSD += costUSD
 
-		g := getGroup(r.tokenGroup, dp)
+		g := getGroup(r.tokenGroup, dis)
 		g.UsedUSD += r.usedUSD
-		g.RevenueCNY += revCNY
+		g.RevenueUSD += revUSD
 	}
 
-	// Step 2 — pipi revenue side
+	// Step 2 — pipi revenue side (downstream group lives in System 1's logs)
 	for _, r := range step2 {
-		dp, dok := downPrice[r.tokenGroup]
+		dis, dok := discount[r.tokenGroup]
 		if !dok {
 			missingGroups[r.tokenGroup] = true
 		}
-		revCNY := r.revenueUSD * dp
+		revUSD := r.revenueUSD * dis
 
 		d := getDay(r.date)
 		d.UsedUSD += r.revenueUSD
-		d.RevenueCNY += revCNY
+		d.RevenueUSD += revUSD
 
-		g := getGroup(r.tokenGroup, dp)
+		g := getGroup(r.tokenGroup, dis)
 		g.UsedUSD += r.revenueUSD
-		g.RevenueCNY += revCNY
+		g.RevenueUSD += revUSD
 	}
 
-	// Step 3 — pipi cost side
+	// Step 3 — pipi cost side (per-sub-key with its own CNY price, converted by daily FX)
 	for _, r := range step3 {
 		var upP float64
 		if r.unitPriceCNY.Valid {
@@ -413,40 +502,37 @@ func handleProfitDaily(c *gin.Context) {
 		} else {
 			missingChIDs[r.channelID] = true
 		}
-		costCNY := r.costUSD * upP
+		rate := getFX(r.date)
+		costUSD := r.costUSD * upP / rate
 
 		d := getDay(r.date)
-		d.CostCNY += costCNY
+		d.CostUSD += costUSD
 
 		k := getKey(byKeyPipi, r.channelID, r.channelName, r.channelTag, "pipi", upP)
 		k.UsedUSD += r.costUSD
-		k.CostCNY += costCNY
+		k.CostUSD += costUSD
 	}
 
-	// Finalize per-day numbers.
 	summary := ProfitSummary{Start: startDate, End: endDate}
 	for _, d := range daily {
-		d.ProfitUSD = (d.RevenueCNY - d.CostCNY) / fxRate
-		if d.RevenueCNY > 0 {
-			d.ProfitRate = (d.RevenueCNY - d.CostCNY) / d.RevenueCNY
+		d.ProfitUSD = d.RevenueUSD - d.CostUSD
+		if d.RevenueUSD > 0 {
+			d.ProfitRate = d.ProfitUSD / d.RevenueUSD
 		}
-		// Round for presentation
 		d.UsedUSD = roundTo(d.UsedUSD, 4)
-		d.CostCNY = roundTo(d.CostCNY, 2)
-		d.RevenueCNY = roundTo(d.RevenueCNY, 2)
+		d.CostUSD = roundTo(d.CostUSD, 4)
+		d.RevenueUSD = roundTo(d.RevenueUSD, 4)
 		d.ProfitUSD = roundTo(d.ProfitUSD, 4)
 		d.ProfitRate = roundTo(d.ProfitRate, 4)
 		summary.UsedUSD += d.UsedUSD
-		summary.CostCNY += d.CostCNY
-		summary.RevenueCNY += d.RevenueCNY
+		summary.CostUSD += d.CostUSD
+		summary.RevenueUSD += d.RevenueUSD
 	}
 
-	// Sorted daily list
 	dailyList := make([]ProfitDaily, 0, len(daily))
 	for _, d := range daily {
 		dailyList = append(dailyList, *d)
 	}
-	// Sort by date asc
 	for i := 1; i < len(dailyList); i++ {
 		for j := i; j > 0 && dailyList[j-1].Date > dailyList[j].Date; j-- {
 			dailyList[j-1], dailyList[j] = dailyList[j], dailyList[j-1]
@@ -454,31 +540,28 @@ func handleProfitDaily(c *gin.Context) {
 	}
 	summary.Daily = dailyList
 
-	// Flatten byKey (system1 first, then pipi)
 	for _, v := range byKey {
 		v.UsedUSD = roundTo(v.UsedUSD, 4)
-		v.CostCNY = roundTo(v.CostCNY, 2)
+		v.CostUSD = roundTo(v.CostUSD, 4)
 		summary.ByKey = append(summary.ByKey, *v)
 	}
 	for _, v := range byKeyPipi {
 		v.UsedUSD = roundTo(v.UsedUSD, 4)
-		v.CostCNY = roundTo(v.CostCNY, 2)
+		v.CostUSD = roundTo(v.CostUSD, 4)
 		summary.ByKey = append(summary.ByKey, *v)
 	}
-
 	for _, v := range byGroup {
 		v.UsedUSD = roundTo(v.UsedUSD, 4)
-		v.RevenueCNY = roundTo(v.RevenueCNY, 2)
+		v.RevenueUSD = roundTo(v.RevenueUSD, 4)
 		summary.ByGroup = append(summary.ByGroup, *v)
 	}
 
-	// Roll up summary totals
 	summary.UsedUSD = roundTo(summary.UsedUSD, 4)
-	summary.CostCNY = roundTo(summary.CostCNY, 2)
-	summary.RevenueCNY = roundTo(summary.RevenueCNY, 2)
-	summary.ProfitUSD = roundTo((summary.RevenueCNY-summary.CostCNY)/fxRate, 4)
-	if summary.RevenueCNY > 0 {
-		summary.ProfitRate = roundTo((summary.RevenueCNY-summary.CostCNY)/summary.RevenueCNY, 4)
+	summary.CostUSD = roundTo(summary.CostUSD, 4)
+	summary.RevenueUSD = roundTo(summary.RevenueUSD, 4)
+	summary.ProfitUSD = roundTo(summary.RevenueUSD-summary.CostUSD, 4)
+	if summary.RevenueUSD > 0 {
+		summary.ProfitRate = roundTo((summary.RevenueUSD-summary.CostUSD)/summary.RevenueUSD, 4)
 	}
 
 	for id := range missingChIDs {

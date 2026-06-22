@@ -36,16 +36,28 @@ export type ChannelRow = {
 
 export type DownstreamPricing = {
   group: string
-  unit_price_cny: number
+  discount: number
   note: string
   updated_at: number
 }
 
+export type FXRate = {
+  date: string
+  rate: number
+  updated_at: number
+}
+
+export type FXRateResponse = {
+  rates: FXRate[]
+  default_rate: number
+}
+
 export type ProfitDailyRow = {
   date: string
+  fx_rate: number
   used_usd: number
-  revenue_cny: number
-  cost_cny: number
+  revenue_usd: number
+  cost_usd: number
   profit_usd: number
   profit_rate: number
 }
@@ -57,22 +69,22 @@ export type ProfitByKey = {
   source: 'system1' | 'pipi'
   used_usd: number
   unit_price_cny: number
-  cost_cny: number
+  cost_usd: number
 }
 
 export type ProfitByGroup = {
   group: string
   used_usd: number
-  unit_price_cny: number
-  revenue_cny: number
+  discount: number
+  revenue_usd: number
 }
 
 export type ProfitSummary = {
   start: string
   end: string
   used_usd: number
-  revenue_cny: number
-  cost_cny: number
+  revenue_usd: number
+  cost_usd: number
   profit_usd: number
   profit_rate: number
   daily: ProfitDailyRow[]
@@ -173,7 +185,7 @@ export const api = {
   getDownstreamPricing: () =>
     request<DownstreamPricing[]>('/api/profit/downstream/pricing'),
 
-  saveDownstreamPricing: (payload: { group: string; unit_price_cny: number; note: string }[]) =>
+  saveDownstreamPricing: (payload: { group: string; discount: number; note: string }[]) =>
     request<{ saved: number }>('/api/profit/downstream/pricing', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -182,6 +194,20 @@ export const api = {
 
   deleteDownstreamPricing: (group: string) =>
     request<{ ok: boolean }>(`/api/profit/downstream/pricing/${encodeURIComponent(group)}`, {
+      method: 'DELETE',
+    }),
+
+  getFXRates: () => request<FXRateResponse>('/api/profit/fx'),
+
+  saveFXRates: (payload: { date: string; rate: number }[]) =>
+    request<{ saved: number }>('/api/profit/fx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  deleteFXRate: (date: string) =>
+    request<{ ok: boolean }>(`/api/profit/fx/${encodeURIComponent(date)}`, {
       method: 'DELETE',
     }),
 

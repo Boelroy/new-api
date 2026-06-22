@@ -1383,12 +1383,29 @@ func main() {
 		// profit reporting: per-key upstream unit price (CNY per USD of usage)
 		`ALTER TABLE report_key_quotas ADD COLUMN IF NOT EXISTS unit_price_cny NUMERIC(8,4)`,
 		`ALTER TABLE report_key_quotas ADD COLUMN IF NOT EXISTS note TEXT NOT NULL DEFAULT ''`,
-		// downstream sales price (CNY per USD of usage), keyed by token group
+		// downstream pricing (USD multiplier / discount, e.g. 0.85), keyed by token group
 		`CREATE TABLE IF NOT EXISTS report_downstream_pricing (
 			"group"         TEXT PRIMARY KEY,
-			unit_price_cny  NUMERIC(8,4) NOT NULL,
+			discount        NUMERIC(8,4) NOT NULL,
 			note            TEXT NOT NULL DEFAULT '',
 			updated_at      BIGINT NOT NULL
+		)`,
+		// migration: rename unit_price_cny -> discount, converting prior CNY/USD values
+		// using the legacy default FX rate (6.77) so existing rows remain meaningful.
+		`DO $$ BEGIN
+			IF EXISTS (SELECT 1 FROM information_schema.columns
+			           WHERE table_name='report_downstream_pricing' AND column_name='unit_price_cny')
+			   AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+			           WHERE table_name='report_downstream_pricing' AND column_name='discount') THEN
+				ALTER TABLE report_downstream_pricing RENAME COLUMN unit_price_cny TO discount;
+				UPDATE report_downstream_pricing SET discount = ROUND(discount / 6.77, 4);
+			END IF;
+		END $$`,
+		// per-day FX rate (CNY per USD). Falls back to 6.77 when a date has no row.
+		`CREATE TABLE IF NOT EXISTS report_fx_rate (
+			date        TEXT PRIMARY KEY,
+			rate        NUMERIC(8,4) NOT NULL,
+			updated_at  BIGINT NOT NULL
 		)`,
 		// pipi daily sync: cost snapshot pulled from System 2
 		`CREATE TABLE IF NOT EXISTS report_pipi_daily (
@@ -1439,6 +1456,9 @@ func main() {
 	api.GET("/profit/downstream/pricing", handleListDownstreamPricing)
 	api.POST("/profit/downstream/pricing", handleSaveDownstreamPricing)
 	api.DELETE("/profit/downstream/pricing/:group", handleDeleteDownstreamPricing)
+	api.GET("/profit/fx", handleListFXRate)
+	api.POST("/profit/fx", handleSaveFXRate)
+	api.DELETE("/profit/fx/:date", handleDeleteFXRate)
 	api.GET("/profit/daily", handleProfitDaily)
 
 	// SPA — serve for all non-API routes
