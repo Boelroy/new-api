@@ -205,22 +205,21 @@ func checkAndNotify() {
 		return
 	}
 
-	var totalUsed, totalQuota float64
+	// Only consider channels that have an explicit quota configured. Mixing
+	// usage from unmetered channels with the configured-quota sum produced
+	// nonsensical negative remainders in the notification text.
+	var totalUsed, totalQuota, totalLastHour float64
 	hasQuota := false
 	for _, ch := range channels {
-		totalUsed += ch.UsedUSD
-		if ch.QuotaUSD != nil {
-			totalQuota += *ch.QuotaUSD
-			hasQuota = true
+		if ch.QuotaUSD == nil {
+			continue
 		}
+		totalUsed += ch.UsedUSD
+		totalQuota += *ch.QuotaUSD
+		totalLastHour += ch.LastHourUSD
+		hasQuota = true
 	}
 	if !hasQuota {
-		return
-	}
-
-	totalLastHour, err := queryTotalLastHour()
-	if err != nil {
-		log.Printf("checkAndNotify totalLastHour error: %v", err)
 		return
 	}
 
