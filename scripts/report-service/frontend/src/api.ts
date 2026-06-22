@@ -120,10 +120,38 @@ export type KeyTestResult = {
   message?: string
 }
 
+// Storage key for the API key used by the /profit gate.
+const PROFIT_KEY_STORAGE = 'report_api_key'
+
+export function getProfitApiKey(): string {
+  try {
+    return localStorage.getItem(PROFIT_KEY_STORAGE) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+export function setProfitApiKey(key: string) {
+  try {
+    if (key) localStorage.setItem(PROFIT_KEY_STORAGE, key)
+    else localStorage.removeItem(PROFIT_KEY_STORAGE)
+  } catch { /* ignore */ }
+}
+
 async function request<T>(url: string, opts?: RequestInit): Promise<T> {
-  const res = await fetch(url, opts)
+  // Auto-inject X-API-Key from localStorage so the /profit gate can
+  // authenticate without relying on cookies.
+  const headers = new Headers(opts?.headers ?? {})
+  const apiKey = getProfitApiKey()
+  if (apiKey && !headers.has('X-API-Key')) {
+    headers.set('X-API-Key', apiKey)
+  }
+  const res = await fetch(url, { ...(opts ?? {}), headers })
   if (res.status === 401) {
-    window.location.href = '/login'
+    // /profit handles its own auth via the gate; other pages bounce to /login.
+    if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/profit')) {
+      window.location.href = '/login'
+    }
     throw new Error('Unauthorized')
   }
   if (!res.ok) {

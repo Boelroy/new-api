@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from 'recharts'
 import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
-import { api, ChannelRow, DownstreamPricing, FXRate, ProfitSummary } from '../api'
+import { api, ChannelRow, DownstreamPricing, FXRate, ProfitSummary, getProfitApiKey, setProfitApiKey } from '../api'
 
 const COLORS = ['#2563eb','#059669','#d97706','#e11d48','#7c3aed','#ea580c','#0d9488','#c026d3','#3b82f6','#10b981']
 
@@ -31,6 +31,12 @@ export default function Profit() {
   const [defaultFxEdit, setDefaultFxEdit] = useState<string>('')
   const [pipiStatus, setPipiStatus] = useState<{ configured: boolean; start?: string; end?: string; status?: string; last_sync_at?: number } | null>(null)
   const [pipiSyncing, setPipiSyncing] = useState(false)
+  // Auth gate state. authChecked=false → still verifying; authOk=true → render the page.
+  const [authChecked, setAuthChecked] = useState(false)
+  const [authOk, setAuthOk] = useState(false)
+  const [gateInput, setGateInput] = useState('')
+  const [gateErr, setGateErr] = useState('')
+  const [gateSubmitting, setGateSubmitting] = useState(false)
   const [loading, setLoading] = useState(false)
   const [refreshedAt, setRefreshedAt] = useState('')
 
@@ -80,7 +86,59 @@ export default function Profit() {
     }
   }
 
-  useEffect(() => { load() }, [])
+  // Verify auth (X-API-Key in localStorage) before loading any data.
+  useEffect(() => {
+    // Accept ?key=... once and clean it out of the URL.
+    const params = new URLSearchParams(window.location.search)
+    const k = params.get('key')
+    if (k) {
+      setProfitApiKey(k)
+      params.delete('key')
+      const newSearch = params.toString()
+      window.history.replaceState({}, '', window.location.pathname + (newSearch ? '?' + newSearch : ''))
+    }
+
+    void (async () => {
+      if (!getProfitApiKey()) {
+        setAuthChecked(true)
+        return
+      }
+      try {
+        await api.getPipiStatus()
+        setAuthOk(true)
+      } catch {
+        setProfitApiKey('')
+      }
+      setAuthChecked(true)
+    })()
+  }, [])
+
+  useEffect(() => {
+    if (authOk) load()
+  }, [authOk])
+
+  const submitGate = async () => {
+    const k = gateInput.trim()
+    if (!k) return
+    setGateSubmitting(true)
+    setGateErr('')
+    setProfitApiKey(k)
+    try {
+      await api.getPipiStatus()
+      setAuthOk(true)
+    } catch {
+      setProfitApiKey('')
+      setGateErr('API Key 无效')
+    } finally {
+      setGateSubmitting(false)
+    }
+  }
+
+  const signOut = () => {
+    setProfitApiKey('')
+    setAuthOk(false)
+    setGateInput('')
+  }
 
   const dailyChart = useMemo(() => {
     if (!profit) return []
@@ -296,8 +354,47 @@ export default function Profit() {
       <button onClick={load} disabled={loading} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-50">
         {loading ? '加载中...' : '查询'}
       </button>
+      <button onClick={signOut} className="border border-gray-200 rounded-md px-2.5 py-1.5 text-[11px] bg-white text-gray-500 hover:text-rose-600 hover:border-rose-300" title="清除 API Key 并返回门">
+        退出
+      </button>
     </>
   )
+
+  // Auth gate — renders before any data when the X-API-Key is missing or invalid.
+  if (!authChecked) {
+    return (
+      <Layout title="Profit Report">
+        <div className="text-center text-gray-400 text-xs py-12">验证中…</div>
+      </Layout>
+    )
+  }
+  if (!authOk) {
+    return (
+      <Layout title="Profit Report" subtitle="需要 API Key 才能访问">
+        <div className="max-w-sm mx-auto bg-white border border-gray-200 rounded-xl p-6 mt-6">
+          <div className="text-sm font-semibold mb-2">输入 API Key</div>
+          <div className="text-[11px] text-gray-400 mb-3">服务端 REPORT_API_KEY 环境变量配置的值</div>
+          <input
+            type="password"
+            autoFocus
+            value={gateInput}
+            onChange={e => setGateInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') void submitGate() }}
+            placeholder="X-API-Key"
+            className="w-full border border-gray-200 rounded-md px-3 py-2 text-xs font-mono focus:outline-none focus:border-gray-400"
+          />
+          {gateErr && <div className="text-rose-600 text-[11px] mt-2">{gateErr}</div>}
+          <button
+            onClick={submitGate}
+            disabled={gateSubmitting || !gateInput.trim()}
+            className="w-full mt-3 bg-gray-900 text-white rounded-md px-3 py-2 text-xs hover:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {gateSubmitting ? '验证中…' : '进入'}
+          </button>
+        </div>
+      </Layout>
+    )
+  }
 
   return (
     <Layout
