@@ -34,13 +34,14 @@ var db *sql.DB
 // ---- Auth ----
 
 var (
-	adminUser        string
-	adminPass        string
-	jwtSecret        []byte
-	mainServiceURL   string
-	mainServiceUID   string
-	ssoSecret        []byte
-	reportAPIKey     string
+	adminUser           string
+	adminPass           string
+	jwtSecret           []byte
+	mainServiceURL      string
+	mainServiceUID      string
+	ssoSecret           []byte
+	reportAPIKey        string
+	profitGateRequired  = true
 )
 
 // SSO session cache: maps session cookie value → expiry
@@ -764,11 +765,13 @@ func handleSSOCallback(c *gin.Context) {
 }
 
 func handleAuthConfig(c *gin.Context) {
+	resp := gin.H{"profit_gate_required": profitGateRequired}
 	if mainServiceURL != "" {
-		c.JSON(http.StatusOK, gin.H{"sso_url": mainServiceURL + "/sign-in"})
+		resp["sso_url"] = mainServiceURL + "/sign-in"
 	} else {
-		c.JSON(http.StatusOK, gin.H{"sso_url": nil})
+		resp["sso_url"] = nil
 	}
+	c.JSON(http.StatusOK, resp)
 }
 
 func handleLogin(c *gin.Context) {
@@ -1304,6 +1307,12 @@ func main() {
 		ssoSecret = []byte(s)
 	}
 	reportAPIKey = os.Getenv("REPORT_API_KEY")
+	if v := os.Getenv("PROFIT_GATE_REQUIRED"); v != "" {
+		switch strings.ToLower(v) {
+		case "false", "0", "no", "off":
+			profitGateRequired = false
+		}
+	}
 	pipiReportURL = os.Getenv("PIPI_REPORT_URL")
 	pipiReportAPIKey = os.Getenv("PIPI_REPORT_API_KEY")
 	larkWebhook = os.Getenv("LARK_WEBHOOK")

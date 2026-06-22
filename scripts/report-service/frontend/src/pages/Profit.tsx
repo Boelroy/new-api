@@ -86,9 +86,9 @@ export default function Profit() {
     }
   }
 
-  // Verify auth before loading any data. The gate only shows when neither
-  // cookie/SSO auth nor a valid X-API-Key works — System 1 users who are
-  // already SSO'd via the main newapi will bypass it transparently.
+  // Gate behaviour is driven by server env PROFIT_GATE_REQUIRED.
+  // When required=false (e.g. System 1) the page renders directly; when
+  // required=true (e.g. System 2) we still validate a stored key first.
   useEffect(() => {
     // Accept ?key=... once and clean it out of the URL.
     const params = new URLSearchParams(window.location.search)
@@ -101,16 +101,29 @@ export default function Profit() {
     }
 
     void (async () => {
+      // Fetch server-side gate config. Default to gate ON if unreachable.
+      let gateRequired = true
+      try {
+        const cfg = await fetch('/api/auth/config').then(r => r.json())
+        if (cfg.profit_gate_required === false) gateRequired = false
+      } catch { /* keep default */ }
+
+      if (!gateRequired) {
+        setAuthOk(true)
+        setAuthChecked(true)
+        return
+      }
+
+      // Gate is on — only proceed if a stored key validates.
+      if (!getProfitApiKey()) {
+        setAuthChecked(true)
+        return
+      }
       try {
         await api.getPipiStatus()
         setAuthOk(true)
-      } catch (err) {
-        if ((err as Error).message === 'Unauthorized') {
-          // Stored key (if any) didn't work — clear it so the gate doesn't
-          // silently keep re-trying a bad value.
-          if (getProfitApiKey()) setProfitApiKey('')
-        }
-        // Stay on the gate; any non-auth error also lands here.
+      } catch {
+        setProfitApiKey('')
       }
       setAuthChecked(true)
     })()
