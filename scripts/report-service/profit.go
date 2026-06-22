@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +59,76 @@ func handleSaveKeyPricing(c *gin.Context) {
 		saved++
 	}
 	c.JSON(http.StatusOK, gin.H{"saved": saved})
+}
+
+// handleBulkSaveKeyPricing accepts raw text "<key><whitespace><price>" per line
+// and upserts unit_price_cny by matching channels.key. Empty / comment (#) lines ignored.
+func handleBulkSaveKeyPricing(c *gin.Context) {
+	var body struct {
+		Text string `json:"text"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	type lineErr struct {
+		Line   int    `json:"line"`
+		Reason string `json:"reason"`
+	}
+	var (
+		notFound = make([]string, 0)
+		parseErr = make([]lineErr, 0)
+		saved    = 0
+	)
+	now := time.Now().Unix()
+
+	for i, raw := range strings.Split(body.Text, "\n") {
+		lineNum := i + 1
+		s := strings.TrimSpace(raw)
+		if s == "" || strings.HasPrefix(s, "#") {
+			continue
+		}
+		// Split on any whitespace (tab, spaces, multiple spaces).
+		fields := strings.Fields(s)
+		if len(fields) < 2 {
+			parseErr = append(parseErr, lineErr{Line: lineNum, Reason: "需要 key 和 price 两列"})
+			continue
+		}
+		key := fields[0]
+		price, err := strconv.ParseFloat(fields[1], 64)
+		if err != nil {
+			parseErr = append(parseErr, lineErr{Line: lineNum, Reason: "无法解析价格: " + fields[1]})
+			continue
+		}
+		var channelID int
+		err = db.QueryRow(`SELECT id FROM channels WHERE key = $1 LIMIT 1`, key).Scan(&channelID)
+		if err == sql.ErrNoRows {
+			notFound = append(notFound, key)
+			continue
+		}
+		if err != nil {
+			parseErr = append(parseErr, lineErr{Line: lineNum, Reason: "查询失败: " + err.Error()})
+			continue
+		}
+		// Upsert only unit_price_cny + updated_at; keep quota_usd/note intact.
+		_, err = db.Exec(`
+			INSERT INTO report_key_quotas (channel_id, quota_usd, unit_price_cny, note, updated_at)
+			VALUES ($1, 0, $2, '', $3)
+			ON CONFLICT (channel_id) DO UPDATE SET
+			  unit_price_cny = $2,
+			  updated_at = $3`,
+			channelID, price, now)
+		if err != nil {
+			parseErr = append(parseErr, lineErr{Line: lineNum, Reason: "写入失败: " + err.Error()})
+			continue
+		}
+		saved++
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"saved":     saved,
+		"not_found": notFound,
+		"errors":    parseErr,
+	})
 }
 
 // ---- Downstream group pricing ----

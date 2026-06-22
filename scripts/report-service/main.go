@@ -1435,6 +1435,7 @@ func main() {
 
 	// Profit reporting
 	api.POST("/profit/keys/pricing", handleSaveKeyPricing)
+	api.POST("/profit/keys/pricing/bulk", handleBulkSaveKeyPricing)
 	api.GET("/profit/downstream/pricing", handleListDownstreamPricing)
 	api.POST("/profit/downstream/pricing", handleSaveDownstreamPricing)
 	api.DELETE("/profit/downstream/pricing/:group", handleDeleteDownstreamPricing)

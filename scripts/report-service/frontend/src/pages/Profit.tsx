@@ -30,6 +30,10 @@ export default function Profit() {
   // Local edits for downstream group prices.
   const [dsEdits, setDsEdits] = useState<Record<string, { price?: string; note?: string }>>({})
   const [dsNewGroup, setDsNewGroup] = useState('')
+  // Bulk-import textarea state.
+  const [bulkText, setBulkText] = useState('')
+  const [bulkResult, setBulkResult] = useState<{ saved: number; not_found: string[]; errors: { line: number; reason: string }[] } | null>(null)
+  const [bulkSubmitting, setBulkSubmitting] = useState(false)
 
   const load = async () => {
     setLoading(true)
@@ -93,6 +97,26 @@ export default function Profit() {
       await load()
     } catch (err) {
       alert('保存失败：' + (err as Error).message)
+    }
+  }
+
+  const submitBulk = async () => {
+    if (!bulkText.trim()) {
+      alert('请粘贴 key 和单价（每行 "key 价格"）')
+      return
+    }
+    setBulkSubmitting(true)
+    try {
+      const r = await api.bulkSaveKeyPricing(bulkText)
+      setBulkResult(r)
+      if (r.saved > 0) {
+        await load()
+        setBulkText('')
+      }
+    } catch (err) {
+      alert('批量导入失败：' + (err as Error).message)
+    } finally {
+      setBulkSubmitting(false)
     }
   }
 
@@ -259,6 +283,52 @@ export default function Profit() {
               )}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      <div className="bg-white border border-gray-200 rounded-xl mb-4">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+          <div>
+            <div className="text-sm font-semibold">批量导入上游单价</div>
+            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">每行 "key 价格"，按 channel.key 精确匹配</div>
+          </div>
+          <button onClick={submitBulk} disabled={bulkSubmitting} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-50">
+            {bulkSubmitting ? '导入中...' : '导入'}
+          </button>
+        </div>
+        <div className="p-4 space-y-3">
+          <textarea
+            value={bulkText}
+            onChange={ev => setBulkText(ev.target.value)}
+            placeholder={`sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx    4.1\nsk-ant-api03-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy    4.3\n# 以 # 开头为注释`}
+            rows={8}
+            className="w-full border border-gray-200 rounded-md px-3 py-2 font-mono text-[11px] resize-y focus:outline-none focus:border-gray-400"
+          />
+          {bulkResult && (
+            <div className="text-xs bg-gray-50 border border-gray-200 rounded-md px-3 py-2 space-y-1">
+              <div>
+                <span className="text-emerald-600 font-medium">已保存 {bulkResult.saved}</span>
+                {bulkResult.not_found.length > 0 && <span className="ml-3 text-amber-700">未匹配 {bulkResult.not_found.length}</span>}
+                {bulkResult.errors.length > 0 && <span className="ml-3 text-rose-600">错误 {bulkResult.errors.length}</span>}
+              </div>
+              {bulkResult.not_found.length > 0 && (
+                <details className="text-amber-700">
+                  <summary className="cursor-pointer">未找到的 key</summary>
+                  <ul className="ml-4 mt-1 font-mono text-[10px] space-y-0.5">
+                    {bulkResult.not_found.map((k, i) => <li key={i}>{k}</li>)}
+                  </ul>
+                </details>
+              )}
+              {bulkResult.errors.length > 0 && (
+                <details className="text-rose-600">
+                  <summary className="cursor-pointer">解析错误</summary>
+                  <ul className="ml-4 mt-1 text-[10px] space-y-0.5">
+                    {bulkResult.errors.map((e, i) => <li key={i}>第 {e.line} 行：{e.reason}</li>)}
+                  </ul>
+                </details>
+              )}
+            </div>
+          )}
         </div>
       </div>
 

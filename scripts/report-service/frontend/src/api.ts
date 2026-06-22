@@ -163,6 +163,13 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  bulkSaveKeyPricing: (text: string) =>
+    request<{ saved: number; not_found: string[]; errors: { line: number; reason: string }[] }>('/api/profit/keys/pricing/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    }),
+
   getDownstreamPricing: () =>
     request<DownstreamPricing[]>('/api/profit/downstream/pricing'),
 
