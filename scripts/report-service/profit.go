@@ -435,7 +435,8 @@ func loadStep1(startDate, endDate string) ([]step1Row, error) {
 		LEFT JOIN report_key_quotas q ON q.channel_id = r.channel_id
 		WHERE LEFT(r.hour,10) BETWEEN $1 AND $2
 		  AND COALESCE(c.tag,'') <> 'pipi'
-		GROUP BY date, r.channel_id, r.channel_name, channel_tag, token_group, q.unit_price_cny
+		GROUP BY LEFT(r.hour,10), r.channel_id, COALESCE(r.channel_name,''),
+		         COALESCE(c.tag,''), COALESCE(r."group",''), q.unit_price_cny
 	`
 	rows, err := db.Query(q, startDate, endDate)
 	if err != nil {
@@ -460,7 +461,7 @@ func loadStep2(startDate, endDate string) ([]step2Row, error) {
 		LEFT JOIN channels c ON c.id = r.channel_id
 		WHERE LEFT(r.hour,10) BETWEEN $1 AND $2
 		  AND COALESCE(c.tag,'') = 'pipi'
-		GROUP BY date, token_group
+		GROUP BY LEFT(r.hour,10), COALESCE(r."group",'')
 	`
 	rows, err := db.Query(q, startDate, endDate)
 	if err != nil {
