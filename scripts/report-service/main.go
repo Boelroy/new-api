@@ -34,14 +34,16 @@ var db *sql.DB
 // ---- Auth ----
 
 var (
-	adminUser           string
-	adminPass           string
-	jwtSecret           []byte
-	mainServiceURL      string
-	mainServiceUID      string
-	ssoSecret           []byte
-	reportAPIKey        string
-	profitGateRequired  = true
+	adminUser      string
+	adminPass      string
+	jwtSecret      []byte
+	mainServiceURL string
+	mainServiceUID string
+	ssoSecret      []byte
+	reportAPIKey   string
+	// profitEnabled controls whether the profit page and its API routes
+	// are wired up at all. Off by default — set PROFIT_ENABLED=true to opt in.
+	profitEnabled = false
 )
 
 // SSO session cache: maps session cookie value → expiry
@@ -765,7 +767,7 @@ func handleSSOCallback(c *gin.Context) {
 }
 
 func handleAuthConfig(c *gin.Context) {
-	resp := gin.H{"profit_gate_required": profitGateRequired}
+	resp := gin.H{"profit_enabled": profitEnabled}
 	if mainServiceURL != "" {
 		resp["sso_url"] = mainServiceURL + "/sign-in"
 	} else {
@@ -1307,10 +1309,10 @@ func main() {
 		ssoSecret = []byte(s)
 	}
 	reportAPIKey = os.Getenv("REPORT_API_KEY")
-	if v := os.Getenv("PROFIT_GATE_REQUIRED"); v != "" {
+	if v := os.Getenv("PROFIT_ENABLED"); v != "" {
 		switch strings.ToLower(v) {
-		case "false", "0", "no", "off":
-			profitGateRequired = false
+		case "true", "1", "yes", "on":
+			profitEnabled = true
 		}
 	}
 	pipiReportURL = os.Getenv("PIPI_REPORT_URL")
@@ -1443,7 +1445,9 @@ func main() {
 
 	startDailyRefresh()
 	startNotifyLoop()
-	startPipiSync()
+	if profitEnabled {
+		startPipiSync()
+	}
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
@@ -1465,19 +1469,21 @@ func main() {
 	api.GET("/allkeys/data", handleAllKeysData)
 	api.POST("/keys/test", handleTestKeys)
 
-	// Profit reporting
-	api.POST("/profit/keys/pricing", handleSaveKeyPricing)
-	api.POST("/profit/keys/pricing/bulk", handleBulkSaveKeyPricing)
-	api.GET("/profit/downstream/pricing", handleListDownstreamPricing)
-	api.POST("/profit/downstream/pricing", handleSaveDownstreamPricing)
-	api.DELETE("/profit/downstream/pricing/:group", handleDeleteDownstreamPricing)
-	api.GET("/profit/fx", handleListFXRate)
-	api.POST("/profit/fx", handleSaveFXRate)
-	api.POST("/profit/fx/default", handleSaveDefaultFXRate)
-	api.DELETE("/profit/fx/:date", handleDeleteFXRate)
-	api.GET("/profit/daily", handleProfitDaily)
-	api.POST("/profit/pipi/sync", handleSyncPipi)
-	api.GET("/profit/pipi/status", handlePipiStatus)
+	// Profit reporting — only mount when the feature is enabled.
+	if profitEnabled {
+		api.POST("/profit/keys/pricing", handleSaveKeyPricing)
+		api.POST("/profit/keys/pricing/bulk", handleBulkSaveKeyPricing)
+		api.GET("/profit/downstream/pricing", handleListDownstreamPricing)
+		api.POST("/profit/downstream/pricing", handleSaveDownstreamPricing)
+		api.DELETE("/profit/downstream/pricing/:group", handleDeleteDownstreamPricing)
+		api.GET("/profit/fx", handleListFXRate)
+		api.POST("/profit/fx", handleSaveFXRate)
+		api.POST("/profit/fx/default", handleSaveDefaultFXRate)
+		api.DELETE("/profit/fx/:date", handleDeleteFXRate)
+		api.GET("/profit/daily", handleProfitDaily)
+		api.POST("/profit/pipi/sync", handleSyncPipi)
+		api.GET("/profit/pipi/status", handlePipiStatus)
+	}
 
 	// SPA — serve for all non-API routes
 	r.NoRoute(spaHandler())

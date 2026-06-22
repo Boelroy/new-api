@@ -32,12 +32,10 @@ export default function Profit() {
   const [defaultFxEdit, setDefaultFxEdit] = useState<string>('')
   const [pipiStatus, setPipiStatus] = useState<{ configured: boolean; start?: string; end?: string; status?: string; last_sync_at?: number } | null>(null)
   const [pipiSyncing, setPipiSyncing] = useState(false)
-  // Auth gate state. authChecked=false → still verifying; authOk=true → render the page.
-  const [authChecked, setAuthChecked] = useState(false)
-  const [authOk, setAuthOk] = useState(false)
-  const [gateInput, setGateInput] = useState('')
-  const [gateErr, setGateErr] = useState('')
-  const [gateSubmitting, setGateSubmitting] = useState(false)
+  // Feature flag: configChecked → still fetching /api/auth/config;
+  // featureEnabled → server says profit_enabled=true.
+  const [configChecked, setConfigChecked] = useState(false)
+  const [featureEnabled, setFeatureEnabled] = useState(false)
   const [loading, setLoading] = useState(false)
   const [refreshedAt, setRefreshedAt] = useState('')
 
@@ -87,11 +85,9 @@ export default function Profit() {
     }
   }
 
-  // Gate behaviour is driven by server env PROFIT_GATE_REQUIRED.
-  // When required=false (e.g. System 1) the page renders directly; when
-  // required=true (e.g. System 2) we still validate a stored key first.
+  // Check server-side feature flag before doing anything else.
   useEffect(() => {
-    // Accept ?key=... once and clean it out of the URL.
+    // Accept ?key=... once for service-to-service callers and clean it from the URL.
     const params = new URLSearchParams(window.location.search)
     const k = params.get('key')
     if (k) {
@@ -102,60 +98,17 @@ export default function Profit() {
     }
 
     void (async () => {
-      // Fetch server-side gate config. Default to gate ON if unreachable.
-      let gateRequired = true
       try {
         const cfg = await fetch('/api/auth/config').then(r => r.json())
-        if (cfg.profit_gate_required === false) gateRequired = false
-      } catch { /* keep default */ }
-
-      if (!gateRequired) {
-        setAuthOk(true)
-        setAuthChecked(true)
-        return
-      }
-
-      // Gate is on — only proceed if a stored key validates.
-      if (!getProfitApiKey()) {
-        setAuthChecked(true)
-        return
-      }
-      try {
-        await api.getPipiStatus()
-        setAuthOk(true)
-      } catch {
-        setProfitApiKey('')
-      }
-      setAuthChecked(true)
+        setFeatureEnabled(cfg.profit_enabled === true)
+      } catch { /* default off */ }
+      setConfigChecked(true)
     })()
   }, [])
 
   useEffect(() => {
-    if (authOk) load()
-  }, [authOk])
-
-  const submitGate = async () => {
-    const k = gateInput.trim()
-    if (!k) return
-    setGateSubmitting(true)
-    setGateErr('')
-    setProfitApiKey(k)
-    try {
-      await api.getPipiStatus()
-      setAuthOk(true)
-    } catch {
-      setProfitApiKey('')
-      setGateErr('API Key 无效')
-    } finally {
-      setGateSubmitting(false)
-    }
-  }
-
-  const signOut = () => {
-    setProfitApiKey('')
-    setAuthOk(false)
-    setGateInput('')
-  }
+    if (featureEnabled) load()
+  }, [featureEnabled])
 
   const dailyChart = useMemo(() => {
     if (!profit) return []
@@ -374,43 +327,23 @@ export default function Profit() {
       <button onClick={load} disabled={loading} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-50">
         {loading ? '加载中...' : '查询'}
       </button>
-      <button onClick={signOut} className="border border-gray-200 rounded-md px-2.5 py-1.5 text-[11px] bg-white text-gray-500 hover:text-rose-600 hover:border-rose-300" title="清除 API Key 并返回门">
-        退出
-      </button>
     </>
   )
 
-  // Auth gate — renders before any data when the X-API-Key is missing or invalid.
-  if (!authChecked) {
+  // Feature flag gate — the entire profit feature is off on this deployment.
+  if (!configChecked) {
     return (
       <Layout title="Profit Report">
-        <div className="text-center text-gray-400 text-xs py-12">验证中…</div>
+        <div className="text-center text-gray-400 text-xs py-12">加载中…</div>
       </Layout>
     )
   }
-  if (!authOk) {
+  if (!featureEnabled) {
     return (
-      <Layout title="Profit Report" subtitle="需要 API Key 才能访问">
-        <div className="max-w-sm mx-auto bg-white border border-gray-200 rounded-xl p-6 mt-6">
-          <div className="text-sm font-semibold mb-2">输入 API Key</div>
-          <div className="text-[11px] text-gray-400 mb-3">服务端 REPORT_API_KEY 环境变量配置的值</div>
-          <input
-            type="password"
-            autoFocus
-            value={gateInput}
-            onChange={e => setGateInput(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') void submitGate() }}
-            placeholder="X-API-Key"
-            className="w-full border border-gray-200 rounded-md px-3 py-2 text-xs font-mono focus:outline-none focus:border-gray-400"
-          />
-          {gateErr && <div className="text-rose-600 text-[11px] mt-2">{gateErr}</div>}
-          <button
-            onClick={submitGate}
-            disabled={gateSubmitting || !gateInput.trim()}
-            className="w-full mt-3 bg-gray-900 text-white rounded-md px-3 py-2 text-xs hover:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {gateSubmitting ? '验证中…' : '进入'}
-          </button>
+      <Layout title="Profit Report" subtitle="此部署未启用该功能">
+        <div className="max-w-sm mx-auto bg-white border border-gray-200 rounded-xl p-6 mt-6 text-center">
+          <div className="text-sm font-semibold mb-2">Profit Report is disabled</div>
+          <div className="text-[11px] text-gray-400">设置 PROFIT_ENABLED=true 后重启服务可启用</div>
         </div>
       </Layout>
     )

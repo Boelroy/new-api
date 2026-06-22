@@ -81,7 +81,7 @@ export default function Sidebar({ open, onClose }: Props) {
     void (async () => {
       try {
         const cfg = await fetch('/api/auth/config').then(r => r.json())
-        if (cfg.profit_gate_required === false) setShowProfit(true)
+        if (cfg.profit_enabled === true) setShowProfit(true)
       } catch { /* keep hidden on error */ }
     })()
   }, [])
