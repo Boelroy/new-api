@@ -610,8 +610,8 @@ func handleProfitDaily(c *gin.Context) {
 	summary := ProfitSummary{Start: startDate, End: endDate}
 	for _, d := range daily {
 		d.ProfitUSD = d.RevenueUSD - d.CostUSD
-		if d.RevenueUSD > 0 {
-			d.ProfitRate = d.ProfitUSD / d.RevenueUSD
+		if d.UsedUSD > 0 {
+			d.ProfitRate = d.ProfitUSD / d.UsedUSD
 		}
 		d.UsedUSD = roundTo(d.UsedUSD, 4)
 		d.CostUSD = roundTo(d.CostUSD, 4)
@@ -663,8 +663,8 @@ func handleProfitDaily(c *gin.Context) {
 			KeyCount:   len(b.channels),
 		}
 		out.ProfitUSD = roundTo(out.RevenueUSD-out.CostUSD, 4)
-		if out.RevenueUSD > 0 {
-			out.ProfitRate = roundTo(out.ProfitUSD/out.RevenueUSD, 4)
+		if out.UsedUSD > 0 {
+			out.ProfitRate = roundTo(out.ProfitUSD/out.UsedUSD, 4)
 		}
 		summary.ByTag = append(summary.ByTag, out)
 	}
@@ -679,8 +679,8 @@ func handleProfitDaily(c *gin.Context) {
 	summary.CostUSD = roundTo(summary.CostUSD, 4)
 	summary.RevenueUSD = roundTo(summary.RevenueUSD, 4)
 	summary.ProfitUSD = roundTo(summary.RevenueUSD-summary.CostUSD, 4)
-	if summary.RevenueUSD > 0 {
-		summary.ProfitRate = roundTo((summary.RevenueUSD-summary.CostUSD)/summary.RevenueUSD, 4)
+	if summary.UsedUSD > 0 {
+		summary.ProfitRate = roundTo((summary.RevenueUSD-summary.CostUSD)/summary.UsedUSD, 4)
 	}
 
 	for id := range missingChIDs {
