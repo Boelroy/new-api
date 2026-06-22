@@ -10,8 +10,24 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// defaultFXRate is the CNY/USD fallback when a date has no row in report_fx_rate.
-const defaultFXRate = 6.77
+// defaultFXRate is the cold fallback when neither report_fx_rate nor
+// report_config['default_fx_rate'] has been configured.
+const defaultFXRate = 6.79
+
+// getDefaultFXRate reads the configurable default from report_config and
+// returns the hardcoded fallback if unset or malformed.
+func getDefaultFXRate() float64 {
+	var v string
+	err := db.QueryRow(`SELECT value FROM report_config WHERE key='default_fx_rate'`).Scan(&v)
+	if err != nil {
+		return defaultFXRate
+	}
+	r, err := strconv.ParseFloat(v, 64)
+	if err != nil || r <= 0 {
+		return defaultFXRate
+	}
+	return r
+}
 
 // ---- Upstream per-key pricing ----
 
@@ -217,7 +233,31 @@ func handleListFXRate(c *gin.Context) {
 		}
 		out = append(out, f)
 	}
-	c.JSON(http.StatusOK, gin.H{"rates": out, "default_rate": defaultFXRate})
+	c.JSON(http.StatusOK, gin.H{"rates": out, "default_rate": getDefaultFXRate()})
+}
+
+func handleSaveDefaultFXRate(c *gin.Context) {
+	var body struct {
+		Rate float64 `json:"rate"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.Rate <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "rate must be > 0"})
+		return
+	}
+	v := strconv.FormatFloat(body.Rate, 'f', 4, 64)
+	_, err := db.Exec(`
+		INSERT INTO report_config (key, value, updated_at) VALUES ('default_fx_rate', $1, $2)
+		ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=$2`,
+		v, time.Now().Unix())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "rate": body.Rate})
 }
 
 func handleSaveFXRate(c *gin.Context) {
@@ -390,11 +430,12 @@ func handleProfitDaily(c *gin.Context) {
 		}
 	}
 	fxRows.Close()
+	def := getDefaultFXRate()
 	getFX := func(d string) float64 {
 		if r, ok := fx[d]; ok && r > 0 {
 			return r
 		}
-		return defaultFXRate
+		return def
 	}
 
 	step1, err := loadStep1(startDate, endDate)

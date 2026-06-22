@@ -1401,10 +1401,16 @@ func main() {
 				UPDATE report_downstream_pricing SET discount = ROUND(discount / 6.77, 4);
 			END IF;
 		END $$`,
-		// per-day FX rate (CNY per USD). Falls back to 6.77 when a date has no row.
+		// per-day FX rate (CNY per USD). Falls back to default when a date has no row.
 		`CREATE TABLE IF NOT EXISTS report_fx_rate (
 			date        TEXT PRIMARY KEY,
 			rate        NUMERIC(8,4) NOT NULL,
+			updated_at  BIGINT NOT NULL
+		)`,
+		// generic key-value config (currently: default_fx_rate)
+		`CREATE TABLE IF NOT EXISTS report_config (
+			key         TEXT PRIMARY KEY,
+			value       TEXT NOT NULL,
 			updated_at  BIGINT NOT NULL
 		)`,
 		// pipi daily sync: cost snapshot pulled from System 2
@@ -1458,6 +1464,7 @@ func main() {
 	api.DELETE("/profit/downstream/pricing/:group", handleDeleteDownstreamPricing)
 	api.GET("/profit/fx", handleListFXRate)
 	api.POST("/profit/fx", handleSaveFXRate)
+	api.POST("/profit/fx/default", handleSaveDefaultFXRate)
 	api.DELETE("/profit/fx/:date", handleDeleteFXRate)
 	api.GET("/profit/daily", handleProfitDaily)
 

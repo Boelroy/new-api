@@ -22,7 +22,8 @@ export default function Profit() {
   const [keys, setKeys] = useState<ChannelRow[]>([])
   const [downstream, setDownstream] = useState<DownstreamPricing[]>([])
   const [fxRates, setFxRates] = useState<FXRate[]>([])
-  const [defaultFxRate, setDefaultFxRate] = useState(6.77)
+  const [defaultFxRate, setDefaultFxRate] = useState(6.79)
+  const [defaultFxEdit, setDefaultFxEdit] = useState<string>('')
   const [loading, setLoading] = useState(false)
   const [refreshedAt, setRefreshedAt] = useState('')
 
@@ -55,6 +56,7 @@ export default function Profit() {
       setDownstream(d)
       setFxRates(fx.rates)
       setDefaultFxRate(fx.default_rate)
+      setDefaultFxEdit('')
       setRefreshedAt(new Date().toLocaleTimeString('zh-CN'))
       setKeyEdits({})
       setDsEdits({})
@@ -217,6 +219,21 @@ export default function Profit() {
     }
   }
 
+  const saveDefaultFx = async () => {
+    const rate = parseFloat(defaultFxEdit)
+    if (Number.isNaN(rate) || rate <= 0) {
+      alert('请输入有效汇率')
+      return
+    }
+    try {
+      await api.saveDefaultFXRate(rate)
+      await load()
+      alert('默认汇率已保存')
+    } catch (err) {
+      alert('保存失败：' + (err as Error).message)
+    }
+  }
+
   const deleteFXRate = async (date: string) => {
     if (!confirm(`删除 ${date} 的汇率？`)) return
     try {
@@ -361,12 +378,29 @@ export default function Profit() {
       </div>
 
       <div className="bg-white border border-gray-200 rounded-xl mb-4">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 gap-3 flex-wrap">
           <div>
             <div className="text-sm font-semibold">每日汇率</div>
-            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">CNY per USD · 未配置日期使用 {defaultFxRate.toFixed(2)}</div>
+            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">CNY per USD · 缺日期回退到默认</div>
           </div>
-          <button onClick={submitFXRates} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85">保存改动</button>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-gray-500">默认</span>
+            <input
+              type="number"
+              step="0.01"
+              value={defaultFxEdit === '' ? String(defaultFxRate) : defaultFxEdit}
+              onChange={ev => setDefaultFxEdit(ev.target.value)}
+              className="w-20 border border-gray-200 rounded px-1.5 py-0.5 text-right text-xs"
+            />
+            <button
+              onClick={saveDefaultFx}
+              disabled={defaultFxEdit === '' || parseFloat(defaultFxEdit) === defaultFxRate}
+              className="border border-gray-200 rounded-md px-2.5 py-1 text-[11px] bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              更新默认
+            </button>
+            <button onClick={submitFXRates} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85">保存改动</button>
+          </div>
         </div>
         <div className="overflow-x-auto max-h-[260px] overflow-y-auto">
           <table className="w-full text-xs whitespace-nowrap">

@@ -206,6 +206,13 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  saveDefaultFXRate: (rate: number) =>
+    request<{ ok: boolean; rate: number }>('/api/profit/fx/default', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rate }),
+    }),
+
   deleteFXRate: (date: string) =>
     request<{ ok: boolean }>(`/api/profit/fx/${encodeURIComponent(date)}`, {
       method: 'DELETE',
