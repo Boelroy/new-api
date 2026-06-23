@@ -1474,11 +1474,13 @@ func main() {
 	api.POST("/channels/batch-create", handleBatchCreateChannels)
 	api.GET("/allkeys/data", handleAllKeysData)
 	api.POST("/keys/test", handleTestKeys)
+	// Per-key upstream pricing edit. Lives outside /profit/* so the All Keys
+	// page can manage it even on deployments where the profit report is off.
+	api.POST("/keys/pricing", handleSaveKeyPricing)
+	api.POST("/keys/pricing/bulk", handleBulkSaveKeyPricing)
 
 	// Profit reporting — only mount when the feature is enabled.
 	if profitEnabled {
-		api.POST("/profit/keys/pricing", handleSaveKeyPricing)
-		api.POST("/profit/keys/pricing/bulk", handleBulkSaveKeyPricing)
 		api.GET("/profit/downstream/pricing", handleListDownstreamPricing)
 		api.POST("/profit/downstream/pricing", handleSaveDownstreamPricing)
 		api.DELETE("/profit/downstream/pricing/:group", handleDeleteDownstreamPricing)

@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from 'recharts'
 import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
-import { api, ChannelRow, DownstreamPricing, FXRate, ProfitSummary, getProfitApiKey, setProfitApiKey } from '../api'
+import { api, DownstreamPricing, FXRate, ProfitSummary, setProfitApiKey } from '../api'
 
 const COLORS = ['#2563eb','#059669','#d97706','#e11d48','#7c3aed','#ea580c','#0d9488','#c026d3','#3b82f6','#10b981']
 
@@ -10,11 +10,6 @@ function today() { return new Date().toISOString().slice(0, 10) }
 function firstOfMonth() {
   const d = new Date()
   d.setUTCDate(1)
-  return d.toISOString().slice(0, 10)
-}
-function dayBefore(ymd: string): string {
-  const d = new Date(ymd + 'T00:00:00Z')
-  d.setUTCDate(d.getUTCDate() - 1)
   return d.toISOString().slice(0, 10)
 }
 
@@ -25,7 +20,6 @@ export default function Profit() {
   const [start, setStart] = useState(firstOfMonth())
   const [end, setEnd] = useState(today())
   const [profit, setProfit] = useState<ProfitSummary | null>(null)
-  const [keys, setKeys] = useState<ChannelRow[]>([])
   const [downstream, setDownstream] = useState<DownstreamPricing[]>([])
   const [fxRates, setFxRates] = useState<FXRate[]>([])
   const [defaultFxRate, setDefaultFxRate] = useState(6.79)
@@ -39,9 +33,6 @@ export default function Profit() {
   const [loading, setLoading] = useState(false)
   const [refreshedAt, setRefreshedAt] = useState('')
 
-  // Local edits buffer for per-key prices.
-  const [keyEdits, setKeyEdits] = useState<Record<number, { price?: string; note?: string }>>({})
-  const [keyOnlyUnpriced, setKeyOnlyUnpriced] = useState(false)
   // Local edits for downstream group prices.
   const [dsEdits, setDsEdits] = useState<Record<string, { price?: string; note?: string }>>({})
   const [dsNewGroup, setDsNewGroup] = useState('')
@@ -49,32 +40,23 @@ export default function Profit() {
   const [fxEdits, setFxEdits] = useState<Record<string, string>>({})
   const [fxNewDate, setFxNewDate] = useState(today())
   const [fxNewRate, setFxNewRate] = useState('')
-  // Bulk-import textarea state.
-  const [bulkText, setBulkText] = useState('')
-  const [bulkResult, setBulkResult] = useState<{ saved: number; not_found: string[]; errors: { line: number; reason: string }[] } | null>(null)
-  const [bulkSubmitting, setBulkSubmitting] = useState(false)
 
   const load = async () => {
     setLoading(true)
     try {
-      // 上游单价配置表只看创建时间落在 [start-1天, end] 的 channel
-      const keysStart = dayBefore(start)
-      const [p, k, d, fx, ps] = await Promise.all([
+      const [p, d, fx, ps] = await Promise.all([
         api.getProfitDaily(start, end),
-        api.getAllKeys(keysStart, end),
         api.getDownstreamPricing(),
         api.getFXRates(),
         api.getPipiStatus().catch(() => null),
       ])
       setProfit(p)
-      setKeys(k.sort((a, b) => a.id - b.id))
       setDownstream(d)
       setFxRates(fx.rates)
       setDefaultFxRate(fx.default_rate)
       setDefaultFxEdit('')
       setPipiStatus(ps)
       setRefreshedAt(new Date().toLocaleTimeString('zh-CN'))
-      setKeyEdits({})
       setDsEdits({})
       setFxEdits({})
     } catch (err) {
@@ -126,63 +108,9 @@ export default function Profit() {
       }))
   }, [profit])
 
-  // Profit report is scoped to Claude-serving channels on the backend
-  // (14 Anthropic direct / 33 AWS Bedrock). Mirror that filter here.
-  const anthropicKeys = useMemo(() => keys.filter(k => k.type === 14 || k.type === 33), [keys])
-  const filteredKeys = useMemo(() => {
-    if (!keyOnlyUnpriced) return anthropicKeys
-    return anthropicKeys.filter(k => k.unit_price_cny == null)
-  }, [anthropicKeys, keyOnlyUnpriced])
-
-  const unpricedKeyCount = useMemo(() => anthropicKeys.filter(k => k.unit_price_cny == null).length, [anthropicKeys])
 
   const missing = profit?.missing_pricing
   const hasMissing = !!(missing && ((missing.channel_ids && missing.channel_ids.length) || (missing.groups && missing.groups.length)))
-
-  const submitKeyPricing = async () => {
-    const payload = Object.entries(keyEdits)
-      .map(([id, e]) => {
-        const channel_id = Number(id)
-        const out: { channel_id: number; unit_price_cny?: number; note?: string } = { channel_id }
-        if (e.price !== undefined && e.price !== '') {
-          const v = parseFloat(e.price)
-          if (!Number.isNaN(v)) out.unit_price_cny = v
-        }
-        if (e.note !== undefined) out.note = e.note
-        return out
-      })
-      .filter(p => p.unit_price_cny !== undefined || p.note !== undefined)
-    if (payload.length === 0) {
-      alert('没有改动')
-      return
-    }
-    try {
-      await api.saveKeyPricing(payload)
-      await load()
-    } catch (err) {
-      alert('保存失败：' + (err as Error).message)
-    }
-  }
-
-  const submitBulk = async () => {
-    if (!bulkText.trim()) {
-      alert('请粘贴 key 和单价（每行 "key 价格"）')
-      return
-    }
-    setBulkSubmitting(true)
-    try {
-      const r = await api.bulkSaveKeyPricing(bulkText)
-      setBulkResult(r)
-      if (r.saved > 0) {
-        await load()
-        setBulkText('')
-      }
-    } catch (err) {
-      alert('批量导入失败：' + (err as Error).message)
-    } finally {
-      setBulkSubmitting(false)
-    }
-  }
 
   const submitDownstream = async () => {
     const payload: { group: string; discount: number; note: string }[] = []
@@ -610,126 +538,8 @@ export default function Profit() {
         </div>
       </div>
 
-      <div className="bg-white border border-gray-200 rounded-xl mb-4">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
-          <div>
-            <div className="text-sm font-semibold">批量导入上游单价</div>
-            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">每行 "key 价格"，按 channel.key 精确匹配</div>
-          </div>
-          <button onClick={submitBulk} disabled={bulkSubmitting} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-50">
-            {bulkSubmitting ? '导入中...' : '导入'}
-          </button>
-        </div>
-        <div className="p-4 space-y-3">
-          <textarea
-            value={bulkText}
-            onChange={ev => setBulkText(ev.target.value)}
-            placeholder={`sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx    4.1\nsk-ant-api03-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy    4.3\n# 以 # 开头为注释`}
-            rows={8}
-            className="w-full border border-gray-200 rounded-md px-3 py-2 font-mono text-[11px] resize-y focus:outline-none focus:border-gray-400"
-          />
-          {bulkResult && (
-            <div className="text-xs bg-gray-50 border border-gray-200 rounded-md px-3 py-2 space-y-1">
-              <div>
-                <span className="text-emerald-600 font-medium">已保存 {bulkResult.saved}</span>
-                {bulkResult.not_found.length > 0 && <span className="ml-3 text-amber-700">未匹配 {bulkResult.not_found.length}</span>}
-                {bulkResult.errors.length > 0 && <span className="ml-3 text-rose-600">错误 {bulkResult.errors.length}</span>}
-              </div>
-              {bulkResult.not_found.length > 0 && (
-                <details className="text-amber-700">
-                  <summary className="cursor-pointer">未找到的 key</summary>
-                  <ul className="ml-4 mt-1 font-mono text-[10px] space-y-0.5">
-                    {bulkResult.not_found.map((k, i) => <li key={i}>{k}</li>)}
-                  </ul>
-                </details>
-              )}
-              {bulkResult.errors.length > 0 && (
-                <details className="text-rose-600">
-                  <summary className="cursor-pointer">解析错误</summary>
-                  <ul className="ml-4 mt-1 text-[10px] space-y-0.5">
-                    {bulkResult.errors.map((e, i) => <li key={i}>第 {e.line} 行：{e.reason}</li>)}
-                  </ul>
-                </details>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="bg-white border border-gray-200 rounded-xl mb-4">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 gap-3 flex-wrap">
-          <div>
-            <div className="text-sm font-semibold">上游单价配置</div>
-            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">Per-Key CNY / USD of usage</div>
-          </div>
-          <div className="flex items-center gap-3">
-            <label className="flex items-center gap-1.5 text-xs text-gray-600">
-              <input
-                type="checkbox"
-                checked={keyOnlyUnpriced}
-                onChange={ev => setKeyOnlyUnpriced(ev.target.checked)}
-                className="rounded border-gray-300"
-              />
-              仅显示未配价（{unpricedKeyCount}）
-            </label>
-            <span className="text-[10px] text-gray-400 tabular-nums">{filteredKeys.length}/{keys.length}</span>
-            <button onClick={submitKeyPricing} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85">保存改动</button>
-          </div>
-        </div>
-        <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
-          <table className="w-full text-xs whitespace-nowrap">
-            <thead className="sticky top-0 bg-gray-50">
-              <tr>
-                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">ID</th>
-                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">名称</th>
-                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Key</th>
-                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Tag</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">已用 USD</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">额度 USD</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">单价 CNY</th>
-                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">备注</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredKeys.map(k => {
-                const e = keyEdits[k.id] || {}
-                const priceVal = e.price !== undefined ? e.price : (k.unit_price_cny != null ? String(k.unit_price_cny) : '')
-                const noteVal = e.note !== undefined ? e.note : k.note
-                const isMissing = missingChIDs.has(k.id)
-                return (
-                  <tr key={k.id} className={`border-t border-gray-100 hover:bg-gray-50 ${isMissing ? 'bg-amber-50/50' : ''}`}>
-                    <td className="px-3 py-1.5 font-mono text-gray-500">{k.id}</td>
-                    <td className="px-3 py-1.5">{k.name}</td>
-                    <td className="px-3 py-1.5 font-mono text-[10px] text-gray-500">{k.key}</td>
-                    <td className="px-3 py-1.5">
-                      {k.tag && <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 text-[10px]">{k.tag}</span>}
-                    </td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{k.used_usd.toFixed(2)}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{k.quota_usd != null ? k.quota_usd.toFixed(2) : '-'}</td>
-                    <td className="px-3 py-1.5 text-right">
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={priceVal}
-                        onChange={ev => setKeyEdits(prev => ({ ...prev, [k.id]: { ...prev[k.id], price: ev.target.value } }))}
-                        placeholder={isMissing ? '缺' : '4.30'}
-                        className={`w-20 border rounded px-1.5 py-0.5 text-right text-xs ${isMissing ? 'border-amber-300 bg-white' : 'border-gray-200'}`}
-                      />
-                    </td>
-                    <td className="px-3 py-1.5">
-                      <input
-                        type="text"
-                        value={noteVal}
-                        onChange={ev => setKeyEdits(prev => ({ ...prev, [k.id]: { ...prev[k.id], note: ev.target.value } }))}
-                        className="w-40 border border-gray-200 rounded px-1.5 py-0.5 text-xs"
-                      />
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
+      <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 mb-4 text-xs text-amber-900">
+        💡 上游 key 的单价配置已移至 <a href="/allkeys" className="underline hover:text-amber-700">All Keys</a> 页面
       </div>
 
       <div className="bg-white border border-gray-200 rounded-xl">

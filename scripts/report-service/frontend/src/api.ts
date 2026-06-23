@@ -210,14 +210,14 @@ export const api = {
     }),
 
   saveKeyPricing: (payload: { channel_id: number; quota_usd?: number; unit_price_cny?: number; note?: string }[]) =>
-    request<{ saved: number }>('/api/profit/keys/pricing', {
+    request<{ saved: number }>('/api/keys/pricing', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
 
   bulkSaveKeyPricing: (text: string) =>
-    request<{ saved: number; not_found: string[]; errors: { line: number; reason: string }[] }>('/api/profit/keys/pricing/bulk', {
+    request<{ saved: number; not_found: string[]; errors: { line: number; reason: string }[] }>('/api/keys/pricing/bulk', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
