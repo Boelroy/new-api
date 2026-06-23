@@ -263,7 +263,16 @@ export const api = {
     request<ProfitSummary>(`/api/profit/daily?start=${start}&end=${end}`),
 
   refreshToday: () =>
-    request<{ ok: boolean; date: string; elapsed_ms: number }>('/api/refresh', {
+    request<{
+      ok: boolean
+      date: string
+      elapsed_ms: number
+      local_elapsed_ms?: number
+      pipi_refresh_elapsed_ms?: number
+      pipi_refresh_error?: string
+      pipi_sync_elapsed_ms?: number
+      pipi_sync_error?: string
+    }>('/api/refresh', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     }),

@@ -810,8 +810,9 @@ func handleLogout(c *gin.Context) {
 }
 
 // handleRefresh re-aggregates today's logs on demand and returns when done.
-// Concurrent calls return 409 immediately — the in-flight run will publish
-// the same fresh state for everyone once it finishes.
+// When pipi is configured (System 1), it ALSO fires System 2's /api/refresh
+// in parallel and then pulls today's pipi rollup so /profit sees fresh
+// numbers end-to-end. Concurrent calls return 409 immediately.
 func handleRefresh(c *gin.Context) {
 	refreshMu.Lock()
 	if refreshRunning {
@@ -830,15 +831,62 @@ func handleRefresh(c *gin.Context) {
 
 	today := time.Now().UTC().Format("2006-01-02")
 	start := time.Now()
-	if err := aggregateDay(today); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+
+	pipiConfigured := pipiReportURL != "" && pipiReportAPIKey != ""
+
+	var wg sync.WaitGroup
+	var localErr, remoteErr error
+	var localElapsed, remoteElapsed int64
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s := time.Now()
+		localErr = aggregateDay(today)
+		localElapsed = time.Since(s).Milliseconds()
+	}()
+	if pipiConfigured {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s := time.Now()
+			remoteErr = pipiRefreshRemote()
+			remoteElapsed = time.Since(s).Milliseconds()
+		}()
+	}
+	wg.Wait()
+
+	if localErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "local: " + localErr.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"ok":         true,
-		"date":       today,
-		"elapsed_ms": time.Since(start).Milliseconds(),
-	})
+
+	// Pipi sync after remote refresh so we pull the freshly aggregated rows.
+	var syncErr error
+	var syncElapsed int64
+	if pipiConfigured {
+		s := time.Now()
+		syncErr = syncPipiOnce(today, today)
+		syncElapsed = time.Since(s).Milliseconds()
+	}
+
+	resp := gin.H{
+		"ok":               true,
+		"date":             today,
+		"elapsed_ms":       time.Since(start).Milliseconds(),
+		"local_elapsed_ms": localElapsed,
+	}
+	if pipiConfigured {
+		resp["pipi_refresh_elapsed_ms"] = remoteElapsed
+		if remoteErr != nil {
+			resp["pipi_refresh_error"] = remoteErr.Error()
+		}
+		resp["pipi_sync_elapsed_ms"] = syncElapsed
+		if syncErr != nil {
+			resp["pipi_sync_error"] = syncErr.Error()
+		}
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 func handleRefreshStatus(c *gin.Context) {

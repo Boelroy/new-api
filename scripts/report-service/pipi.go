@@ -47,6 +47,31 @@ type pipiChannelRow struct {
 	UnitPriceCNY *float64 `json:"unit_price_cny"`
 }
 
+// pipiRefreshRemote triggers System 2's POST /api/refresh and waits for it
+// to finish. Treats 409 (already running there) as success since the
+// in-flight run will produce fresh data anyway.
+func pipiRefreshRemote() error {
+	if pipiReportURL == "" || pipiReportAPIKey == "" {
+		return nil
+	}
+	req, err := http.NewRequest("POST", strings.TrimRight(pipiReportURL, "/")+"/api/refresh", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-API-Key", pipiReportAPIKey)
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusConflict {
+		return nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	return fmt.Errorf("pipi refresh: status %d body=%s", resp.StatusCode, string(body))
+}
+
 func pipiGet(path string, out any) error {
 	url := strings.TrimRight(pipiReportURL, "/") + path
 	req, err := http.NewRequest("GET", url, nil)

@@ -199,7 +199,17 @@ export default function Profit() {
     try {
       const r = await api.refreshToday()
       await load()
-      alert(`已刷新 ${r.date}（${(r.elapsed_ms / 1000).toFixed(1)}s）`)
+      const lines = [`已刷新 ${r.date}（总计 ${(r.elapsed_ms / 1000).toFixed(1)}s）`]
+      if (r.local_elapsed_ms !== undefined) {
+        lines.push(`  本地聚合 ${(r.local_elapsed_ms / 1000).toFixed(1)}s`)
+      }
+      if (r.pipi_refresh_elapsed_ms !== undefined) {
+        lines.push(`  pipi refresh ${(r.pipi_refresh_elapsed_ms / 1000).toFixed(1)}s${r.pipi_refresh_error ? ' ⚠ ' + r.pipi_refresh_error : ''}`)
+      }
+      if (r.pipi_sync_elapsed_ms !== undefined) {
+        lines.push(`  pipi sync ${(r.pipi_sync_elapsed_ms / 1000).toFixed(1)}s${r.pipi_sync_error ? ' ⚠ ' + r.pipi_sync_error : ''}`)
+      }
+      alert(lines.join('\n'))
     } catch (err) {
       const msg = (err as Error).message
       if (msg.includes('already running')) {
