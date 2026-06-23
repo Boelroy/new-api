@@ -217,7 +217,7 @@ func checkAndNotify() {
 	// Only consider channels that have an explicit quota configured. Mixing
 	// usage from unmetered channels with the configured-quota sum produced
 	// nonsensical negative remainders in the notification text.
-	var totalUsed, totalQuota, totalLastHour float64
+	var totalUsed, totalQuota float64
 	hasQuota := false
 	for _, ch := range channels {
 		if ch.QuotaUSD == nil {
@@ -225,10 +225,20 @@ func checkAndNotify() {
 		}
 		totalUsed += ch.UsedUSD
 		totalQuota += *ch.QuotaUSD
-		totalLastHour += ch.LastHourUSD
 		hasQuota = true
 	}
 	if !hasQuota {
+		return
+	}
+
+	// Burn rate covers ALL channels — including unquota'd / disabled ones —
+	// so the eta matches what users see in the "最近1小时消耗" card on the
+	// Key Capacity page (which uses queryTotalLastHour). Pessimistic-but-
+	// consistent: real Anthropic-side spend is included even when a key
+	// hasn't been mapped to a quota row yet.
+	totalLastHour, err := queryTotalLastHour()
+	if err != nil {
+		log.Printf("checkAndNotify last-hour error: %v", err)
 		return
 	}
 
@@ -316,9 +326,12 @@ func snapshotNotify() notifyState {
 		st.ChannelsWithQuota++
 		st.TotalUsedUSD += ch.UsedUSD
 		st.TotalQuotaUSD += *ch.QuotaUSD
-		st.TotalLastHourUSD += ch.LastHourUSD
 	}
 	st.TotalRemainingUSD = st.TotalQuotaUSD - st.TotalUsedUSD
+	// Burn rate sourced globally so it matches the UI's 最近1小时消耗 card.
+	if lh, err := queryTotalLastHour(); err == nil {
+		st.TotalLastHourUSD = lh
+	}
 	if st.TotalLastHourUSD > 0 {
 		st.ETAHours = st.TotalRemainingUSD / st.TotalLastHourUSD
 		st.WouldAlert["hours"] = notifyHoursThreshold > 0 && st.ETAHours < notifyHoursThreshold
