@@ -278,12 +278,8 @@ func startNotifyLoop() {
 	if larkWebhook == "" {
 		return
 	}
+	ticker := time.NewTicker(10 * time.Minute)
 	go func() {
-		// Fire an immediate check after startup so a freshly-deployed instance
-		// doesn't sit on a tripped threshold for 10 minutes before the first tick.
-		time.Sleep(5 * time.Second)
-		checkAndNotify()
-		ticker := time.NewTicker(10 * time.Minute)
 		for range ticker.C {
 			checkAndNotify()
 		}
