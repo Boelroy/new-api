@@ -265,12 +265,93 @@ func checkAndNotify() {
 }
 
 func startNotifyLoop() {
-	ticker := time.NewTicker(10 * time.Minute)
+	if larkWebhook == "" {
+		return
+	}
 	go func() {
+		// Fire an immediate check after startup so a freshly-deployed instance
+		// doesn't sit on a tripped threshold for 10 minutes before the first tick.
+		time.Sleep(5 * time.Second)
+		checkAndNotify()
+		ticker := time.NewTicker(10 * time.Minute)
 		for range ticker.C {
 			checkAndNotify()
 		}
 	}()
+}
+
+// computeNotifyState mirrors the calculation in checkAndNotify but returns the
+// state without sending. Used by /api/notify/status for diagnosis.
+type notifyState struct {
+	ChannelsWithQuota int                  `json:"channels_with_quota"`
+	TotalQuotaUSD     float64              `json:"total_quota_usd"`
+	TotalUsedUSD      float64              `json:"total_used_usd"`
+	TotalRemainingUSD float64              `json:"total_remaining_usd"`
+	TotalLastHourUSD  float64              `json:"total_last_hour_usd"`
+	ETAHours          float64              `json:"eta_hours"`
+	LarkConfigured    bool                 `json:"lark_configured"`
+	Thresholds        map[string]float64   `json:"thresholds"`
+	WouldAlert        map[string]bool      `json:"would_alert"`
+	LastNotified      map[string]time.Time `json:"last_notified"`
+}
+
+func snapshotNotify() notifyState {
+	st := notifyState{
+		LarkConfigured: larkWebhook != "",
+		Thresholds: map[string]float64{
+			"hours": notifyHoursThreshold,
+			"usd":   notifyUSDThreshold,
+		},
+		WouldAlert:   map[string]bool{},
+		LastNotified: map[string]time.Time{},
+	}
+	channels, err := queryKeyData()
+	if err != nil {
+		return st
+	}
+	for _, ch := range channels {
+		if ch.QuotaUSD == nil {
+			continue
+		}
+		st.ChannelsWithQuota++
+		st.TotalUsedUSD += ch.UsedUSD
+		st.TotalQuotaUSD += *ch.QuotaUSD
+		st.TotalLastHourUSD += ch.LastHourUSD
+	}
+	st.TotalRemainingUSD = st.TotalQuotaUSD - st.TotalUsedUSD
+	if st.TotalLastHourUSD > 0 {
+		st.ETAHours = st.TotalRemainingUSD / st.TotalLastHourUSD
+		st.WouldAlert["hours"] = notifyHoursThreshold > 0 && st.ETAHours < notifyHoursThreshold
+	}
+	st.WouldAlert["usd"] = notifyUSDThreshold > 0 && st.TotalRemainingUSD < notifyUSDThreshold
+
+	notifyMu.Lock()
+	for k, v := range lastNotified {
+		st.LastNotified[k] = v
+	}
+	notifyMu.Unlock()
+	return st
+}
+
+func handleNotifyStatus(c *gin.Context) {
+	c.JSON(http.StatusOK, snapshotNotify())
+}
+
+// handleNotifyCheck runs the standard alert check (still respects canNotify).
+func handleNotifyCheck(c *gin.Context) {
+	go checkAndNotify()
+	c.JSON(http.StatusOK, gin.H{"ok": true, "triggered": true})
+}
+
+// handleNotifyTest fires a synthetic test alert to Lark, bypassing thresholds
+// and suppression so operators can verify wiring end-to-end.
+func handleNotifyTest(c *gin.Context) {
+	if larkWebhook == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "LARK_WEBHOOK not configured"})
+		return
+	}
+	sendLark("🔧 Lark 通道测试 from report-service @ " + time.Now().Format("2006-01-02 15:04:05"))
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 // ---- Daily Cache ----
@@ -1569,6 +1650,9 @@ func main() {
 	api.POST("/keys/test", handleTestKeys)
 	api.POST("/refresh", handleRefresh)
 	api.GET("/refresh/status", handleRefreshStatus)
+	api.GET("/notify/status", handleNotifyStatus)
+	api.POST("/notify/check", handleNotifyCheck)
+	api.POST("/notify/test", handleNotifyTest)
 	// Per-key upstream pricing edit. Lives outside /profit/* so the All Keys
 	// page can manage it even on deployments where the profit report is off.
 	api.POST("/keys/pricing", handleSaveKeyPricing)
