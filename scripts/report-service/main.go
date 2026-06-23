@@ -160,6 +160,12 @@ var (
 	notifyUSDThreshold   float64
 	notifyMu             sync.Mutex
 	lastNotified         = map[string]time.Time{}
+
+	// Single-flight guard for the manual aggregate-today refresh so a
+	// double click (or multiple operators) can't race aggregateDay against
+	// itself.
+	refreshMu      sync.Mutex
+	refreshRunning bool
 )
 
 func canNotify(key string) bool {
@@ -801,6 +807,45 @@ func handleLogin(c *gin.Context) {
 func handleLogout(c *gin.Context) {
 	c.SetCookie("token", "", -1, "/", "", false, true)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// handleRefresh re-aggregates today's logs on demand and returns when done.
+// Concurrent calls return 409 immediately — the in-flight run will publish
+// the same fresh state for everyone once it finishes.
+func handleRefresh(c *gin.Context) {
+	refreshMu.Lock()
+	if refreshRunning {
+		refreshMu.Unlock()
+		c.JSON(http.StatusConflict, gin.H{"error": "refresh already running", "running": true})
+		return
+	}
+	refreshRunning = true
+	refreshMu.Unlock()
+
+	defer func() {
+		refreshMu.Lock()
+		refreshRunning = false
+		refreshMu.Unlock()
+	}()
+
+	today := time.Now().UTC().Format("2006-01-02")
+	start := time.Now()
+	if err := aggregateDay(today); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"ok":         true,
+		"date":       today,
+		"elapsed_ms": time.Since(start).Milliseconds(),
+	})
+}
+
+func handleRefreshStatus(c *gin.Context) {
+	refreshMu.Lock()
+	running := refreshRunning
+	refreshMu.Unlock()
+	c.JSON(http.StatusOK, gin.H{"running": running})
 }
 
 func handleReport(c *gin.Context) {
@@ -1474,6 +1519,8 @@ func main() {
 	api.POST("/channels/batch-create", handleBatchCreateChannels)
 	api.GET("/allkeys/data", handleAllKeysData)
 	api.POST("/keys/test", handleTestKeys)
+	api.POST("/refresh", handleRefresh)
+	api.GET("/refresh/status", handleRefreshStatus)
 	// Per-key upstream pricing edit. Lives outside /profit/* so the All Keys
 	// page can manage it even on deployments where the profit report is off.
 	api.POST("/keys/pricing", handleSaveKeyPricing)

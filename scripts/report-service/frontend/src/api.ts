@@ -262,6 +262,15 @@ export const api = {
   getProfitDaily: (start: string, end: string) =>
     request<ProfitSummary>(`/api/profit/daily?start=${start}&end=${end}`),
 
+  refreshToday: () =>
+    request<{ ok: boolean; date: string; elapsed_ms: number }>('/api/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    }),
+
+  getRefreshStatus: () =>
+    request<{ running: boolean }>('/api/refresh/status'),
+
   syncPipi: (payload?: { start?: string; end?: string; days?: number }) =>
     request<{ ok: boolean; start: string; end: string }>('/api/profit/pipi/sync', {
       method: 'POST',

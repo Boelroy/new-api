@@ -26,6 +26,7 @@ export default function Profit() {
   const [defaultFxEdit, setDefaultFxEdit] = useState<string>('')
   const [pipiStatus, setPipiStatus] = useState<{ configured: boolean; start?: string; end?: string; status?: string; last_sync_at?: number } | null>(null)
   const [pipiSyncing, setPipiSyncing] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   // Feature flag: configChecked → still fetching /api/auth/config;
   // featureEnabled → server says profit_enabled=true.
   const [configChecked, setConfigChecked] = useState(false)
@@ -192,6 +193,25 @@ export default function Profit() {
     }
   }
 
+  const runRefresh = async () => {
+    if (refreshing) return
+    setRefreshing(true)
+    try {
+      const r = await api.refreshToday()
+      await load()
+      alert(`已刷新 ${r.date}（${(r.elapsed_ms / 1000).toFixed(1)}s）`)
+    } catch (err) {
+      const msg = (err as Error).message
+      if (msg.includes('already running')) {
+        alert('刷新已在进行，请稍候')
+      } else {
+        alert('刷新失败：' + msg)
+      }
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
   const runPipiSync = async (full = false) => {
     setPipiSyncing(true)
     try {
@@ -254,6 +274,14 @@ export default function Profit() {
       <input type="date" value={end} onChange={e => setEnd(e.target.value)} className="border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white" />
       <button onClick={load} disabled={loading} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-50">
         {loading ? '加载中...' : '查询'}
+      </button>
+      <button
+        onClick={runRefresh}
+        disabled={refreshing || loading}
+        title="重新聚合今日 logs 到 report_daily_agg"
+        className="border border-gray-200 rounded-md px-3 py-1.5 text-xs bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        {refreshing ? '刷新中…' : '刷新今日'}
       </button>
     </>
   )
