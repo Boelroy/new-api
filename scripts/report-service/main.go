@@ -1195,6 +1195,12 @@ func spaHandler() gin.HandlerFunc {
 	fileServer := http.FileServer(http.FS(distFS))
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
+		// Unknown /api/* routes (e.g. disabled features) must surface as 404,
+		// not the SPA shell — otherwise gated endpoints return 200 with HTML.
+		if strings.HasPrefix(path, "/api/") {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
 		// Try to serve exact file; fall back to index.html for SPA routing
 		f, err := distFS.Open(strings.TrimPrefix(path, "/"))
 		if err == nil {
