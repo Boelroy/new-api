@@ -98,14 +98,14 @@ export default function Profit() {
     return profit.daily.map(d => ({ date: d.date.slice(5), profit: d.profit_usd, rev: d.revenue_usd, cost: d.cost_usd }))
   }, [profit])
 
-  const tagRateChart = useMemo(() => {
+  const tagProfitChart = useMemo(() => {
     if (!profit) return []
     return [...profit.by_tag]
       .filter(t => t.revenue_usd > 0 || t.cost_usd > 0)
-      .sort((a, b) => b.profit_rate - a.profit_rate)
+      .sort((a, b) => b.profit_usd - a.profit_usd)
       .map(t => ({
         name: (t.tag || '(无)') + (t.source === 'pipi' ? ' ·pipi' : ''),
-        rate: t.profit_rate * 100,
+        profit: t.profit_usd,
       }))
   }, [profit])
 
@@ -358,16 +358,16 @@ export default function Profit() {
           </ResponsiveContainer>
         </div>
         <div className="bg-white border border-gray-200 rounded-xl p-4">
-          <h3 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">Profit Rate by Tag (%)</h3>
+          <h3 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">Profit by Tag ($)</h3>
           <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={tagRateChart} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
+            <BarChart data={tagProfitChart} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
               <XAxis dataKey="name" tick={{ fontSize: 9 }} />
-              <YAxis tick={{ fontSize: 10 }} tickFormatter={v => v.toFixed(0) + '%'} />
-              <Tooltip formatter={(v: number) => [v.toFixed(2) + '%', '毛利率']} />
-              <Bar dataKey="rate" radius={[3,3,0,0]}>
-                {tagRateChart.map((d, i) => (
-                  <Cell key={i} fill={d.rate >= 0 ? '#10b981' : '#e11d48'} />
+              <YAxis tick={{ fontSize: 10 }} tickFormatter={v => '$' + v.toFixed(0)} />
+              <Tooltip formatter={(v: number) => ['$' + v.toFixed(2), '毛利']} />
+              <Bar dataKey="profit" radius={[3,3,0,0]}>
+                {tagProfitChart.map((d, i) => (
+                  <Cell key={i} fill={d.profit >= 0 ? '#10b981' : '#e11d48'} />
                 ))}
               </Bar>
             </BarChart>
