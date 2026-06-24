@@ -5,6 +5,9 @@
     "default",
     "classic"
   ],
+  "dependencies": {
+    "date-fns": "^2.30.0"
+  },
   "catalog": {
     "@lobehub/icons": "^5.10.0",
     "axios": "^1.16.1",
