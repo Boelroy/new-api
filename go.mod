@@ -61,6 +61,24 @@ require (
 )
 
 require (
+	github.com/waffo-com/waffo-pancake-sdk-go v0.3.1
+	gorm.io/driver/clickhouse v0.6.0
+)
+
+require (
+	github.com/ClickHouse/ch-go v0.58.2 // indirect
+	github.com/ClickHouse/clickhouse-go/v2 v2.15.0 // indirect
+	github.com/go-faster/city v1.0.1 // indirect
+	github.com/go-faster/errors v0.6.1 // indirect
+	github.com/hashicorp/go-version v1.6.0 // indirect
+	github.com/paulmach/orb v0.10.0 // indirect
+	github.com/pierrec/lz4/v4 v4.1.18 // indirect
+	github.com/segmentio/asm v1.2.0 // indirect
+	go.opentelemetry.io/otel v1.19.0 // indirect
+	go.opentelemetry.io/otel/trace v1.19.0 // indirect
+)
+
+require (
 	github.com/DmitriyVTitov/size v1.5.0 // indirect
 	github.com/anknown/darts v0.0.0-20151216065714-83ff685239e6 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.8 // indirect
