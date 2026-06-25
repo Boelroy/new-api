@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import Layout from '../components/Layout'
 import { api, DetectResult, DetectSignal } from '../api'
 
@@ -151,6 +151,19 @@ export default function ProviderDetect() {
   const [error, setError] = useState<string | null>(null)
   const [intervalMs, setIntervalMs] = useState(500)
   const [maxRetries, setMaxRetries] = useState(2)
+  const [graderAvailable, setGraderAvailable] = useState(false)
+  const [runGrader, setRunGrader] = useState(false)
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const cfg = await fetch('/api/auth/config').then(r => r.json())
+        const ok = cfg.grader_configured === true
+        setGraderAvailable(ok)
+        if (ok) setRunGrader(true)
+      } catch { /* keep disabled on error */ }
+    })()
+  }, [])
 
   const finalModel = modelMode === 'custom' ? customModel.trim() : model
 
@@ -191,6 +204,7 @@ export default function ProviderDetect() {
         model: finalModel,
         interval_ms: Math.max(0, Math.min(60_000, Math.floor(intervalMs) || 0)),
         max_retries: Math.max(0, Math.min(5, Math.floor(maxRetries) || 0)),
+        run_grader: graderAvailable && runGrader,
       })
       setResult(r)
     } catch (e: any) {
@@ -303,6 +317,23 @@ export default function ProviderDetect() {
             )}
           </div>
 
+          {graderAvailable && (
+            <div className="pt-3 border-t border-gray-100">
+              <label className="flex items-center gap-2 text-xs text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={runGrader}
+                  onChange={e => setRunGrader(e.target.checked)}
+                  className="rounded border-gray-300"
+                />
+                <span>探测后让 Claude 自动判别</span>
+              </label>
+              <p className="text-[10px] text-gray-400 mt-1">
+                调 <code className="bg-gray-100 px-1 rounded">claude -p</code>，读 PIPELINE.md + trace 给中文判别报告（~$0.05-0.1）
+              </p>
+            </div>
+          )}
+
           <div className="pt-3 border-t border-gray-100 grid grid-cols-2 gap-3">
             <div>
               <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">
@@ -364,8 +395,27 @@ export default function ProviderDetect() {
 
           {result && (
             <>
+              {result.llm_report && (
+                <div className="bg-white border border-emerald-200 rounded-xl overflow-hidden">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-emerald-100 bg-emerald-50">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-800">
+                        Claude {result.grader_model || ''}
+                      </span>
+                      <span className="text-sm font-semibold text-emerald-900">Eval Report</span>
+                    </div>
+                    <span className="text-[10px] text-emerald-700 tabular-nums">{result.grader_ms ? `${(result.grader_ms / 1000).toFixed(1)}s` : ''}</span>
+                  </div>
+                  <pre className="text-[12px] font-mono leading-relaxed bg-white p-4 max-h-[60vh] overflow-auto whitespace-pre-wrap break-words">{result.llm_report}</pre>
+                </div>
+              )}
+              {result.llm_error && (
+                <div className="bg-amber-50 border border-amber-100 rounded-xl px-4 py-3 text-xs text-amber-800">
+                  Claude grader 失败：{result.llm_error}
+                </div>
+              )}
               <div className="bg-white border border-gray-200 rounded-xl p-4">
-                <div className="text-sm font-semibold text-gray-900 mb-3">判别结论</div>
+                <div className="text-sm font-semibold text-gray-900 mb-3">判别结论（规则）</div>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">Router 层</div>

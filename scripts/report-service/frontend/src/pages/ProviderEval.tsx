@@ -21,6 +21,7 @@ function statusColor(s: string) {
     case 'error': return 'bg-rose-100 text-rose-700'
     case 'cancelled': return 'bg-gray-100 text-gray-600'
     case 'running': return 'bg-blue-100 text-blue-700'
+    case 'grading': return 'bg-purple-100 text-purple-700'
     default: return 'bg-gray-100 text-gray-500'
   }
 }
@@ -41,7 +42,20 @@ export default function ProviderEval() {
   const [modelMode, setModelMode] = useState<'preset' | 'custom'>('preset')
   const [customModel, setCustomModel] = useState('')
   const [repeat, setRepeat] = useState(1)
+  const [graderAvailable, setGraderAvailable] = useState(false)
+  const [runGrader, setRunGrader] = useState(false)
   const [jobId, setJobId] = useState<string | null>(null)
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const cfg = await fetch('/api/auth/config').then(r => r.json())
+        const ok = cfg.grader_configured === true
+        setGraderAvailable(ok)
+        if (ok) setRunGrader(true)
+      } catch { /* keep disabled on error */ }
+    })()
+  }, [])
   const [status, setStatus] = useState<EvalStatus | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const logRef = useRef<HTMLPreElement>(null)
@@ -56,7 +70,7 @@ export default function ProviderEval() {
         const s = await api.evalStatus(jobId)
         if (cancelled) return
         setStatus(s)
-        if (s.status === 'running') {
+        if (s.status === 'running' || s.status === 'grading') {
           setTimeout(tick, POLL_INTERVAL_MS)
         }
       } catch (e: any) {
@@ -81,7 +95,7 @@ export default function ProviderEval() {
   }
 
   const finalModel = modelMode === 'custom' ? customModel.trim() : model
-  const running = status?.status === 'running'
+  const running = status?.status === 'running' || status?.status === 'grading'
   const canRun = url.trim() && key.trim() && finalModel.length > 0 && !running
 
   const handleStart = async () => {
@@ -95,6 +109,7 @@ export default function ProviderEval() {
         key: key.trim(),
         model: finalModel,
         repeat,
+        run_grader: graderAvailable && runGrader,
       })
       setJobId(r.job_id)
     } catch (e: any) {
@@ -208,13 +223,30 @@ export default function ProviderEval() {
             </p>
           </div>
 
+          {graderAvailable && (
+            <div className="pt-3 border-t border-gray-100">
+              <label className="flex items-center gap-2 text-xs text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={runGrader}
+                  onChange={e => setRunGrader(e.target.checked)}
+                  className="rounded border-gray-300"
+                />
+                <span>评估后让 Claude 自动打分</span>
+              </label>
+              <p className="text-[10px] text-gray-400 mt-1">
+                probe.mjs 跑完后调 <code className="bg-gray-100 px-1 rounded">claude -p</code>，按 PIPELINE.md §2-4 输出中文评估报告（~$0.3-0.5）
+              </p>
+            </div>
+          )}
+
           {submitError && (
             <div className="bg-rose-50 border border-rose-100 text-rose-700 text-xs rounded-md px-3 py-2">{submitError}</div>
           )}
 
           <div className="text-[10px] text-gray-400 leading-relaxed pt-2 border-t border-gray-100 space-y-1">
             <div>将真实调用上游模型，会产生费用 — 仅对你授权的 endpoint 使用</div>
-            <div>采集完成后输出原始 trace.md，可下载后喂给 LLM 按 PIPELINE.md §2-4 打分</div>
+            <div>采集完成后输出原始 trace.md，{graderAvailable ? '并由 Claude 自动按 PIPELINE.md §2-4 打分' : '可下载后喂给 LLM 按 PIPELINE.md §2-4 打分'}</div>
           </div>
         </div>
 
@@ -262,6 +294,40 @@ export default function ProviderEval() {
                   {status.stderr || (status.status === 'running' ? 'starting node probe.mjs ...' : '<no output>')}
                 </pre>
               </div>
+
+              {status.llm_report && (
+                <div className="bg-white border border-emerald-200 rounded-xl overflow-hidden">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-emerald-100 bg-emerald-50">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-800">Claude</span>
+                      <span className="text-sm font-semibold text-emerald-900">Eval Report</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-emerald-700 tabular-nums">
+                        {status.grader_ms ? `${(status.grader_ms / 1000).toFixed(1)}s` : ''}
+                      </span>
+                      <button
+                        onClick={() => status.llm_report && downloadText(traceName.replace('-trace.md', '-eval.md'), status.llm_report)}
+                        className="border border-emerald-200 rounded-md px-3 py-1 text-[11px] bg-white hover:bg-emerald-50 text-emerald-700"
+                      >
+                        下载 .md
+                      </button>
+                    </div>
+                  </div>
+                  <pre className="text-[12px] font-mono leading-relaxed bg-white p-4 max-h-[60vh] overflow-auto whitespace-pre-wrap break-words">{status.llm_report}</pre>
+                </div>
+              )}
+              {status.llm_error && (
+                <div className="bg-amber-50 border border-amber-100 rounded-xl px-4 py-3 text-xs text-amber-800">
+                  Claude grader 失败：{status.llm_error}
+                </div>
+              )}
+              {status.status === 'grading' && !status.llm_report && (
+                <div className="bg-purple-50 border border-purple-100 rounded-xl px-4 py-3 text-xs text-purple-800 flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-purple-500 animate-pulse" />
+                  正在调用 Claude grader，预计 30-90s ...
+                </div>
+              )}
 
               {status.trace && (
                 <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">

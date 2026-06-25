@@ -157,6 +157,10 @@ export type DetectResult = {
   started_at: string
   probes: DetectProbe[]
   classification: DetectClassification
+  llm_report?: string
+  llm_error?: string
+  grader_model?: string
+  grader_ms?: number
 }
 
 export type DetectModelsResponse = {
@@ -174,7 +178,7 @@ export type EvalStartResponse = {
 
 export type EvalStatus = {
   job_id: string
-  status: 'running' | 'ok' | 'error' | 'cancelled'
+  status: 'running' | 'grading' | 'ok' | 'error' | 'cancelled'
   repeat: number
   started_at: number
   ended_at?: number
@@ -183,6 +187,9 @@ export type EvalStatus = {
   stderr_trimmed: boolean
   trace?: string
   error?: string
+  llm_report?: string
+  llm_error?: string
+  grader_ms?: number
 }
 
 // Storage key for the API key used by the /profit gate.
@@ -279,15 +286,15 @@ export const api = {
     return request<DetectModelsResponse>(`/api/detect/models?${qs}`)
   },
 
-  detectRun: (payload: { url: string; key: string; model: string; interval_ms?: number; max_retries?: number }) =>
+  detectRun: (payload: { url: string; key: string; model: string; interval_ms?: number; max_retries?: number; run_grader?: boolean }) =>
     request<DetectResult>('/api/detect/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
 
-  evalStart: (payload: { url: string; key: string; model: string; repeat?: number }) =>
-    request<EvalStartResponse>('/api/eval/start', {
+  evalStart: (payload: { url: string; key: string; model: string; repeat?: number; run_grader?: boolean }) =>
+    request<EvalStartResponse & { run_grader: boolean }>('/api/eval/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),

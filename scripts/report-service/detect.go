@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -68,6 +69,10 @@ type detectResult struct {
 	StartedAt      string               `json:"started_at"`
 	Probes         []detectProbe        `json:"probes"`
 	Classification detectClassification `json:"classification"`
+	LLMReport      string               `json:"llm_report,omitempty"`
+	LLMError       string               `json:"llm_error,omitempty"`
+	GraderModel    string               `json:"grader_model,omitempty"`
+	GraderMs       int64                `json:"grader_ms,omitempty"`
 }
 
 // ---- HTTP probes ----
@@ -264,6 +269,7 @@ func detectProbeStream(ctx context.Context, base, key string, body map[string]an
 type detectOptions struct {
 	IntervalMs int
 	MaxRetries int
+	RunGrader  bool
 }
 
 // runDetect executes the full 6-probe sequence + classification.
@@ -382,7 +388,71 @@ func runDetect(rawURL, key, model string, opts detectOptions) (detectResult, err
 	))
 
 	res.Classification = classifyDetect(res.Probes)
+
+	if opts.RunGrader && graderConfigured() {
+		traceMD := renderDetectTraceMarkdown(res)
+		pipelineMD, err := readPipelineFile("DETECT_PIPELINE_PATH")
+		if err != nil {
+			res.LLMError = "pipeline load: " + err.Error()
+		} else {
+			t0 := time.Now()
+			report, gerr := runClaudeGrader(ctx, detectGraderInstruction, pipelineMD, traceMD)
+			res.GraderMs = time.Since(t0).Milliseconds()
+			res.GraderModel = strings.TrimSpace(os.Getenv(graderEnvModel))
+			if res.GraderModel == "" {
+				res.GraderModel = graderDefaultModel
+			}
+			if gerr != nil {
+				res.LLMError = gerr.Error()
+			} else {
+				res.LLMReport = report
+			}
+		}
+	}
+
 	return res, nil
+}
+
+// renderDetectTraceMarkdown builds a probe.mjs-style markdown bundle from a
+// detect result so the LLM grader sees the same shape PIPELINE.md is written
+// against.
+func renderDetectTraceMarkdown(r detectResult) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "# Provider Detection Trace Bundle\n\n- **URL**: `%s`\n- **Model**: `%s`\n- **Started at**: %s\n- **Probes**: %d\n\n---\n\n",
+		r.URL, r.Model, r.StartedAt, len(r.Probes))
+	for i, p := range r.Probes {
+		streamLine := ""
+		if p.StreamEventCount != 0 || p.StreamMaxGapMs != 0 {
+			streamLine = fmt.Sprintf(" | events=%d | max-gap=%dms", p.StreamEventCount, p.StreamMaxGapMs)
+		}
+		retryLine := ""
+		if p.Retries > 0 {
+			retryLine = fmt.Sprintf(" | retries=%d", p.Retries)
+		}
+		fmt.Fprintf(&sb, "## %s\n\n**Intent**: %s\n\n**HTTP**: %d (%dms)%s%s\n\n### Headers\n\n```\n",
+			p.Label, p.Intent, p.Status, p.ElapsedMs, streamLine, retryLine)
+		if len(p.Headers) == 0 {
+			sb.WriteString("<none>\n")
+		} else {
+			for k, v := range p.Headers {
+				fmt.Fprintf(&sb, "%s: %s\n", k, v)
+			}
+		}
+		sb.WriteString("```\n\n### Body\n\n```\n")
+		if p.Body == "" {
+			sb.WriteString("<empty>\n")
+		} else {
+			sb.WriteString(p.Body)
+			if !strings.HasSuffix(p.Body, "\n") {
+				sb.WriteByte('\n')
+			}
+		}
+		sb.WriteString("```\n")
+		if i < len(r.Probes)-1 {
+			sb.WriteString("\n---\n\n")
+		}
+	}
+	return sb.String()
 }
 
 // ---- Classifier: §2 signal panel ----
@@ -559,6 +629,7 @@ type detectRequest struct {
 	Model      string `json:"model"`
 	IntervalMs *int   `json:"interval_ms,omitempty"`
 	MaxRetries *int   `json:"max_retries,omitempty"`
+	RunGrader  *bool  `json:"run_grader,omitempty"`
 }
 
 func handleDetectModels(c *gin.Context) {
@@ -602,6 +673,9 @@ func handleDetectRun(c *gin.Context) {
 	}
 	if req.MaxRetries != nil {
 		opts.MaxRetries = *req.MaxRetries
+	}
+	if req.RunGrader != nil {
+		opts.RunGrader = *req.RunGrader
 	}
 
 	res, err := runDetect(req.URL, req.Key, req.Model, opts)

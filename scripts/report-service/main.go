@@ -863,7 +863,10 @@ func handleSSOCallback(c *gin.Context) {
 }
 
 func handleAuthConfig(c *gin.Context) {
-	resp := gin.H{"profit_enabled": profitEnabled}
+	resp := gin.H{
+		"profit_enabled":    profitEnabled,
+		"grader_configured": graderConfigured(),
+	}
 	if mainServiceURL != "" {
 		resp["sso_url"] = mainServiceURL + "/sign-in"
 	} else {

@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -47,6 +48,10 @@ type evalJob struct {
 	StderrTrim  bool // true once we started dropping head bytes
 	Trace       string
 	Err         string
+	RunGrader   bool
+	LLMReport   string
+	LLMError    string
+	GraderMs    int64
 	cancel      context.CancelFunc
 	mu          sync.Mutex
 }
@@ -98,11 +103,36 @@ func (j *evalJob) appendStderr(line string) {
 	j.StderrBuf.WriteByte('\n')
 }
 
-func (j *evalJob) snapshot() (status, stderrLog, trace, errMsg string, stderrTrim bool, repeat int, startedAt, endedAt time.Time) {
+type evalSnapshot struct {
+	Status     string
+	StderrLog  string
+	Trace      string
+	Err        string
+	LLMReport  string
+	LLMError   string
+	GraderMs   int64
+	StderrTrim bool
+	Repeat     int
+	StartedAt  time.Time
+	EndedAt    time.Time
+}
+
+func (j *evalJob) snapshot() evalSnapshot {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	endedAt = j.EndedAt
-	return j.Status, j.StderrBuf.String(), j.Trace, j.Err, j.StderrTrim, j.Repeat, j.StartedAt, endedAt
+	return evalSnapshot{
+		Status:     j.Status,
+		StderrLog:  j.StderrBuf.String(),
+		Trace:      j.Trace,
+		Err:        j.Err,
+		LLMReport:  j.LLMReport,
+		LLMError:   j.LLMError,
+		GraderMs:   j.GraderMs,
+		StderrTrim: j.StderrTrim,
+		Repeat:     j.Repeat,
+		StartedAt:  j.StartedAt,
+		EndedAt:    j.EndedAt,
+	}
 }
 
 // runEval is the goroutine that drives `node probe.mjs ... --out -`.
@@ -177,12 +207,11 @@ func runEval(j *evalJob, url, key, model string, repeat int) {
 	}
 
 	j.mu.Lock()
-	j.EndedAt = time.Now()
 	j.Trace = string(traceBuf)
+	probeDone := time.Now()
 	switch {
 	case waitErr != nil:
 		j.Status = "error"
-		// Surface deadline / kill explicitly so the UI can render properly.
 		switch {
 		case errors.Is(ctx.Err(), context.DeadlineExceeded):
 			j.Err = "evaluation timed out after " + evalMaxWallClock.String()
@@ -195,9 +224,57 @@ func runEval(j *evalJob, url, key, model string, repeat int) {
 		j.Status = "error"
 		j.Err = "read stdout: " + readErr.Error()
 	default:
-		j.Status = "ok"
+		j.Status = "grading" // bumped to ok after grader returns (or skip)
 	}
+	runGrader := j.RunGrader
+	traceForGrader := j.Trace
 	j.mu.Unlock()
+
+	if j.Status == "grading" {
+		if runGrader && graderConfigured() {
+			j.appendStderr("--- probe complete, invoking Claude grader ---")
+			pipelineMD, perr := readPipelineFile("EVAL_PIPELINE_PATH")
+			if perr != nil {
+				j.appendStderr("grader: pipeline load failed — " + perr.Error())
+				j.mu.Lock()
+				j.LLMError = "pipeline load: " + perr.Error()
+				j.Status = "ok"
+				j.EndedAt = time.Now()
+				j.mu.Unlock()
+				return
+			}
+			t0 := time.Now()
+			// Detach grader from the wall-clock context (which is already past
+			// the probe budget). Use a fresh root context — runClaudeGrader
+			// applies its own hard timeout.
+			report, gerr := runClaudeGrader(context.Background(), evalGraderInstruction, pipelineMD, traceForGrader)
+			elapsed := time.Since(t0).Milliseconds()
+			j.mu.Lock()
+			j.GraderMs = elapsed
+			if gerr != nil {
+				j.appendStderr("grader: " + gerr.Error())
+				j.LLMError = gerr.Error()
+			} else {
+				j.appendStderr(fmt.Sprintf("grader: done in %dms (%d chars)", elapsed, len(report)))
+				j.LLMReport = report
+			}
+			j.Status = "ok"
+			j.EndedAt = time.Now()
+			j.mu.Unlock()
+		} else {
+			if runGrader && !graderConfigured() {
+				j.appendStderr("grader skipped: CLAUDE_GRADER_API_KEY not set")
+			}
+			j.mu.Lock()
+			j.Status = "ok"
+			j.EndedAt = probeDone
+			j.mu.Unlock()
+		}
+	} else {
+		j.mu.Lock()
+		j.EndedAt = probeDone
+		j.mu.Unlock()
+	}
 }
 
 func (j *evalJob) fail(msg string) {
@@ -211,10 +288,11 @@ func (j *evalJob) fail(msg string) {
 // ---- HTTP handlers ----
 
 type evalStartRequest struct {
-	URL    string `json:"url"`
-	Key    string `json:"key"`
-	Model  string `json:"model"`
-	Repeat int    `json:"repeat"`
+	URL       string `json:"url"`
+	Key       string `json:"key"`
+	Model     string `json:"model"`
+	Repeat    int    `json:"repeat"`
+	RunGrader *bool  `json:"run_grader,omitempty"`
 }
 
 func handleEvalStart(c *gin.Context) {
@@ -242,6 +320,11 @@ func handleEvalStart(c *gin.Context) {
 		repeat = evalMaxRepeat
 	}
 
+	runGrader := graderConfigured()
+	if req.RunGrader != nil {
+		runGrader = *req.RunGrader && graderConfigured()
+	}
+
 	job := &evalJob{
 		ID:        newEvalJobID(),
 		URL:       req.URL,
@@ -249,6 +332,7 @@ func handleEvalStart(c *gin.Context) {
 		Repeat:    repeat,
 		Status:    "running",
 		StartedAt: time.Now(),
+		RunGrader: runGrader,
 	}
 	evalJobsMu.Lock()
 	evalJobs[job.ID] = job
@@ -260,6 +344,7 @@ func handleEvalStart(c *gin.Context) {
 		"job_id":     job.ID,
 		"started_at": job.StartedAt.Unix(),
 		"repeat":     repeat,
+		"run_grader": runGrader,
 	})
 }
 
@@ -272,24 +357,33 @@ func handleEvalStatus(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
 		return
 	}
-	status, log, trace, errMsg, trimmed, repeat, startedAt, endedAt := job.snapshot()
+	s := job.snapshot()
 	resp := gin.H{
 		"job_id":         id,
-		"status":         status,
-		"repeat":         repeat,
-		"started_at":     startedAt.Unix(),
-		"stderr":         log,
-		"stderr_trimmed": trimmed,
+		"status":         s.Status,
+		"repeat":         s.Repeat,
+		"started_at":     s.StartedAt.Unix(),
+		"stderr":         s.StderrLog,
+		"stderr_trimmed": s.StderrTrim,
 	}
-	if !endedAt.IsZero() {
-		resp["ended_at"] = endedAt.Unix()
-		resp["elapsed_ms"] = endedAt.Sub(startedAt).Milliseconds()
+	if !s.EndedAt.IsZero() {
+		resp["ended_at"] = s.EndedAt.Unix()
+		resp["elapsed_ms"] = s.EndedAt.Sub(s.StartedAt).Milliseconds()
 	}
-	if status != "running" {
-		resp["trace"] = trace
-		if errMsg != "" {
-			resp["error"] = errMsg
+	// Trace can be huge while grading is still in flight — return it as
+	// soon as probe.mjs finishes so the UI can render it while we wait.
+	if s.Status != "running" {
+		resp["trace"] = s.Trace
+		if s.Err != "" {
+			resp["error"] = s.Err
 		}
+	}
+	if s.LLMReport != "" {
+		resp["llm_report"] = s.LLMReport
+		resp["grader_ms"] = s.GraderMs
+	}
+	if s.LLMError != "" {
+		resp["llm_error"] = s.LLMError
 	}
 	c.JSON(http.StatusOK, resp)
 }
