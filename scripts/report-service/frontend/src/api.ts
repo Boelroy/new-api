@@ -166,6 +166,25 @@ export type DetectModelsResponse = {
   elapsed_ms: number
 }
 
+export type EvalStartResponse = {
+  job_id: string
+  started_at: number
+  repeat: number
+}
+
+export type EvalStatus = {
+  job_id: string
+  status: 'running' | 'ok' | 'error' | 'cancelled'
+  repeat: number
+  started_at: number
+  ended_at?: number
+  elapsed_ms?: number
+  stderr: string
+  stderr_trimmed: boolean
+  trace?: string
+  error?: string
+}
+
 // Storage key for the API key used by the /profit gate.
 const PROFIT_KEY_STORAGE = 'report_api_key'
 
@@ -266,6 +285,18 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
+
+  evalStart: (payload: { url: string; key: string; model: string; repeat?: number }) =>
+    request<EvalStartResponse>('/api/eval/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  evalStatus: (id: string) => request<EvalStatus>(`/api/eval/status/${encodeURIComponent(id)}`),
+
+  evalCancel: (id: string) =>
+    request<{ ok: boolean }>(`/api/eval/cancel/${encodeURIComponent(id)}`, { method: 'POST' }),
 
   saveKeyPricing: (payload: { channel_id: number; quota_usd?: number; unit_price_cny?: number; note?: string }[]) =>
     request<{ saved: number }>('/api/keys/pricing', {

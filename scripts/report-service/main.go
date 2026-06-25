@@ -1634,6 +1634,7 @@ func main() {
 
 	startDailyRefresh()
 	startNotifyLoop()
+	startEvalJobReaper()
 	if profitEnabled {
 		startPipiSync()
 	}
@@ -1659,6 +1660,9 @@ func main() {
 	api.POST("/keys/test", handleTestKeys)
 	api.GET("/detect/models", handleDetectModels)
 	api.POST("/detect/run", handleDetectRun)
+	api.POST("/eval/start", handleEvalStart)
+	api.GET("/eval/status/:id", handleEvalStatus)
+	api.POST("/eval/cancel/:id", handleEvalCancel)
 	api.POST("/refresh", handleRefresh)
 	api.GET("/refresh/status", handleRefreshStatus)
 	api.GET("/notify/status", handleNotifyStatus)

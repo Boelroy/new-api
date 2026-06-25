@@ -5,6 +5,7 @@ import KeyCapacity from './pages/KeyCapacity'
 import AllKeys from './pages/AllKeys'
 import KeyTester from './pages/KeyTester'
 import ProviderDetect from './pages/ProviderDetect'
+import ProviderEval from './pages/ProviderEval'
 import Profit from './pages/Profit'
 
 export default function App() {
@@ -18,6 +19,7 @@ export default function App() {
         <Route path="/allkeys" element={<AllKeys />} />
         <Route path="/tester" element={<KeyTester />} />
         <Route path="/detect" element={<ProviderDetect />} />
+        <Route path="/eval" element={<ProviderEval />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

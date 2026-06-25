@@ -14,8 +14,10 @@ COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 RUN CGO_ENABLED=0 go build -o report-service .
 
 FROM alpine:3.19
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata nodejs
 COPY --from=builder /app/report-service /usr/local/bin/report-service
+COPY eval-tool /app/eval-tool
 ENV TZ=Asia/Tokyo
+ENV EVAL_SCRIPT_PATH=/app/eval-tool/probe.mjs
 EXPOSE 8090
 CMD ["report-service"]
