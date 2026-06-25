@@ -1657,6 +1657,8 @@ func main() {
 	api.POST("/channels/batch-create", handleBatchCreateChannels)
 	api.GET("/allkeys/data", handleAllKeysData)
 	api.POST("/keys/test", handleTestKeys)
+	api.GET("/detect/models", handleDetectModels)
+	api.POST("/detect/run", handleDetectRun)
 	api.POST("/refresh", handleRefresh)
 	api.GET("/refresh/status", handleRefreshStatus)
 	api.GET("/notify/status", handleNotifyStatus)

@@ -120,6 +120,52 @@ export type KeyTestResult = {
   message?: string
 }
 
+export type DetectProbe = {
+  label: string
+  intent: string
+  status: number
+  headers: Record<string, string>
+  body: string
+  elapsed_ms: number
+  retries?: number
+  retry_history?: number[]
+  stream_event_count?: number
+  stream_max_gap_ms?: number
+}
+
+export type DetectSignal = {
+  code: string
+  tier: number
+  label: string
+  detail: string
+  layer: string
+  implies: string
+}
+
+export type DetectClassification = {
+  router_label: string
+  router_confidence: string
+  backend_label: string
+  backend_confidence: string
+  signals: DetectSignal[]
+  notes?: string[]
+}
+
+export type DetectResult = {
+  url: string
+  model: string
+  started_at: string
+  probes: DetectProbe[]
+  classification: DetectClassification
+}
+
+export type DetectModelsResponse = {
+  status: number
+  headers: Record<string, string>
+  body: string
+  elapsed_ms: number
+}
+
 // Storage key for the API key used by the /profit gate.
 const PROFIT_KEY_STORAGE = 'report_api_key'
 
@@ -207,6 +253,18 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ keys, model }),
+    }),
+
+  detectModels: (url: string, key: string) => {
+    const qs = new URLSearchParams({ url, key }).toString()
+    return request<DetectModelsResponse>(`/api/detect/models?${qs}`)
+  },
+
+  detectRun: (payload: { url: string; key: string; model: string; interval_ms?: number; max_retries?: number }) =>
+    request<DetectResult>('/api/detect/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     }),
 
   saveKeyPricing: (payload: { channel_id: number; quota_usd?: number; unit_price_cny?: number; note?: string }[]) =>
