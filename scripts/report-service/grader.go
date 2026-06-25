@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -22,8 +23,11 @@ const (
 	graderEnvAuthToken  = "CLAUDE_GRADER_AUTH_TOKEN"
 	graderEnvBaseURL    = "CLAUDE_GRADER_BASE_URL"
 	graderEnvModel      = "CLAUDE_GRADER_MODEL"
+	graderEnvTimeoutSec = "CLAUDE_GRADER_TIMEOUT_SEC"
 	graderDefaultModel  = "claude-sonnet-4-6"
-	graderHardTimeout   = 5 * time.Minute
+	// Bumped from 5min to 15min: full eval graders through gateways with
+	// 192KB prompts can take 6-10min in practice. Overridable via env.
+	graderHardTimeout   = 15 * time.Minute
 	graderMaxPromptSize = 1 << 20 // 1 MiB — pipeline + trace combined safety cap
 )
 
@@ -144,7 +148,13 @@ func runClaudeGrader(ctx context.Context, instruction, pipelineMD, traceMD strin
 		prompt.WriteString("\n\n<trace truncated>")
 	}
 
-	jobCtx, cancel := context.WithTimeout(ctx, graderHardTimeout)
+	timeout := graderHardTimeout
+	if v := strings.TrimSpace(os.Getenv(graderEnvTimeoutSec)); v != "" {
+		if secs, perr := strconv.Atoi(v); perr == nil && secs > 0 && secs <= 3600 {
+			timeout = time.Duration(secs) * time.Second
+		}
+	}
+	jobCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(jobCtx, "claude", "-p", "--model", model, "--output-format", "text")

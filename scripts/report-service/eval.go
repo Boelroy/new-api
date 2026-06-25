@@ -249,13 +249,20 @@ func runEval(j *evalJob, url, key, model string, repeat int) {
 			// applies its own hard timeout.
 			report, gerr := runClaudeGrader(context.Background(), evalGraderInstruction, pipelineMD, traceForGrader)
 			elapsed := time.Since(t0).Milliseconds()
+			// IMPORTANT: append the log line OUTSIDE the j.mu critical section.
+			// appendStderr takes j.mu internally; calling it while holding j.mu
+			// would deadlock (sync.Mutex is non-reentrant in Go) and block the
+			// reaper and every subsequent handleEvalStart.
+			if gerr != nil {
+				j.appendStderr("grader: " + gerr.Error())
+			} else {
+				j.appendStderr(fmt.Sprintf("grader: done in %dms (%d chars)", elapsed, len(report)))
+			}
 			j.mu.Lock()
 			j.GraderMs = elapsed
 			if gerr != nil {
-				j.appendStderr("grader: " + gerr.Error())
 				j.LLMError = gerr.Error()
 			} else {
-				j.appendStderr(fmt.Sprintf("grader: done in %dms (%d chars)", elapsed, len(report)))
 				j.LLMReport = report
 			}
 			j.Status = "ok"
