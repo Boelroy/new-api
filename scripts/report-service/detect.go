@@ -13,7 +13,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -273,7 +272,9 @@ type detectOptions struct {
 }
 
 // runDetect executes the full 6-probe sequence + classification.
-func runDetect(rawURL, key, model string, opts detectOptions) (detectResult, error) {
+// The caller-supplied context governs cancellation. Grader/LLM-report
+// invocation is the caller's responsibility (see testing.go).
+func runDetect(ctx context.Context, rawURL, key, model string, opts detectOptions) (detectResult, error) {
 	if _, err := url.Parse(rawURL); err != nil {
 		return detectResult{}, fmt.Errorf("invalid url: %w", err)
 	}
@@ -298,8 +299,9 @@ func runDetect(rawURL, key, model string, opts detectOptions) (detectResult, err
 	if opts.MaxRetries > 5 {
 		opts.MaxRetries = 5
 	}
-
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	res := detectResult{
 		URL:       rawURL,
 		Model:     model,
@@ -388,28 +390,6 @@ func runDetect(rawURL, key, model string, opts detectOptions) (detectResult, err
 	))
 
 	res.Classification = classifyDetect(res.Probes)
-
-	if opts.RunGrader && graderConfigured() {
-		traceMD := renderDetectTraceMarkdown(res)
-		pipelineMD, err := readPipelineFile("DETECT_PIPELINE_PATH")
-		if err != nil {
-			res.LLMError = "pipeline load: " + err.Error()
-		} else {
-			t0 := time.Now()
-			report, gerr := runClaudeGrader(ctx, detectGraderInstruction, pipelineMD, traceMD)
-			res.GraderMs = time.Since(t0).Milliseconds()
-			res.GraderModel = strings.TrimSpace(os.Getenv(graderEnvModel))
-			if res.GraderModel == "" {
-				res.GraderModel = graderDefaultModel
-			}
-			if gerr != nil {
-				res.LLMError = gerr.Error()
-			} else {
-				res.LLMReport = report
-			}
-		}
-	}
-
 	return res, nil
 }
 
@@ -623,15 +603,6 @@ func classifyDetect(probes []detectProbe) detectClassification {
 
 // ---- HTTP handlers ----
 
-type detectRequest struct {
-	URL        string `json:"url"`
-	Key        string `json:"key"`
-	Model      string `json:"model"`
-	IntervalMs *int   `json:"interval_ms,omitempty"`
-	MaxRetries *int   `json:"max_retries,omitempty"`
-	RunGrader  *bool  `json:"run_grader,omitempty"`
-}
-
 func handleDetectModels(c *gin.Context) {
 	base := strings.TrimSpace(c.Query("url"))
 	key := strings.TrimSpace(c.Query("key"))
@@ -654,34 +625,3 @@ func handleDetectModels(c *gin.Context) {
 	})
 }
 
-func handleDetectRun(c *gin.Context) {
-	var req detectRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	req.URL = strings.TrimSpace(req.URL)
-	req.Key = strings.TrimSpace(req.Key)
-	req.Model = strings.TrimSpace(req.Model)
-
-	opts := detectOptions{
-		IntervalMs: detectDefaultIntervalMs,
-		MaxRetries: detectDefaultMaxRetries,
-	}
-	if req.IntervalMs != nil {
-		opts.IntervalMs = *req.IntervalMs
-	}
-	if req.MaxRetries != nil {
-		opts.MaxRetries = *req.MaxRetries
-	}
-	if req.RunGrader != nil {
-		opts.RunGrader = *req.RunGrader
-	}
-
-	res, err := runDetect(req.URL, req.Key, req.Model, opts)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, res)
-}

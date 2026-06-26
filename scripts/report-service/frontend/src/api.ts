@@ -170,26 +170,57 @@ export type DetectModelsResponse = {
   elapsed_ms: number
 }
 
-export type EvalStartResponse = {
-  job_id: string
-  started_at: number
-  repeat: number
+// ---- Provider Testing (unified Detect + Eval) ----
+
+export type TestProject = {
+  id: string
+  name: string
+  url: string
+  api_key: string      // masked on list/get
+  created_at: number
+  updated_at: number
+  run_count?: number
 }
 
-export type EvalStatus = {
-  job_id: string
-  status: 'running' | 'grading' | 'ok' | 'error' | 'cancelled'
-  repeat: number
+export type TestRunStatus = 'running' | 'grading' | 'ok' | 'error' | 'cancelled'
+export type TestRunKind = 'detect' | 'eval'
+
+export type TestRun = {
+  id: string
+  project_id: string
+  model: string
+  kind: TestRunKind
+  status: TestRunStatus
+  pass_at: number
+  run_grader: boolean
+  trace_bytes: number
+  report_bytes: number
+  stderr_bytes: number
+  result_bytes: number
+  error_msg?: string
+  llm_error?: string
+  grader_ms: number
   started_at: number
   ended_at?: number
   elapsed_ms?: number
-  stderr: string
-  stderr_trimmed: boolean
-  trace?: string
-  error?: string
-  llm_report?: string
-  llm_error?: string
-  grader_ms?: number
+}
+
+export type TestRunDetail = TestRun & {
+  trace_url?: string
+  report_url?: string
+  stderr_url?: string
+  result_url?: string
+}
+
+export type TestRunLiveStatus = {
+  id: string
+  status: TestRunStatus
+  started_at: number
+  ended_at?: number
+  elapsed_ms?: number
+  error_msg?: string
+  stderr?: string
+  stderr_trimmed?: boolean
 }
 
 // Storage key for the API key used by the /profit gate.
@@ -286,24 +317,62 @@ export const api = {
     return request<DetectModelsResponse>(`/api/detect/models?${qs}`)
   },
 
-  detectRun: (payload: { url: string; key: string; model: string; interval_ms?: number; max_retries?: number; run_grader?: boolean }) =>
-    request<DetectResult>('/api/detect/run', {
+  // ---- Provider Testing ----
+
+  testingListProjects: () =>
+    request<{ projects: TestProject[] }>('/api/testing/projects'),
+
+  testingCreateProject: (payload: { name: string; url: string; api_key: string }) =>
+    request<TestProject>('/api/testing/projects', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
 
-  evalStart: (payload: { url: string; key: string; model: string; repeat?: number; run_grader?: boolean }) =>
-    request<EvalStartResponse & { run_grader: boolean }>('/api/eval/start', {
-      method: 'POST',
+  testingGetProject: (id: string) =>
+    request<TestProject>(`/api/testing/projects/${encodeURIComponent(id)}`),
+
+  testingUpdateProject: (id: string, payload: { name?: string; url?: string; api_key?: string }) =>
+    request<TestProject>(`/api/testing/projects/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
 
-  evalStatus: (id: string) => request<EvalStatus>(`/api/eval/status/${encodeURIComponent(id)}`),
+  testingDeleteProject: (id: string) =>
+    request<{ ok: boolean; deleted_runs: number }>(`/api/testing/projects/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
 
-  evalCancel: (id: string) =>
-    request<{ ok: boolean }>(`/api/eval/cancel/${encodeURIComponent(id)}`, { method: 'POST' }),
+  testingListRuns: (projectId: string) =>
+    request<{ runs: TestRun[] }>(`/api/testing/projects/${encodeURIComponent(projectId)}/runs`),
+
+  testingStartRun: (
+    projectId: string,
+    payload: { kind: TestRunKind; model: string; pass_at?: number; run_grader?: boolean },
+  ) =>
+    request<{ run_id: string; project_id: string; started_at: number; run_grader: boolean; kind: TestRunKind; model: string; pass_at: number }>(
+      `/api/testing/projects/${encodeURIComponent(projectId)}/runs`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+    ),
+
+  testingGetRun: (id: string) =>
+    request<TestRunDetail>(`/api/testing/runs/${encodeURIComponent(id)}`),
+
+  testingRunStatus: (id: string) =>
+    request<TestRunLiveStatus>(`/api/testing/runs/${encodeURIComponent(id)}/status`),
+
+  testingCancelRun: (id: string) =>
+    request<{ ok: boolean }>(`/api/testing/runs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+
+  testingDeleteRun: (id: string) =>
+    request<{ ok: boolean; project_id: string }>(`/api/testing/runs/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
 
   saveKeyPricing: (payload: { channel_id: number; quota_usd?: number; unit_price_cny?: number; note?: string }[]) =>
     request<{ saved: number }>('/api/keys/pricing', {

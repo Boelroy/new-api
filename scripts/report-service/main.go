@@ -866,6 +866,7 @@ func handleAuthConfig(c *gin.Context) {
 	resp := gin.H{
 		"profit_enabled":    profitEnabled,
 		"grader_configured": graderConfigured(),
+		"r2_configured":     r2Configured(),
 	}
 	if mainServiceURL != "" {
 		resp["sso_url"] = mainServiceURL + "/sign-in"
@@ -1629,15 +1630,48 @@ func main() {
 			PRIMARY KEY (date, channel_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_report_pipi_date ON report_pipi_daily(date)`,
+		// Provider testing — projects + per-project run history. Artifacts
+		// (trace.md / report.md / stderr.log / result.json) live in R2;
+		// these tables hold only metadata.
+		`CREATE TABLE IF NOT EXISTS rs_test_project (
+			id          TEXT PRIMARY KEY,
+			name        TEXT NOT NULL,
+			url         TEXT NOT NULL,
+			api_key     TEXT NOT NULL,
+			created_at  BIGINT NOT NULL,
+			updated_at  BIGINT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_rs_test_project_created ON rs_test_project(created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS rs_test_run (
+			id           TEXT PRIMARY KEY,
+			project_id   TEXT NOT NULL REFERENCES rs_test_project(id) ON DELETE CASCADE,
+			model        TEXT NOT NULL,
+			kind         TEXT NOT NULL,
+			status       TEXT NOT NULL,
+			pass_at      INT  NOT NULL DEFAULT 1,
+			run_grader   BOOLEAN NOT NULL DEFAULT TRUE,
+			trace_bytes  BIGINT NOT NULL DEFAULT 0,
+			report_bytes BIGINT NOT NULL DEFAULT 0,
+			stderr_bytes BIGINT NOT NULL DEFAULT 0,
+			result_bytes BIGINT NOT NULL DEFAULT 0,
+			error_msg    TEXT NOT NULL DEFAULT '',
+			llm_error    TEXT NOT NULL DEFAULT '',
+			grader_ms    BIGINT NOT NULL DEFAULT 0,
+			started_at   BIGINT NOT NULL,
+			ended_at     BIGINT,
+			elapsed_ms   BIGINT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_rs_test_run_project_started ON rs_test_run(project_id, started_at DESC)`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
 		}
 	}
 
+	resetRunningTestRuns()
 	startDailyRefresh()
 	startNotifyLoop()
-	startEvalJobReaper()
+	startTestJobReaper()
 	if profitEnabled {
 		startPipiSync()
 	}
@@ -1662,10 +1696,20 @@ func main() {
 	api.GET("/allkeys/data", handleAllKeysData)
 	api.POST("/keys/test", handleTestKeys)
 	api.GET("/detect/models", handleDetectModels)
-	api.POST("/detect/run", handleDetectRun)
-	api.POST("/eval/start", handleEvalStart)
-	api.GET("/eval/status/:id", handleEvalStatus)
-	api.POST("/eval/cancel/:id", handleEvalCancel)
+
+	// Provider Testing — unified project-based detect + eval
+	api.GET("/testing/projects", handleTestingProjectsList)
+	api.POST("/testing/projects", handleTestingProjectCreate)
+	api.GET("/testing/projects/:id", handleTestingProjectGet)
+	api.PATCH("/testing/projects/:id", handleTestingProjectUpdate)
+	api.DELETE("/testing/projects/:id", handleTestingProjectDelete)
+	api.GET("/testing/projects/:id/runs", handleTestingRunList)
+	api.POST("/testing/projects/:id/runs", handleTestingRunStart)
+	api.GET("/testing/runs/:id", handleTestingRunDetail)
+	api.GET("/testing/runs/:id/status", handleTestingRunStatus)
+	api.POST("/testing/runs/:id/cancel", handleTestingRunCancel)
+	api.DELETE("/testing/runs/:id", handleTestingRunDelete)
+
 	api.POST("/refresh", handleRefresh)
 	api.GET("/refresh/status", handleRefreshStatus)
 	api.GET("/notify/status", handleNotifyStatus)

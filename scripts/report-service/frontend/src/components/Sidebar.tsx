@@ -54,28 +54,21 @@ const NAV_ITEMS: Item[] = [
       </svg>
     ),
   },
-  {
-    to: '/detect',
-    label: 'Provider Detect',
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="11" cy="11" r="7" />
-        <line x1="21" y1="21" x2="16.65" y2="16.65" />
-        <path d="M11 8v3l2 2" />
-      </svg>
-    ),
-  },
-  {
-    to: '/eval',
-    label: 'Provider Eval',
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M9 11l3 3L22 4" />
-        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
-      </svg>
-    ),
-  },
 ]
+
+// Shown only when the server reports r2_configured=true, i.e. R2 is wired up
+// so trace + report artifacts can actually persist.
+const TESTING_ITEM: Item = {
+  to: '/testing',
+  label: 'Provider Testing',
+  icon: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="11" cy="11" r="7" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+      <path d="M8 11l2 2 4-4" />
+    </svg>
+  ),
+}
 
 // Shown only when the server reports profit_gate_required=false, i.e. the
 // /profit page is directly accessible on this deployment.
@@ -97,17 +90,21 @@ type Props = {
 
 export default function Sidebar({ open, onClose }: Props) {
   const [showProfit, setShowProfit] = useState(false)
+  const [showTesting, setShowTesting] = useState(false)
 
   useEffect(() => {
     void (async () => {
       try {
         const cfg = await fetch('/api/auth/config').then(r => r.json())
         if (cfg.profit_enabled === true) setShowProfit(true)
+        if (cfg.r2_configured === true) setShowTesting(true)
       } catch { /* keep hidden on error */ }
     })()
   }, [])
 
-  const items = showProfit ? [NAV_ITEMS[0], PROFIT_ITEM, ...NAV_ITEMS.slice(1)] : NAV_ITEMS
+  let items = NAV_ITEMS
+  if (showProfit) items = [items[0], PROFIT_ITEM, ...items.slice(1)]
+  if (showTesting) items = [...items, TESTING_ITEM]
 
   const handleLogout = async () => {
     await api.logout()
