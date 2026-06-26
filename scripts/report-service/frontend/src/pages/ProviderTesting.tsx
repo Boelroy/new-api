@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import Layout from '../components/Layout'
 import RunDetailPanels from '../components/RunDetailPanels'
-import { api, TestProject, TestRun, TestRunKind } from '../api'
+import { api, TestProject, TestRun } from '../api'
 
 const MODEL_DEFAULTS = [
   'claude-sonnet-4-6',
@@ -59,7 +59,6 @@ export default function ProviderTesting() {
   const [pageError, setPageError] = useState<string | null>(null)
 
   // New-run form state.
-  const [kind, setKind] = useState<TestRunKind>('detect')
   const [modelMode, setModelMode] = useState<'preset' | 'custom'>('preset')
   const [model, setModel] = useState(MODEL_DEFAULTS[0])
   const [customModel, setCustomModel] = useState('')
@@ -158,9 +157,8 @@ export default function ProviderTesting() {
     setPageError(null)
     try {
       const r = await api.testingStartRun(selectedProject.id, {
-        kind,
         model: finalModel,
-        pass_at: kind === 'eval' ? passAt : 1,
+        pass_at: passAt,
         run_grader: graderAvailable && runGrader,
       })
       // Reload runs immediately, jump straight into the new run detail.
@@ -339,21 +337,11 @@ export default function ProviderTesting() {
 
               {/* New run form */}
               <div className="bg-white border border-gray-200 rounded-xl p-4">
-                <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">新建测试</div>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">新建测试</div>
+                  <div className="text-[10px] text-gray-400">每次测试自动跑 Detect + Eval，约 3-16 分钟</div>
+                </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Kind</label>
-                    <div className="flex items-center gap-3 text-xs">
-                      <label className="flex items-center gap-1 text-gray-700">
-                        <input type="radio" checked={kind === 'detect'} onChange={() => setKind('detect')} />
-                        Detect (~20s)
-                      </label>
-                      <label className="flex items-center gap-1 text-gray-700">
-                        <input type="radio" checked={kind === 'eval'} onChange={() => setKind('eval')} />
-                        Eval (~3-15min)
-                      </label>
-                    </div>
-                  </div>
                   <div>
                     <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Model</label>
                     <div className="flex items-center gap-2 mb-2 text-[10px]">
@@ -384,20 +372,18 @@ export default function ProviderTesting() {
                       />
                     )}
                   </div>
-                  {kind === 'eval' && (
-                    <div>
-                      <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">pass@N</label>
-                      <select
-                        value={passAt}
-                        onChange={e => setPassAt(Number(e.target.value))}
-                        className="w-full border border-gray-200 rounded-md px-2.5 py-2 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
-                      >
-                        <option value={1}>pass@1 — ~$2.6 / 3 min</option>
-                        <option value={3}>pass@3 — ~$5 / 7 min</option>
-                        <option value={5}>pass@5 — ~$8 / 10 min</option>
-                      </select>
-                    </div>
-                  )}
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Eval pass@N</label>
+                    <select
+                      value={passAt}
+                      onChange={e => setPassAt(Number(e.target.value))}
+                      className="w-full border border-gray-200 rounded-md px-2.5 py-2 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
+                    >
+                      <option value={1}>pass@1 — ~$2.6 / 3 min</option>
+                      <option value={3}>pass@3 — ~$5 / 7 min</option>
+                      <option value={5}>pass@5 — ~$8 / 10 min</option>
+                    </select>
+                  </div>
                   {graderAvailable && (
                     <div>
                       <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">自动打分</label>
@@ -449,10 +435,8 @@ export default function ProviderTesting() {
                           </span>
                           <span className="text-[11px] text-gray-500 tabular-nums">{fmtTimeShort(r.started_at)}</span>
                           <span className="text-[11px] text-gray-400">·</span>
-                          <span className="text-[11px] text-gray-700">{r.kind}</span>
-                          <span className="text-[11px] text-gray-400">·</span>
                           <span className="text-[11px] text-gray-700 font-mono truncate">{r.model}</span>
-                          {r.kind === 'eval' && r.pass_at > 1 && (
+                          {r.pass_at > 1 && (
                             <span className="text-[10px] text-gray-400">pass@{r.pass_at}</span>
                           )}
                         </div>

@@ -1,10 +1,12 @@
 package main
 
-// Unified provider testing: project CRUD + per-project async test runs
-// (detect or eval). Run artifacts (trace.md / report.md / stderr.log /
-// result.json) live in Cloudflare R2; metadata + status lives in Postgres
+// Unified provider testing: project CRUD + per-project async test runs.
+// Each click runs BOTH detect and eval back-to-back as a single combined
+// run. Artifacts (detect/{trace,report,result} + eval/{trace,report} +
+// stderr.log) live in Cloudflare R2; metadata + status lives in Postgres
 // (rs_test_project / rs_test_run). In-memory job map tracks in-flight
-// state so UI polling can show live stderr without re-hitting R2.
+// state so UI polling can show live stderr without re-hitting R2. The
+// /api/testing/runs/:id/file proxy avoids browser↔R2 CORS.
 
 import (
 	"context"
@@ -13,11 +15,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gin-gonic/gin"
 )
 
@@ -25,21 +30,48 @@ const (
 	testRunHardTimeout       = 35 * time.Minute
 	testJobMemoryGrace       = 10 * time.Minute
 	testStderrMemoryMaxBytes = 256 * 1024
-	testSignedURLTTL         = 5 * time.Minute
 )
+
+// Artifact kinds streamed through the file proxy.
+var allowedFileKinds = map[string]struct{}{
+	"detect-trace":  {},
+	"detect-report": {},
+	"detect-result": {},
+	"eval-trace":    {},
+	"eval-report":   {},
+	"stderr":        {},
+}
+
+func r2KeyForArtifact(runID, kind string) (string, string) {
+	switch kind {
+	case "detect-trace":
+		return fmt.Sprintf("runs/%s/detect/trace.md", runID), "text/markdown; charset=utf-8"
+	case "detect-report":
+		return fmt.Sprintf("runs/%s/detect/report.md", runID), "text/markdown; charset=utf-8"
+	case "detect-result":
+		return fmt.Sprintf("runs/%s/detect/result.json", runID), "application/json; charset=utf-8"
+	case "eval-trace":
+		return fmt.Sprintf("runs/%s/eval/trace.md", runID), "text/markdown; charset=utf-8"
+	case "eval-report":
+		return fmt.Sprintf("runs/%s/eval/report.md", runID), "text/markdown; charset=utf-8"
+	case "stderr":
+		return fmt.Sprintf("runs/%s/stderr.log", runID), "text/plain; charset=utf-8"
+	}
+	return "", ""
+}
 
 // ---- in-memory live state ----
 
 type testRunMem struct {
 	ID        string
 	StartedAt time.Time
-	Status    string // mirrors DB status until terminal
+	Status    string
 	cancel    context.CancelFunc
 
 	mu         sync.Mutex
 	stderrBuf  strings.Builder
 	stderrTrim bool
-	endedAt    time.Time // non-zero once terminal; used by reaper
+	endedAt    time.Time
 }
 
 var (
@@ -69,6 +101,12 @@ func (j *testRunMem) snapshotStderr() (string, bool) {
 	return j.stderrBuf.String(), j.stderrTrim
 }
 
+func (j *testRunMem) setStatus(s string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.Status = s
+}
+
 func (j *testRunMem) markEnded(status string) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -76,9 +114,6 @@ func (j *testRunMem) markEnded(status string) {
 	j.endedAt = time.Now()
 }
 
-// startTestJobReaper drops finished in-memory job state after the grace
-// period. DB rows + R2 objects stay forever; this only frees the live
-// stderr buffer.
 func startTestJobReaper() {
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
@@ -99,9 +134,6 @@ func startTestJobReaper() {
 	}()
 }
 
-// resetRunningTestRuns flips any rs_test_run rows still marked as
-// running/grading at boot to status=error, since their in-memory state
-// was wiped by the restart.
 func resetRunningTestRuns() {
 	if db == nil {
 		return
@@ -127,7 +159,7 @@ type projectRow struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	URL       string `json:"url"`
-	APIKey    string `json:"api_key,omitempty"` // included on POST response; redacted on list
+	APIKey    string `json:"api_key,omitempty"`
 	CreatedAt int64  `json:"created_at"`
 	UpdatedAt int64  `json:"updated_at"`
 	RunCount  int64  `json:"run_count,omitempty"`
@@ -294,13 +326,14 @@ func handleTestingProjectDelete(c *gin.Context) {
 	}
 	rows.Close()
 	if len(runIDs) > 0 {
-		keys := make([]string, 0, len(runIDs)*4)
+		keys := make([]string, 0, len(runIDs)*6)
 		for _, rid := range runIDs {
-			keys = append(keys,
-				r2RunKey(rid, "trace.md"),
-				r2RunKey(rid, "report.md"),
-				r2RunKey(rid, "stderr.log"),
-				r2RunKey(rid, "result.json"))
+			for k := range allowedFileKinds {
+				key, _ := r2KeyForArtifact(rid, k)
+				if key != "" {
+					keys = append(keys, key)
+				}
+			}
 		}
 		_ = r2DeleteObjects(c.Request.Context(), keys)
 	}
@@ -314,23 +347,25 @@ func handleTestingProjectDelete(c *gin.Context) {
 // ---- run handlers ----
 
 type runRow struct {
-	ID          string `json:"id"`
-	ProjectID   string `json:"project_id"`
-	Model       string `json:"model"`
-	Kind        string `json:"kind"`
-	Status      string `json:"status"`
-	PassAt      int    `json:"pass_at"`
-	RunGrader   bool   `json:"run_grader"`
-	TraceBytes  int64  `json:"trace_bytes"`
-	ReportBytes int64  `json:"report_bytes"`
-	StderrBytes int64  `json:"stderr_bytes"`
-	ResultBytes int64  `json:"result_bytes"`
-	ErrorMsg    string `json:"error_msg,omitempty"`
-	LLMError    string `json:"llm_error,omitempty"`
-	GraderMs    int64  `json:"grader_ms"`
-	StartedAt   int64  `json:"started_at"`
-	EndedAt     *int64 `json:"ended_at,omitempty"`
-	ElapsedMs   *int64 `json:"elapsed_ms,omitempty"`
+	ID                string `json:"id"`
+	ProjectID         string `json:"project_id"`
+	Model             string `json:"model"`
+	Kind              string `json:"kind"`
+	Status            string `json:"status"`
+	PassAt            int    `json:"pass_at"`
+	RunGrader         bool   `json:"run_grader"`
+	DetectTraceBytes  int64  `json:"detect_trace_bytes"`
+	DetectReportBytes int64  `json:"detect_report_bytes"`
+	DetectResultBytes int64  `json:"detect_result_bytes"`
+	EvalTraceBytes    int64  `json:"eval_trace_bytes"`
+	EvalReportBytes   int64  `json:"eval_report_bytes"`
+	StderrBytes       int64  `json:"stderr_bytes"`
+	ErrorMsg          string `json:"error_msg,omitempty"`
+	LLMError          string `json:"llm_error,omitempty"`
+	GraderMs          int64  `json:"grader_ms"`
+	StartedAt         int64  `json:"started_at"`
+	EndedAt           *int64 `json:"ended_at,omitempty"`
+	ElapsedMs         *int64 `json:"elapsed_ms,omitempty"`
 }
 
 func scanRun(s sqlScanner) (*runRow, error) {
@@ -338,7 +373,8 @@ func scanRun(s sqlScanner) (*runRow, error) {
 	var endedAt, elapsedMs sql.NullInt64
 	if err := s.Scan(
 		&r.ID, &r.ProjectID, &r.Model, &r.Kind, &r.Status, &r.PassAt, &r.RunGrader,
-		&r.TraceBytes, &r.ReportBytes, &r.StderrBytes, &r.ResultBytes,
+		&r.DetectTraceBytes, &r.DetectReportBytes, &r.DetectResultBytes,
+		&r.EvalTraceBytes, &r.EvalReportBytes, &r.StderrBytes,
 		&r.ErrorMsg, &r.LLMError, &r.GraderMs, &r.StartedAt, &endedAt, &elapsedMs,
 	); err != nil {
 		return nil, err
@@ -359,7 +395,8 @@ type sqlScanner interface {
 }
 
 const runSelectCols = `id, project_id, model, kind, status, pass_at, run_grader,
-	trace_bytes, report_bytes, stderr_bytes, result_bytes,
+	detect_trace_bytes, detect_report_bytes, detect_result_bytes,
+	eval_trace_bytes, eval_report_bytes, stderr_bytes,
 	error_msg, llm_error, grader_ms, started_at, ended_at, elapsed_ms`
 
 func handleTestingRunList(c *gin.Context) {
@@ -392,7 +429,6 @@ func handleTestingRunList(c *gin.Context) {
 }
 
 type runStartRequest struct {
-	Kind      string `json:"kind"`
 	Model     string `json:"model"`
 	PassAt    int    `json:"pass_at"`
 	RunGrader *bool  `json:"run_grader,omitempty"`
@@ -418,12 +454,7 @@ func handleTestingRunStart(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	req.Kind = strings.TrimSpace(req.Kind)
 	req.Model = strings.TrimSpace(req.Model)
-	if req.Kind != "detect" && req.Kind != "eval" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "kind must be 'detect' or 'eval'"})
-		return
-	}
 	if req.Model == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "model required"})
 		return
@@ -443,8 +474,8 @@ func handleTestingRunStart(c *gin.Context) {
 	now := time.Now().Unix()
 	if _, err := db.Exec(`INSERT INTO rs_test_run
 		(id, project_id, model, kind, status, pass_at, run_grader, started_at)
-		VALUES ($1, $2, $3, $4, 'running', $5, $6, $7)`,
-		runID, pid, req.Model, req.Kind, req.PassAt, runGrader, now); err != nil {
+		VALUES ($1, $2, $3, 'combined', 'running', $4, $5, $6)`,
+		runID, pid, req.Model, req.PassAt, runGrader, now); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -460,14 +491,13 @@ func handleTestingRunStart(c *gin.Context) {
 	testJobs[runID] = mem
 	testJobsMu.Unlock()
 
-	go runTestJob(ctx, mem, proj, req.Kind, req.Model, req.PassAt, runGrader)
+	go runCombinedTestJob(ctx, mem, proj, req.Model, req.PassAt, runGrader)
 
 	c.JSON(http.StatusOK, gin.H{
 		"run_id":     runID,
 		"project_id": pid,
 		"started_at": now,
 		"run_grader": runGrader,
-		"kind":       req.Kind,
 		"model":      req.Model,
 		"pass_at":    req.PassAt,
 	})
@@ -492,10 +522,16 @@ func handleTestingRunDetail(c *gin.Context) {
 	resp := gin.H{
 		"id": r.ID, "project_id": r.ProjectID, "model": r.Model, "kind": r.Kind,
 		"status": r.Status, "pass_at": r.PassAt, "run_grader": r.RunGrader,
-		"trace_bytes": r.TraceBytes, "report_bytes": r.ReportBytes,
-		"stderr_bytes": r.StderrBytes, "result_bytes": r.ResultBytes,
-		"error_msg": r.ErrorMsg, "llm_error": r.LLMError,
-		"grader_ms": r.GraderMs, "started_at": r.StartedAt,
+		"detect_trace_bytes":  r.DetectTraceBytes,
+		"detect_report_bytes": r.DetectReportBytes,
+		"detect_result_bytes": r.DetectResultBytes,
+		"eval_trace_bytes":    r.EvalTraceBytes,
+		"eval_report_bytes":   r.EvalReportBytes,
+		"stderr_bytes":        r.StderrBytes,
+		"error_msg":           r.ErrorMsg,
+		"llm_error":           r.LLMError,
+		"grader_ms":           r.GraderMs,
+		"started_at":          r.StartedAt,
 	}
 	if r.EndedAt != nil {
 		resp["ended_at"] = *r.EndedAt
@@ -503,29 +539,22 @@ func handleTestingRunDetail(c *gin.Context) {
 	if r.ElapsedMs != nil {
 		resp["elapsed_ms"] = *r.ElapsedMs
 	}
-	if r2Configured() {
-		ctx := c.Request.Context()
-		if r.TraceBytes > 0 {
-			if u, err := r2SignedGetURL(ctx, r2RunKey(id, "trace.md"), testSignedURLTTL); err == nil {
-				resp["trace_url"] = u
-			}
-		}
-		if r.ReportBytes > 0 {
-			if u, err := r2SignedGetURL(ctx, r2RunKey(id, "report.md"), testSignedURLTTL); err == nil {
-				resp["report_url"] = u
-			}
-		}
-		if r.StderrBytes > 0 {
-			if u, err := r2SignedGetURL(ctx, r2RunKey(id, "stderr.log"), testSignedURLTTL); err == nil {
-				resp["stderr_url"] = u
-			}
-		}
-		if r.ResultBytes > 0 {
-			if u, err := r2SignedGetURL(ctx, r2RunKey(id, "result.json"), testSignedURLTTL); err == nil {
-				resp["result_url"] = u
-			}
+	// File proxy URLs (server-relative; avoid R2 CORS).
+	files := map[string]int64{
+		"detect-trace":  r.DetectTraceBytes,
+		"detect-report": r.DetectReportBytes,
+		"detect-result": r.DetectResultBytes,
+		"eval-trace":    r.EvalTraceBytes,
+		"eval-report":   r.EvalReportBytes,
+		"stderr":        r.StderrBytes,
+	}
+	urls := gin.H{}
+	for kind, n := range files {
+		if n > 0 {
+			urls[kind] = fmt.Sprintf("/api/testing/runs/%s/file?kind=%s", id, kind)
 		}
 	}
+	resp["files"] = urls
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -589,11 +618,12 @@ func handleTestingRunDelete(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	keys := []string{
-		r2RunKey(id, "trace.md"),
-		r2RunKey(id, "report.md"),
-		r2RunKey(id, "stderr.log"),
-		r2RunKey(id, "result.json"),
+	keys := make([]string, 0, len(allowedFileKinds))
+	for k := range allowedFileKinds {
+		key, _ := r2KeyForArtifact(id, k)
+		if key != "" {
+			keys = append(keys, key)
+		}
 	}
 	_ = r2DeleteObjects(c.Request.Context(), keys)
 	if _, err := db.Exec(`DELETE FROM rs_test_run WHERE id = $1`, id); err != nil {
@@ -603,19 +633,64 @@ func handleTestingRunDelete(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "project_id": r.ProjectID})
 }
 
+// handleTestingRunFile streams an R2 object back to the browser. Avoids
+// the CORS hop the browser would otherwise need to do against R2.
+func handleTestingRunFile(c *gin.Context) {
+	id := c.Param("id")
+	kind := strings.TrimSpace(c.Query("kind"))
+	if _, ok := allowedFileKinds[kind]; !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown kind"})
+		return
+	}
+	if _, err := loadRun(id); err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "run not found"})
+		return
+	}
+	key, contentType := r2KeyForArtifact(id, kind)
+	if key == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown kind"})
+		return
+	}
+	if err := r2InitOnce(); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		return
+	}
+	out, err := r2Client.GetObject(c.Request.Context(), &s3.GetObjectInput{
+		Bucket: aws.String(r2BucketName),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	defer out.Body.Close()
+	c.Header("Content-Type", contentType)
+	if out.ContentLength != nil {
+		c.Header("Content-Length", fmt.Sprintf("%d", *out.ContentLength))
+	}
+	// Cache aggressively — artifacts are immutable per run.
+	c.Header("Cache-Control", "private, max-age=300")
+	c.Status(http.StatusOK)
+	_, _ = io.Copy(c.Writer, out.Body)
+}
+
 // ---- background runner ----
 
-func runTestJob(ctx context.Context, mem *testRunMem, proj *projectRow,
-	kind, model string, passAt int, runGrader bool) {
+// runCombinedTestJob runs detect first, then eval, both for the same model
+// against the same project. Each phase's artifacts go under a per-kind
+// subpath in R2 so we can serve them independently.
+func runCombinedTestJob(ctx context.Context, mem *testRunMem, proj *projectRow,
+	model string, passAt int, runGrader bool) {
 
 	runID := mem.ID
+
 	defer func() {
-		// Always upload the final stderr snapshot + write terminal status.
 		stderrStr, _ := mem.snapshotStderr()
 		stderrBytes := int64(len(stderrStr))
 		if stderrBytes > 0 {
+			key, ct := r2KeyForArtifact(runID, "stderr")
 			uctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			_ = r2PutObject(uctx, r2RunKey(runID, "stderr.log"), "text/plain; charset=utf-8", []byte(stderrStr))
+			_ = r2PutObject(uctx, key, ct, []byte(stderrStr))
 			cancel()
 		}
 		endedAt := time.Now().Unix()
@@ -626,127 +701,166 @@ func runTestJob(ctx context.Context, mem *testRunMem, proj *projectRow,
 			stderrBytes, endedAt, elapsedMs, runID)
 	}()
 
-	var (
-		traceMD     string
-		probeErr    error
-		resultJSON  []byte
-	)
+	totalGraderMs := int64(0)
+	var llmErrors []string
 
-	switch kind {
-	case "detect":
-		opts := detectOptions{
-			IntervalMs: detectDefaultIntervalMs,
-			MaxRetries: detectDefaultMaxRetries,
-		}
-		mem.appendStderr("detect: running 6 probes against " + proj.URL)
-		res, err := runDetect(ctx, proj.URL, proj.APIKey, model, opts)
-		if err != nil {
-			probeErr = err
-			break
-		}
-		traceMD = renderDetectTraceMarkdown(res)
-		if b, jerr := json.Marshal(res); jerr == nil {
-			resultJSON = b
-		}
-		mem.appendStderr(fmt.Sprintf("detect: classification router=%s/%s backend=%s/%s",
-			res.Classification.RouterLabel, res.Classification.RouterConfidence,
-			res.Classification.BackendLabel, res.Classification.BackendConfidence))
-	case "eval":
-		mem.appendStderr(fmt.Sprintf("eval: starting probe.mjs (pass@%d) against %s", passAt, proj.URL))
-		tr, err := runEvalProbe(ctx, proj.URL, proj.APIKey, model, passAt, mem.appendStderr)
-		traceMD = tr
-		probeErr = err
-	default:
-		probeErr = fmt.Errorf("unknown kind: %s", kind)
-	}
-
-	if probeErr != nil {
-		mem.appendStderr("probe error: " + probeErr.Error())
+	// ---- Phase 1: Detect ----
+	mem.appendStderr("=== detect: 6 probes against " + proj.URL + " ===")
+	mem.setStatus("running")
+	dRes, dErr := runDetect(ctx, proj.URL, proj.APIKey, model, detectOptions{
+		IntervalMs: detectDefaultIntervalMs,
+		MaxRetries: detectDefaultMaxRetries,
+	})
+	if dErr != nil {
+		mem.appendStderr("detect error: " + dErr.Error())
 		_, _ = db.Exec(`UPDATE rs_test_run SET status='error', error_msg=$1 WHERE id=$2`,
-			probeErr.Error(), runID)
+			"detect: "+dErr.Error(), runID)
 		mem.markEnded("error")
 		return
 	}
+	mem.appendStderr(fmt.Sprintf("detect: classification router=%s/%s backend=%s/%s",
+		dRes.Classification.RouterLabel, dRes.Classification.RouterConfidence,
+		dRes.Classification.BackendLabel, dRes.Classification.BackendConfidence))
 
-	// Upload trace.md (always present on success) and result.json (detect only).
-	if traceMD != "" {
+	detectTraceMD := renderDetectTraceMarkdown(dRes)
+	detectResultJSON, _ := json.Marshal(dRes)
+
+	if detectTraceMD != "" {
+		key, ct := r2KeyForArtifact(runID, "detect-trace")
 		uctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		if err := r2PutObject(uctx, r2RunKey(runID, "trace.md"),
-			"text/markdown; charset=utf-8", []byte(traceMD)); err != nil {
-			cancel()
-			mem.appendStderr("r2 upload trace failed: " + err.Error())
-			_, _ = db.Exec(`UPDATE rs_test_run SET status='error', error_msg=$1 WHERE id=$2`,
-				"r2 upload trace: "+err.Error(), runID)
+		if err := r2PutObject(uctx, key, ct, []byte(detectTraceMD)); err == nil {
+			_, _ = db.Exec(`UPDATE rs_test_run SET detect_trace_bytes=$1 WHERE id=$2`,
+				int64(len(detectTraceMD)), runID)
+		} else {
+			mem.appendStderr("r2 upload detect-trace failed: " + err.Error())
+		}
+		cancel()
+	}
+	if len(detectResultJSON) > 0 {
+		key, ct := r2KeyForArtifact(runID, "detect-result")
+		uctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := r2PutObject(uctx, key, ct, detectResultJSON); err == nil {
+			_, _ = db.Exec(`UPDATE rs_test_run SET detect_result_bytes=$1 WHERE id=$2`,
+				int64(len(detectResultJSON)), runID)
+		} else {
+			mem.appendStderr("r2 upload detect-result failed: " + err.Error())
+		}
+		cancel()
+	}
+
+	if runGrader && graderConfigured() && detectTraceMD != "" {
+		mem.appendStderr("--- detect probe complete, invoking Claude grader for detect ---")
+		_, _ = db.Exec(`UPDATE rs_test_run SET status='grading' WHERE id=$1`, runID)
+		mem.setStatus("grading")
+		pipelineMD, perr := readPipelineFile("DETECT_PIPELINE_PATH")
+		if perr != nil {
+			mem.appendStderr("grader detect: pipeline load failed — " + perr.Error())
+			llmErrors = append(llmErrors, "detect pipeline: "+perr.Error())
+		} else {
+			t0 := time.Now()
+			report, gerr := runClaudeGrader(context.Background(), detectGraderInstruction, pipelineMD, detectTraceMD)
+			elapsed := time.Since(t0).Milliseconds()
+			totalGraderMs += elapsed
+			if gerr != nil {
+				mem.appendStderr("grader detect: " + gerr.Error())
+				llmErrors = append(llmErrors, "detect grader: "+gerr.Error())
+			} else {
+				mem.appendStderr(fmt.Sprintf("grader detect: done in %dms (%d chars)", elapsed, len(report)))
+				key, ct := r2KeyForArtifact(runID, "detect-report")
+				uctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				if err := r2PutObject(uctx, key, ct, []byte(report)); err == nil {
+					_, _ = db.Exec(`UPDATE rs_test_run SET detect_report_bytes=$1 WHERE id=$2`,
+						int64(len(report)), runID)
+				} else {
+					mem.appendStderr("r2 upload detect-report failed: " + err.Error())
+					llmErrors = append(llmErrors, "detect upload: "+err.Error())
+				}
+				cancel()
+			}
+		}
+	}
+
+	// ---- Phase 2: Eval ----
+	if ctx.Err() != nil {
+		mem.appendStderr("cancelled before eval phase")
+		_, _ = db.Exec(`UPDATE rs_test_run SET status='cancelled', error_msg='cancelled before eval' WHERE id=$1`, runID)
+		mem.markEnded("cancelled")
+		return
+	}
+	mem.appendStderr(fmt.Sprintf("=== eval: probe.mjs (pass@%d) against %s ===", passAt, proj.URL))
+	_, _ = db.Exec(`UPDATE rs_test_run SET status='running' WHERE id=$1`, runID)
+	mem.setStatus("running")
+	evalTraceMD, eErr := runEvalProbe(ctx, proj.URL, proj.APIKey, model, passAt, mem.appendStderr)
+	if eErr != nil {
+		mem.appendStderr("eval error: " + eErr.Error())
+		// Don't fail the whole run — detect already succeeded. Note the error and continue.
+		if evalTraceMD == "" {
+			finalErr := "eval: " + eErr.Error()
+			llmErr := ""
+			if len(llmErrors) > 0 {
+				llmErr = strings.Join(llmErrors, " ; ")
+			}
+			_, _ = db.Exec(`UPDATE rs_test_run SET status='error', error_msg=$1, llm_error=$2, grader_ms=$3 WHERE id=$4`,
+				finalErr, llmErr, totalGraderMs, runID)
 			mem.markEnded("error")
 			return
 		}
-		cancel()
-		_, _ = db.Exec(`UPDATE rs_test_run SET trace_bytes=$1 WHERE id=$2`,
-			int64(len(traceMD)), runID)
-	}
-	if len(resultJSON) > 0 {
-		uctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if err := r2PutObject(uctx, r2RunKey(runID, "result.json"),
-			"application/json; charset=utf-8", resultJSON); err == nil {
-			_, _ = db.Exec(`UPDATE rs_test_run SET result_bytes=$1 WHERE id=$2`,
-				int64(len(resultJSON)), runID)
-		} else {
-			mem.appendStderr("r2 upload result.json failed: " + err.Error())
-		}
-		cancel()
 	}
 
-	// Optional grader pass.
-	if runGrader && graderConfigured() && traceMD != "" {
-		mem.appendStderr("--- probe complete, invoking Claude grader ---")
-		_, _ = db.Exec(`UPDATE rs_test_run SET status='grading' WHERE id=$1`, runID)
-		mem.mu.Lock()
-		mem.Status = "grading"
-		mem.mu.Unlock()
-
-		pipelineEnv := "EVAL_PIPELINE_PATH"
-		instruction := evalGraderInstruction
-		if kind == "detect" {
-			pipelineEnv = "DETECT_PIPELINE_PATH"
-			instruction = detectGraderInstruction
-		}
-		pipelineMD, perr := readPipelineFile(pipelineEnv)
-		if perr != nil {
-			mem.appendStderr("grader: pipeline load failed — " + perr.Error())
-			_, _ = db.Exec(`UPDATE rs_test_run SET status='ok', llm_error=$1 WHERE id=$2`,
-				"pipeline load: "+perr.Error(), runID)
-			mem.markEnded("ok")
-			return
-		}
-		t0 := time.Now()
-		report, gerr := runClaudeGrader(context.Background(), instruction, pipelineMD, traceMD)
-		elapsed := time.Since(t0).Milliseconds()
-		if gerr != nil {
-			mem.appendStderr("grader: " + gerr.Error())
-			_, _ = db.Exec(`UPDATE rs_test_run SET status='ok', llm_error=$1, grader_ms=$2 WHERE id=$3`,
-				gerr.Error(), elapsed, runID)
-			mem.markEnded("ok")
-			return
-		}
-		mem.appendStderr(fmt.Sprintf("grader: done in %dms (%d chars)", elapsed, len(report)))
+	if evalTraceMD != "" {
+		key, ct := r2KeyForArtifact(runID, "eval-trace")
 		uctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		if err := r2PutObject(uctx, r2RunKey(runID, "report.md"),
-			"text/markdown; charset=utf-8", []byte(report)); err != nil {
-			cancel()
-			mem.appendStderr("r2 upload report failed: " + err.Error())
-			_, _ = db.Exec(`UPDATE rs_test_run SET status='ok', llm_error=$1, grader_ms=$2 WHERE id=$3`,
-				"r2 upload report: "+err.Error(), elapsed, runID)
-			mem.markEnded("ok")
-			return
+		if err := r2PutObject(uctx, key, ct, []byte(evalTraceMD)); err == nil {
+			_, _ = db.Exec(`UPDATE rs_test_run SET eval_trace_bytes=$1 WHERE id=$2`,
+				int64(len(evalTraceMD)), runID)
+		} else {
+			mem.appendStderr("r2 upload eval-trace failed: " + err.Error())
 		}
 		cancel()
-		_, _ = db.Exec(`UPDATE rs_test_run
-			SET status='ok', report_bytes=$1, grader_ms=$2 WHERE id=$3`,
-			int64(len(report)), elapsed, runID)
-		mem.markEnded("ok")
-		return
 	}
 
-	_, _ = db.Exec(`UPDATE rs_test_run SET status='ok' WHERE id=$1`, runID)
+	if runGrader && graderConfigured() && evalTraceMD != "" {
+		mem.appendStderr("--- eval probe complete, invoking Claude grader for eval ---")
+		_, _ = db.Exec(`UPDATE rs_test_run SET status='grading' WHERE id=$1`, runID)
+		mem.setStatus("grading")
+		pipelineMD, perr := readPipelineFile("EVAL_PIPELINE_PATH")
+		if perr != nil {
+			mem.appendStderr("grader eval: pipeline load failed — " + perr.Error())
+			llmErrors = append(llmErrors, "eval pipeline: "+perr.Error())
+		} else {
+			t0 := time.Now()
+			report, gerr := runClaudeGrader(context.Background(), evalGraderInstruction, pipelineMD, evalTraceMD)
+			elapsed := time.Since(t0).Milliseconds()
+			totalGraderMs += elapsed
+			if gerr != nil {
+				mem.appendStderr("grader eval: " + gerr.Error())
+				llmErrors = append(llmErrors, "eval grader: "+gerr.Error())
+			} else {
+				mem.appendStderr(fmt.Sprintf("grader eval: done in %dms (%d chars)", elapsed, len(report)))
+				key, ct := r2KeyForArtifact(runID, "eval-report")
+				uctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				if err := r2PutObject(uctx, key, ct, []byte(report)); err == nil {
+					_, _ = db.Exec(`UPDATE rs_test_run SET eval_report_bytes=$1 WHERE id=$2`,
+						int64(len(report)), runID)
+				} else {
+					mem.appendStderr("r2 upload eval-report failed: " + err.Error())
+					llmErrors = append(llmErrors, "eval upload: "+err.Error())
+				}
+				cancel()
+			}
+		}
+	}
+
+	// Done.
+	finalErr := ""
+	if eErr != nil {
+		finalErr = "eval (partial): " + eErr.Error()
+	}
+	llmErr := ""
+	if len(llmErrors) > 0 {
+		llmErr = strings.Join(llmErrors, " ; ")
+	}
+	_, _ = db.Exec(`UPDATE rs_test_run SET status='ok', error_msg=$1, llm_error=$2, grader_ms=$3 WHERE id=$4`,
+		finalErr, llmErr, totalGraderMs, runID)
 	mem.markEnded("ok")
 }

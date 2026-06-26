@@ -1662,6 +1662,12 @@ func main() {
 			elapsed_ms   BIGINT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_rs_test_run_project_started ON rs_test_run(project_id, started_at DESC)`,
+		// migration: combined runs (detect + eval together)
+		`ALTER TABLE rs_test_run ADD COLUMN IF NOT EXISTS detect_trace_bytes  BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE rs_test_run ADD COLUMN IF NOT EXISTS detect_report_bytes BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE rs_test_run ADD COLUMN IF NOT EXISTS detect_result_bytes BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE rs_test_run ADD COLUMN IF NOT EXISTS eval_trace_bytes    BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE rs_test_run ADD COLUMN IF NOT EXISTS eval_report_bytes   BIGINT NOT NULL DEFAULT 0`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
@@ -1707,6 +1713,7 @@ func main() {
 	api.POST("/testing/projects/:id/runs", handleTestingRunStart)
 	api.GET("/testing/runs/:id", handleTestingRunDetail)
 	api.GET("/testing/runs/:id/status", handleTestingRunStatus)
+	api.GET("/testing/runs/:id/file", handleTestingRunFile)
 	api.POST("/testing/runs/:id/cancel", handleTestingRunCancel)
 	api.DELETE("/testing/runs/:id", handleTestingRunDelete)
 

@@ -183,7 +183,14 @@ export type TestProject = {
 }
 
 export type TestRunStatus = 'running' | 'grading' | 'ok' | 'error' | 'cancelled'
-export type TestRunKind = 'detect' | 'eval'
+export type TestRunKind = 'detect' | 'eval' | 'combined'
+export type TestFileKind =
+  | 'detect-trace'
+  | 'detect-report'
+  | 'detect-result'
+  | 'eval-trace'
+  | 'eval-report'
+  | 'stderr'
 
 export type TestRun = {
   id: string
@@ -193,10 +200,12 @@ export type TestRun = {
   status: TestRunStatus
   pass_at: number
   run_grader: boolean
-  trace_bytes: number
-  report_bytes: number
+  detect_trace_bytes: number
+  detect_report_bytes: number
+  detect_result_bytes: number
+  eval_trace_bytes: number
+  eval_report_bytes: number
   stderr_bytes: number
-  result_bytes: number
   error_msg?: string
   llm_error?: string
   grader_ms: number
@@ -206,10 +215,7 @@ export type TestRun = {
 }
 
 export type TestRunDetail = TestRun & {
-  trace_url?: string
-  report_url?: string
-  stderr_url?: string
-  result_url?: string
+  files: Partial<Record<TestFileKind, string>>
 }
 
 export type TestRunLiveStatus = {
@@ -349,9 +355,9 @@ export const api = {
 
   testingStartRun: (
     projectId: string,
-    payload: { kind: TestRunKind; model: string; pass_at?: number; run_grader?: boolean },
+    payload: { model: string; pass_at?: number; run_grader?: boolean },
   ) =>
-    request<{ run_id: string; project_id: string; started_at: number; run_grader: boolean; kind: TestRunKind; model: string; pass_at: number }>(
+    request<{ run_id: string; project_id: string; started_at: number; run_grader: boolean; model: string; pass_at: number }>(
       `/api/testing/projects/${encodeURIComponent(projectId)}/runs`,
       {
         method: 'POST',
