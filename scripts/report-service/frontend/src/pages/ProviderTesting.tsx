@@ -5,21 +5,21 @@ import RunDetailPanels from '../components/RunDetailPanels'
 import { api, TestProject, TestRun } from '../api'
 
 const MODEL_DEFAULTS = [
-  'claude-sonnet-4-6',
   'claude-opus-4-7',
+  'claude-sonnet-4-6',
   'claude-opus-4-6',
   'claude-haiku-4-5-20251001',
   'claude-sonnet-4-5-20250929',
   'claude-opus-4-5-20251101',
-  'claude-3-7-sonnet-20250219',
-  'claude-3-5-sonnet-20241022',
+  'claude-opus-4-8',
+  'claude-fable-5',
 ]
 
 const RUNS_REFRESH_MS = 4000
 
 function statusColor(s: string) {
   switch (s) {
-    case 'ok': return 'bg-emerald-100 text-emerald-800'
+    case 'done': return 'bg-emerald-100 text-emerald-800'
     case 'error': return 'bg-rose-100 text-rose-700'
     case 'cancelled': return 'bg-gray-100 text-gray-600'
     case 'running': return 'bg-blue-100 text-blue-700'

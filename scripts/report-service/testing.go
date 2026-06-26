@@ -761,7 +761,7 @@ func runGraderRetry(ctx context.Context, mem *testRunMem, phase string) {
 
 	if err := r2InitOnce(); err != nil {
 		mem.appendStderr("r2 init failed: " + err.Error())
-		finish("ok", phase+" grader retry: r2 init: "+err.Error(), 0, 0)
+		finish("done", phase+" grader retry: r2 init: "+err.Error(), 0, 0)
 		return
 	}
 	out, err := r2Client.GetObject(ctx, &s3.GetObjectInput{
@@ -770,21 +770,21 @@ func runGraderRetry(ctx context.Context, mem *testRunMem, phase string) {
 	})
 	if err != nil {
 		mem.appendStderr("r2 fetch trace failed: " + err.Error())
-		finish("ok", phase+" grader retry: r2 fetch: "+err.Error(), 0, 0)
+		finish("done", phase+" grader retry: r2 fetch: "+err.Error(), 0, 0)
 		return
 	}
 	traceBuf, rerr := io.ReadAll(out.Body)
 	_ = out.Body.Close()
 	if rerr != nil {
 		mem.appendStderr("read trace failed: " + rerr.Error())
-		finish("ok", phase+" grader retry: read trace: "+rerr.Error(), 0, 0)
+		finish("done", phase+" grader retry: read trace: "+rerr.Error(), 0, 0)
 		return
 	}
 
 	pipelineMD, perr := readPipelineFile(pipelineEnv)
 	if perr != nil {
 		mem.appendStderr("pipeline load: " + perr.Error())
-		finish("ok", phase+" grader retry: pipeline: "+perr.Error(), 0, 0)
+		finish("done", phase+" grader retry: pipeline: "+perr.Error(), 0, 0)
 		return
 	}
 
@@ -793,7 +793,7 @@ func runGraderRetry(ctx context.Context, mem *testRunMem, phase string) {
 	elapsed := time.Since(t0).Milliseconds()
 	if gerr != nil {
 		mem.appendStderr("grader: " + gerr.Error())
-		finish("ok", phase+" grader retry: "+gerr.Error(), 0, elapsed)
+		finish("done", phase+" grader retry: "+gerr.Error(), 0, elapsed)
 		return
 	}
 	mem.appendStderr(fmt.Sprintf("grader: done in %dms (%d chars)", elapsed, len(report)))
@@ -803,11 +803,11 @@ func runGraderRetry(ctx context.Context, mem *testRunMem, phase string) {
 	if err := r2PutObject(uctx, key, ct, []byte(report)); err != nil {
 		ucancel()
 		mem.appendStderr("upload report failed: " + err.Error())
-		finish("ok", phase+" grader retry: upload: "+err.Error(), 0, elapsed)
+		finish("done", phase+" grader retry: upload: "+err.Error(), 0, elapsed)
 		return
 	}
 	ucancel()
-	finish("ok", "", int64(len(report)), elapsed)
+	finish("done", "", int64(len(report)), elapsed)
 }
 
 // handleTestingRunFile streams an R2 object back to the browser. Avoids
@@ -1037,7 +1037,7 @@ func runCombinedTestJob(ctx context.Context, mem *testRunMem, proj *projectRow,
 	if len(llmErrors) > 0 {
 		llmErr = strings.Join(llmErrors, " ; ")
 	}
-	_, _ = db.Exec(`UPDATE rs_test_run SET status='ok', error_msg=$1, llm_error=$2, grader_ms=$3 WHERE id=$4`,
+	_, _ = db.Exec(`UPDATE rs_test_run SET status='done', error_msg=$1, llm_error=$2, grader_ms=$3 WHERE id=$4`,
 		finalErr, llmErr, totalGraderMs, runID)
-	mem.markEnded("ok")
+	mem.markEnded("done")
 }

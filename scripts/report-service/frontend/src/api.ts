@@ -182,7 +182,7 @@ export type TestProject = {
   run_count?: number
 }
 
-export type TestRunStatus = 'running' | 'grading' | 'ok' | 'error' | 'cancelled'
+export type TestRunStatus = 'running' | 'grading' | 'done' | 'error' | 'cancelled'
 export type TestRunKind = 'detect' | 'eval' | 'combined'
 export type TestFileKind =
   | 'detect-trace'

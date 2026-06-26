@@ -7,7 +7,7 @@ const POLL_INTERVAL_MS = 2000
 
 function statusColor(s: string) {
   switch (s) {
-    case 'ok': return 'bg-emerald-100 text-emerald-800'
+    case 'done': return 'bg-emerald-100 text-emerald-800'
     case 'error': return 'bg-rose-100 text-rose-700'
     case 'cancelled': return 'bg-gray-100 text-gray-600'
     case 'running': return 'bg-blue-100 text-blue-700'
@@ -88,7 +88,7 @@ export default function RunDetailPanels({ run, onClose, onDeleted }: Props) {
   const logRef = useRef<HTMLPreElement>(null)
   const followRef = useRef(true)
 
-  const isTerminal = run.status === 'ok' || run.status === 'error' || run.status === 'cancelled'
+  const isTerminal = run.status === 'done' || run.status === 'error' || run.status === 'cancelled'
 
   // Initial + occasional refresh of detail (file URLs are server-proxy paths,
   // they don't expire — but bytes change as the run progresses, so re-fetch).

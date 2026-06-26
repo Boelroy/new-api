@@ -1668,6 +1668,8 @@ func main() {
 		`ALTER TABLE rs_test_run ADD COLUMN IF NOT EXISTS detect_result_bytes BIGINT NOT NULL DEFAULT 0`,
 		`ALTER TABLE rs_test_run ADD COLUMN IF NOT EXISTS eval_trace_bytes    BIGINT NOT NULL DEFAULT 0`,
 		`ALTER TABLE rs_test_run ADD COLUMN IF NOT EXISTS eval_report_bytes   BIGINT NOT NULL DEFAULT 0`,
+		// status rename: legacy 'ok' → 'done' (consistent terminal label)
+		`UPDATE rs_test_run SET status='done' WHERE status='ok'`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
