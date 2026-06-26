@@ -633,6 +633,183 @@ func handleTestingRunDelete(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "project_id": r.ProjectID})
 }
 
+// handleTestingRunRegrade re-runs the Claude grader for one phase
+// (detect | eval) using the trace already in R2. The run's status flips
+// back to 'grading' while the goroutine works; UI polls /status as usual.
+func handleTestingRunRegrade(c *gin.Context) {
+	id := c.Param("id")
+	phase := strings.TrimSpace(c.Query("phase"))
+	if phase == "" {
+		var body struct {
+			Phase string `json:"phase"`
+		}
+		_ = c.ShouldBindJSON(&body)
+		phase = strings.TrimSpace(body.Phase)
+	}
+	if phase != "detect" && phase != "eval" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "phase must be 'detect' or 'eval'"})
+		return
+	}
+	if !graderConfigured() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "grader not configured"})
+		return
+	}
+	r, err := loadRun(id)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "run not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	var traceBytes int64
+	if phase == "detect" {
+		traceBytes = r.DetectTraceBytes
+	} else {
+		traceBytes = r.EvalTraceBytes
+	}
+	if traceBytes == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": phase + " trace not available — nothing to regrade"})
+		return
+	}
+	// Reject if another job is already in flight on this run.
+	testJobsMu.Lock()
+	if mem, ok := testJobs[id]; ok {
+		mem.mu.Lock()
+		isRunning := mem.endedAt.IsZero()
+		mem.mu.Unlock()
+		if isRunning {
+			testJobsMu.Unlock()
+			c.JSON(http.StatusConflict, gin.H{"error": "another job is already in flight for this run"})
+			return
+		}
+		delete(testJobs, id)
+	}
+	testJobsMu.Unlock()
+
+	_, _ = db.Exec(`UPDATE rs_test_run SET status='grading' WHERE id=$1`, id)
+	ctx, cancel := context.WithTimeout(context.Background(), testRunHardTimeout)
+	mem := &testRunMem{
+		ID:        id,
+		StartedAt: time.Now(),
+		Status:    "grading",
+		cancel:    cancel,
+	}
+	testJobsMu.Lock()
+	testJobs[id] = mem
+	testJobsMu.Unlock()
+
+	go runGraderRetry(ctx, mem, phase)
+
+	c.JSON(http.StatusOK, gin.H{"ok": true, "phase": phase})
+}
+
+func runGraderRetry(ctx context.Context, mem *testRunMem, phase string) {
+	runID := mem.ID
+
+	var (
+		traceKey    string
+		pipelineEnv string
+		instruction string
+		reportKind  string
+		bytesCol    string
+	)
+	switch phase {
+	case "detect":
+		traceKey, _ = r2KeyForArtifact(runID, "detect-trace")
+		pipelineEnv = "DETECT_PIPELINE_PATH"
+		instruction = detectGraderInstruction
+		reportKind = "detect-report"
+		bytesCol = "detect_report_bytes"
+	case "eval":
+		traceKey, _ = r2KeyForArtifact(runID, "eval-trace")
+		pipelineEnv = "EVAL_PIPELINE_PATH"
+		instruction = evalGraderInstruction
+		reportKind = "eval-report"
+		bytesCol = "eval_report_bytes"
+	}
+
+	finish := func(status, llmErr string, reportBytes, elapsed int64) {
+		updates := []string{"status=$1"}
+		args := []any{status}
+		idx := 2
+		if llmErr != "" {
+			updates = append(updates, fmt.Sprintf("llm_error=$%d", idx))
+			args = append(args, llmErr)
+			idx++
+		} else {
+			updates = append(updates, "llm_error=''")
+		}
+		if reportBytes > 0 {
+			updates = append(updates, fmt.Sprintf("%s=$%d", bytesCol, idx))
+			args = append(args, reportBytes)
+			idx++
+		}
+		if elapsed > 0 {
+			updates = append(updates, fmt.Sprintf("grader_ms = grader_ms + $%d", idx))
+			args = append(args, elapsed)
+			idx++
+		}
+		args = append(args, runID)
+		query := fmt.Sprintf(`UPDATE rs_test_run SET %s WHERE id=$%d`, strings.Join(updates, ", "), idx)
+		_, _ = db.Exec(query, args...)
+		mem.markEnded(status)
+	}
+
+	mem.appendStderr(fmt.Sprintf("=== manual retry: %s grader ===", phase))
+
+	if err := r2InitOnce(); err != nil {
+		mem.appendStderr("r2 init failed: " + err.Error())
+		finish("ok", phase+" grader retry: r2 init: "+err.Error(), 0, 0)
+		return
+	}
+	out, err := r2Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(r2BucketName),
+		Key:    aws.String(traceKey),
+	})
+	if err != nil {
+		mem.appendStderr("r2 fetch trace failed: " + err.Error())
+		finish("ok", phase+" grader retry: r2 fetch: "+err.Error(), 0, 0)
+		return
+	}
+	traceBuf, rerr := io.ReadAll(out.Body)
+	_ = out.Body.Close()
+	if rerr != nil {
+		mem.appendStderr("read trace failed: " + rerr.Error())
+		finish("ok", phase+" grader retry: read trace: "+rerr.Error(), 0, 0)
+		return
+	}
+
+	pipelineMD, perr := readPipelineFile(pipelineEnv)
+	if perr != nil {
+		mem.appendStderr("pipeline load: " + perr.Error())
+		finish("ok", phase+" grader retry: pipeline: "+perr.Error(), 0, 0)
+		return
+	}
+
+	t0 := time.Now()
+	report, gerr := runClaudeGrader(context.Background(), instruction, pipelineMD, string(traceBuf))
+	elapsed := time.Since(t0).Milliseconds()
+	if gerr != nil {
+		mem.appendStderr("grader: " + gerr.Error())
+		finish("ok", phase+" grader retry: "+gerr.Error(), 0, elapsed)
+		return
+	}
+	mem.appendStderr(fmt.Sprintf("grader: done in %dms (%d chars)", elapsed, len(report)))
+
+	key, ct := r2KeyForArtifact(runID, reportKind)
+	uctx, ucancel := context.WithTimeout(context.Background(), 60*time.Second)
+	if err := r2PutObject(uctx, key, ct, []byte(report)); err != nil {
+		ucancel()
+		mem.appendStderr("upload report failed: " + err.Error())
+		finish("ok", phase+" grader retry: upload: "+err.Error(), 0, elapsed)
+		return
+	}
+	ucancel()
+	finish("ok", "", int64(len(report)), elapsed)
+}
+
 // handleTestingRunFile streams an R2 object back to the browser. Avoids
 // the CORS hop the browser would otherwise need to do against R2.
 func handleTestingRunFile(c *gin.Context) {

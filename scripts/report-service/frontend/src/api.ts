@@ -375,6 +375,13 @@ export const api = {
   testingCancelRun: (id: string) =>
     request<{ ok: boolean }>(`/api/testing/runs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
 
+  testingRegrade: (id: string, phase: 'detect' | 'eval') =>
+    request<{ ok: boolean; phase: string }>(`/api/testing/runs/${encodeURIComponent(id)}/regrade`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phase }),
+    }),
+
   testingDeleteRun: (id: string) =>
     request<{ ok: boolean; project_id: string }>(`/api/testing/runs/${encodeURIComponent(id)}`, {
       method: 'DELETE',

@@ -174,6 +174,19 @@ export default function RunDetailPanels({ run, onClose, onDeleted }: Props) {
     try { await api.testingCancelRun(run.id) } catch { /* ignore */ }
   }
 
+  const handleRegrade = async (phase: 'detect' | 'eval') => {
+    try {
+      await api.testingRegrade(run.id, phase)
+      // Optimistic: pull fresh detail so the UI flips into the grading state.
+      const d = await api.testingGetRun(run.id)
+      setDetail(d)
+      if (phase === 'detect') setDetectReport(null)
+      else setEvalReport(null)
+    } catch (e: any) {
+      alert(`重试失败：${e?.message || String(e)}`)
+    }
+  }
+
   const handleDelete = async () => {
     if (!confirm('删除这次测试记录？包含 R2 上的 trace / report。')) return
     try {
@@ -261,9 +274,19 @@ export default function RunDetailPanels({ run, onClose, onDeleted }: Props) {
 
       {/* DETECT section */}
       <div className="space-y-3">
-        <div className="flex items-center gap-2">
-          <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-800">Detect</span>
-          <span className="text-xs text-gray-500">6 probes · 路由层 / 后端供应商判别</span>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-800">Detect</span>
+            <span className="text-xs text-gray-500">6 probes · 路由层 / 后端供应商判别</span>
+          </div>
+          {isTerminal && run.run_grader && run.detect_trace_bytes > 0 && run.detect_report_bytes === 0 && (
+            <button
+              onClick={() => handleRegrade('detect')}
+              className="border border-amber-200 text-amber-800 bg-amber-50 hover:bg-amber-100 rounded-md px-3 py-1 text-[11px]"
+            >
+              重试 Grader
+            </button>
+          )}
         </div>
 
         {detectResult && (
@@ -359,9 +382,19 @@ export default function RunDetailPanels({ run, onClose, onDeleted }: Props) {
 
       {/* EVAL section */}
       <div className="space-y-3 pt-3 border-t border-dashed border-gray-200">
-        <div className="flex items-center gap-2">
-          <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-100 text-blue-800">Eval</span>
-          <span className="text-xs text-gray-500">25 步 / ~47 probe · 性能 / 智商 / 功能</span>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-100 text-blue-800">Eval</span>
+            <span className="text-xs text-gray-500">25 步 / ~47 probe · 性能 / 智商 / 功能</span>
+          </div>
+          {isTerminal && run.run_grader && run.eval_trace_bytes > 0 && run.eval_report_bytes === 0 && (
+            <button
+              onClick={() => handleRegrade('eval')}
+              className="border border-blue-200 text-blue-800 bg-blue-50 hover:bg-blue-100 rounded-md px-3 py-1 text-[11px]"
+            >
+              重试 Grader
+            </button>
+          )}
         </div>
 
         {evalReport && (

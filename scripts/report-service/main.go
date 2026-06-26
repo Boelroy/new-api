@@ -1714,6 +1714,7 @@ func main() {
 	api.GET("/testing/runs/:id", handleTestingRunDetail)
 	api.GET("/testing/runs/:id/status", handleTestingRunStatus)
 	api.GET("/testing/runs/:id/file", handleTestingRunFile)
+	api.POST("/testing/runs/:id/regrade", handleTestingRunRegrade)
 	api.POST("/testing/runs/:id/cancel", handleTestingRunCancel)
 	api.DELETE("/testing/runs/:id", handleTestingRunDelete)
 
