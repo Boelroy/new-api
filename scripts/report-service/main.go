@@ -1037,6 +1037,66 @@ func handleAuthConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// Brute-force defenses on /api/login. Tunable in one place: 5 wrong passwords
+// against a username in 15 minutes locks the account, and 10 wrong attempts
+// from the same IP in 5 minutes throttle further tries regardless of which
+// username was targeted. Both windows are computed against rs_login_attempt
+// which startPruneLoginAttempts trims down to ~24h.
+const (
+	loginLockoutWindowSec   = 15 * 60
+	loginLockoutMaxFails    = 5
+	loginIPRateWindowSec    = 5 * 60
+	loginIPRateMaxFails     = 10
+	loginAttemptRetentionSec = 24 * 60 * 60
+)
+
+// clientIPForLogin prefers Cloudflare's Cf-Connecting-Ip (always set when
+// requests come through the tunnel) and falls back to Gin's RemoteIP. We
+// avoid trusting X-Forwarded-For directly because it's spoofable on the
+// hop between the cloudflared sidecar and us.
+func clientIPForLogin(c *gin.Context) string {
+	if ip := c.GetHeader("Cf-Connecting-Ip"); ip != "" {
+		return ip
+	}
+	return c.ClientIP()
+}
+
+func recordLoginAttempt(username, ip string, ok bool) {
+	if _, err := db.Exec(
+		`INSERT INTO rs_login_attempt (username, ip, succeeded, attempted_at)
+		 VALUES ($1, $2, $3, $4)`,
+		username, ip, ok, time.Now().Unix(),
+	); err != nil {
+		log.Printf("[login] record attempt error: %v", err)
+	}
+}
+
+func countRecentFailures(column, value string, sinceSec int64) (int, error) {
+	var n int
+	err := db.QueryRow(
+		fmt.Sprintf(`SELECT COUNT(*) FROM rs_login_attempt
+		             WHERE %s=$1 AND succeeded=false AND attempted_at >= $2`, column),
+		value, sinceSec,
+	).Scan(&n)
+	return n, err
+}
+
+func startPruneLoginAttempts() {
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			cutoff := time.Now().Unix() - loginAttemptRetentionSec
+			if _, err := db.Exec(
+				`DELETE FROM rs_login_attempt WHERE attempted_at < $1`, cutoff,
+			); err != nil {
+				log.Printf("[login] prune error: %v", err)
+			}
+			<-t.C
+		}
+	}()
+}
+
 func handleLogin(c *gin.Context) {
 	var body struct {
 		Username string `json:"username"`
@@ -1046,16 +1106,43 @@ func handleLogin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
+
+	ip := clientIPForLogin(c)
+	now := time.Now().Unix()
+
+	// IP rate limit first — protects against credential stuffing across many
+	// usernames from a single attacker.
+	if n, err := countRecentFailures("ip", ip, now-loginIPRateWindowSec); err == nil && n >= loginIPRateMaxFails {
+		log.Printf("[login] ip throttled ip=%s recent_fails=%d", ip, n)
+		c.JSON(http.StatusTooManyRequests, gin.H{
+			"error": "too many failed attempts from this address, try again later",
+		})
+		return
+	}
+	// Per-username lockout — protects a single high-value account from a
+	// targeted dictionary attack even when the attacker rotates IPs.
+	if n, err := countRecentFailures("username", body.Username, now-loginLockoutWindowSec); err == nil && n >= loginLockoutMaxFails {
+		log.Printf("[login] account locked user=%s recent_fails=%d ip=%s", body.Username, n, ip)
+		c.JSON(http.StatusTooManyRequests, gin.H{
+			"error": "account temporarily locked, try again later",
+		})
+		return
+	}
+
 	id, hash, role, studio, err := authUserByUsername(body.Username)
 	if err != nil || bcrypt.CompareHashAndPassword([]byte(hash), []byte(body.Password)) != nil {
+		recordLoginAttempt(body.Username, ip, false)
+		log.Printf("[login] failed user=%s ip=%s", body.Username, ip)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
 	tokenStr, err := newJWT(id, body.Username, role, studio)
 	if err != nil {
+		recordLoginAttempt(body.Username, ip, false)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "token generation failed"})
 		return
 	}
+	recordLoginAttempt(body.Username, ip, true)
 	c.SetCookie("token", tokenStr, 86400, "/", "", false, true)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "username": body.Username, "role": role, "studio": studio})
 }
@@ -2087,6 +2174,17 @@ func main() {
 			updated_at    BIGINT NOT NULL
 		)`,
 		`ALTER TABLE rs_auth_user ADD COLUMN IF NOT EXISTS studio TEXT NOT NULL DEFAULT ''`,
+		// Login attempts log — used for per-username lockout and per-IP rate
+		// limiting on /api/login. Pruned to ~24h by startPruneLoginAttempts.
+		`CREATE TABLE IF NOT EXISTS rs_login_attempt (
+			id           BIGSERIAL PRIMARY KEY,
+			username     TEXT NOT NULL,
+			ip           TEXT NOT NULL,
+			succeeded    BOOLEAN NOT NULL,
+			attempted_at BIGINT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_rs_login_attempt_user ON rs_login_attempt(username, attempted_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_rs_login_attempt_ip   ON rs_login_attempt(ip,       attempted_at DESC)`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
@@ -2098,6 +2196,7 @@ func main() {
 	startDailyRefresh()
 	startNotifyLoop()
 	startTestJobReaper()
+	startPruneLoginAttempts()
 	if profitEnabled {
 		startPipiSync()
 	}
