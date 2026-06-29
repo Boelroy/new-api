@@ -270,6 +270,13 @@ async function request<T>(url: string, opts?: RequestInit): Promise<T> {
   return res.json()
 }
 
+// Mirrors the role tiers enforced on the backend.
+export const ROLE_USER = 1
+export const ROLE_ADMIN = 10
+export const ROLE_SUPER_ADMIN = 100
+
+export type AuthMe = { role: number }
+
 export const api = {
   login: (username: string, password: string) =>
     fetch('/api/login', {
@@ -279,6 +286,8 @@ export const api = {
     }),
 
   logout: () => fetch('/api/logout', { method: 'POST' }),
+
+  getAuthMe: () => request<AuthMe>('/api/auth/me'),
 
   getReport: (start: string, end: string) =>
     request<LogRow[]>(`/api/report?start=${start}&end=${end}`),

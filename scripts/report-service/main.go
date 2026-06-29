@@ -46,28 +46,43 @@ var (
 	profitEnabled = false
 )
 
-// SSO session cache: maps session cookie value → expiry
+// Role tiers mirror common.RoleCommonUser / RoleAdminUser / RoleRootUser in
+// the main service. Routes are gated against these via requireRole.
+const (
+	minUserRole       = 1   // any authenticated main-service user
+	minAdminRole      = 10  // common.RoleAdminUser
+	minSuperAdminRole = 100 // common.RoleRootUser
+)
+
+// SSO session cache: maps session cookie value → (role, expiry).
+type ssoCacheEntry struct {
+	role int
+	exp  time.Time
+}
+
 var (
-	ssoCache   = map[string]time.Time{}
+	ssoCache   = map[string]ssoCacheEntry{}
 	ssoCacheMu sync.Mutex
 )
 
-func checkMainServiceSession(rawCookieHeader string) bool {
+// checkMainServiceSession returns the user's role (>=1) and true when the
+// supplied main-service session cookie is still valid; (0, false) otherwise.
+func checkMainServiceSession(rawCookieHeader string) (int, bool) {
 	if mainServiceURL == "" || rawCookieHeader == "" {
-		return false
+		return 0, false
 	}
 
 	ssoCacheMu.Lock()
-	if exp, ok := ssoCache[rawCookieHeader]; ok && time.Now().Before(exp) {
+	if entry, ok := ssoCache[rawCookieHeader]; ok && time.Now().Before(entry.exp) {
 		ssoCacheMu.Unlock()
-		return true
+		return entry.role, true
 	}
 	ssoCacheMu.Unlock()
 
 	req, err := http.NewRequest("GET", mainServiceURL+"/api/user/self", nil)
 	if err != nil {
 		log.Printf("[sso] build request error: %v", err)
-		return false
+		return 0, false
 	}
 	req.Header.Set("Cookie", rawCookieHeader)
 	req.Header.Set("New-Api-User", mainServiceUID)
@@ -75,14 +90,14 @@ func checkMainServiceSession(rawCookieHeader string) bool {
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[sso] request error: %v", err)
-		return false
+		return 0, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes := make([]byte, 200)
 		n, _ := resp.Body.Read(bodyBytes)
 		log.Printf("[sso] %d: %s", resp.StatusCode, bodyBytes[:n])
-		return false
+		return 0, false
 	}
 
 	var body struct {
@@ -92,24 +107,27 @@ func checkMainServiceSession(rawCookieHeader string) bool {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		log.Printf("[sso] decode error: %v", err)
-		return false
+		return 0, false
 	}
 	log.Printf("[sso] user role=%d", body.Data.Role)
-	if body.Data.Role < 10 {
-		return false
+	if body.Data.Role < minUserRole {
+		return 0, false
 	}
 
 	ssoCacheMu.Lock()
-	ssoCache[rawCookieHeader] = time.Now().Add(5 * time.Minute)
+	ssoCache[rawCookieHeader] = ssoCacheEntry{role: body.Data.Role, exp: time.Now().Add(5 * time.Minute)}
 	ssoCacheMu.Unlock()
-	return true
+	return body.Data.Role, true
 }
 
-func newJWT() (string, error) {
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-		Subject:   adminUser,
-		ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
-		IssuedAt:  jwt.NewNumericDate(time.Now()),
+// newJWT mints a local session token. The role claim is carried so that the
+// SSO callback's downgrade is preserved across the JWT-fallback path.
+func newJWT(role int) (string, error) {
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub":  adminUser,
+		"role": role,
+		"exp":  time.Now().Add(24 * time.Hour).Unix(),
+		"iat":  time.Now().Unix(),
 	})
 	return token.SignedString(jwtSecret)
 }
@@ -118,13 +136,15 @@ func authMiddleware(c *gin.Context) {
 	// Service-to-service: X-API-Key short-circuit (used by cross-system sync)
 	if reportAPIKey != "" {
 		if k := c.GetHeader("X-API-Key"); k != "" && k == reportAPIKey {
+			c.Set("role", minSuperAdminRole)
 			c.Next()
 			return
 		}
 	}
 	// Try main service SSO first
 	if rawCookie := c.GetHeader("Cookie"); rawCookie != "" && strings.Contains(rawCookie, "session=") {
-		if checkMainServiceSession(rawCookie) {
+		if role, ok := checkMainServiceSession(rawCookie); ok {
+			c.Set("role", role)
 			c.Next()
 			return
 		}
@@ -138,7 +158,7 @@ func authMiddleware(c *gin.Context) {
 		c.Abort()
 		return
 	}
-	_, err = jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
+	parsed, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method")
 		}
@@ -149,7 +169,34 @@ func authMiddleware(c *gin.Context) {
 		c.Abort()
 		return
 	}
+	// Older tokens predate the role claim: treat them as the embedded admin
+	// (super admin) so existing sessions stay fully functional.
+	role := minSuperAdminRole
+	if claims, ok := parsed.Claims.(jwt.MapClaims); ok {
+		if r, ok := claims["role"].(float64); ok {
+			role = int(r)
+		}
+	}
+	c.Set("role", role)
 	c.Next()
+}
+
+func requireRole(min int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		roleAny, _ := c.Get("role")
+		role, _ := roleAny.(int)
+		if role < min {
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+func handleAuthMe(c *gin.Context) {
+	role, _ := c.Get("role")
+	c.JSON(http.StatusOK, gin.H{"role": role})
 }
 
 // ---- Lark Notification ----
@@ -812,8 +859,6 @@ func roundTo(f float64, places int) float64 {
 
 // ---- Handlers ----
 
-const minAdminRole = 10 // mirrors common.RoleAdminUser in the main service
-
 func handleSSOCallback(c *gin.Context) {
 	tokenStr := c.Query("sso_token")
 	if tokenStr == "" || len(ssoSecret) == 0 {
@@ -848,11 +893,11 @@ func handleSSOCallback(c *gin.Context) {
 		c.Redirect(http.StatusFound, "/login?error=sso_failed")
 		return
 	}
-	if int(roleRaw) < minAdminRole {
+	if int(roleRaw) < minUserRole {
 		c.Redirect(http.StatusFound, "/login?error=sso_failed")
 		return
 	}
-	localToken, err := newJWT()
+	localToken, err := newJWT(int(roleRaw))
 	if err != nil {
 		c.Redirect(http.StatusFound, "/login?error=sso_failed")
 		return
@@ -889,7 +934,7 @@ func handleLogin(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
-	tokenStr, err := newJWT()
+	tokenStr, err := newJWT(minSuperAdminRole)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "token generation failed"})
 		return
@@ -1693,55 +1738,60 @@ func main() {
 	r.GET("/api/auth/config", handleAuthConfig)
 	r.GET("/api/auth/callback", handleSSOCallback)
 
-	// Protected API
+	// Protected API. Any authenticated caller (incl. role=1 regular users)
+	// can hit the routes mounted directly on `api`. Admin-only and super
+	// admin-only routes live under the requireRole subgroups below.
 	api := r.Group("/api", authMiddleware)
-	api.GET("/report", handleReport)
-	api.GET("/export/csv", handleExportCSV)
-	api.GET("/export/html", handleExportHTML)
-	api.GET("/keys/data", handleKeysData)
-	api.POST("/keys/quota", handleSaveQuotas)
-	api.POST("/channels/batch-create", handleBatchCreateChannels)
+	api.GET("/auth/me", handleAuthMe)
 	api.GET("/allkeys/data", handleAllKeysData)
-	api.POST("/keys/test", handleTestKeys)
-	api.GET("/detect/models", handleDetectModels)
 
-	// Provider Testing — unified project-based detect + eval
-	api.GET("/testing/projects", handleTestingProjectsList)
-	api.POST("/testing/projects", handleTestingProjectCreate)
-	api.GET("/testing/projects/:id", handleTestingProjectGet)
-	api.PATCH("/testing/projects/:id", handleTestingProjectUpdate)
-	api.DELETE("/testing/projects/:id", handleTestingProjectDelete)
-	api.GET("/testing/projects/:id/runs", handleTestingRunList)
-	api.POST("/testing/projects/:id/runs", handleTestingRunStart)
-	api.GET("/testing/runs/:id", handleTestingRunDetail)
-	api.GET("/testing/runs/:id/status", handleTestingRunStatus)
-	api.GET("/testing/runs/:id/file", handleTestingRunFile)
-	api.POST("/testing/runs/:id/regrade", handleTestingRunRegrade)
-	api.POST("/testing/runs/:id/cancel", handleTestingRunCancel)
-	api.DELETE("/testing/runs/:id", handleTestingRunDelete)
-
-	api.POST("/refresh", handleRefresh)
-	api.GET("/refresh/status", handleRefreshStatus)
-	api.GET("/notify/status", handleNotifyStatus)
-	api.POST("/notify/check", handleNotifyCheck)
-	api.POST("/notify/test", handleNotifyTest)
+	adminAPI := api.Group("", requireRole(minAdminRole))
+	adminAPI.GET("/report", handleReport)
+	adminAPI.GET("/export/csv", handleExportCSV)
+	adminAPI.GET("/export/html", handleExportHTML)
+	adminAPI.GET("/keys/data", handleKeysData)
+	adminAPI.POST("/keys/quota", handleSaveQuotas)
+	adminAPI.POST("/channels/batch-create", handleBatchCreateChannels)
+	adminAPI.POST("/keys/test", handleTestKeys)
+	adminAPI.GET("/detect/models", handleDetectModels)
+	adminAPI.POST("/refresh", handleRefresh)
+	adminAPI.GET("/refresh/status", handleRefreshStatus)
+	adminAPI.GET("/notify/status", handleNotifyStatus)
+	adminAPI.POST("/notify/check", handleNotifyCheck)
+	adminAPI.POST("/notify/test", handleNotifyTest)
 	// Per-key upstream pricing edit. Lives outside /profit/* so the All Keys
 	// page can manage it even on deployments where the profit report is off.
-	api.POST("/keys/pricing", handleSaveKeyPricing)
-	api.POST("/keys/pricing/bulk", handleBulkSaveKeyPricing)
+	adminAPI.POST("/keys/pricing", handleSaveKeyPricing)
+	adminAPI.POST("/keys/pricing/bulk", handleBulkSaveKeyPricing)
+
+	// Provider Testing and Profit are super-admin-only by product policy.
+	superAPI := api.Group("", requireRole(minSuperAdminRole))
+	superAPI.GET("/testing/projects", handleTestingProjectsList)
+	superAPI.POST("/testing/projects", handleTestingProjectCreate)
+	superAPI.GET("/testing/projects/:id", handleTestingProjectGet)
+	superAPI.PATCH("/testing/projects/:id", handleTestingProjectUpdate)
+	superAPI.DELETE("/testing/projects/:id", handleTestingProjectDelete)
+	superAPI.GET("/testing/projects/:id/runs", handleTestingRunList)
+	superAPI.POST("/testing/projects/:id/runs", handleTestingRunStart)
+	superAPI.GET("/testing/runs/:id", handleTestingRunDetail)
+	superAPI.GET("/testing/runs/:id/status", handleTestingRunStatus)
+	superAPI.GET("/testing/runs/:id/file", handleTestingRunFile)
+	superAPI.POST("/testing/runs/:id/regrade", handleTestingRunRegrade)
+	superAPI.POST("/testing/runs/:id/cancel", handleTestingRunCancel)
+	superAPI.DELETE("/testing/runs/:id", handleTestingRunDelete)
 
 	// Profit reporting — only mount when the feature is enabled.
 	if profitEnabled {
-		api.GET("/profit/downstream/pricing", handleListDownstreamPricing)
-		api.POST("/profit/downstream/pricing", handleSaveDownstreamPricing)
-		api.DELETE("/profit/downstream/pricing/:group", handleDeleteDownstreamPricing)
-		api.GET("/profit/fx", handleListFXRate)
-		api.POST("/profit/fx", handleSaveFXRate)
-		api.POST("/profit/fx/default", handleSaveDefaultFXRate)
-		api.DELETE("/profit/fx/:date", handleDeleteFXRate)
-		api.GET("/profit/daily", handleProfitDaily)
-		api.POST("/profit/pipi/sync", handleSyncPipi)
-		api.GET("/profit/pipi/status", handlePipiStatus)
+		superAPI.GET("/profit/downstream/pricing", handleListDownstreamPricing)
+		superAPI.POST("/profit/downstream/pricing", handleSaveDownstreamPricing)
+		superAPI.DELETE("/profit/downstream/pricing/:group", handleDeleteDownstreamPricing)
+		superAPI.GET("/profit/fx", handleListFXRate)
+		superAPI.POST("/profit/fx", handleSaveFXRate)
+		superAPI.POST("/profit/fx/default", handleSaveDefaultFXRate)
+		superAPI.DELETE("/profit/fx/:date", handleDeleteFXRate)
+		superAPI.GET("/profit/daily", handleProfitDaily)
+		superAPI.POST("/profit/pipi/sync", handleSyncPipi)
+		superAPI.GET("/profit/pipi/status", handlePipiStatus)
 	}
 
 	// SPA — serve for all non-API routes

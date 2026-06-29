@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { api } from '../api'
+import { api, ROLE_ADMIN, ROLE_SUPER_ADMIN } from '../api'
 
 type Item = {
   to: string
@@ -9,51 +9,61 @@ type Item = {
   end?: boolean
 }
 
-const NAV_ITEMS: Item[] = [
-  {
-    to: '/',
-    end: true,
-    label: 'Usage Report',
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M3 3v18h18" />
-        <path d="M7 14l4-4 4 4 6-6" />
-      </svg>
-    ),
-  },
-  {
-    to: '/keys',
-    label: 'Key Capacity',
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="9" cy="12" r="3" />
-        <path d="M12 12h10" />
-        <path d="M18 12v3" />
-        <path d="M22 12v3" />
-      </svg>
-    ),
-  },
-  {
-    to: '/allkeys',
-    label: 'All Keys',
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="4" width="18" height="4" rx="1" />
-        <rect x="3" y="10" width="18" height="4" rx="1" />
-        <rect x="3" y="16" width="18" height="4" rx="1" />
-      </svg>
-    ),
-  },
-  {
-    to: '/tester',
-    label: 'Key Tester',
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M9 12l2 2 4-4" />
-        <circle cx="12" cy="12" r="9" />
-      </svg>
-    ),
-  },
+const USAGE_REPORT_ITEM: Item = {
+  to: '/',
+  end: true,
+  label: 'Usage Report',
+  icon: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 3v18h18" />
+      <path d="M7 14l4-4 4 4 6-6" />
+    </svg>
+  ),
+}
+
+const KEY_CAPACITY_ITEM: Item = {
+  to: '/keys',
+  label: 'Key Capacity',
+  icon: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="9" cy="12" r="3" />
+      <path d="M12 12h10" />
+      <path d="M18 12v3" />
+      <path d="M22 12v3" />
+    </svg>
+  ),
+}
+
+const ALL_KEYS_ITEM: Item = {
+  to: '/allkeys',
+  label: 'All Keys',
+  icon: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="4" rx="1" />
+      <rect x="3" y="10" width="18" height="4" rx="1" />
+      <rect x="3" y="16" width="18" height="4" rx="1" />
+    </svg>
+  ),
+}
+
+const KEY_TESTER_ITEM: Item = {
+  to: '/tester',
+  label: 'Key Tester',
+  icon: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 12l2 2 4-4" />
+      <circle cx="12" cy="12" r="9" />
+    </svg>
+  ),
+}
+
+// Visible to all admins (role >= 10). Super-admin-only items are appended
+// below in the render path when the user's role and config flags allow.
+const ADMIN_NAV_ITEMS: Item[] = [
+  USAGE_REPORT_ITEM,
+  KEY_CAPACITY_ITEM,
+  ALL_KEYS_ITEM,
+  KEY_TESTER_ITEM,
 ]
 
 // Shown only when the server reports r2_configured=true, i.e. R2 is wired up
@@ -91,6 +101,7 @@ type Props = {
 export default function Sidebar({ open, onClose }: Props) {
   const [showProfit, setShowProfit] = useState(false)
   const [showTesting, setShowTesting] = useState(false)
+  const [role, setRole] = useState<number | null>(null)
 
   useEffect(() => {
     void (async () => {
@@ -100,11 +111,29 @@ export default function Sidebar({ open, onClose }: Props) {
         if (cfg.r2_configured === true) setShowTesting(true)
       } catch { /* keep hidden on error */ }
     })()
+    void (async () => {
+      try {
+        const me = await api.getAuthMe()
+        setRole(me.role)
+      } catch { setRole(0) }
+    })()
   }, [])
 
-  let items = NAV_ITEMS
-  if (showProfit) items = [items[0], PROFIT_ITEM, ...items.slice(1)]
-  if (showTesting) items = [...items, TESTING_ITEM]
+  // Render nothing until we know the role, to avoid flashing admin items
+  // to a regular user.
+  let items: Item[]
+  if (role === null) {
+    items = []
+  } else if (role >= ROLE_ADMIN) {
+    items = ADMIN_NAV_ITEMS.slice()
+    if (role >= ROLE_SUPER_ADMIN) {
+      if (showProfit) items = [items[0], PROFIT_ITEM, ...items.slice(1)]
+      if (showTesting) items = [...items, TESTING_ITEM]
+    }
+  } else {
+    // Regular users only see All Keys.
+    items = [ALL_KEYS_ITEM]
+  }
 
   const handleLogout = async () => {
     await api.logout()
