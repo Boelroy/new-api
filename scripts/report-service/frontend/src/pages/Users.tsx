@@ -181,13 +181,14 @@ export default function Users() {
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
             </select>
-            <input
-              className="rounded-md border border-gray-300 px-3 py-2 text-sm"
-              placeholder="Studio (channel tag, optional)"
+            <select
+              className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm"
               value={newStudio}
               onChange={e => setNewStudio(e.target.value)}
-              list="studio-options"
-            />
+            >
+              <option value="">Studio: (unrestricted)</option>
+              {studios.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
             <button
               type="button"
               onClick={handleCreate}
@@ -197,13 +198,10 @@ export default function Users() {
               {creating ? 'Creating…' : 'Create'}
             </button>
           </div>
-          <datalist id="studio-options">
-            {studios.map(s => <option key={s} value={s} />)}
-          </datalist>
           <p className="text-xs text-gray-400 mt-2">
             Studio scopes a User-role account to channels whose tag matches the
-            value. Leave empty for unrestricted access. Available tags from
-            channels: {studios.length === 0 ? 'none yet' : studios.join(', ')}.
+            value. Use "(unrestricted)" to skip studio binding. Add new studios
+            by creating channels with that tag in Key Capacity → Batch create.
           </p>
         </section>
 
@@ -259,21 +257,21 @@ export default function Users() {
                         </select>
                       </td>
                       <td className="px-4 py-2">
-                        <input
-                          type="text"
+                        <select
                           className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs w-full min-w-[8rem]"
-                          defaultValue={u.studio}
+                          value={u.studio}
                           disabled={disabled}
-                          list="studio-options"
-                          placeholder="(unrestricted)"
-                          onBlur={e => {
-                            const next = e.target.value.trim()
-                            if (next !== u.studio) void handleChangeStudio(u, next)
-                          }}
-                          onKeyDown={e => {
-                            if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
-                          }}
-                        />
+                          onChange={e => void handleChangeStudio(u, e.target.value)}
+                        >
+                          <option value="">(unrestricted)</option>
+                          {/* Preserve current value as an option even when not in
+                              the channel-tag list, so a freshly-bound studio
+                              that no channel uses yet still displays here. */}
+                          {u.studio && !studios.includes(u.studio) && (
+                            <option value={u.studio}>{u.studio}</option>
+                          )}
+                          {studios.map(s => <option key={s} value={s}>{s}</option>)}
+                        </select>
                       </td>
                       <td className="px-4 py-2 text-gray-500">{formatTime(u.created_at)}</td>
                       <td className="px-4 py-2 text-gray-500">{formatTime(u.updated_at)}</td>

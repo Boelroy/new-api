@@ -26,7 +26,8 @@ function ProgressBar({ pct }: { pct: number }) {
 }
 
 function BatchCreatePanel({ onCreated }: { onCreated: () => void }) {
-  const [studio, setStudio] = useState('pipi')
+  const [studio, setStudio] = useState('')
+  const [studioMode, setStudioMode] = useState<'pick' | 'new'>('pick')
   const [suffix, setSuffix] = useState('')
   const [input, setInput] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -38,7 +39,14 @@ function BatchCreatePanel({ onCreated }: { onCreated: () => void }) {
       try {
         const res = await api.listStudios()
         setStudios(res.studios)
-      } catch { /* ignore — datalist just stays empty */ }
+        // Pre-select the first existing studio, or pipi if it exists, so
+        // the operator doesn't have to click before the form is usable.
+        setStudio(prev => {
+          if (prev) return prev
+          if (res.studios.includes('pipi')) return 'pipi'
+          return res.studios[0] ?? ''
+        })
+      } catch { /* leave dropdown empty on error */ }
     })()
   }, [])
 
@@ -87,16 +95,40 @@ function BatchCreatePanel({ onCreated }: { onCreated: () => void }) {
       <div className="grid grid-cols-2 gap-2 mb-2">
         <div>
           <label className="block text-[11px] text-gray-500 mb-1">工作室</label>
-          <input
-            value={studio}
-            onChange={e => setStudio(e.target.value)}
-            placeholder="如 pipi / alpha"
-            list="batch-studio-options"
-            className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
-          />
-          <datalist id="batch-studio-options">
-            {studios.map(s => <option key={s} value={s} />)}
-          </datalist>
+          {studioMode === 'pick' ? (
+            <select
+              value={studios.includes(studio) ? studio : ''}
+              onChange={e => {
+                if (e.target.value === '__NEW__') {
+                  setStudioMode('new')
+                  setStudio('')
+                } else {
+                  setStudio(e.target.value)
+                }
+              }}
+              className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
+            >
+              {studios.length === 0 && <option value="">（无现有工作室）</option>}
+              {studios.map(s => <option key={s} value={s}>{s}</option>)}
+              <option value="__NEW__">+ 新建工作室…</option>
+            </select>
+          ) : (
+            <div className="flex gap-1">
+              <input
+                value={studio}
+                onChange={e => setStudio(e.target.value)}
+                placeholder="新工作室名称"
+                autoFocus
+                className="flex-1 border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
+              />
+              <button
+                type="button"
+                onClick={() => { setStudioMode('pick'); setStudio(studios[0] ?? '') }}
+                className="border border-gray-200 rounded-md px-2 text-xs text-gray-500 hover:bg-gray-50"
+                title="返回选择"
+              >×</button>
+            </div>
+          )}
         </div>
         <div>
           <label className="block text-[11px] text-gray-500 mb-1">后缀</label>
