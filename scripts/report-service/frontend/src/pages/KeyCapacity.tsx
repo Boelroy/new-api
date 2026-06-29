@@ -26,13 +26,28 @@ function ProgressBar({ pct }: { pct: number }) {
 }
 
 function BatchCreatePanel({ onCreated }: { onCreated: () => void }) {
+  const [studio, setStudio] = useState('pipi')
   const [suffix, setSuffix] = useState('')
   const [input, setInput] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [result, setResult] = useState<string | null>(null)
+  const [studios, setStudios] = useState<string[]>([])
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await api.listStudios()
+        setStudios(res.studios)
+      } catch { /* ignore — datalist just stays empty */ }
+    })()
+  }, [])
 
   const handleSubmit = async () => {
     setResult(null)
+    if (!studio.trim()) {
+      setResult('请填写工作室名')
+      return
+    }
     if (!suffix.trim()) {
       setResult('请填写后缀')
       return
@@ -55,7 +70,7 @@ function BatchCreatePanel({ onCreated }: { onCreated: () => void }) {
     }
     setSubmitting(true)
     try {
-      const res = await api.batchCreateChannels(suffix.trim(), channels)
+      const res = await api.batchCreateChannels(studio.trim(), suffix.trim(), channels)
       setResult(`成功创建 ${res.count} 个渠道`)
       setInput('')
       onCreated()
@@ -69,14 +84,29 @@ function BatchCreatePanel({ onCreated }: { onCreated: () => void }) {
   return (
     <div className="bg-white border border-gray-200 rounded-xl p-4">
       <h2 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">批量创建渠道</h2>
-      <div className="mb-2">
-        <label className="block text-[11px] text-gray-500 mb-1">后缀</label>
-        <input
-          value={suffix}
-          onChange={e => setSuffix(e.target.value)}
-          placeholder="例如：1"
-          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
-        />
+      <div className="grid grid-cols-2 gap-2 mb-2">
+        <div>
+          <label className="block text-[11px] text-gray-500 mb-1">工作室</label>
+          <input
+            value={studio}
+            onChange={e => setStudio(e.target.value)}
+            placeholder="如 pipi / alpha"
+            list="batch-studio-options"
+            className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
+          />
+          <datalist id="batch-studio-options">
+            {studios.map(s => <option key={s} value={s} />)}
+          </datalist>
+        </div>
+        <div>
+          <label className="block text-[11px] text-gray-500 mb-1">后缀</label>
+          <input
+            value={suffix}
+            onChange={e => setSuffix(e.target.value)}
+            placeholder="例如 a / 5"
+            className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
+          />
+        </div>
       </div>
       <textarea
         value={input}
@@ -86,7 +116,8 @@ function BatchCreatePanel({ onCreated }: { onCreated: () => void }) {
         className="w-full border border-gray-200 rounded-md p-2.5 text-xs font-mono resize-y bg-gray-50 focus:outline-none focus:border-gray-900"
       />
       <p className="text-[10px] text-gray-400 mt-2 leading-relaxed">
-        命名：MMDD-pipi-后缀-容量；类型：Anthropic；模型：claude-opus-4-7 等 8 个
+        命名 MMDD-工作室-后缀-容量；工作室会写入 channels.tag，用于限制 user 角色账号可见范围
+        {studios.length > 0 && <>。已有：{studios.join('、')}</>}
       </p>
       <button
         onClick={handleSubmit}

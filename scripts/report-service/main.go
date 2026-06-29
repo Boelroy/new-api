@@ -1510,6 +1510,7 @@ const channelInfoDefault = `{"is_multi_key":false,"multi_key_size":0,"multi_key_
 
 func handleBatchCreateChannels(c *gin.Context) {
 	var payload struct {
+		Studio   string `json:"studio"`
 		Suffix   string `json:"suffix"`
 		Channels []struct {
 			Key      string  `json:"key"`
@@ -1520,7 +1521,13 @@ func handleBatchCreateChannels(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	studio := strings.TrimSpace(payload.Studio)
 	suffix := strings.TrimSpace(payload.Suffix)
+	// Backward compat: older clients only sent `suffix`. Keep the legacy
+	// `pipi` literal so previously-named batches stay consistent.
+	if studio == "" {
+		studio = "pipi"
+	}
 	if suffix == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "suffix is required"})
 		return
@@ -1553,12 +1560,11 @@ func handleBatchCreateChannels(c *gin.Context) {
 			continue
 		}
 		quotaInt := int(ch.QuotaUSD)
-		name := fmt.Sprintf("%s-pipi-%s-%d", dateStr, suffix, quotaInt)
+		name := fmt.Sprintf("%s-%s-%s-%d", dateStr, studio, suffix, quotaInt)
 
 		var channelID int
-		// suffix doubles as the studio tag: it already differentiates the
-		// channel names this batch, and writing it to channels.tag lets the
-		// rs_auth_user.studio binding filter All Keys by the same identifier.
+		// channels.tag = studio so rs_auth_user.studio bindings can filter
+		// All Keys by the same identifier the operator picked here.
 		err := tx.QueryRow(`
 			INSERT INTO channels
 			(type, key, status, name, weight, created_time, base_url, "group", models,
@@ -1566,7 +1572,7 @@ func handleBatchCreateChannels(c *gin.Context) {
 			VALUES (14, $1, 1, $2, 0, $3, '', 'default', $4,
 			        '', '', 1001, 1, 0, $5::json, $6)
 			RETURNING id`,
-			key, name, now, defaultAnthropicModels, channelInfoDefault, suffix).Scan(&channelID)
+			key, name, now, defaultAnthropicModels, channelInfoDefault, studio).Scan(&channelID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("insert channel: %v", err)})
 			return
