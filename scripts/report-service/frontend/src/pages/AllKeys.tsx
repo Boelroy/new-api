@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
-import { api, ChannelRow } from '../api'
+import { api, ChannelRow, ROLE_ADMIN } from '../api'
 
 const STATUS_LABEL: Record<number, string> = { 1: '启用', 2: '手动禁用', 3: '自动禁用' }
 const STATUS_CLS: Record<number, string> = {
@@ -40,6 +40,12 @@ export default function AllKeys() {
   const [loading, setLoading] = useState(false)
   const [refreshedAt, setRefreshedAt] = useState('')
 
+  // role gates the pricing-edit UI. /api/keys/pricing is admin-only on the
+  // backend, so non-admins would just hit 403 — surface that by hiding the
+  // controls entirely.
+  const [role, setRole] = useState<number | null>(null)
+  const canEditPricing = role !== null && role >= ROLE_ADMIN
+
   // Per-row inline price edits (channel_id -> raw input string).
   const [priceEdits, setPriceEdits] = useState<Record<number, string>>({})
   const [onlyUnpriced, setOnlyUnpriced] = useState(false)
@@ -49,6 +55,17 @@ export default function AllKeys() {
   const [bulkText, setBulkText] = useState('')
   const [bulkResult, setBulkResult] = useState<{ saved: number; not_found: string[]; errors: { line: number; reason: string }[] } | null>(null)
   const [bulkSubmitting, setBulkSubmitting] = useState(false)
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const me = await api.getAuthMe()
+        setRole(me.role)
+      } catch {
+        setRole(0)
+      }
+    })()
+  }, [])
 
   const load = async (s?: string, e?: string) => {
     setLoading(true)
@@ -152,6 +169,7 @@ export default function AllKeys() {
         { label: '总剩余', value: summary.totalRemaining ? '$' + summary.totalRemaining.toFixed(2) : '—', color: 'text-emerald-600' },
       ]} />
 
+      {canEditPricing && (
       <div className="bg-white border border-gray-200 rounded-xl mb-4">
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
           <div>
@@ -197,6 +215,7 @@ export default function AllKeys() {
           )}
         </div>
       </div>
+      )}
 
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100 gap-3 flex-wrap">
@@ -212,13 +231,15 @@ export default function AllKeys() {
             </label>
             <span className="text-[10px] text-gray-400 tabular-nums">{filteredRows.length}/{rows.length}</span>
           </div>
-          <button
-            onClick={submitPrices}
-            disabled={saving || Object.keys(priceEdits).length === 0}
-            className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {saving ? '保存中…' : '保存价格改动'}
-          </button>
+          {canEditPricing && (
+            <button
+              onClick={submitPrices}
+              disabled={saving || Object.keys(priceEdits).length === 0}
+              className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {saving ? '保存中…' : '保存价格改动'}
+            </button>
+          )}
         </div>
         <div className="overflow-x-auto max-h-[70vh] overflow-y-auto">
           <table className="w-full text-xs whitespace-nowrap border-separate border-spacing-0">
@@ -250,14 +271,20 @@ export default function AllKeys() {
                       </span>
                     </td>
                     <td className="px-3 py-1.5 border-b border-gray-50 text-right">
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={priceVal}
-                        onChange={ev => setPriceEdits(prev => ({ ...prev, [r.id]: ev.target.value }))}
-                        placeholder={isMissingPrice ? '缺' : '4.30'}
-                        className={`w-20 border rounded px-1.5 py-0.5 text-right text-xs tabular-nums ${isMissingPrice ? 'border-amber-300 bg-white' : 'border-gray-200'}`}
-                      />
+                      {canEditPricing ? (
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={priceVal}
+                          onChange={ev => setPriceEdits(prev => ({ ...prev, [r.id]: ev.target.value }))}
+                          placeholder={isMissingPrice ? '缺' : '4.30'}
+                          className={`w-20 border rounded px-1.5 py-0.5 text-right text-xs tabular-nums ${isMissingPrice ? 'border-amber-300 bg-white' : 'border-gray-200'}`}
+                        />
+                      ) : (
+                        <span className={`tabular-nums ${isMissingPrice ? 'text-gray-300' : ''}`}>
+                          {isMissingPrice ? '—' : Number(priceVal).toFixed(2)}
+                        </span>
+                      )}
                     </td>
                     <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">${r.used_usd.toFixed(4)}</td>
                     <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{quota != null ? '$' + quota.toFixed(2) : <span className="text-gray-300">未设置</span>}</td>
