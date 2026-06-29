@@ -7,6 +7,7 @@ import AllKeys from './pages/AllKeys'
 import KeyTester from './pages/KeyTester'
 import ProviderTesting from './pages/ProviderTesting'
 import Profit from './pages/Profit'
+import Users from './pages/Users'
 import { api, ROLE_ADMIN, ROLE_SUPER_ADMIN } from './api'
 
 // RoleGate guards a page against unauthorized roles. While the role is being
@@ -43,6 +44,7 @@ export default function App() {
         <Route path="/tester" element={<RoleGate min={ROLE_ADMIN}><KeyTester /></RoleGate>} />
         <Route path="/testing" element={<RoleGate min={ROLE_SUPER_ADMIN}><ProviderTesting /></RoleGate>} />
         <Route path="/testing/:projectId" element={<RoleGate min={ROLE_SUPER_ADMIN}><ProviderTesting /></RoleGate>} />
+        <Route path="/users" element={<RoleGate min={ROLE_SUPER_ADMIN}><Users /></RoleGate>} />
         <Route path="/detect" element={<Navigate to="/testing" replace />} />
         <Route path="/eval" element={<Navigate to="/testing" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />

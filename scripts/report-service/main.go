@@ -22,6 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	_ "github.com/lib/pq"
+	"golang.org/x/crypto/bcrypt"
 )
 
 //go:embed frontend/dist
@@ -120,14 +121,16 @@ func checkMainServiceSession(rawCookieHeader string) (int, bool) {
 	return body.Data.Role, true
 }
 
-// newJWT mints a local session token. The role claim is carried so that the
-// SSO callback's downgrade is preserved across the JWT-fallback path.
-func newJWT(role int) (string, error) {
+// newJWT mints a local session token. user_id=0 marks SSO-issued tokens that
+// have no rs_auth_user row; >0 corresponds to the DB-backed user.
+func newJWT(userID int64, username string, role int) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub":  adminUser,
-		"role": role,
-		"exp":  time.Now().Add(24 * time.Hour).Unix(),
-		"iat":  time.Now().Unix(),
+		"sub":      username,
+		"user_id":  userID,
+		"username": username,
+		"role":     role,
+		"exp":      time.Now().Add(24 * time.Hour).Unix(),
+		"iat":      time.Now().Unix(),
 	})
 	return token.SignedString(jwtSecret)
 }
@@ -172,12 +175,26 @@ func authMiddleware(c *gin.Context) {
 	// Older tokens predate the role claim: treat them as the embedded admin
 	// (super admin) so existing sessions stay fully functional.
 	role := minSuperAdminRole
+	var userID int64
+	var username string
 	if claims, ok := parsed.Claims.(jwt.MapClaims); ok {
 		if r, ok := claims["role"].(float64); ok {
 			role = int(r)
 		}
+		if u, ok := claims["user_id"].(float64); ok {
+			userID = int64(u)
+		}
+		if u, ok := claims["username"].(string); ok {
+			username = u
+		}
 	}
 	c.Set("role", role)
+	if userID > 0 {
+		c.Set("user_id", userID)
+	}
+	if username != "" {
+		c.Set("username", username)
+	}
 	c.Next()
 }
 
@@ -196,7 +213,87 @@ func requireRole(min int) gin.HandlerFunc {
 
 func handleAuthMe(c *gin.Context) {
 	role, _ := c.Get("role")
-	c.JSON(http.StatusOK, gin.H{"role": role})
+	resp := gin.H{"role": role}
+	if uid, ok := c.Get("user_id"); ok {
+		resp["user_id"] = uid
+	}
+	if uname, ok := c.Get("username"); ok {
+		resp["username"] = uname
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// ---- Local user store (rs_auth_user) ----
+
+type authUser struct {
+	ID        int64  `json:"id"`
+	Username  string `json:"username"`
+	Role      int    `json:"role"`
+	CreatedAt int64  `json:"created_at"`
+	UpdatedAt int64  `json:"updated_at"`
+}
+
+// authUserFromRow scans the user-facing columns (no password hash). Used by
+// list/get endpoints that must never echo the hash back to clients.
+func authUserFromRow(row interface{ Scan(...any) error }) (authUser, error) {
+	var u authUser
+	err := row.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt, &u.UpdatedAt)
+	return u, err
+}
+
+func authUserByUsername(username string) (id int64, hash string, role int, err error) {
+	err = db.QueryRow(
+		`SELECT id, password_hash, role FROM rs_auth_user WHERE username=$1`,
+		username,
+	).Scan(&id, &hash, &role)
+	return
+}
+
+func authUserByID(id int64) (authUser, error) {
+	row := db.QueryRow(
+		`SELECT id, username, role, created_at, updated_at FROM rs_auth_user WHERE id=$1`,
+		id,
+	)
+	return authUserFromRow(row)
+}
+
+func countAuthUsers() (int, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM rs_auth_user`).Scan(&n)
+	return n, err
+}
+
+// seedAdminUser is invoked once after table creation. It promotes the
+// compose-supplied ADMIN_USERNAME/ADMIN_PASSWORD into a real DB row so the
+// first deploy has a working super-admin login. Subsequent deploys leave the
+// table untouched — admins manage users from the UI.
+func seedAdminUser() {
+	if adminUser == "" || adminPass == "" {
+		return
+	}
+	n, err := countAuthUsers()
+	if err != nil {
+		log.Printf("[auth-seed] count error: %v", err)
+		return
+	}
+	if n > 0 {
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(adminPass), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("[auth-seed] hash error: %v", err)
+		return
+	}
+	now := time.Now().Unix()
+	if _, err := db.Exec(
+		`INSERT INTO rs_auth_user (username, password_hash, role, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $4)`,
+		adminUser, string(hash), minSuperAdminRole, now,
+	); err != nil {
+		log.Printf("[auth-seed] insert error: %v", err)
+		return
+	}
+	log.Printf("[auth-seed] seeded super-admin user %q from ADMIN_USERNAME env", adminUser)
 }
 
 // ---- Lark Notification ----
@@ -897,7 +994,8 @@ func handleSSOCallback(c *gin.Context) {
 		c.Redirect(http.StatusFound, "/login?error=sso_failed")
 		return
 	}
-	localToken, err := newJWT(int(roleRaw))
+	ssoUsername, _ := claims["sub"].(string)
+	localToken, err := newJWT(0, ssoUsername, int(roleRaw))
 	if err != nil {
 		c.Redirect(http.StatusFound, "/login?error=sso_failed")
 		return
@@ -930,21 +1028,200 @@ func handleLogin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-	if body.Username != adminUser || body.Password != adminPass {
+	id, hash, role, err := authUserByUsername(body.Username)
+	if err != nil || bcrypt.CompareHashAndPassword([]byte(hash), []byte(body.Password)) != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
-	tokenStr, err := newJWT(minSuperAdminRole)
+	tokenStr, err := newJWT(id, body.Username, role)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "token generation failed"})
 		return
 	}
 	c.SetCookie("token", tokenStr, 86400, "/", "", false, true)
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "username": body.Username, "role": role})
 }
 
 func handleLogout(c *gin.Context) {
 	c.SetCookie("token", "", -1, "/", "", false, true)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ---- User management (super_admin only; mounted under superAPI) ----
+
+func isValidRoleTier(role int) bool {
+	return role == minUserRole || role == minAdminRole || role == minSuperAdminRole
+}
+
+func handleUsersList(c *gin.Context) {
+	rows, err := db.Query(
+		`SELECT id, username, role, created_at, updated_at FROM rs_auth_user ORDER BY id ASC`,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	out := make([]authUser, 0)
+	for rows.Next() {
+		u, err := authUserFromRow(rows)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		out = append(out, u)
+	}
+	c.JSON(http.StatusOK, gin.H{"users": out})
+}
+
+func handleUserCreate(c *gin.Context) {
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Role     int    `json:"role"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	body.Username = strings.TrimSpace(body.Username)
+	if body.Username == "" || body.Password == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "username and password are required"})
+		return
+	}
+	if !isValidRoleTier(body.Role) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 10, or 100"})
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "hash error"})
+		return
+	}
+	now := time.Now().Unix()
+	var id int64
+	err = db.QueryRow(
+		`INSERT INTO rs_auth_user (username, password_hash, role, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $4) RETURNING id`,
+		body.Username, string(hash), body.Role, now,
+	).Scan(&id)
+	if err != nil {
+		// Unique violation surfaces as a 409 with the bare DB string so the
+		// frontend can show "username taken" without needing extra plumbing.
+		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
+			c.JSON(http.StatusConflict, gin.H{"error": "username already exists"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	u, err := authUserByID(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, u)
+}
+
+func handleUserUpdate(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	target, err := authUserByID(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+	var body struct {
+		Password *string `json:"password,omitempty"`
+		Role     *int    `json:"role,omitempty"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	// Guard rails: a super admin cannot demote themselves and lock everyone
+	// out, and cannot demote the last remaining super admin via this handler.
+	if body.Role != nil {
+		if !isValidRoleTier(*body.Role) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 10, or 100"})
+			return
+		}
+		if target.Role >= minSuperAdminRole && *body.Role < minSuperAdminRole {
+			var others int
+			if err := db.QueryRow(
+				`SELECT COUNT(*) FROM rs_auth_user WHERE role >= $1 AND id <> $2`,
+				minSuperAdminRole, id,
+			).Scan(&others); err == nil && others == 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "cannot demote the last super admin"})
+				return
+			}
+		}
+		if _, err := db.Exec(
+			`UPDATE rs_auth_user SET role=$1, updated_at=$2 WHERE id=$3`,
+			*body.Role, time.Now().Unix(), id,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.Password != nil && *body.Password != "" {
+		hash, err := bcrypt.GenerateFromPassword([]byte(*body.Password), bcrypt.DefaultCost)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "hash error"})
+			return
+		}
+		if _, err := db.Exec(
+			`UPDATE rs_auth_user SET password_hash=$1, updated_at=$2 WHERE id=$3`,
+			string(hash), time.Now().Unix(), id,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	u, err := authUserByID(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, u)
+}
+
+func handleUserDelete(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	// Forbid deleting self — too easy to footgun yourself out of the only
+	// active super-admin slot.
+	if uidAny, ok := c.Get("user_id"); ok {
+		if uid, ok := uidAny.(int64); ok && uid == id {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "cannot delete the currently logged-in user"})
+			return
+		}
+	}
+	target, err := authUserByID(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+	if target.Role >= minSuperAdminRole {
+		var others int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM rs_auth_user WHERE role >= $1 AND id <> $2`,
+			minSuperAdminRole, id,
+		).Scan(&others); err == nil && others == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "cannot delete the last super admin"})
+			return
+		}
+	}
+	if _, err := db.Exec(`DELETE FROM rs_auth_user WHERE id=$1`, id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -1715,11 +1992,22 @@ func main() {
 		`ALTER TABLE rs_test_run ADD COLUMN IF NOT EXISTS eval_report_bytes   BIGINT NOT NULL DEFAULT 0`,
 		// status rename: legacy 'ok' → 'done' (consistent terminal label)
 		`UPDATE rs_test_run SET status='done' WHERE status='ok'`,
+		// Local report-service users — independent from the main service's
+		// user table. role mirrors common.RoleCommonUser/Admin/Root.
+		`CREATE TABLE IF NOT EXISTS rs_auth_user (
+			id            BIGSERIAL PRIMARY KEY,
+			username      TEXT NOT NULL UNIQUE,
+			password_hash TEXT NOT NULL,
+			role          INT  NOT NULL DEFAULT 1,
+			created_at    BIGINT NOT NULL,
+			updated_at    BIGINT NOT NULL
+		)`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
 		}
 	}
+	seedAdminUser()
 
 	resetRunningTestRuns()
 	startDailyRefresh()
@@ -1764,8 +2052,12 @@ func main() {
 	adminAPI.POST("/keys/pricing", handleSaveKeyPricing)
 	adminAPI.POST("/keys/pricing/bulk", handleBulkSaveKeyPricing)
 
-	// Provider Testing and Profit are super-admin-only by product policy.
+	// Provider Testing, Profit, and user management are super-admin-only.
 	superAPI := api.Group("", requireRole(minSuperAdminRole))
+	superAPI.GET("/users", handleUsersList)
+	superAPI.POST("/users", handleUserCreate)
+	superAPI.PATCH("/users/:id", handleUserUpdate)
+	superAPI.DELETE("/users/:id", handleUserDelete)
 	superAPI.GET("/testing/projects", handleTestingProjectsList)
 	superAPI.POST("/testing/projects", handleTestingProjectCreate)
 	superAPI.GET("/testing/projects/:id", handleTestingProjectGet)

@@ -275,7 +275,19 @@ export const ROLE_USER = 1
 export const ROLE_ADMIN = 10
 export const ROLE_SUPER_ADMIN = 100
 
-export type AuthMe = { role: number }
+export type AuthMe = {
+  role: number
+  user_id?: number
+  username?: string
+}
+
+export type AuthUser = {
+  id: number
+  username: string
+  role: number
+  created_at: number
+  updated_at: number
+}
 
 export const api = {
   login: (username: string, password: string) =>
@@ -288,6 +300,25 @@ export const api = {
   logout: () => fetch('/api/logout', { method: 'POST' }),
 
   getAuthMe: () => request<AuthMe>('/api/auth/me'),
+
+  listUsers: () => request<{ users: AuthUser[] }>('/api/users'),
+
+  createUser: (payload: { username: string; password: string; role: number }) =>
+    request<AuthUser>('/api/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  updateUser: (id: number, payload: { password?: string; role?: number }) =>
+    request<AuthUser>(`/api/users/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  deleteUser: (id: number) =>
+    request<{ ok: boolean }>(`/api/users/${id}`, { method: 'DELETE' }),
 
   getReport: (start: string, end: string) =>
     request<LogRow[]>(`/api/report?start=${start}&end=${end}`),
