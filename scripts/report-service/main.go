@@ -1219,15 +1219,20 @@ func handleUserUpdate(c *gin.Context) {
 	c.JSON(http.StatusOK, u)
 }
 
-// handleStudiosList returns the distinct channels.tag values that exist on
-// the main service. Used by the Users page to populate the studio selector
-// without forcing operators to type tag strings exactly. Admin+ can call it
-// so admins can spot-check the dataset even though only super admins manage
-// user accounts.
+// handleStudiosList returns distinct studio names known to the system —
+// the union of channels.tag (where the studio is "in use") and
+// rs_auth_user.studio (where a user is bound but no channel exists yet).
+// Pre-binding users before keys arrive is a common flow, so this prevents
+// the operator-set studio from disappearing from the dropdown.
 func handleStudiosList(c *gin.Context) {
-	rows, err := db.Query(
-		`SELECT DISTINCT COALESCE(NULLIF(TRIM(tag), ''), '') AS tag FROM channels
-		 WHERE tag IS NOT NULL AND TRIM(tag) <> '' ORDER BY tag ASC`,
+	rows, err := db.Query(`
+		SELECT DISTINCT s FROM (
+		  SELECT TRIM(tag)    AS s FROM channels
+		  UNION
+		  SELECT TRIM(studio) AS s FROM rs_auth_user
+		) t
+		WHERE s IS NOT NULL AND s <> ''
+		ORDER BY s ASC`,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
