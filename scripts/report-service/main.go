@@ -122,13 +122,15 @@ func checkMainServiceSession(rawCookieHeader string) (int, bool) {
 }
 
 // newJWT mints a local session token. user_id=0 marks SSO-issued tokens that
-// have no rs_auth_user row; >0 corresponds to the DB-backed user.
-func newJWT(userID int64, username string, role int) (string, error) {
+// have no rs_auth_user row; >0 corresponds to the DB-backed user. studio
+// scopes a role=1 user's All Keys view (empty = unrestricted).
+func newJWT(userID int64, username string, role int, studio string) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"sub":      username,
 		"user_id":  userID,
 		"username": username,
 		"role":     role,
+		"studio":   studio,
 		"exp":      time.Now().Add(24 * time.Hour).Unix(),
 		"iat":      time.Now().Unix(),
 	})
@@ -159,7 +161,7 @@ func authMiddleware(c *gin.Context) {
 			// admin (super admin) so existing sessions stay functional.
 			role := minSuperAdminRole
 			var userID int64
-			var username string
+			var username, studio string
 			if claims, ok := parsed.Claims.(jwt.MapClaims); ok {
 				if r, ok := claims["role"].(float64); ok {
 					role = int(r)
@@ -170,6 +172,9 @@ func authMiddleware(c *gin.Context) {
 				if u, ok := claims["username"].(string); ok {
 					username = u
 				}
+				if s, ok := claims["studio"].(string); ok {
+					studio = s
+				}
 			}
 			c.Set("role", role)
 			if userID > 0 {
@@ -177,6 +182,9 @@ func authMiddleware(c *gin.Context) {
 			}
 			if username != "" {
 				c.Set("username", username)
+			}
+			if studio != "" {
+				c.Set("studio", studio)
 			}
 			c.Next()
 			return
@@ -218,6 +226,11 @@ func handleAuthMe(c *gin.Context) {
 	if uname, ok := c.Get("username"); ok {
 		resp["username"] = uname
 	}
+	if studio, ok := c.Get("studio"); ok {
+		resp["studio"] = studio
+	} else {
+		resp["studio"] = ""
+	}
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -227,6 +240,7 @@ type authUser struct {
 	ID        int64  `json:"id"`
 	Username  string `json:"username"`
 	Role      int    `json:"role"`
+	Studio    string `json:"studio"`
 	CreatedAt int64  `json:"created_at"`
 	UpdatedAt int64  `json:"updated_at"`
 }
@@ -235,21 +249,21 @@ type authUser struct {
 // list/get endpoints that must never echo the hash back to clients.
 func authUserFromRow(row interface{ Scan(...any) error }) (authUser, error) {
 	var u authUser
-	err := row.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt, &u.UpdatedAt)
+	err := row.Scan(&u.ID, &u.Username, &u.Role, &u.Studio, &u.CreatedAt, &u.UpdatedAt)
 	return u, err
 }
 
-func authUserByUsername(username string) (id int64, hash string, role int, err error) {
+func authUserByUsername(username string) (id int64, hash string, role int, studio string, err error) {
 	err = db.QueryRow(
-		`SELECT id, password_hash, role FROM rs_auth_user WHERE username=$1`,
+		`SELECT id, password_hash, role, studio FROM rs_auth_user WHERE username=$1`,
 		username,
-	).Scan(&id, &hash, &role)
+	).Scan(&id, &hash, &role, &studio)
 	return
 }
 
 func authUserByID(id int64) (authUser, error) {
 	row := db.QueryRow(
-		`SELECT id, username, role, created_at, updated_at FROM rs_auth_user WHERE id=$1`,
+		`SELECT id, username, role, studio, created_at, updated_at FROM rs_auth_user WHERE id=$1`,
 		id,
 	)
 	return authUserFromRow(row)
@@ -284,8 +298,8 @@ func seedAdminUser() {
 	}
 	now := time.Now().Unix()
 	if _, err := db.Exec(
-		`INSERT INTO rs_auth_user (username, password_hash, role, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $4)`,
+		`INSERT INTO rs_auth_user (username, password_hash, role, studio, created_at, updated_at)
+		 VALUES ($1, $2, $3, '', $4, $4)`,
 		adminUser, string(hash), minSuperAdminRole, now,
 	); err != nil {
 		log.Printf("[auth-seed] insert error: %v", err)
@@ -860,22 +874,28 @@ func queryTotalLastHour() (float64, error) {
 	return roundTo(float64(total)/quotaPerUnit, 6), nil
 }
 
-func queryAllKeys(startTS, endTS int64) ([]ChannelRow, error) {
+func queryAllKeys(startTS, endTS int64, studio string) ([]ChannelRow, error) {
 	query := `
 		SELECT c.id, COALESCE(c.name,''), c.key, COALESCE(c.status,1), COALESCE(c.type,0), COALESCE(c.tag,''),
 		       COALESCE(c.used_quota,0), q.quota_usd, q.unit_price_cny, COALESCE(q.note,'')
 		FROM channels c
 		LEFT JOIN report_key_quotas q ON q.channel_id = c.id`
 	args := []any{}
-	if startTS > 0 && endTS > 0 {
-		query += ` WHERE c.created_time >= $1 AND c.created_time < $2`
-		args = append(args, startTS, endTS)
-	} else if startTS > 0 {
-		query += ` WHERE c.created_time >= $1`
+	conds := []string{}
+	if startTS > 0 {
 		args = append(args, startTS)
-	} else if endTS > 0 {
-		query += ` WHERE c.created_time < $1`
+		conds = append(conds, fmt.Sprintf("c.created_time >= $%d", len(args)))
+	}
+	if endTS > 0 {
 		args = append(args, endTS)
+		conds = append(conds, fmt.Sprintf("c.created_time < $%d", len(args)))
+	}
+	if studio != "" {
+		args = append(args, studio)
+		conds = append(conds, fmt.Sprintf("c.tag = $%d", len(args)))
+	}
+	if len(conds) > 0 {
+		query += " WHERE " + strings.Join(conds, " AND ")
 	}
 	query += ` ORDER BY c.id`
 	rows, err := db.Query(query, args...)
@@ -993,7 +1013,7 @@ func handleSSOCallback(c *gin.Context) {
 		return
 	}
 	ssoUsername, _ := claims["sub"].(string)
-	localToken, err := newJWT(0, ssoUsername, int(roleRaw))
+	localToken, err := newJWT(0, ssoUsername, int(roleRaw), "")
 	if err != nil {
 		c.Redirect(http.StatusFound, "/login?error=sso_failed")
 		return
@@ -1026,18 +1046,18 @@ func handleLogin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-	id, hash, role, err := authUserByUsername(body.Username)
+	id, hash, role, studio, err := authUserByUsername(body.Username)
 	if err != nil || bcrypt.CompareHashAndPassword([]byte(hash), []byte(body.Password)) != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
-	tokenStr, err := newJWT(id, body.Username, role)
+	tokenStr, err := newJWT(id, body.Username, role, studio)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "token generation failed"})
 		return
 	}
 	c.SetCookie("token", tokenStr, 86400, "/", "", false, true)
-	c.JSON(http.StatusOK, gin.H{"ok": true, "username": body.Username, "role": role})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "username": body.Username, "role": role, "studio": studio})
 }
 
 func handleLogout(c *gin.Context) {
@@ -1053,7 +1073,7 @@ func isValidRoleTier(role int) bool {
 
 func handleUsersList(c *gin.Context) {
 	rows, err := db.Query(
-		`SELECT id, username, role, created_at, updated_at FROM rs_auth_user ORDER BY id ASC`,
+		`SELECT id, username, role, studio, created_at, updated_at FROM rs_auth_user ORDER BY id ASC`,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1077,12 +1097,14 @@ func handleUserCreate(c *gin.Context) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 		Role     int    `json:"role"`
+		Studio   string `json:"studio"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
 	body.Username = strings.TrimSpace(body.Username)
+	body.Studio = strings.TrimSpace(body.Studio)
 	if body.Username == "" || body.Password == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "username and password are required"})
 		return
@@ -1099,9 +1121,9 @@ func handleUserCreate(c *gin.Context) {
 	now := time.Now().Unix()
 	var id int64
 	err = db.QueryRow(
-		`INSERT INTO rs_auth_user (username, password_hash, role, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $4) RETURNING id`,
-		body.Username, string(hash), body.Role, now,
+		`INSERT INTO rs_auth_user (username, password_hash, role, studio, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $5) RETURNING id`,
+		body.Username, string(hash), body.Role, body.Studio, now,
 	).Scan(&id)
 	if err != nil {
 		// Unique violation surfaces as a 409 with the bare DB string so the
@@ -1135,6 +1157,7 @@ func handleUserUpdate(c *gin.Context) {
 	var body struct {
 		Password *string `json:"password,omitempty"`
 		Role     *int    `json:"role,omitempty"`
+		Studio   *string `json:"studio,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
@@ -1179,12 +1202,48 @@ func handleUserUpdate(c *gin.Context) {
 			return
 		}
 	}
+	if body.Studio != nil {
+		if _, err := db.Exec(
+			`UPDATE rs_auth_user SET studio=$1, updated_at=$2 WHERE id=$3`,
+			strings.TrimSpace(*body.Studio), time.Now().Unix(), id,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
 	u, err := authUserByID(id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, u)
+}
+
+// handleStudiosList returns the distinct channels.tag values that exist on
+// the main service. Used by the Users page to populate the studio selector
+// without forcing operators to type tag strings exactly. Admin+ can call it
+// so admins can spot-check the dataset even though only super admins manage
+// user accounts.
+func handleStudiosList(c *gin.Context) {
+	rows, err := db.Query(
+		`SELECT DISTINCT COALESCE(NULLIF(TRIM(tag), ''), '') AS tag FROM channels
+		 WHERE tag IS NOT NULL AND TRIM(tag) <> '' ORDER BY tag ASC`,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	out := make([]string, 0)
+	for rows.Next() {
+		var tag string
+		if err := rows.Scan(&tag); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		out = append(out, tag)
+	}
+	c.JSON(http.StatusOK, gin.H{"studios": out})
 }
 
 func handleUserDelete(c *gin.Context) {
@@ -1497,14 +1556,17 @@ func handleBatchCreateChannels(c *gin.Context) {
 		name := fmt.Sprintf("%s-pipi-%s-%d", dateStr, suffix, quotaInt)
 
 		var channelID int
+		// suffix doubles as the studio tag: it already differentiates the
+		// channel names this batch, and writing it to channels.tag lets the
+		// rs_auth_user.studio binding filter All Keys by the same identifier.
 		err := tx.QueryRow(`
 			INSERT INTO channels
 			(type, key, status, name, weight, created_time, base_url, "group", models,
-			 model_mapping, status_code_mapping, priority, auto_ban, used_quota, channel_info)
+			 model_mapping, status_code_mapping, priority, auto_ban, used_quota, channel_info, tag)
 			VALUES (14, $1, 1, $2, 0, $3, '', 'default', $4,
-			        '', '', 1001, 1, 0, $5::json)
+			        '', '', 1001, 1, 0, $5::json, $6)
 			RETURNING id`,
-			key, name, now, defaultAnthropicModels, channelInfoDefault).Scan(&channelID)
+			key, name, now, defaultAnthropicModels, channelInfoDefault, suffix).Scan(&channelID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("insert channel: %v", err)})
 			return
@@ -1684,7 +1746,16 @@ func handleAllKeysData(c *gin.Context) {
 			endTS = t.AddDate(0, 0, 1).Unix()
 		}
 	}
-	channels, err := queryAllKeys(startTS, endTS)
+	// role=1 (regular user) gets scoped to their studio. Admin+ see everything,
+	// even if a stale studio claim is sitting in their JWT.
+	studioFilter := ""
+	roleAny, _ := c.Get("role")
+	if role, _ := roleAny.(int); role > 0 && role < minAdminRole {
+		if s, ok := c.Get("studio"); ok {
+			studioFilter, _ = s.(string)
+		}
+	}
+	channels, err := queryAllKeys(startTS, endTS, studioFilter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -1992,14 +2063,19 @@ func main() {
 		`UPDATE rs_test_run SET status='done' WHERE status='ok'`,
 		// Local report-service users — independent from the main service's
 		// user table. role mirrors common.RoleCommonUser/Admin/Root.
+		// studio scopes a role=1 user's All Keys view to channels with the
+		// same channels.tag value; '' means "no studio binding" (super_admin
+		// + unbound users see everything).
 		`CREATE TABLE IF NOT EXISTS rs_auth_user (
 			id            BIGSERIAL PRIMARY KEY,
 			username      TEXT NOT NULL UNIQUE,
 			password_hash TEXT NOT NULL,
 			role          INT  NOT NULL DEFAULT 1,
+			studio        TEXT NOT NULL DEFAULT '',
 			created_at    BIGINT NOT NULL,
 			updated_at    BIGINT NOT NULL
 		)`,
+		`ALTER TABLE rs_auth_user ADD COLUMN IF NOT EXISTS studio TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
@@ -2049,6 +2125,7 @@ func main() {
 	// page can manage it even on deployments where the profit report is off.
 	adminAPI.POST("/keys/pricing", handleSaveKeyPricing)
 	adminAPI.POST("/keys/pricing/bulk", handleBulkSaveKeyPricing)
+	adminAPI.GET("/studios", handleStudiosList)
 
 	// Provider Testing, Profit, and user management are super-admin-only.
 	superAPI := api.Group("", requireRole(minSuperAdminRole))

@@ -27,14 +27,21 @@ export default function Users() {
   const [newUsername, setNewUsername] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [newRole, setNewRole] = useState<number>(ROLE_USER)
+  const [newStudio, setNewStudio] = useState('')
   const [creating, setCreating] = useState(false)
+
+  const [studios, setStudios] = useState<string[]>([])
 
   const reload = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const res = await api.listUsers()
-      setUsers(res.users)
+      const [usersRes, studiosRes] = await Promise.all([
+        api.listUsers(),
+        api.listStudios().catch(() => ({ studios: [] as string[] })),
+      ])
+      setUsers(usersRes.users)
+      setStudios(studiosRes.studios)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'failed to load users')
     } finally {
@@ -65,10 +72,12 @@ export default function Users() {
         username: newUsername.trim(),
         password: newPassword,
         role: newRole,
+        studio: newStudio.trim(),
       })
       setNewUsername('')
       setNewPassword('')
       setNewRole(ROLE_USER)
+      setNewStudio('')
       await reload()
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'create failed')
@@ -83,6 +92,20 @@ export default function Users() {
     setError(null)
     try {
       await api.updateUser(u.id, { role })
+      await reload()
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'update failed')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const handleChangeStudio = async (u: AuthUser, studio: string) => {
+    if (studio === u.studio) return
+    setBusyId(u.id)
+    setError(null)
+    try {
+      await api.updateUser(u.id, { studio })
       await reload()
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'update failed')
@@ -133,7 +156,7 @@ export default function Users() {
 
         <section className="rounded-lg border border-gray-200 bg-white p-4">
           <h2 className="text-sm font-medium text-gray-900 mb-3">Create user</h2>
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
             <input
               className="rounded-md border border-gray-300 px-3 py-2 text-sm"
               placeholder="Username"
@@ -158,6 +181,13 @@ export default function Users() {
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
             </select>
+            <input
+              className="rounded-md border border-gray-300 px-3 py-2 text-sm"
+              placeholder="Studio (channel tag, optional)"
+              value={newStudio}
+              onChange={e => setNewStudio(e.target.value)}
+              list="studio-options"
+            />
             <button
               type="button"
               onClick={handleCreate}
@@ -167,6 +197,14 @@ export default function Users() {
               {creating ? 'Creating…' : 'Create'}
             </button>
           </div>
+          <datalist id="studio-options">
+            {studios.map(s => <option key={s} value={s} />)}
+          </datalist>
+          <p className="text-xs text-gray-400 mt-2">
+            Studio scopes a User-role account to channels whose tag matches the
+            value. Leave empty for unrestricted access. Available tags from
+            channels: {studios.length === 0 ? 'none yet' : studios.join(', ')}.
+          </p>
         </section>
 
         <section className="rounded-lg border border-gray-200 bg-white">
@@ -187,6 +225,7 @@ export default function Users() {
                   <th className="px-4 py-2 text-left font-medium">ID</th>
                   <th className="px-4 py-2 text-left font-medium">Username</th>
                   <th className="px-4 py-2 text-left font-medium">Role</th>
+                  <th className="px-4 py-2 text-left font-medium">Studio</th>
                   <th className="px-4 py-2 text-left font-medium">Created</th>
                   <th className="px-4 py-2 text-left font-medium">Updated</th>
                   <th className="px-4 py-2 text-right font-medium">Actions</th>
@@ -194,9 +233,9 @@ export default function Users() {
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {loading ? (
-                  <tr><td colSpan={6} className="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
+                  <tr><td colSpan={7} className="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
                 ) : users.length === 0 ? (
-                  <tr><td colSpan={6} className="px-4 py-6 text-center text-gray-400">No users yet.</td></tr>
+                  <tr><td colSpan={7} className="px-4 py-6 text-center text-gray-400">No users yet.</td></tr>
                 ) : users.map(u => {
                   const isSelf = me?.user_id === u.id
                   const disabled = busyId === u.id
@@ -218,6 +257,23 @@ export default function Users() {
                             <option key={o.value} value={o.value}>{o.label}</option>
                           ))}
                         </select>
+                      </td>
+                      <td className="px-4 py-2">
+                        <input
+                          type="text"
+                          className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs w-full min-w-[8rem]"
+                          defaultValue={u.studio}
+                          disabled={disabled}
+                          list="studio-options"
+                          placeholder="(unrestricted)"
+                          onBlur={e => {
+                            const next = e.target.value.trim()
+                            if (next !== u.studio) void handleChangeStudio(u, next)
+                          }}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                          }}
+                        />
                       </td>
                       <td className="px-4 py-2 text-gray-500">{formatTime(u.created_at)}</td>
                       <td className="px-4 py-2 text-gray-500">{formatTime(u.updated_at)}</td>

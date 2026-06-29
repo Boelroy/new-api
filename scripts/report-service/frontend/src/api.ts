@@ -281,12 +281,14 @@ export type AuthMe = {
   role: number
   user_id?: number
   username?: string
+  studio?: string
 }
 
 export type AuthUser = {
   id: number
   username: string
   role: number
+  studio: string
   created_at: number
   updated_at: number
 }
@@ -305,14 +307,14 @@ export const api = {
 
   listUsers: () => request<{ users: AuthUser[] }>('/api/users'),
 
-  createUser: (payload: { username: string; password: string; role: number }) =>
+  createUser: (payload: { username: string; password: string; role: number; studio?: string }) =>
     request<AuthUser>('/api/users', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
 
-  updateUser: (id: number, payload: { password?: string; role?: number }) =>
+  updateUser: (id: number, payload: { password?: string; role?: number; studio?: string }) =>
     request<AuthUser>(`/api/users/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -321,6 +323,8 @@ export const api = {
 
   deleteUser: (id: number) =>
     request<{ ok: boolean }>(`/api/users/${id}`, { method: 'DELETE' }),
+
+  listStudios: () => request<{ studios: string[] }>('/api/studios'),
 
   getReport: (start: string, end: string) =>
     request<LogRow[]>(`/api/report?start=${start}&end=${end}`),
