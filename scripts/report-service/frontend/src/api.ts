@@ -249,10 +249,12 @@ export function setProfitApiKey(key: string) {
 
 async function request<T>(url: string, opts?: RequestInit): Promise<T> {
   // Auto-inject X-API-Key from localStorage so the /profit gate can
-  // authenticate without relying on cookies.
+  // authenticate without relying on cookies. Restricted to /api/profit/*
+  // because the same header on other endpoints would short-circuit the
+  // server's auth middleware to super_admin and bypass role gates.
   const headers = new Headers(opts?.headers ?? {})
   const apiKey = getProfitApiKey()
-  if (apiKey && !headers.has('X-API-Key')) {
+  if (apiKey && !headers.has('X-API-Key') && url.startsWith('/api/profit/')) {
     headers.set('X-API-Key', apiKey)
   }
   const res = await fetch(url, { ...(opts ?? {}), headers })

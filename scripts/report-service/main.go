@@ -136,7 +136,54 @@ func newJWT(userID int64, username string, role int) (string, error) {
 }
 
 func authMiddleware(c *gin.Context) {
-	// Service-to-service: X-API-Key short-circuit (used by cross-system sync)
+	// User sessions (SSO cookie or local JWT) take strict priority over the
+	// service-to-service X-API-Key. Reversing the order let a logged-in user
+	// — whose browser auto-injects the api key for the /profit gate — be
+	// silently promoted to super_admin and bypass the role gates.
+	if rawCookie := c.GetHeader("Cookie"); rawCookie != "" && strings.Contains(rawCookie, "session=") {
+		if role, ok := checkMainServiceSession(rawCookie); ok {
+			c.Set("role", role)
+			c.Next()
+			return
+		}
+	}
+	if tokenStr, err := c.Cookie("token"); err == nil {
+		parsed, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method")
+			}
+			return jwtSecret, nil
+		})
+		if err == nil {
+			// Older tokens predate the role claim: treat them as the embedded
+			// admin (super admin) so existing sessions stay functional.
+			role := minSuperAdminRole
+			var userID int64
+			var username string
+			if claims, ok := parsed.Claims.(jwt.MapClaims); ok {
+				if r, ok := claims["role"].(float64); ok {
+					role = int(r)
+				}
+				if u, ok := claims["user_id"].(float64); ok {
+					userID = int64(u)
+				}
+				if u, ok := claims["username"].(string); ok {
+					username = u
+				}
+			}
+			c.Set("role", role)
+			if userID > 0 {
+				c.Set("user_id", userID)
+			}
+			if username != "" {
+				c.Set("username", username)
+			}
+			c.Next()
+			return
+		}
+	}
+	// Service-to-service: X-API-Key fallback for cookie-less callers (cross
+	// system sync). Granted super_admin since callers are trusted services.
 	if reportAPIKey != "" {
 		if k := c.GetHeader("X-API-Key"); k != "" && k == reportAPIKey {
 			c.Set("role", minSuperAdminRole)
@@ -144,58 +191,9 @@ func authMiddleware(c *gin.Context) {
 			return
 		}
 	}
-	// Try main service SSO first
-	if rawCookie := c.GetHeader("Cookie"); rawCookie != "" && strings.Contains(rawCookie, "session=") {
-		if role, ok := checkMainServiceSession(rawCookie); ok {
-			c.Set("role", role)
-			c.Next()
-			return
-		}
-	} else {
-		log.Printf("[sso] no session cookie on %s %s", c.Request.Method, c.Request.URL.Path)
-	}
-	// Fall back to local JWT
-	tokenStr, err := c.Cookie("token")
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		c.Abort()
-		return
-	}
-	parsed, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method")
-		}
-		return jwtSecret, nil
-	})
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		c.Abort()
-		return
-	}
-	// Older tokens predate the role claim: treat them as the embedded admin
-	// (super admin) so existing sessions stay fully functional.
-	role := minSuperAdminRole
-	var userID int64
-	var username string
-	if claims, ok := parsed.Claims.(jwt.MapClaims); ok {
-		if r, ok := claims["role"].(float64); ok {
-			role = int(r)
-		}
-		if u, ok := claims["user_id"].(float64); ok {
-			userID = int64(u)
-		}
-		if u, ok := claims["username"].(string); ok {
-			username = u
-		}
-	}
-	c.Set("role", role)
-	if userID > 0 {
-		c.Set("user_id", userID)
-	}
-	if username != "" {
-		c.Set("username", username)
-	}
-	c.Next()
+	log.Printf("[auth] unauthorized on %s %s", c.Request.Method, c.Request.URL.Path)
+	c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+	c.Abort()
 }
 
 func requireRole(min int) gin.HandlerFunc {
