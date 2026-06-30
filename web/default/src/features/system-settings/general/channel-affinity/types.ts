@@ -19,7 +19,13 @@ For commercial licensing, please contact support@quantumnous.com
 export interface KeySource {
   type: 'context_int' | 'context_string' | 'request_header' | 'gjson'
   key?: string
+  // path: single gjson lookup, returns the raw value.
   path?: string
+  // paths: multiple gjson lookups for content-prefix affinity. When set, the
+  // values are concatenated and SHA1-hashed so identical request prefixes
+  // pin to the same upstream channel (e.g. system + messages.0.content for
+  // Anthropic prompt-cache reuse). Mutually exclusive with `path`.
+  paths?: string[]
 }
 
 export interface AffinityRule {

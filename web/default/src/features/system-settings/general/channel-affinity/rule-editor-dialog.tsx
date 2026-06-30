@@ -92,7 +92,16 @@ function normalizeStringList(text: string): string[] {
 
 function normalizeKeySource(src: Partial<KeySource>): KeySource {
   const type = (src?.type || 'gjson') as KeySource['type']
-  if (type === 'gjson') return { type, key: '', path: src?.path || '' }
+  if (type === 'gjson') {
+    // Preserve multi-path mode if present; otherwise fall back to single path.
+    const cleanPaths = (src?.paths || [])
+      .map((p) => (p || '').trim())
+      .filter((p) => p.length > 0)
+    if (cleanPaths.length > 1) {
+      return { type, key: '', path: '', paths: cleanPaths }
+    }
+    return { type, key: '', path: cleanPaths[0] ?? src?.path ?? '' }
+  }
   return { type, key: src?.key || '', path: '' }
 }
 
@@ -193,7 +202,13 @@ export function RuleEditorDialog(props: Props) {
 
     const validKeySources = keySources
       .map(normalizeKeySource)
-      .filter((s) => s.type && (s.type === 'gjson' ? s.path : s.key))
+      .filter((s) => {
+        if (!s.type) return false
+        if (s.type === 'gjson') {
+          return Boolean(s.path) || Boolean(s.paths && s.paths.length > 0)
+        }
+        return Boolean(s.key)
+      })
     if (validKeySources.length === 0) {
       toast.error(t('At least one valid key source is required'))
       return
@@ -355,24 +370,45 @@ export function RuleEditorDialog(props: Props) {
                     </SelectGroup>
                   </SelectContent>
                 </Select>
-                <Input
-                  className='min-w-0 flex-1'
-                  placeholder={
-                    src.type === 'gjson'
-                      ? 'metadata.conversation_id'
-                      : 'user_id'
-                  }
-                  value={src.type === 'gjson' ? src.path || '' : src.key || ''}
-                  onChange={(e) => {
-                    const next = [...keySources]
-                    if (src.type === 'gjson') {
-                      next[idx] = { ...src, path: e.target.value }
-                    } else {
-                      next[idx] = { ...src, key: e.target.value }
+                {src.type === 'gjson' ? (
+                  <Textarea
+                    className='min-w-0 flex-1 font-mono text-xs'
+                    rows={Math.max(
+                      1,
+                      (src.paths && src.paths.length) || (src.path ? 1 : 1),
+                    )}
+                    placeholder={'metadata.conversation_id\nor multi-line for content-prefix hash, e.g.\nsystem\nmessages.0.content'}
+                    value={
+                      src.paths && src.paths.length > 0
+                        ? src.paths.join('\n')
+                        : src.path || ''
                     }
-                    setKeySources(next)
-                  }}
-                />
+                    onChange={(e) => {
+                      const lines = e.target.value
+                        .split('\n')
+                        .map((l) => l.trim())
+                        .filter((l) => l.length > 0)
+                      const next = [...keySources]
+                      if (lines.length > 1) {
+                        next[idx] = { ...src, path: '', paths: lines }
+                      } else {
+                        next[idx] = { ...src, path: lines[0] ?? '', paths: undefined }
+                      }
+                      setKeySources(next)
+                    }}
+                  />
+                ) : (
+                  <Input
+                    className='min-w-0 flex-1'
+                    placeholder='user_id'
+                    value={src.key || ''}
+                    onChange={(e) => {
+                      const next = [...keySources]
+                      next[idx] = { ...src, key: e.target.value }
+                      setKeySources(next)
+                    }}
+                  />
+                )}
                 <Button
                   type='button'
                   variant='ghost'
