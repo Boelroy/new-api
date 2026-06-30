@@ -14,9 +14,9 @@ import (
 
 var StartTime = time.Now().Unix() // unit: second
 var Version = "v0.0.0"            // this hard coding will be replaced automatically when building, no need to manually change
-var SystemName = "PolarCode"
+var SystemName = "New API"
 var Footer = ""
-var Logo = ""
+var Logo = "https://www.newapi.ai/assets/newapi.svg"
 var TopUpLink = ""
 
 var themeValue atomic.Value // stores string; safe for concurrent read/write
