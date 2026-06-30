@@ -29,6 +29,8 @@ function BatchCreatePanel({ onCreated }: { onCreated: () => void }) {
   const [studio, setStudio] = useState('')
   const [studioMode, setStudioMode] = useState<'pick' | 'new'>('pick')
   const [suffix, setSuffix] = useState('')
+  const [costInput, setCostInput] = useState('')          // per-key 上游单价 (CNY)
+  const [priorityInput, setPriorityInput] = useState('')  // channels.priority
   const [input, setInput] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [result, setResult] = useState<string | null>(null)
@@ -65,20 +67,27 @@ function BatchCreatePanel({ onCreated }: { onCreated: () => void }) {
       const t = line.trim()
       if (!t || t.startsWith('#')) return
       const parts = t.split(/[\s,]+/)
-      if (parts.length >= 2) {
-        const q = parseFloat(parts[1])
-        if (parts[0] && !isNaN(q) && q > 0) {
-          channels.push({ key: parts[0], quota_usd: q })
-        }
-      }
+      if (parts.length < 2) return
+      const q = parseFloat(parts[1])
+      if (!parts[0] || isNaN(q) || q <= 0) return
+      channels.push({ key: parts[0], quota_usd: q })
     })
     if (channels.length === 0) {
       setResult('未解析到有效行')
       return
     }
+    const defaults: { priority?: number; unit_price_cny?: number } = {}
+    if (costInput.trim()) {
+      const c = parseFloat(costInput.trim())
+      if (!isNaN(c) && c > 0) defaults.unit_price_cny = c
+    }
+    if (priorityInput.trim()) {
+      const p = parseInt(priorityInput.trim(), 10)
+      if (!isNaN(p) && p > 0) defaults.priority = p
+    }
     setSubmitting(true)
     try {
-      const res = await api.batchCreateChannels(studio.trim(), suffix.trim(), channels)
+      const res = await api.batchCreateChannels(studio.trim(), suffix.trim(), channels, defaults)
       setResult(`成功创建 ${res.count} 个渠道`)
       setInput('')
       onCreated()
@@ -140,15 +149,41 @@ function BatchCreatePanel({ onCreated }: { onCreated: () => void }) {
           />
         </div>
       </div>
+      <div className="grid grid-cols-2 gap-2 mb-2">
+        <div>
+          <label className="block text-[11px] text-gray-500 mb-1">默认成本 (CNY/USD 上游单价)</label>
+          <input
+            type="number"
+            step="0.01"
+            min="0"
+            value={costInput}
+            onChange={e => setCostInput(e.target.value)}
+            placeholder="例如 4.3，空=不写"
+            className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
+          />
+        </div>
+        <div>
+          <label className="block text-[11px] text-gray-500 mb-1">默认优先级</label>
+          <input
+            type="number"
+            step="1"
+            min="1"
+            value={priorityInput}
+            onChange={e => setPriorityInput(e.target.value)}
+            placeholder="例如 2，空=默认 1001"
+            className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
+          />
+        </div>
+      </div>
       <textarea
         value={input}
         onChange={e => setInput(e.target.value)}
         rows={8}
-        placeholder={'每行 Key 和额度（USD）：\n\nsk-ant-api03-xxxx 220\nsk-ant-api03-yyyy 500'}
+        placeholder={'每行: key 额度（USD）\n\nsk-ant-api03-xxxx 220\nsk-ant-api03-yyyy 500'}
         className="w-full border border-gray-200 rounded-md p-2.5 text-xs font-mono resize-y bg-gray-50 focus:outline-none focus:border-gray-900"
       />
       <p className="text-[10px] text-gray-400 mt-2 leading-relaxed">
-        命名 MMDD-工作室-后缀-容量；工作室会写入 channels.tag，用于限制 user 角色账号可见范围
+        命名 MMDD-工作室-后缀-容量；上方"默认成本/优先级"会写到所有新建渠道；channels.tag 用作 user 角色可见范围
         {studios.length > 0 && <>。已有：{studios.join('、')}</>}
       </p>
       <button
@@ -172,6 +207,12 @@ export default function KeyCapacity() {
   const [refreshedAt, setRefreshedAt] = useState('')
   const [saving, setSaving] = useState(false)
 
+  // 批量改优先级状态：勾选的 channel.id 集合 + 目标优先级值
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [bulkPriority, setBulkPriority] = useState('')
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [bulkMsg, setBulkMsg] = useState<string | null>(null)
+
   const load = useCallback(async () => {
     try {
       const res = await api.getKeysData()
@@ -186,6 +227,39 @@ export default function KeyCapacity() {
     const t = setInterval(load, 60000)
     return () => clearInterval(t)
   }, [load])
+
+  const toggleRow = (id: number) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const toggleAll = (checked: boolean) => {
+    setSelected(checked ? new Set(channels.map(c => c.id)) : new Set())
+  }
+
+  const handleBulkPriority = async () => {
+    setBulkMsg(null)
+    const p = parseInt(bulkPriority.trim(), 10)
+    if (isNaN(p) || p <= 0) { setBulkMsg('优先级必须是正整数'); return }
+    if (selected.size === 0) { setBulkMsg('请勾选至少一条渠道'); return }
+    setBulkBusy(true)
+    try {
+      const ids = Array.from(selected)
+      const res = await api.batchUpdateChannelPriority(ids, p)
+      setBulkMsg(`已更新 ${res.updated} 条渠道优先级为 ${res.priority}`)
+      setSelected(new Set())
+      setBulkPriority('')
+      await load()
+    } catch (e: any) {
+      setBulkMsg('失败: ' + (e?.message || e))
+    } finally {
+      setBulkBusy(false)
+    }
+  }
 
   const handleApply = async () => {
     const map: Record<string, number> = {}
@@ -258,11 +332,51 @@ export default function KeyCapacity() {
         </div>
 
         <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+          {/* 批量改优先级工具栏 */}
+          <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100 gap-3 flex-wrap">
+            <div className="flex items-center gap-2 text-xs text-gray-500">
+              <span>已选 <span className="tabular-nums font-medium text-gray-900">{selected.size}</span> / {channels.length}</span>
+              {selected.size > 0 && (
+                <button onClick={() => setSelected(new Set())} className="text-gray-400 hover:text-gray-700">清空</button>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                step="1"
+                min="1"
+                value={bulkPriority}
+                onChange={e => setBulkPriority(e.target.value)}
+                placeholder="优先级 (例如 2)"
+                className="w-32 border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-white focus:outline-none focus:border-gray-900"
+              />
+              <button
+                onClick={handleBulkPriority}
+                disabled={bulkBusy || selected.size === 0}
+                className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {bulkBusy ? '应用中…' : '设置选中优先级'}
+              </button>
+            </div>
+          </div>
+          {bulkMsg && (
+            <div className={`px-4 py-1.5 text-[11px] border-b border-gray-100 ${bulkMsg.startsWith('已更新') ? 'text-emerald-600 bg-emerald-50/40' : 'text-rose-600 bg-rose-50/40'}`}>{bulkMsg}</div>
+          )}
+
           <div className="overflow-x-auto max-h-[70vh] overflow-y-auto">
             <table className="w-full text-xs whitespace-nowrap border-separate border-spacing-0">
               <thead>
                 <tr>
-                  {['ID','名称','Key 末尾','已用 ($)','额度 ($)','剩余 ($)','剩余%','最近1小时消耗 ($)','预计剩余时长'].map(h => (
+                  <th className="sticky top-0 bg-gray-50 px-3 py-2 text-left border-b border-gray-200 w-8">
+                    <input
+                      type="checkbox"
+                      checked={channels.length > 0 && selected.size === channels.length}
+                      ref={el => { if (el) el.indeterminate = selected.size > 0 && selected.size < channels.length }}
+                      onChange={e => toggleAll(e.target.checked)}
+                      className="rounded border-gray-300"
+                    />
+                  </th>
+                  {['ID','名称','Key 末尾','优先级','已用 ($)','额度 ($)','剩余 ($)','剩余%','最近1小时消耗 ($)','预计剩余时长'].map(h => (
                     <th key={h} className="sticky top-0 bg-gray-50 px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200">{h}</th>
                   ))}
                 </tr>
@@ -274,11 +388,21 @@ export default function KeyCapacity() {
                   const pct = quota && quota > 0 ? (remaining! / quota) * 100 : null
                   const eta = remaining != null && ch.last_hour_usd > 0 ? remaining / ch.last_hour_usd : remaining != null && remaining > 0 ? Infinity : null
                   const etaF = fmtETA(eta)
+                  const isSelected = selected.has(ch.id)
                   return (
-                    <tr key={ch.id} className="hover:bg-gray-50">
+                    <tr key={ch.id} className={isSelected ? 'bg-blue-50/40 hover:bg-blue-50' : 'hover:bg-gray-50'}>
+                      <td className="px-3 py-1.5 border-b border-gray-50 w-8">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleRow(ch.id)}
+                          className="rounded border-gray-300"
+                        />
+                      </td>
                       <td className="px-3 py-1.5 border-b border-gray-50">{ch.id}</td>
                       <td className="px-3 py-1.5 border-b border-gray-50">{ch.name}</td>
                       <td className="px-3 py-1.5 border-b border-gray-50 font-mono text-gray-400">{ch.key}</td>
+                      <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{ch.priority || <span className="text-gray-300">—</span>}</td>
                       <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">${ch.used_usd.toFixed(4)}</td>
                       <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{quota != null ? '$' + quota.toFixed(2) : <span className="text-gray-300">未设置</span>}</td>
                       <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{remaining != null ? '$' + remaining.toFixed(4) : '—'}</td>

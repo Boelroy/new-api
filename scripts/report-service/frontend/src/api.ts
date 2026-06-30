@@ -28,6 +28,7 @@ export type ChannelRow = {
   status: number
   type: number
   tag: string
+  priority: number
   used_usd: number
   last_hour_usd: number
   quota_usd: number | null
@@ -338,11 +339,23 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  batchCreateChannels: (studio: string, suffix: string, channels: { key: string; quota_usd: number }[]) =>
+  batchCreateChannels: (
+    studio: string,
+    suffix: string,
+    channels: { key: string; quota_usd: number; priority?: number; unit_price_cny?: number }[],
+    defaults?: { priority?: number; unit_price_cny?: number },
+  ) =>
     request<{ created: { id: number; name: string }[]; count: number }>('/api/channels/batch-create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ studio, suffix, channels }),
+      body: JSON.stringify({ studio, suffix, channels, ...(defaults ?? {}) }),
+    }),
+
+  batchUpdateChannelPriority: (channel_ids: number[], priority: number) =>
+    request<{ updated: number; priority: number }>('/api/channels/batch-priority', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel_ids, priority }),
     }),
 
   getAllKeys: (start?: string, end?: string) => {

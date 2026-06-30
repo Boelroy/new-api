@@ -793,6 +793,7 @@ type ChannelRow struct {
 	Status        int      `json:"status"`
 	Type          int      `json:"type"`
 	Tag           string   `json:"tag"`
+	Priority      int      `json:"priority"`
 	UsedUSD       float64  `json:"used_usd"`
 	LastHourUSD   float64  `json:"last_hour_usd"`
 	QuotaUSD      *float64 `json:"quota_usd"`
@@ -808,6 +809,7 @@ type KeySummary struct {
 func queryKeyData() ([]ChannelRow, error) {
 	rows, err := db.Query(`
 		SELECT c.id, COALESCE(c.name,''), c.key, COALESCE(c.status,1), COALESCE(c.type,0), COALESCE(c.tag,''),
+		       COALESCE(c.priority,0),
 		       COALESCE(c.used_quota,0), q.quota_usd, q.unit_price_cny, COALESCE(q.note,'')
 		FROM channels c
 		LEFT JOIN report_key_quotas q ON q.channel_id = c.id
@@ -824,7 +826,7 @@ func queryKeyData() ([]ChannelRow, error) {
 		var r ChannelRow
 		var usedQuota int64
 		var quotaUSD, unitPrice sql.NullFloat64
-		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &r.Type, &r.Tag, &usedQuota, &quotaUSD, &unitPrice, &r.Note); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &r.Type, &r.Tag, &r.Priority, &usedQuota, &quotaUSD, &unitPrice, &r.Note); err != nil {
 			return nil, err
 		}
 		r.UsedUSD = roundTo(float64(usedQuota)/quotaPerUnit, 4)
@@ -877,6 +879,7 @@ func queryTotalLastHour() (float64, error) {
 func queryAllKeys(startTS, endTS int64, studio string) ([]ChannelRow, error) {
 	query := `
 		SELECT c.id, COALESCE(c.name,''), c.key, COALESCE(c.status,1), COALESCE(c.type,0), COALESCE(c.tag,''),
+		       COALESCE(c.priority,0),
 		       COALESCE(c.used_quota,0), q.quota_usd, q.unit_price_cny, COALESCE(q.note,'')
 		FROM channels c
 		LEFT JOIN report_key_quotas q ON q.channel_id = c.id`
@@ -909,7 +912,7 @@ func queryAllKeys(startTS, endTS int64, studio string) ([]ChannelRow, error) {
 		var r ChannelRow
 		var usedQuota int64
 		var quotaUSD, unitPrice sql.NullFloat64
-		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &r.Type, &r.Tag, &usedQuota, &quotaUSD, &unitPrice, &r.Note); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &r.Type, &r.Tag, &r.Priority, &usedQuota, &quotaUSD, &unitPrice, &r.Note); err != nil {
 			return nil, err
 		}
 		r.UsedUSD = roundTo(float64(usedQuota)/quotaPerUnit, 4)
@@ -1604,9 +1607,16 @@ func handleBatchCreateChannels(c *gin.Context) {
 	var payload struct {
 		Studio   string `json:"studio"`
 		Suffix   string `json:"suffix"`
-		Channels []struct {
-			Key      string  `json:"key"`
-			QuotaUSD float64 `json:"quota_usd"`
+		// Default priority + unit price applied to every channel that does not
+		// override them in the per-row entry. Lets the form set a single value
+		// up top instead of repeating it on every key.
+		Priority     int     `json:"priority"`
+		UnitPriceCNY float64 `json:"unit_price_cny"`
+		Channels     []struct {
+			Key          string   `json:"key"`
+			QuotaUSD     float64  `json:"quota_usd"`
+			Priority     *int     `json:"priority,omitempty"`
+			UnitPriceCNY *float64 `json:"unit_price_cny,omitempty"`
 		} `json:"channels"`
 	}
 	if err := c.ShouldBindJSON(&payload); err != nil {
@@ -1627,6 +1637,14 @@ func handleBatchCreateChannels(c *gin.Context) {
 	if len(payload.Channels) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no channels provided"})
 		return
+	}
+	// Legacy default for channels.priority. Mirrors the value used in upstream
+	// new-api so failover behavior stays consistent for batches that don't
+	// override it.
+	const defaultChannelPriority = 1001
+	defaultPriority := payload.Priority
+	if defaultPriority <= 0 {
+		defaultPriority = defaultChannelPriority
 	}
 
 	dateStr := time.Now().UTC().Format("0102")
@@ -1653,6 +1671,10 @@ func handleBatchCreateChannels(c *gin.Context) {
 		}
 		quotaInt := int(ch.QuotaUSD)
 		name := fmt.Sprintf("%s-%s-%s-%d", dateStr, studio, suffix, quotaInt)
+		priority := defaultPriority
+		if ch.Priority != nil && *ch.Priority > 0 {
+			priority = *ch.Priority
+		}
 
 		var channelID int
 		// channels.tag = studio so rs_auth_user.studio bindings can filter
@@ -1662,9 +1684,9 @@ func handleBatchCreateChannels(c *gin.Context) {
 			(type, key, status, name, weight, created_time, base_url, "group", models,
 			 model_mapping, status_code_mapping, priority, auto_ban, used_quota, channel_info, tag)
 			VALUES (14, $1, 1, $2, 0, $3, '', 'default', $4,
-			        '', '', 1001, 1, 0, $5::json, $6)
+			        '', '', $7, 1, 0, $5::json, $6)
 			RETURNING id`,
-			key, name, now, defaultAnthropicModels, channelInfoDefault, studio).Scan(&channelID)
+			key, name, now, defaultAnthropicModels, channelInfoDefault, studio, priority).Scan(&channelID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("insert channel: %v", err)})
 			return
@@ -1673,20 +1695,35 @@ func handleBatchCreateChannels(c *gin.Context) {
 		for _, m := range models {
 			_, err = tx.Exec(`
 				INSERT INTO abilities ("group", model, channel_id, enabled, priority, weight)
-				VALUES ('default', $1, $2, true, 1001, 0)
+				VALUES ('default', $1, $2, true, $3, 0)
 				ON CONFLICT DO NOTHING`,
-				strings.TrimSpace(m), channelID)
+				strings.TrimSpace(m), channelID, priority)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("insert ability: %v", err)})
 				return
 			}
 		}
 
-		_, err = tx.Exec(`
-			INSERT INTO report_key_quotas (channel_id, quota_usd, updated_at)
-			VALUES ($1, $2, $3)
-			ON CONFLICT (channel_id) DO UPDATE SET quota_usd=$2, updated_at=$3`,
-			channelID, ch.QuotaUSD, now)
+		// Persist quota + optional unit_price_cny in a single upsert so the
+		// All Keys page picks them up without a second round trip.
+		unitPrice := payload.UnitPriceCNY
+		if ch.UnitPriceCNY != nil {
+			unitPrice = *ch.UnitPriceCNY
+		}
+		if unitPrice > 0 {
+			_, err = tx.Exec(`
+				INSERT INTO report_key_quotas (channel_id, quota_usd, unit_price_cny, updated_at)
+				VALUES ($1, $2, $3, $4)
+				ON CONFLICT (channel_id)
+				DO UPDATE SET quota_usd=$2, unit_price_cny=$3, updated_at=$4`,
+				channelID, ch.QuotaUSD, unitPrice, now)
+		} else {
+			_, err = tx.Exec(`
+				INSERT INTO report_key_quotas (channel_id, quota_usd, updated_at)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (channel_id) DO UPDATE SET quota_usd=$2, updated_at=$3`,
+				channelID, ch.QuotaUSD, now)
+		}
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("insert quota: %v", err)})
 			return
@@ -1699,6 +1736,52 @@ func handleBatchCreateChannels(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"created": results, "count": len(results)})
+}
+
+// handleBatchUpdateChannelPriority sets channels.priority and the matching
+// abilities.priority for a list of channel ids in a single transaction. The
+// pair must stay in sync — abilities.priority controls per-model selection
+// weight on relay dispatch — so updating one without the other reintroduces
+// the failover bug we saw when ability rows kept the legacy 1001 default.
+func handleBatchUpdateChannelPriority(c *gin.Context) {
+	var payload struct {
+		ChannelIDs []int `json:"channel_ids"`
+		Priority   int   `json:"priority"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(payload.ChannelIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "channel_ids is required"})
+		return
+	}
+	if payload.Priority <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "priority must be > 0"})
+		return
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+	ids := payload.ChannelIDs
+	res, err := tx.Exec(`UPDATE channels SET priority=$1 WHERE id = ANY($2)`, payload.Priority, ids)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("update channels: %v", err)})
+		return
+	}
+	updated, _ := res.RowsAffected()
+	if _, err := tx.Exec(`UPDATE abilities SET priority=$1 WHERE channel_id = ANY($2)`, payload.Priority, ids); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("update abilities: %v", err)})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"updated": updated, "priority": payload.Priority})
 }
 
 // ---- Key tester ----
@@ -2230,6 +2313,7 @@ func main() {
 	adminAPI.GET("/keys/data", handleKeysData)
 	adminAPI.POST("/keys/quota", handleSaveQuotas)
 	adminAPI.POST("/channels/batch-create", handleBatchCreateChannels)
+	adminAPI.POST("/channels/batch-priority", handleBatchUpdateChannelPriority)
 	adminAPI.POST("/keys/test", handleTestKeys)
 	adminAPI.GET("/detect/models", handleDetectModels)
 	adminAPI.POST("/refresh", handleRefresh)
