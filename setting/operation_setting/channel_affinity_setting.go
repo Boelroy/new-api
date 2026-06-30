@@ -5,7 +5,13 @@ import "github.com/QuantumNous/new-api/setting/config"
 type ChannelAffinityKeySource struct {
 	Type string `json:"type"` // context_int, context_string, request_header, gjson
 	Key  string `json:"key,omitempty"`
+	// Path: single-value gjson lookup (original behavior, returns raw value).
 	Path string `json:"path,omitempty"`
+	// Paths: multi-value gjson lookup with type=gjson. Each path is resolved
+	// against the request body, concatenated, and SHA1'd to produce a short
+	// stable key. Use this for content-prefix affinity such as Anthropic
+	// prompt caching where {system, messages[0].content} forms the cache key.
+	Paths []string `json:"paths,omitempty"`
 }
 
 type ChannelAffinityRule struct {
@@ -101,6 +107,15 @@ var channelAffinitySetting = ChannelAffinitySetting{
 			ModelRegex: []string{"^claude-.*$"},
 			PathRegex:  []string{"/v1/messages"},
 			KeySources: []ChannelAffinityKeySource{
+				// Anthropic prompt cache keys on the prompt prefix tokens
+				// (system block + initial messages), so pinning identical
+				// prefixes to the same upstream channel keeps caches warm.
+				// The result is SHA1-hashed inside extractChannelAffinityValue
+				// to keep the Redis key small even for large prompts.
+				{Type: "gjson", Paths: []string{"system", "messages.0.content"}},
+				// Fallback when the body is unreachable (e.g. weird client);
+				// CLI clients always set metadata.user_id, which is a stable
+				// per-session identifier.
 				{Type: "gjson", Path: "metadata.user_id"},
 			},
 			ValueRegex:            "",

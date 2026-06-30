@@ -308,6 +308,12 @@ func extractChannelAffinityValue(c *gin.Context, src operation_setting.ChannelAf
 		}
 		return strings.TrimSpace(c.Request.Header.Get(src.Key))
 	case "gjson":
+		// Multi-path concat + hash. Used for content-prefix affinity such as
+		// {system, messages[0].content} where the cacheable prefix should pin
+		// the request to the same channel for prompt-cache reuse.
+		if len(src.Paths) > 0 {
+			return extractMultiPathHash(c, src.Paths)
+		}
 		if src.Path == "" {
 			return ""
 		}
@@ -332,6 +338,51 @@ func extractChannelAffinityValue(c *gin.Context, src operation_setting.ChannelAf
 	default:
 		return ""
 	}
+}
+
+// extractMultiPathHash resolves each path against the request body, joins the
+// raw values with a unit separator, and returns a SHA1 hex. Returning the hash
+// (not the concatenation) keeps the downstream cache key bounded even when the
+// system prompt + first message run to many kilobytes.
+func extractMultiPathHash(c *gin.Context, paths []string) string {
+	storage, err := common.GetBodyStorage(c)
+	if err != nil {
+		return ""
+	}
+	body, err := storage.Bytes()
+	if err != nil || len(body) == 0 {
+		return ""
+	}
+	var buf strings.Builder
+	nonEmpty := false
+	for i, p := range paths {
+		if i > 0 {
+			buf.WriteByte(0x1f)
+		}
+		if p == "" {
+			continue
+		}
+		res := gjson.GetBytes(body, p)
+		if !res.Exists() {
+			continue
+		}
+		var v string
+		switch res.Type {
+		case gjson.String, gjson.Number, gjson.True, gjson.False:
+			v = res.String()
+		default:
+			v = res.Raw
+		}
+		v = strings.TrimSpace(v)
+		if v != "" {
+			nonEmpty = true
+			buf.WriteString(v)
+		}
+	}
+	if !nonEmpty {
+		return ""
+	}
+	return common.Sha1([]byte(buf.String()))
 }
 
 func buildChannelAffinityCacheKeySuffix(rule operation_setting.ChannelAffinityRule, modelName string, usingGroup string, affinityValue string) string {
