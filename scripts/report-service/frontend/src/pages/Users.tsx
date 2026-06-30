@@ -186,7 +186,7 @@ export default function Users() {
               value={newStudio}
               onChange={e => setNewStudio(e.target.value)}
             >
-              <option value="">Studio: (unrestricted)</option>
+              <option value="">Studio: (no access for user-tier)</option>
               {studios.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
             <button
@@ -199,9 +199,10 @@ export default function Users() {
             </button>
           </div>
           <p className="text-xs text-gray-400 mt-2">
-            Studio scopes a User-role account to channels whose tag matches the
-            value. Use "(unrestricted)" to skip studio binding. Add new studios
-            by creating channels with that tag in Key Capacity → Batch create.
+            Studio binds a User-role account to channels whose tag matches it.
+            Without a studio binding, a User-role account sees no channels at
+            all. Admin / super admin ignore studio. Add new studios by creating
+            channels with that tag in Key Capacity → Batch create.
           </p>
         </section>
 
@@ -263,7 +264,7 @@ export default function Users() {
                           disabled={disabled}
                           onChange={e => void handleChangeStudio(u, e.target.value)}
                         >
-                          <option value="">(unrestricted)</option>
+                          <option value="">(no access)</option>
                           {/* Preserve current value as an option even when not in
                               the channel-tag list, so a freshly-bound studio
                               that no channel uses yet still displays here. */}

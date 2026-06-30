@@ -1844,14 +1844,20 @@ func handleAllKeysData(c *gin.Context) {
 			endTS = t.AddDate(0, 0, 1).Unix()
 		}
 	}
-	// role=1 (regular user) gets scoped to their studio. Admin+ see everything,
-	// even if a stale studio claim is sitting in their JWT.
+	// role=1 (regular user) is scoped to their studio. An unbound user-tier
+	// account sees nothing — operators have to explicitly bind a studio in
+	// the Users page before any channel becomes visible. Admin+ ignore the
+	// studio entirely.
 	studioFilter := ""
 	roleAny, _ := c.Get("role")
 	if role, _ := roleAny.(int); role > 0 && role < minAdminRole {
-		if s, ok := c.Get("studio"); ok {
-			studioFilter, _ = s.(string)
+		studioAny, _ := c.Get("studio")
+		studio, _ := studioAny.(string)
+		if studio == "" {
+			c.JSON(http.StatusOK, []ChannelRow{})
+			return
 		}
+		studioFilter = studio
 	}
 	channels, err := queryAllKeys(startTS, endTS, studioFilter)
 	if err != nil {
