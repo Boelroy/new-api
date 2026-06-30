@@ -341,6 +341,13 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if _, ok := c.Get("specific_channel_id"); ok {
 		return false
 	}
+	// Retry when the upstream body matches an admin-configured keyword. This
+	// runs before the status-code skip so e.g. a 400 with "Your credit balance
+	// is too low" still fails over to the next channel without forcing every
+	// other 400 to retry.
+	if service.ShouldRetryByMessage(openaiErr) {
+		return true
+	}
 	code := openaiErr.StatusCode
 	if code >= 200 && code < 300 {
 		return false

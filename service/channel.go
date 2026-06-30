@@ -64,6 +64,21 @@ func ShouldDisableChannel(err *types.NewAPIError) bool {
 	return search
 }
 
+// ShouldRetryByMessage scans the upstream error body against the configured
+// retry-on-keyword list. Lets channel-level error patterns (e.g. credit
+// exhausted, organization disabled) bypass the status-code retry policy so
+// the request fails over to the next channel even on a 400.
+func ShouldRetryByMessage(err *types.NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	if len(operation_setting.AutomaticRetryKeywords) == 0 {
+		return false
+	}
+	hit, _ := AcSearch(strings.ToLower(err.Error()), operation_setting.AutomaticRetryKeywords, true)
+	return hit
+}
+
 func ShouldEnableChannel(newAPIError *types.NewAPIError, status int) bool {
 	if !common.AutomaticEnableChannelEnabled {
 		return false
