@@ -21,7 +21,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -1829,7 +1829,10 @@ func handleBatchUpdateChannelPriority(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback()
-	ids := payload.ChannelIDs
+	// lib/pq needs pq.Array to marshal a Go slice into a Postgres int[] for the
+	// ANY($n) operator; passing a bare []int surfaces as
+	// "unsupported type []int, a slice of int".
+	ids := pq.Array(payload.ChannelIDs)
 	res, err := tx.Exec(`UPDATE channels SET priority=$1 WHERE id = ANY($2)`, payload.Priority, ids)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("update channels: %v", err)})
