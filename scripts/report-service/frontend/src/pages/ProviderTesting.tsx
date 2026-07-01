@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import Layout from '../components/Layout'
 import RunDetailPanels from '../components/RunDetailPanels'
-import { api, TestProject, TestRun } from '../api'
+import { api, ClaudeCallResponse, TestProject, TestRun } from '../api'
 
 const MODEL_DEFAULTS = [
   'claude-opus-4-7',
@@ -66,6 +66,17 @@ export default function ProviderTesting() {
   const [runGrader, setRunGrader] = useState(true)
   const [submitting, setSubmitting] = useState(false)
 
+  // Claude 直接调用 (ad-hoc single-shot) state. Shares no state with the
+  // Detect+Eval form above; keeps its own model + message so users can
+  // switch back and forth without clobbering the run config.
+  const [callModelMode, setCallModelMode] = useState<'preset' | 'custom'>('preset')
+  const [callModel, setCallModel] = useState(MODEL_DEFAULTS[0])
+  const [callCustomModel, setCallCustomModel] = useState('')
+  const [callMessage, setCallMessage] = useState('Say hi in one short sentence.')
+  const [callSending, setCallSending] = useState(false)
+  const [callResult, setCallResult] = useState<ClaudeCallResponse | null>(null)
+  const [callError, setCallError] = useState<string | null>(null)
+
   // New-project modal.
   const [newOpen, setNewOpen] = useState(false)
   const [newName, setNewName] = useState('')
@@ -112,6 +123,9 @@ export default function ProviderTesting() {
 
   // Load selected project + run list when projectId changes.
   useEffect(() => {
+    // Switching projects invalidates any prior ad-hoc call result.
+    setCallResult(null)
+    setCallError(null)
     if (!params.projectId) {
       setSelectedProject(null)
       setRuns(null)
@@ -169,6 +183,27 @@ export default function ProviderTesting() {
       setPageError('启动失败：' + (e?.message || String(e)))
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  const finalCallModel = callModelMode === 'custom' ? callCustomModel.trim() : callModel
+  const canCall = !!selectedProject && finalCallModel.length > 0 && callMessage.trim().length > 0 && !callSending
+
+  const handleClaudeCall = async () => {
+    if (!selectedProject || !canCall) return
+    setCallSending(true)
+    setCallError(null)
+    setCallResult(null)
+    try {
+      const r = await api.testingClaudeCall(selectedProject.id, {
+        model: finalCallModel,
+        message: callMessage.trim(),
+      })
+      setCallResult(r)
+    } catch (e: any) {
+      setCallError(e?.message || String(e))
+    } finally {
+      setCallSending(false)
     }
   }
 
@@ -409,6 +444,142 @@ export default function ProviderTesting() {
                   </button>
                   <span className="text-[10px] text-gray-400">真实调用上游模型 — 仅对你授权的 endpoint 使用</span>
                 </div>
+              </div>
+
+              {/* Claude 直接调用 — ad-hoc single-shot against project host+key */}
+              <div className="bg-white border border-gray-200 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">Claude 直接调用</div>
+                  <div className="text-[10px] text-gray-400">
+                    使用项目的 host + api key 打一发 /v1/messages · 非流式 · max_tokens 1024
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Model</label>
+                    <div className="flex items-center gap-2 mb-2 text-[10px]">
+                      <label className="flex items-center gap-1 text-gray-500">
+                        <input
+                          type="radio"
+                          checked={callModelMode === 'preset'}
+                          onChange={() => setCallModelMode('preset')}
+                        />
+                        预设
+                      </label>
+                      <label className="flex items-center gap-1 text-gray-500">
+                        <input
+                          type="radio"
+                          checked={callModelMode === 'custom'}
+                          onChange={() => setCallModelMode('custom')}
+                        />
+                        手填
+                      </label>
+                    </div>
+                    {callModelMode === 'preset' ? (
+                      <select
+                        value={callModel}
+                        onChange={e => setCallModel(e.target.value)}
+                        className="w-full border border-gray-200 rounded-md px-2.5 py-2 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
+                      >
+                        {MODEL_DEFAULTS.map(m => <option key={m} value={m}>{m}</option>)}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={callCustomModel}
+                        onChange={e => setCallCustomModel(e.target.value)}
+                        placeholder="claude-sonnet-4-6"
+                        className="w-full border border-gray-200 rounded-md px-2.5 py-2 text-xs bg-gray-50 focus:outline-none focus:border-gray-900 font-mono"
+                      />
+                    )}
+                  </div>
+                  <div className="md:col-span-2">
+                    <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">User message</label>
+                    <textarea
+                      value={callMessage}
+                      onChange={e => setCallMessage(e.target.value)}
+                      rows={3}
+                      placeholder="Say hi in one short sentence."
+                      className="w-full border border-gray-200 rounded-md px-2.5 py-2 text-xs bg-gray-50 focus:outline-none focus:border-gray-900 font-mono resize-y"
+                    />
+                  </div>
+                </div>
+                <div className="mt-4 flex items-center gap-2">
+                  <button
+                    onClick={handleClaudeCall}
+                    disabled={!canCall}
+                    className="bg-gray-900 text-white rounded-md px-4 py-1.5 text-xs hover:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {callSending ? '调用中 ...' : '发送'}
+                  </button>
+                  {callResult && (
+                    <button
+                      onClick={() => { setCallResult(null); setCallError(null) }}
+                      className="border border-gray-200 rounded-md px-3 py-1 text-[11px] text-gray-500 hover:bg-gray-50"
+                    >
+                      清空结果
+                    </button>
+                  )}
+                  <span className="text-[10px] text-gray-400">真实计费 · 请节制</span>
+                </div>
+
+                {(callError || callResult) && (
+                  <div className="mt-4 border-t border-gray-100 pt-4 space-y-2">
+                    {callError && (
+                      <div className="bg-rose-50 border border-rose-100 text-rose-700 text-xs rounded-md px-3 py-2 whitespace-pre-wrap break-all">
+                        请求失败：{callError}
+                      </div>
+                    )}
+                    {callResult && (
+                      <>
+                        <div className="flex items-center gap-2 text-[11px] flex-wrap">
+                          <span
+                            className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                              callResult.error
+                                ? 'bg-rose-100 text-rose-700'
+                                : callResult.status >= 200 && callResult.status < 300
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : 'bg-amber-100 text-amber-800'
+                            }`}
+                          >
+                            {callResult.error ? 'error' : `HTTP ${callResult.status || 0}`}
+                          </span>
+                          <span className="text-gray-500 tabular-nums">{fmtElapsed(callResult.latency_ms)}</span>
+                          {callResult.stop_reason && (
+                            <span className="text-gray-400">stop: <span className="font-mono">{callResult.stop_reason}</span></span>
+                          )}
+                        </div>
+                        {callResult.error ? (
+                          <pre className="bg-rose-50 border border-rose-100 text-rose-700 text-[11px] rounded-md px-3 py-2 whitespace-pre-wrap break-all font-mono max-h-64 overflow-auto">
+                            {callResult.error}
+                          </pre>
+                        ) : (
+                          <div className="bg-gray-50 border border-gray-100 rounded-md px-3 py-2 whitespace-pre-wrap text-xs text-gray-800 max-h-72 overflow-auto">
+                            {callResult.text || <span className="text-gray-400">（无文本内容）</span>}
+                          </div>
+                        )}
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px] text-gray-500">
+                          <div>
+                            <div className="text-[10px] uppercase tracking-wider text-gray-400">Input</div>
+                            <div className="tabular-nums text-gray-800">{callResult.usage.input_tokens.toLocaleString()}</div>
+                          </div>
+                          <div>
+                            <div className="text-[10px] uppercase tracking-wider text-gray-400">Output</div>
+                            <div className="tabular-nums text-gray-800">{callResult.usage.output_tokens.toLocaleString()}</div>
+                          </div>
+                          <div>
+                            <div className="text-[10px] uppercase tracking-wider text-gray-400">Cache read</div>
+                            <div className="tabular-nums text-emerald-700">{callResult.usage.cache_read_tokens.toLocaleString()}</div>
+                          </div>
+                          <div>
+                            <div className="text-[10px] uppercase tracking-wider text-gray-400">Cache write</div>
+                            <div className="tabular-nums text-rose-600">{callResult.usage.cache_write_tokens.toLocaleString()}</div>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Run history */}

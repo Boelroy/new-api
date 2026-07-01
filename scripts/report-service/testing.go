@@ -9,6 +9,7 @@ package main
 // /api/testing/runs/:id/file proxy avoids browser↔R2 CORS.
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -342,6 +343,150 @@ func handleTestingProjectDelete(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "deleted_runs": len(runIDs)})
+}
+
+// ---- ad-hoc Claude call (project-scoped) ----
+
+// One-shot Anthropic /v1/messages call using a project's stored URL + API key.
+// Non-streaming; only exposes model + user message. Used by the "Claude 直接
+// 调用" panel to eyeball whether a saved provider actually answers.
+type claudeCallRequest struct {
+	Model     string `json:"model"`
+	Message   string `json:"message"`
+	MaxTokens int    `json:"max_tokens,omitempty"`
+}
+
+type claudeCallUsage struct {
+	InputTokens      int `json:"input_tokens"`
+	OutputTokens     int `json:"output_tokens"`
+	CacheReadTokens  int `json:"cache_read_tokens"`
+	CacheWriteTokens int `json:"cache_write_tokens"`
+}
+
+type claudeCallResponse struct {
+	Status     int             `json:"status"`
+	Text       string          `json:"text,omitempty"`
+	StopReason string          `json:"stop_reason,omitempty"`
+	Usage      claudeCallUsage `json:"usage"`
+	LatencyMs  int64           `json:"latency_ms"`
+	Error      string          `json:"error,omitempty"`
+}
+
+const claudeCallDefaultMaxTokens = 1024
+const claudeCallHardMaxTokens = 8192
+const claudeCallTimeout = 120 * time.Second
+
+func handleTestingProjectClaudeCall(c *gin.Context) {
+	id := c.Param("id")
+	var req claudeCallRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	req.Model = strings.TrimSpace(req.Model)
+	req.Message = strings.TrimSpace(req.Message)
+	if req.Model == "" || req.Message == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "model and message required"})
+		return
+	}
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = claudeCallDefaultMaxTokens
+	} else if maxTokens > claudeCallHardMaxTokens {
+		maxTokens = claudeCallHardMaxTokens
+	}
+
+	p, err := loadProject(id)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	body := map[string]any{
+		"model":      req.Model,
+		"max_tokens": maxTokens,
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{
+				{"type": "text", "text": req.Message},
+			},
+		}},
+	}
+	buf, err := json.Marshal(body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	endpoint := strings.TrimRight(p.URL, "/") + "/v1/messages"
+	ctx, cancel := context.WithTimeout(c.Request.Context(), claudeCallTimeout)
+	defer cancel()
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(buf))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	httpReq.Header.Set("x-api-key", p.APIKey)
+	httpReq.Header.Set("anthropic-version", detectAnthropicVerHdr)
+	httpReq.Header.Set("content-type", "application/json")
+
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(httpReq)
+	latency := time.Since(start).Milliseconds()
+	out := claudeCallResponse{LatencyMs: latency}
+	if err != nil {
+		out.Error = err.Error()
+		c.JSON(http.StatusOK, out)
+		return
+	}
+	defer resp.Body.Close()
+	out.Status = resp.StatusCode
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		// Surface upstream error verbatim so the operator can see the real
+		// message (auth failures, credit-low, model_not_found, etc.).
+		out.Error = string(respBody)
+		c.JSON(http.StatusOK, out)
+		return
+	}
+	var parsed struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		StopReason string `json:"stop_reason"`
+		Usage      struct {
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		out.Error = "parse response: " + err.Error()
+		out.Text = string(respBody)
+		c.JSON(http.StatusOK, out)
+		return
+	}
+	var sb strings.Builder
+	for _, blk := range parsed.Content {
+		if blk.Type == "text" {
+			sb.WriteString(blk.Text)
+		}
+	}
+	out.Text = sb.String()
+	out.StopReason = parsed.StopReason
+	out.Usage = claudeCallUsage{
+		InputTokens:      parsed.Usage.InputTokens,
+		OutputTokens:     parsed.Usage.OutputTokens,
+		CacheReadTokens:  parsed.Usage.CacheReadInputTokens,
+		CacheWriteTokens: parsed.Usage.CacheCreationInputTokens,
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 // ---- run handlers ----

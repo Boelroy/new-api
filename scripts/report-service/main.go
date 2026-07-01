@@ -49,8 +49,14 @@ var (
 
 // Role tiers mirror common.RoleCommonUser / RoleAdminUser / RoleRootUser in
 // the main service. Routes are gated against these via requireRole.
+//
+// minTesterRole is a horizontal specialization, not a tier: role=5 is only
+// granted access to Key Tester + Provider Testing via requireRoleOrTester,
+// and does NOT inherit admin permissions by virtue of being numerically
+// above minUserRole.
 const (
 	minUserRole       = 1   // any authenticated main-service user
+	minTesterRole     = 5   // Key Tester + Provider Testing only
 	minAdminRole      = 10  // common.RoleAdminUser
 	minSuperAdminRole = 100 // common.RoleRootUser
 )
@@ -214,6 +220,23 @@ func requireRole(min int) gin.HandlerFunc {
 			return
 		}
 		c.Next()
+	}
+}
+
+// requireRoleOrTester grants access to callers at min tier OR the tester
+// role. Tester (role=5) is a horizontal specialization and does not inherit
+// admin permissions via tier compare, so we special-case it for the two
+// testing-related surface areas (Key Tester + Provider Testing).
+func requireRoleOrTester(min int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		roleAny, _ := c.Get("role")
+		role, _ := roleAny.(int)
+		if role >= min || role == minTesterRole {
+			c.Next()
+			return
+		}
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		c.Abort()
 	}
 }
 
@@ -1158,7 +1181,11 @@ func handleLogout(c *gin.Context) {
 // ---- User management (super_admin only; mounted under superAPI) ----
 
 func isValidRoleTier(role int) bool {
-	return role == minUserRole || role == minAdminRole || role == minSuperAdminRole
+	switch role {
+	case minUserRole, minTesterRole, minAdminRole, minSuperAdminRole:
+		return true
+	}
+	return false
 }
 
 func handleUsersList(c *gin.Context) {
@@ -2508,8 +2535,6 @@ func main() {
 	adminAPI.GET("/config/batch-models", handleGetBatchModels)
 	adminAPI.POST("/config/batch-models", handleSetBatchModels)
 	adminAPI.GET("/cache-stats", handleCacheStats)
-	adminAPI.POST("/keys/test", handleTestKeys)
-	adminAPI.GET("/detect/models", handleDetectModels)
 	adminAPI.POST("/refresh", handleRefresh)
 	adminAPI.GET("/refresh/status", handleRefreshStatus)
 	adminAPI.GET("/notify/status", handleNotifyStatus)
@@ -2521,25 +2546,35 @@ func main() {
 	adminAPI.POST("/keys/pricing/bulk", handleBulkSaveKeyPricing)
 	adminAPI.GET("/studios", handleStudiosList)
 
-	// Provider Testing, Profit, and user management are super-admin-only.
+	// Key Tester surface: admin+ or the tester role. detect/models feeds the
+	// same UI (fetches provider model catalog before running a test).
+	keyTesterAPI := api.Group("", requireRoleOrTester(minAdminRole))
+	keyTesterAPI.POST("/keys/test", handleTestKeys)
+	keyTesterAPI.GET("/detect/models", handleDetectModels)
+
+	// User management + Profit stay super-admin-only.
 	superAPI := api.Group("", requireRole(minSuperAdminRole))
 	superAPI.GET("/users", handleUsersList)
 	superAPI.POST("/users", handleUserCreate)
 	superAPI.PATCH("/users/:id", handleUserUpdate)
 	superAPI.DELETE("/users/:id", handleUserDelete)
-	superAPI.GET("/testing/projects", handleTestingProjectsList)
-	superAPI.POST("/testing/projects", handleTestingProjectCreate)
-	superAPI.GET("/testing/projects/:id", handleTestingProjectGet)
-	superAPI.PATCH("/testing/projects/:id", handleTestingProjectUpdate)
-	superAPI.DELETE("/testing/projects/:id", handleTestingProjectDelete)
-	superAPI.GET("/testing/projects/:id/runs", handleTestingRunList)
-	superAPI.POST("/testing/projects/:id/runs", handleTestingRunStart)
-	superAPI.GET("/testing/runs/:id", handleTestingRunDetail)
-	superAPI.GET("/testing/runs/:id/status", handleTestingRunStatus)
-	superAPI.GET("/testing/runs/:id/file", handleTestingRunFile)
-	superAPI.POST("/testing/runs/:id/regrade", handleTestingRunRegrade)
-	superAPI.POST("/testing/runs/:id/cancel", handleTestingRunCancel)
-	superAPI.DELETE("/testing/runs/:id", handleTestingRunDelete)
+
+	// Provider Testing: super_admin or tester role.
+	testingAPI := api.Group("", requireRoleOrTester(minSuperAdminRole))
+	testingAPI.GET("/testing/projects", handleTestingProjectsList)
+	testingAPI.POST("/testing/projects", handleTestingProjectCreate)
+	testingAPI.GET("/testing/projects/:id", handleTestingProjectGet)
+	testingAPI.PATCH("/testing/projects/:id", handleTestingProjectUpdate)
+	testingAPI.DELETE("/testing/projects/:id", handleTestingProjectDelete)
+	testingAPI.POST("/testing/projects/:id/claude-call", handleTestingProjectClaudeCall)
+	testingAPI.GET("/testing/projects/:id/runs", handleTestingRunList)
+	testingAPI.POST("/testing/projects/:id/runs", handleTestingRunStart)
+	testingAPI.GET("/testing/runs/:id", handleTestingRunDetail)
+	testingAPI.GET("/testing/runs/:id/status", handleTestingRunStatus)
+	testingAPI.GET("/testing/runs/:id/file", handleTestingRunFile)
+	testingAPI.POST("/testing/runs/:id/regrade", handleTestingRunRegrade)
+	testingAPI.POST("/testing/runs/:id/cancel", handleTestingRunCancel)
+	testingAPI.DELETE("/testing/runs/:id", handleTestingRunDelete)
 
 	// Profit reporting — only mount when the feature is enabled.
 	if profitEnabled {

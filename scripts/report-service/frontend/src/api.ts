@@ -219,6 +219,22 @@ export type TestRunDetail = TestRun & {
   files: Partial<Record<TestFileKind, string>>
 }
 
+export type ClaudeCallUsage = {
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
+}
+
+export type ClaudeCallResponse = {
+  status: number
+  text?: string
+  stop_reason?: string
+  usage: ClaudeCallUsage
+  latency_ms: number
+  error?: string
+}
+
 export type TestRunLiveStatus = {
   id: string
   status: TestRunStatus
@@ -303,8 +319,11 @@ export type CacheStatsResponse = {
   }
 }
 
-// Mirrors the role tiers enforced on the backend.
+// Mirrors the role tiers enforced on the backend. ROLE_TESTER is a
+// horizontal specialization (Key Tester + Provider Testing only) and does
+// NOT inherit admin permissions via numeric compare.
 export const ROLE_USER = 1
+export const ROLE_TESTER = 5
 export const ROLE_ADMIN = 10
 export const ROLE_SUPER_ADMIN = 100
 
@@ -457,6 +476,16 @@ export const api = {
   testingDeleteProject: (id: string) =>
     request<{ ok: boolean; deleted_runs: number }>(`/api/testing/projects/${encodeURIComponent(id)}`, {
       method: 'DELETE',
+    }),
+
+  testingClaudeCall: (
+    projectId: string,
+    payload: { model: string; message: string; max_tokens?: number },
+  ) =>
+    request<ClaudeCallResponse>(`/api/testing/projects/${encodeURIComponent(projectId)}/claude-call`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     }),
 
   testingListRuns: (projectId: string) =>

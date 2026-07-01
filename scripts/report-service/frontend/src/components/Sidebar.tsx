@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { api, ROLE_ADMIN, ROLE_SUPER_ADMIN } from '../api'
+import { api, ROLE_ADMIN, ROLE_SUPER_ADMIN, ROLE_TESTER } from '../api'
 
 type Item = {
   to: string
@@ -181,6 +181,11 @@ export default function Sidebar({ open, onClose }: Props) {
       if (showTesting) items = [...items, TESTING_ITEM]
       items = [...items, USERS_ITEM]
     }
+  } else if (role === ROLE_TESTER) {
+    // Tester is a horizontal specialization — Key Tester always, Provider
+    // Testing only when the deployment has R2 wired up.
+    items = [KEY_TESTER_ITEM]
+    if (showTesting) items.push(TESTING_ITEM)
   } else {
     // Regular users only see All Keys.
     items = [ALL_KEYS_ITEM]

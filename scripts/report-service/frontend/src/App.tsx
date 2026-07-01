@@ -9,7 +9,7 @@ import ProviderTesting from './pages/ProviderTesting'
 import Profit from './pages/Profit'
 import Users from './pages/Users'
 import CacheReport from './pages/CacheReport'
-import { api, ROLE_ADMIN, ROLE_SUPER_ADMIN } from './api'
+import { api, ROLE_ADMIN, ROLE_SUPER_ADMIN, ROLE_TESTER } from './api'
 
 // RoleGate guards a page against unauthorized roles. While the role is being
 // fetched it renders null so we don't flash protected content; on denial it
@@ -36,15 +36,31 @@ async function loadRole(): Promise<number> {
   return inflightRole
 }
 
-function RoleGate({ min, children }: { min: number; children: ReactElement }) {
+function landingFor(role: number): string {
+  if (role >= ROLE_ADMIN) return '/'
+  if (role === ROLE_TESTER) return '/tester'
+  return '/allkeys'
+}
+
+// RoleGate accepts either a numeric tier (`min`) or an arbitrary predicate
+// (`allow`). Tester is a horizontal role that doesn't fit tier compare, so
+// routes that let tester through pass `allow` instead of `min`.
+type GateProps = {
+  children: ReactElement
+  min?: number
+  allow?: (role: number) => boolean
+}
+
+function RoleGate({ min, allow, children }: GateProps) {
   const [role, setRole] = useState<number | null>(cachedRole)
   useEffect(() => {
     if (cachedRole !== null) return
     void loadRole().then(setRole)
   }, [])
   if (role === null) return null
-  if (role < min) {
-    return <Navigate to={role >= ROLE_ADMIN ? '/' : '/allkeys'} replace />
+  const permitted = allow ? allow(role) : (min !== undefined && role >= min)
+  if (!permitted) {
+    return <Navigate to={landingFor(role)} replace />
   }
   return children
 }
@@ -58,10 +74,10 @@ export default function App() {
         <Route path="/profit" element={<RoleGate min={ROLE_SUPER_ADMIN}><Profit /></RoleGate>} />
         <Route path="/keys" element={<RoleGate min={ROLE_ADMIN}><KeyCapacity /></RoleGate>} />
         <Route path="/allkeys" element={<AllKeys />} />
-        <Route path="/tester" element={<RoleGate min={ROLE_ADMIN}><KeyTester /></RoleGate>} />
+        <Route path="/tester" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_TESTER}><KeyTester /></RoleGate>} />
         <Route path="/cache" element={<RoleGate min={ROLE_ADMIN}><CacheReport /></RoleGate>} />
-        <Route path="/testing" element={<RoleGate min={ROLE_SUPER_ADMIN}><ProviderTesting /></RoleGate>} />
-        <Route path="/testing/:projectId" element={<RoleGate min={ROLE_SUPER_ADMIN}><ProviderTesting /></RoleGate>} />
+        <Route path="/testing" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
+        <Route path="/testing/:projectId" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
         <Route path="/users" element={<RoleGate min={ROLE_SUPER_ADMIN}><Users /></RoleGate>} />
         <Route path="/detect" element={<Navigate to="/testing" replace />} />
         <Route path="/eval" element={<Navigate to="/testing" replace />} />
