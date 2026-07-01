@@ -1801,6 +1801,119 @@ func handleBatchCreateChannels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"created": results, "count": len(results)})
 }
 
+// ---- Cache stats report ----
+
+type cacheStatsBucket struct {
+	Bucket             string  `json:"bucket"`
+	Requests           int64   `json:"requests"`
+	PromptTokens       int64   `json:"prompt_tokens"`
+	CacheReadTokens    int64   `json:"cache_read_tokens"`
+	CacheWriteTokens   int64   `json:"cache_write_tokens"`
+	CompletionTokens   int64   `json:"completion_tokens"`
+	HitPct             float64 `json:"hit_pct"`
+	ReuseX             float64 `json:"reuse_x"`
+}
+
+// handleCacheStats returns time-bucketed Anthropic cache metrics for the
+// admin dashboard. `bucket` accepts "hour" (default) or "day"; `start` / `end`
+// are inclusive dates. Model filter defaults to claude-*; pass model=all to
+// see everything.
+func handleCacheStats(c *gin.Context) {
+	bucketMode := strings.ToLower(strings.TrimSpace(c.DefaultQuery("bucket", "hour")))
+	if bucketMode != "hour" && bucketMode != "day" {
+		bucketMode = "hour"
+	}
+	// Default: last 24h (hour bucket) or last 14d (day bucket).
+	nowUnix := time.Now().Unix()
+	defaultLookback := int64(24 * 3600)
+	if bucketMode == "day" {
+		defaultLookback = 14 * 24 * 3600
+	}
+	startTS := nowUnix - defaultLookback
+	endTS := nowUnix
+	if s := c.Query("start"); s != "" {
+		if t, err := time.ParseInLocation("2006-01-02", s, time.UTC); err == nil {
+			startTS = t.Unix()
+		}
+	}
+	if e := c.Query("end"); e != "" {
+		if t, err := time.ParseInLocation("2006-01-02", e, time.UTC); err == nil {
+			endTS = t.AddDate(0, 0, 1).Unix()
+		}
+	}
+	if endTS <= startTS {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "end must be after start"})
+		return
+	}
+
+	modelFilter := strings.TrimSpace(c.DefaultQuery("model", "claude"))
+
+	bucketExpr := "to_timestamp(created_at - (created_at % 3600)) AT TIME ZONE 'UTC'"
+	if bucketMode == "day" {
+		bucketExpr = "to_timestamp(created_at - (created_at % 86400)) AT TIME ZONE 'UTC'"
+	}
+
+	query := fmt.Sprintf(`
+		SELECT %s::text AS bucket,
+		       COUNT(*)::bigint AS requests,
+		       COALESCE(SUM(prompt_tokens),0)::bigint AS prompt_tokens,
+		       COALESCE(SUM(completion_tokens),0)::bigint AS completion_tokens,
+		       COALESCE(SUM(COALESCE((other::jsonb->>'cache_tokens')::bigint, 0)),0)::bigint  AS cache_read_tokens,
+		       COALESCE(SUM(COALESCE((other::jsonb->>'cache_creation_tokens')::bigint, 0)),0)::bigint AS cache_write_tokens
+		  FROM logs
+		 WHERE created_at >= $1 AND created_at < $2
+		   AND ($3 = 'all' OR model_name LIKE $3 || '-%%')
+		 GROUP BY 1 ORDER BY 1`, bucketExpr)
+
+	rows, err := db.Query(query, startTS, endTS, modelFilter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	buckets := make([]cacheStatsBucket, 0)
+	var totRequests, totInput, totCacheRead, totCacheWrite, totCompletion int64
+	for rows.Next() {
+		var b cacheStatsBucket
+		if err := rows.Scan(&b.Bucket, &b.Requests, &b.PromptTokens, &b.CompletionTokens, &b.CacheReadTokens, &b.CacheWriteTokens); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if b.PromptTokens+b.CacheReadTokens > 0 {
+			b.HitPct = roundTo(100.0*float64(b.CacheReadTokens)/float64(b.PromptTokens+b.CacheReadTokens), 2)
+		}
+		if b.CacheWriteTokens > 0 {
+			b.ReuseX = roundTo(float64(b.CacheReadTokens)/float64(b.CacheWriteTokens), 2)
+		}
+		buckets = append(buckets, b)
+		totRequests += b.Requests
+		totInput += b.PromptTokens
+		totCacheRead += b.CacheReadTokens
+		totCacheWrite += b.CacheWriteTokens
+		totCompletion += b.CompletionTokens
+	}
+	summary := gin.H{
+		"requests":            totRequests,
+		"prompt_tokens":       totInput,
+		"completion_tokens":   totCompletion,
+		"cache_read_tokens":   totCacheRead,
+		"cache_write_tokens":  totCacheWrite,
+		"hit_pct":             0.0,
+		"reuse_x":             0.0,
+	}
+	if totInput+totCacheRead > 0 {
+		summary["hit_pct"] = roundTo(100.0*float64(totCacheRead)/float64(totInput+totCacheRead), 2)
+	}
+	if totCacheWrite > 0 {
+		summary["reuse_x"] = roundTo(float64(totCacheRead)/float64(totCacheWrite), 2)
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"buckets": buckets,
+		"summary": summary,
+		"range":   gin.H{"start": startTS, "end": endTS, "bucket": bucketMode, "model": modelFilter},
+	})
+}
+
 // handleBatchUpdateChannelPriority sets channels.priority and the matching
 // abilities.priority for a list of channel ids in a single transaction. The
 // pair must stay in sync — abilities.priority controls per-model selection
@@ -2382,6 +2495,7 @@ func main() {
 	adminAPI.POST("/channels/batch-priority", handleBatchUpdateChannelPriority)
 	adminAPI.GET("/config/batch-models", handleGetBatchModels)
 	adminAPI.POST("/config/batch-models", handleSetBatchModels)
+	adminAPI.GET("/cache-stats", handleCacheStats)
 	adminAPI.POST("/keys/test", handleTestKeys)
 	adminAPI.GET("/detect/models", handleDetectModels)
 	adminAPI.POST("/refresh", handleRefresh)

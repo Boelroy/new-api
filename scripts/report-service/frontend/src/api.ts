@@ -273,6 +273,36 @@ async function request<T>(url: string, opts?: RequestInit): Promise<T> {
   return res.json()
 }
 
+export type CacheStatsBucket = {
+  bucket: string
+  requests: number
+  prompt_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
+  completion_tokens: number
+  hit_pct: number
+  reuse_x: number
+}
+
+export type CacheStatsResponse = {
+  buckets: CacheStatsBucket[]
+  summary: {
+    requests: number
+    prompt_tokens: number
+    completion_tokens: number
+    cache_read_tokens: number
+    cache_write_tokens: number
+    hit_pct: number
+    reuse_x: number
+  }
+  range: {
+    start: number
+    end: number
+    bucket: 'hour' | 'day'
+    model: string
+  }
+}
+
 // Mirrors the role tiers enforced on the backend.
 export const ROLE_USER = 1
 export const ROLE_ADMIN = 10
@@ -357,6 +387,16 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ channel_ids, priority }),
     }),
+
+  getCacheStats: (params: { start?: string; end?: string; bucket?: 'hour' | 'day'; model?: string }) => {
+    const qs = new URLSearchParams()
+    if (params.start) qs.set('start', params.start)
+    if (params.end) qs.set('end', params.end)
+    if (params.bucket) qs.set('bucket', params.bucket)
+    if (params.model) qs.set('model', params.model)
+    const suffix = qs.toString()
+    return request<CacheStatsResponse>(`/api/cache-stats${suffix ? '?' + suffix : ''}`)
+  },
 
   getBatchCreateModels: () =>
     request<{ models: string }>('/api/config/batch-models'),
