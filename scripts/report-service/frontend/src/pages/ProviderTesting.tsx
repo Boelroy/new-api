@@ -543,7 +543,6 @@ export default function ProviderTesting() {
                 value={newName}
                 onChange={e => setNewName(e.target.value)}
                 className="w-full border border-gray-200 rounded-md px-2.5 py-2 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
-                placeholder="例如 nexrouter prod"
               />
             </div>
             <div>

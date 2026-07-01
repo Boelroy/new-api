@@ -2550,12 +2550,8 @@ func main() {
 	adminAPI.POST("/keys/pricing", handleSaveKeyPricing)
 	adminAPI.POST("/keys/pricing/bulk", handleBulkSaveKeyPricing)
 	adminAPI.GET("/studios", handleStudiosList)
-
-	// Key Tester surface: admin+ or the tester role. detect/models feeds the
-	// same UI (fetches provider model catalog before running a test).
-	keyTesterAPI := api.Group("", requireRoleOrTester(minAdminRole))
-	keyTesterAPI.POST("/keys/test", handleTestKeys)
-	keyTesterAPI.GET("/detect/models", handleDetectModels)
+	adminAPI.POST("/keys/test", handleTestKeys)
+	adminAPI.GET("/detect/models", handleDetectModels)
 
 	// User management + Profit stay super-admin-only.
 	superAPI := api.Group("", requireRole(minSuperAdminRole))

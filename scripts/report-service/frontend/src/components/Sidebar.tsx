@@ -182,10 +182,8 @@ export default function Sidebar({ open, onClose }: Props) {
       items = [...items, USERS_ITEM]
     }
   } else if (role === ROLE_TESTER) {
-    // Tester is a horizontal specialization — Key Tester always, Provider
-    // Testing only when the deployment has R2 wired up.
-    items = [KEY_TESTER_ITEM]
-    if (showTesting) items.push(TESTING_ITEM)
+    // Tester is scoped to Provider Testing only (shown when R2 is wired up).
+    items = showTesting ? [TESTING_ITEM] : []
   } else {
     // Regular users only see All Keys.
     items = [ALL_KEYS_ITEM]
