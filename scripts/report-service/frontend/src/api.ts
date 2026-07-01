@@ -177,7 +177,10 @@ export type TestProject = {
   id: string
   name: string
   url: string
-  api_key: string      // masked on list/get
+  api_key: string          // masked on list/get
+  grader_url: string       // empty when grader not configured
+  grader_api_key: string   // masked on list/get; empty means no grader
+  grader_model: string     // fallback default applied server-side when empty
   created_at: number
   updated_at: number
   run_count?: number
@@ -217,22 +220,6 @@ export type TestRun = {
 
 export type TestRunDetail = TestRun & {
   files: Partial<Record<TestFileKind, string>>
-}
-
-export type ClaudeCallUsage = {
-  input_tokens: number
-  output_tokens: number
-  cache_read_tokens: number
-  cache_write_tokens: number
-}
-
-export type ClaudeCallResponse = {
-  status: number
-  text?: string
-  stop_reason?: string
-  usage: ClaudeCallUsage
-  latency_ms: number
-  error?: string
 }
 
 export type TestRunLiveStatus = {
@@ -456,7 +443,14 @@ export const api = {
   testingListProjects: () =>
     request<{ projects: TestProject[] }>('/api/testing/projects'),
 
-  testingCreateProject: (payload: { name: string; url: string; api_key: string }) =>
+  testingCreateProject: (payload: {
+    name: string
+    url: string
+    api_key: string
+    grader_url?: string
+    grader_api_key?: string
+    grader_model?: string
+  }) =>
     request<TestProject>('/api/testing/projects', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -466,7 +460,17 @@ export const api = {
   testingGetProject: (id: string) =>
     request<TestProject>(`/api/testing/projects/${encodeURIComponent(id)}`),
 
-  testingUpdateProject: (id: string, payload: { name?: string; url?: string; api_key?: string }) =>
+  testingUpdateProject: (
+    id: string,
+    payload: {
+      name?: string
+      url?: string
+      api_key?: string
+      grader_url?: string
+      grader_api_key?: string
+      grader_model?: string
+    },
+  ) =>
     request<TestProject>(`/api/testing/projects/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -476,16 +480,6 @@ export const api = {
   testingDeleteProject: (id: string) =>
     request<{ ok: boolean; deleted_runs: number }>(`/api/testing/projects/${encodeURIComponent(id)}`, {
       method: 'DELETE',
-    }),
-
-  testingClaudeCall: (
-    projectId: string,
-    payload: { model: string; message: string; max_tokens?: number },
-  ) =>
-    request<ClaudeCallResponse>(`/api/testing/projects/${encodeURIComponent(projectId)}/claude-call`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
     }),
 
   testingListRuns: (projectId: string) =>

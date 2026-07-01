@@ -9,7 +9,6 @@ package main
 // /api/testing/runs/:id/file proxy avoids browser↔R2 CORS.
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -157,13 +156,16 @@ func newRunID() string {
 // ---- project handlers ----
 
 type projectRow struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	URL       string `json:"url"`
-	APIKey    string `json:"api_key,omitempty"`
-	CreatedAt int64  `json:"created_at"`
-	UpdatedAt int64  `json:"updated_at"`
-	RunCount  int64  `json:"run_count,omitempty"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	URL          string `json:"url"`
+	APIKey       string `json:"api_key,omitempty"`
+	GraderURL    string `json:"grader_url"`
+	GraderAPIKey string `json:"grader_api_key,omitempty"`
+	GraderModel  string `json:"grader_model"`
+	CreatedAt    int64  `json:"created_at"`
+	UpdatedAt    int64  `json:"updated_at"`
+	RunCount     int64  `json:"run_count,omitempty"`
 }
 
 func maskAPIKey(k string) string {
@@ -174,7 +176,9 @@ func maskAPIKey(k string) string {
 }
 
 func handleTestingProjectsList(c *gin.Context) {
-	rows, err := db.Query(`SELECT p.id, p.name, p.url, p.api_key, p.created_at, p.updated_at,
+	rows, err := db.Query(`SELECT p.id, p.name, p.url, p.api_key,
+		p.grader_url, p.grader_api_key, p.grader_model,
+		p.created_at, p.updated_at,
 		COALESCE((SELECT COUNT(*) FROM rs_test_run r WHERE r.project_id = p.id), 0)
 		FROM rs_test_project p
 		ORDER BY p.created_at DESC`)
@@ -186,20 +190,26 @@ func handleTestingProjectsList(c *gin.Context) {
 	out := make([]projectRow, 0)
 	for rows.Next() {
 		var p projectRow
-		if err := rows.Scan(&p.ID, &p.Name, &p.URL, &p.APIKey, &p.CreatedAt, &p.UpdatedAt, &p.RunCount); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.URL, &p.APIKey,
+			&p.GraderURL, &p.GraderAPIKey, &p.GraderModel,
+			&p.CreatedAt, &p.UpdatedAt, &p.RunCount); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 		p.APIKey = maskAPIKey(p.APIKey)
+		p.GraderAPIKey = maskAPIKey(p.GraderAPIKey)
 		out = append(out, p)
 	}
 	c.JSON(http.StatusOK, gin.H{"projects": out})
 }
 
 type projectUpsertRequest struct {
-	Name   string `json:"name"`
-	URL    string `json:"url"`
-	APIKey string `json:"api_key"`
+	Name         string `json:"name"`
+	URL          string `json:"url"`
+	APIKey       string `json:"api_key"`
+	GraderURL    string `json:"grader_url"`
+	GraderAPIKey string `json:"grader_api_key"`
+	GraderModel  string `json:"grader_model"`
 }
 
 func handleTestingProjectCreate(c *gin.Context) {
@@ -211,6 +221,9 @@ func handleTestingProjectCreate(c *gin.Context) {
 	req.Name = strings.TrimSpace(req.Name)
 	req.URL = strings.TrimSpace(req.URL)
 	req.APIKey = strings.TrimSpace(req.APIKey)
+	req.GraderURL = strings.TrimSpace(req.GraderURL)
+	req.GraderAPIKey = strings.TrimSpace(req.GraderAPIKey)
+	req.GraderModel = strings.TrimSpace(req.GraderModel)
 	if req.Name == "" || req.URL == "" || req.APIKey == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name, url, api_key required"})
 		return
@@ -219,24 +232,36 @@ func handleTestingProjectCreate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "url must be http:// or https://"})
 		return
 	}
+	if req.GraderURL != "" && !strings.HasPrefix(req.GraderURL, "http://") && !strings.HasPrefix(req.GraderURL, "https://") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "grader_url must be http:// or https://"})
+		return
+	}
 	id := newRunID()
 	now := time.Now().Unix()
-	if _, err := db.Exec(`INSERT INTO rs_test_project (id, name, url, api_key, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $5)`, id, req.Name, req.URL, req.APIKey, now); err != nil {
+	if _, err := db.Exec(`INSERT INTO rs_test_project
+		(id, name, url, api_key, grader_url, grader_api_key, grader_model, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)`,
+		id, req.Name, req.URL, req.APIKey,
+		req.GraderURL, req.GraderAPIKey, req.GraderModel, now); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, projectRow{
 		ID: id, Name: req.Name, URL: req.URL, APIKey: maskAPIKey(req.APIKey),
+		GraderURL: req.GraderURL, GraderAPIKey: maskAPIKey(req.GraderAPIKey), GraderModel: req.GraderModel,
 		CreatedAt: now, UpdatedAt: now,
 	})
 }
 
 func loadProject(id string) (*projectRow, error) {
 	var p projectRow
-	err := db.QueryRow(`SELECT id, name, url, api_key, created_at, updated_at
+	err := db.QueryRow(`SELECT id, name, url, api_key,
+		grader_url, grader_api_key, grader_model,
+		created_at, updated_at
 		FROM rs_test_project WHERE id = $1`, id).
-		Scan(&p.ID, &p.Name, &p.URL, &p.APIKey, &p.CreatedAt, &p.UpdatedAt)
+		Scan(&p.ID, &p.Name, &p.URL, &p.APIKey,
+			&p.GraderURL, &p.GraderAPIKey, &p.GraderModel,
+			&p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -255,21 +280,27 @@ func handleTestingProjectGet(c *gin.Context) {
 		return
 	}
 	p.APIKey = maskAPIKey(p.APIKey)
+	p.GraderAPIKey = maskAPIKey(p.GraderAPIKey)
 	c.JSON(http.StatusOK, p)
+}
+
+// projectPatchRequest uses pointer fields so callers can distinguish "leave
+// unchanged" (nil) from "set to empty string" (non-nil "") — critical for
+// grader_url / grader_model, where the empty string clears the config.
+type projectPatchRequest struct {
+	Name         *string `json:"name,omitempty"`
+	URL          *string `json:"url,omitempty"`
+	APIKey       *string `json:"api_key,omitempty"`
+	GraderURL    *string `json:"grader_url,omitempty"`
+	GraderAPIKey *string `json:"grader_api_key,omitempty"`
+	GraderModel  *string `json:"grader_model,omitempty"`
 }
 
 func handleTestingProjectUpdate(c *gin.Context) {
 	id := c.Param("id")
-	var req projectUpsertRequest
+	var req projectPatchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	req.Name = strings.TrimSpace(req.Name)
-	req.URL = strings.TrimSpace(req.URL)
-	req.APIKey = strings.TrimSpace(req.APIKey)
-	if req.Name == "" && req.URL == "" && req.APIKey == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "at least one of name/url/api_key required"})
 		return
 	}
 	cur, err := loadProject(id)
@@ -281,26 +312,73 @@ func handleTestingProjectUpdate(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if req.Name != "" {
-		cur.Name = req.Name
+	changed := false
+	if req.Name != nil {
+		if v := strings.TrimSpace(*req.Name); v != "" && v != cur.Name {
+			cur.Name = v
+			changed = true
+		}
 	}
-	if req.URL != "" {
-		if !strings.HasPrefix(req.URL, "http://") && !strings.HasPrefix(req.URL, "https://") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "url must be http:// or https://"})
+	if req.URL != nil {
+		if v := strings.TrimSpace(*req.URL); v != "" && v != cur.URL {
+			if !strings.HasPrefix(v, "http://") && !strings.HasPrefix(v, "https://") {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "url must be http:// or https://"})
+				return
+			}
+			cur.URL = v
+			changed = true
+		}
+	}
+	if req.APIKey != nil {
+		// Empty string means "keep the existing key" (mirrors legacy behavior).
+		if v := strings.TrimSpace(*req.APIKey); v != "" {
+			cur.APIKey = v
+			changed = true
+		}
+	}
+	if req.GraderURL != nil {
+		v := strings.TrimSpace(*req.GraderURL)
+		if v != "" && !strings.HasPrefix(v, "http://") && !strings.HasPrefix(v, "https://") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "grader_url must be http:// or https://"})
 			return
 		}
-		cur.URL = req.URL
+		if v != cur.GraderURL {
+			cur.GraderURL = v
+			changed = true
+		}
 	}
-	if req.APIKey != "" {
-		cur.APIKey = req.APIKey
+	if req.GraderAPIKey != nil {
+		// Non-empty overwrites; empty string clears the stored key. Distinct
+		// from api_key semantics because grader creds may need to be removed.
+		v := strings.TrimSpace(*req.GraderAPIKey)
+		cur.GraderAPIKey = v
+		changed = true
+	}
+	if req.GraderModel != nil {
+		v := strings.TrimSpace(*req.GraderModel)
+		if v != cur.GraderModel {
+			cur.GraderModel = v
+			changed = true
+		}
+	}
+	if !changed {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no changes"})
+		return
 	}
 	cur.UpdatedAt = time.Now().Unix()
-	if _, err := db.Exec(`UPDATE rs_test_project SET name=$1, url=$2, api_key=$3, updated_at=$4
-		WHERE id=$5`, cur.Name, cur.URL, cur.APIKey, cur.UpdatedAt, id); err != nil {
+	if _, err := db.Exec(`UPDATE rs_test_project
+		SET name=$1, url=$2, api_key=$3,
+		    grader_url=$4, grader_api_key=$5, grader_model=$6,
+		    updated_at=$7
+		WHERE id=$8`,
+		cur.Name, cur.URL, cur.APIKey,
+		cur.GraderURL, cur.GraderAPIKey, cur.GraderModel,
+		cur.UpdatedAt, id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	cur.APIKey = maskAPIKey(cur.APIKey)
+	cur.GraderAPIKey = maskAPIKey(cur.GraderAPIKey)
 	c.JSON(http.StatusOK, cur)
 }
 
@@ -343,150 +421,6 @@ func handleTestingProjectDelete(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "deleted_runs": len(runIDs)})
-}
-
-// ---- ad-hoc Claude call (project-scoped) ----
-
-// One-shot Anthropic /v1/messages call using a project's stored URL + API key.
-// Non-streaming; only exposes model + user message. Used by the "Claude 直接
-// 调用" panel to eyeball whether a saved provider actually answers.
-type claudeCallRequest struct {
-	Model     string `json:"model"`
-	Message   string `json:"message"`
-	MaxTokens int    `json:"max_tokens,omitempty"`
-}
-
-type claudeCallUsage struct {
-	InputTokens      int `json:"input_tokens"`
-	OutputTokens     int `json:"output_tokens"`
-	CacheReadTokens  int `json:"cache_read_tokens"`
-	CacheWriteTokens int `json:"cache_write_tokens"`
-}
-
-type claudeCallResponse struct {
-	Status     int             `json:"status"`
-	Text       string          `json:"text,omitempty"`
-	StopReason string          `json:"stop_reason,omitempty"`
-	Usage      claudeCallUsage `json:"usage"`
-	LatencyMs  int64           `json:"latency_ms"`
-	Error      string          `json:"error,omitempty"`
-}
-
-const claudeCallDefaultMaxTokens = 1024
-const claudeCallHardMaxTokens = 8192
-const claudeCallTimeout = 120 * time.Second
-
-func handleTestingProjectClaudeCall(c *gin.Context) {
-	id := c.Param("id")
-	var req claudeCallRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	req.Model = strings.TrimSpace(req.Model)
-	req.Message = strings.TrimSpace(req.Message)
-	if req.Model == "" || req.Message == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "model and message required"})
-		return
-	}
-	maxTokens := req.MaxTokens
-	if maxTokens <= 0 {
-		maxTokens = claudeCallDefaultMaxTokens
-	} else if maxTokens > claudeCallHardMaxTokens {
-		maxTokens = claudeCallHardMaxTokens
-	}
-
-	p, err := loadProject(id)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
-		return
-	}
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	body := map[string]any{
-		"model":      req.Model,
-		"max_tokens": maxTokens,
-		"messages": []map[string]any{{
-			"role": "user",
-			"content": []map[string]any{
-				{"type": "text", "text": req.Message},
-			},
-		}},
-	}
-	buf, err := json.Marshal(body)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	endpoint := strings.TrimRight(p.URL, "/") + "/v1/messages"
-	ctx, cancel := context.WithTimeout(c.Request.Context(), claudeCallTimeout)
-	defer cancel()
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(buf))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	httpReq.Header.Set("x-api-key", p.APIKey)
-	httpReq.Header.Set("anthropic-version", detectAnthropicVerHdr)
-	httpReq.Header.Set("content-type", "application/json")
-
-	start := time.Now()
-	resp, err := http.DefaultClient.Do(httpReq)
-	latency := time.Since(start).Milliseconds()
-	out := claudeCallResponse{LatencyMs: latency}
-	if err != nil {
-		out.Error = err.Error()
-		c.JSON(http.StatusOK, out)
-		return
-	}
-	defer resp.Body.Close()
-	out.Status = resp.StatusCode
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		// Surface upstream error verbatim so the operator can see the real
-		// message (auth failures, credit-low, model_not_found, etc.).
-		out.Error = string(respBody)
-		c.JSON(http.StatusOK, out)
-		return
-	}
-	var parsed struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-		StopReason string `json:"stop_reason"`
-		Usage      struct {
-			InputTokens              int `json:"input_tokens"`
-			OutputTokens             int `json:"output_tokens"`
-			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
-			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-		} `json:"usage"`
-	}
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		out.Error = "parse response: " + err.Error()
-		out.Text = string(respBody)
-		c.JSON(http.StatusOK, out)
-		return
-	}
-	var sb strings.Builder
-	for _, blk := range parsed.Content {
-		if blk.Type == "text" {
-			sb.WriteString(blk.Text)
-		}
-	}
-	out.Text = sb.String()
-	out.StopReason = parsed.StopReason
-	out.Usage = claudeCallUsage{
-		InputTokens:      parsed.Usage.InputTokens,
-		OutputTokens:     parsed.Usage.OutputTokens,
-		CacheReadTokens:  parsed.Usage.CacheReadInputTokens,
-		CacheWriteTokens: parsed.Usage.CacheCreationInputTokens,
-	}
-	c.JSON(http.StatusOK, out)
 }
 
 // ---- run handlers ----
@@ -610,9 +544,12 @@ func handleTestingRunStart(c *gin.Context) {
 	if req.PassAt > evalMaxRepeat {
 		req.PassAt = evalMaxRepeat
 	}
-	runGrader := graderConfigured()
+	// Grader only runs when the project has both grader URL + api key set.
+	// Callers can opt out via run_grader:false in the request body.
+	hasGraderCreds := graderCredsPresent(proj.GraderURL, proj.GraderAPIKey)
+	runGrader := hasGraderCreds
 	if req.RunGrader != nil {
-		runGrader = *req.RunGrader && graderConfigured()
+		runGrader = *req.RunGrader && hasGraderCreds
 	}
 
 	runID := newRunID()
@@ -795,10 +732,6 @@ func handleTestingRunRegrade(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "phase must be 'detect' or 'eval'"})
 		return
 	}
-	if !graderConfigured() {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "grader not configured"})
-		return
-	}
 	r, err := loadRun(id)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "run not found"})
@@ -806,6 +739,21 @@ func handleTestingRunRegrade(c *gin.Context) {
 	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	// Grader creds live on the project, so a regrade needs the project
+	// row to know where + who to call. Fail fast when creds aren't set.
+	proj, perr := loadProject(r.ProjectID)
+	if perr == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
+		return
+	}
+	if perr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": perr.Error()})
+		return
+	}
+	if !graderCredsPresent(proj.GraderURL, proj.GraderAPIKey) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "project has no grader URL / api key configured"})
 		return
 	}
 	var traceBytes int64
@@ -845,12 +793,12 @@ func handleTestingRunRegrade(c *gin.Context) {
 	testJobs[id] = mem
 	testJobsMu.Unlock()
 
-	go runGraderRetry(ctx, mem, phase)
+	go runGraderRetry(ctx, mem, phase, proj.GraderURL, proj.GraderAPIKey, proj.GraderModel)
 
 	c.JSON(http.StatusOK, gin.H{"ok": true, "phase": phase})
 }
 
-func runGraderRetry(ctx context.Context, mem *testRunMem, phase string) {
+func runGraderRetry(ctx context.Context, mem *testRunMem, phase, graderURL, graderAPIKey, graderModel string) {
 	runID := mem.ID
 
 	var (
@@ -934,7 +882,9 @@ func runGraderRetry(ctx context.Context, mem *testRunMem, phase string) {
 	}
 
 	t0 := time.Now()
-	report, gerr := runClaudeGrader(context.Background(), instruction, pipelineMD, string(traceBuf))
+	report, gerr := runDirectHTTPGrader(context.Background(),
+		graderURL, graderAPIKey, graderModel,
+		instruction, pipelineMD, string(traceBuf))
 	elapsed := time.Since(t0).Milliseconds()
 	if gerr != nil {
 		mem.appendStderr("grader: " + gerr.Error())
@@ -1070,7 +1020,7 @@ func runCombinedTestJob(ctx context.Context, mem *testRunMem, proj *projectRow,
 		cancel()
 	}
 
-	if runGrader && graderConfigured() && detectTraceMD != "" {
+	if runGrader && graderCredsPresent(proj.GraderURL, proj.GraderAPIKey) && detectTraceMD != "" {
 		mem.appendStderr("--- detect probe complete, invoking Claude grader for detect ---")
 		_, _ = db.Exec(`UPDATE rs_test_run SET status='grading' WHERE id=$1`, runID)
 		mem.setStatus("grading")
@@ -1080,7 +1030,9 @@ func runCombinedTestJob(ctx context.Context, mem *testRunMem, proj *projectRow,
 			llmErrors = append(llmErrors, "detect pipeline: "+perr.Error())
 		} else {
 			t0 := time.Now()
-			report, gerr := runClaudeGrader(context.Background(), detectGraderInstruction, pipelineMD, detectTraceMD)
+			report, gerr := runDirectHTTPGrader(context.Background(),
+				proj.GraderURL, proj.GraderAPIKey, proj.GraderModel,
+				detectGraderInstruction, pipelineMD, detectTraceMD)
 			elapsed := time.Since(t0).Milliseconds()
 			totalGraderMs += elapsed
 			if gerr != nil {
@@ -1141,7 +1093,7 @@ func runCombinedTestJob(ctx context.Context, mem *testRunMem, proj *projectRow,
 		cancel()
 	}
 
-	if runGrader && graderConfigured() && evalTraceMD != "" {
+	if runGrader && graderCredsPresent(proj.GraderURL, proj.GraderAPIKey) && evalTraceMD != "" {
 		mem.appendStderr("--- eval probe complete, invoking Claude grader for eval ---")
 		_, _ = db.Exec(`UPDATE rs_test_run SET status='grading' WHERE id=$1`, runID)
 		mem.setStatus("grading")
@@ -1151,7 +1103,9 @@ func runCombinedTestJob(ctx context.Context, mem *testRunMem, proj *projectRow,
 			llmErrors = append(llmErrors, "eval pipeline: "+perr.Error())
 		} else {
 			t0 := time.Now()
-			report, gerr := runClaudeGrader(context.Background(), evalGraderInstruction, pipelineMD, evalTraceMD)
+			report, gerr := runDirectHTTPGrader(context.Background(),
+				proj.GraderURL, proj.GraderAPIKey, proj.GraderModel,
+				evalGraderInstruction, pipelineMD, evalTraceMD)
 			elapsed := time.Since(t0).Milliseconds()
 			totalGraderMs += elapsed
 			if gerr != nil {

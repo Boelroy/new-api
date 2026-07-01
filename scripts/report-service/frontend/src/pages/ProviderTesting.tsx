@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import Layout from '../components/Layout'
 import RunDetailPanels from '../components/RunDetailPanels'
-import { api, ClaudeCallResponse, TestProject, TestRun } from '../api'
+import { api, TestProject, TestRun } from '../api'
 
 const MODEL_DEFAULTS = [
   'claude-opus-4-7',
@@ -52,7 +52,6 @@ export default function ProviderTesting() {
   const navigate = useNavigate()
 
   const [r2Available, setR2Available] = useState<boolean | null>(null)
-  const [graderAvailable, setGraderAvailable] = useState(false)
   const [projects, setProjects] = useState<TestProject[] | null>(null)
   const [selectedProject, setSelectedProject] = useState<TestProject | null>(null)
   const [runs, setRuns] = useState<TestRun[] | null>(null)
@@ -66,28 +65,23 @@ export default function ProviderTesting() {
   const [runGrader, setRunGrader] = useState(true)
   const [submitting, setSubmitting] = useState(false)
 
-  // Claude 直接调用 (ad-hoc single-shot) state. Shares no state with the
-  // Detect+Eval form above; keeps its own model + message so users can
-  // switch back and forth without clobbering the run config.
-  const [callModelMode, setCallModelMode] = useState<'preset' | 'custom'>('preset')
-  const [callModel, setCallModel] = useState(MODEL_DEFAULTS[0])
-  const [callCustomModel, setCallCustomModel] = useState('')
-  const [callMessage, setCallMessage] = useState('Say hi in one short sentence.')
-  const [callSending, setCallSending] = useState(false)
-  const [callResult, setCallResult] = useState<ClaudeCallResponse | null>(null)
-  const [callError, setCallError] = useState<string | null>(null)
-
   // New-project modal.
   const [newOpen, setNewOpen] = useState(false)
   const [newName, setNewName] = useState('')
   const [newUrl, setNewUrl] = useState('')
   const [newKey, setNewKey] = useState('')
+  const [newGraderUrl, setNewGraderUrl] = useState('')
+  const [newGraderKey, setNewGraderKey] = useState('')
+  const [newGraderModel, setNewGraderModel] = useState('')
 
   // Edit-project modal.
   const [editOpen, setEditOpen] = useState(false)
   const [editName, setEditName] = useState('')
   const [editUrl, setEditUrl] = useState('')
   const [editKey, setEditKey] = useState('')
+  const [editGraderUrl, setEditGraderUrl] = useState('')
+  const [editGraderKey, setEditGraderKey] = useState('')
+  const [editGraderModel, setEditGraderModel] = useState('')
 
   const selectedRunId = search.get('run') || null
   const selectedRun = useMemo(
@@ -95,15 +89,13 @@ export default function ProviderTesting() {
     [runs, selectedRunId],
   )
 
-  // Load server capabilities.
+  // Load server capabilities. Grader availability is now per-project so we
+  // only need R2 status here.
   useEffect(() => {
     void (async () => {
       try {
         const cfg = await fetch('/api/auth/config').then(r => r.json())
         setR2Available(cfg.r2_configured === true)
-        const grader = cfg.grader_configured === true
-        setGraderAvailable(grader)
-        setRunGrader(grader)
       } catch {
         setR2Available(false)
       }
@@ -123,9 +115,6 @@ export default function ProviderTesting() {
 
   // Load selected project + run list when projectId changes.
   useEffect(() => {
-    // Switching projects invalidates any prior ad-hoc call result.
-    setCallResult(null)
-    setCallError(null)
     if (!params.projectId) {
       setSelectedProject(null)
       setRuns(null)
@@ -173,7 +162,9 @@ export default function ProviderTesting() {
       const r = await api.testingStartRun(selectedProject.id, {
         model: finalModel,
         pass_at: passAt,
-        run_grader: graderAvailable && runGrader,
+        // Backend gates on the project's own grader creds; sending true here
+        // is a no-op when the project doesn't have them configured.
+        run_grader: runGrader,
       })
       // Reload runs immediately, jump straight into the new run detail.
       const rl = await api.testingListRuns(selectedProject.id)
@@ -186,35 +177,22 @@ export default function ProviderTesting() {
     }
   }
 
-  const finalCallModel = callModelMode === 'custom' ? callCustomModel.trim() : callModel
-  const canCall = !!selectedProject && finalCallModel.length > 0 && callMessage.trim().length > 0 && !callSending
-
-  const handleClaudeCall = async () => {
-    if (!selectedProject || !canCall) return
-    setCallSending(true)
-    setCallError(null)
-    setCallResult(null)
-    try {
-      const r = await api.testingClaudeCall(selectedProject.id, {
-        model: finalCallModel,
-        message: callMessage.trim(),
-      })
-      setCallResult(r)
-    } catch (e: any) {
-      setCallError(e?.message || String(e))
-    } finally {
-      setCallSending(false)
-    }
-  }
-
   const handleCreateProject = async () => {
     const name = newName.trim()
     const url = newUrl.trim()
     const key = newKey.trim()
     if (!name || !url || !key) return
     try {
-      const p = await api.testingCreateProject({ name, url, api_key: key })
+      const p = await api.testingCreateProject({
+        name,
+        url,
+        api_key: key,
+        grader_url: newGraderUrl.trim(),
+        grader_api_key: newGraderKey.trim(),
+        grader_model: newGraderModel.trim(),
+      })
       setNewName(''); setNewUrl(''); setNewKey('')
+      setNewGraderUrl(''); setNewGraderKey(''); setNewGraderModel('')
       setNewOpen(false)
       await reloadProjects()
       navigate(`/testing/${p.id}`)
@@ -228,16 +206,39 @@ export default function ProviderTesting() {
     setEditName(selectedProject.name)
     setEditUrl(selectedProject.url)
     setEditKey('')
+    setEditGraderUrl(selectedProject.grader_url || '')
+    setEditGraderKey('')
+    setEditGraderModel(selectedProject.grader_model || '')
     setEditOpen(true)
   }
 
   const handleSaveEdit = async () => {
     if (!selectedProject) return
-    const payload: { name?: string; url?: string; api_key?: string } = {}
+    // Pointer-style payload: only include keys the user actually changed.
+    // Empty grader_url is a legitimate "clear grader" signal, so we send
+    // it whenever the field differs from what the project had.
+    const payload: {
+      name?: string
+      url?: string
+      api_key?: string
+      grader_url?: string
+      grader_api_key?: string
+      grader_model?: string
+    } = {}
     if (editName.trim() && editName.trim() !== selectedProject.name) payload.name = editName.trim()
     if (editUrl.trim() && editUrl.trim() !== selectedProject.url) payload.url = editUrl.trim()
     if (editKey.trim()) payload.api_key = editKey.trim()
-    if (!payload.name && !payload.url && !payload.api_key) {
+    if (editGraderUrl.trim() !== (selectedProject.grader_url || '').trim()) {
+      payload.grader_url = editGraderUrl.trim()
+    }
+    if (editGraderKey.trim()) payload.grader_api_key = editGraderKey.trim()
+    if (editGraderModel.trim() !== (selectedProject.grader_model || '').trim()) {
+      payload.grader_model = editGraderModel.trim()
+    }
+    if (
+      payload.name === undefined && payload.url === undefined && payload.api_key === undefined &&
+      payload.grader_url === undefined && payload.grader_api_key === undefined && payload.grader_model === undefined
+    ) {
       setEditOpen(false)
       return
     }
@@ -419,7 +420,7 @@ export default function ProviderTesting() {
                       <option value={5}>pass@5 — ~$8 / 10 min</option>
                     </select>
                   </div>
-                  {graderAvailable && (
+                  {selectedProject.grader_url && selectedProject.grader_api_key ? (
                     <div>
                       <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">自动打分</label>
                       <label className="flex items-center gap-2 text-xs text-gray-700">
@@ -429,8 +430,22 @@ export default function ProviderTesting() {
                           onChange={e => setRunGrader(e.target.checked)}
                           className="rounded border-gray-300"
                         />
-                        <span>让 Claude 评估并保存 report.md</span>
+                        <span>调用 Grader endpoint 生成 report.md</span>
                       </label>
+                    </div>
+                  ) : (
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">自动打分</label>
+                      <div className="text-[11px] text-gray-400 leading-relaxed">
+                        本项目未配置 Grader URL / API Key，跑测试不会生成 report.md。<br />
+                        <button
+                          type="button"
+                          onClick={openEdit}
+                          className="mt-1 text-gray-600 hover:text-gray-900 underline underline-offset-2"
+                        >
+                          去编辑项目设置 Grader
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -444,142 +459,6 @@ export default function ProviderTesting() {
                   </button>
                   <span className="text-[10px] text-gray-400">真实调用上游模型 — 仅对你授权的 endpoint 使用</span>
                 </div>
-              </div>
-
-              {/* Claude 直接调用 — ad-hoc single-shot against project host+key */}
-              <div className="bg-white border border-gray-200 rounded-xl p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">Claude 直接调用</div>
-                  <div className="text-[10px] text-gray-400">
-                    使用项目的 host + api key 打一发 /v1/messages · 非流式 · max_tokens 1024
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Model</label>
-                    <div className="flex items-center gap-2 mb-2 text-[10px]">
-                      <label className="flex items-center gap-1 text-gray-500">
-                        <input
-                          type="radio"
-                          checked={callModelMode === 'preset'}
-                          onChange={() => setCallModelMode('preset')}
-                        />
-                        预设
-                      </label>
-                      <label className="flex items-center gap-1 text-gray-500">
-                        <input
-                          type="radio"
-                          checked={callModelMode === 'custom'}
-                          onChange={() => setCallModelMode('custom')}
-                        />
-                        手填
-                      </label>
-                    </div>
-                    {callModelMode === 'preset' ? (
-                      <select
-                        value={callModel}
-                        onChange={e => setCallModel(e.target.value)}
-                        className="w-full border border-gray-200 rounded-md px-2.5 py-2 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
-                      >
-                        {MODEL_DEFAULTS.map(m => <option key={m} value={m}>{m}</option>)}
-                      </select>
-                    ) : (
-                      <input
-                        type="text"
-                        value={callCustomModel}
-                        onChange={e => setCallCustomModel(e.target.value)}
-                        placeholder="claude-sonnet-4-6"
-                        className="w-full border border-gray-200 rounded-md px-2.5 py-2 text-xs bg-gray-50 focus:outline-none focus:border-gray-900 font-mono"
-                      />
-                    )}
-                  </div>
-                  <div className="md:col-span-2">
-                    <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">User message</label>
-                    <textarea
-                      value={callMessage}
-                      onChange={e => setCallMessage(e.target.value)}
-                      rows={3}
-                      placeholder="Say hi in one short sentence."
-                      className="w-full border border-gray-200 rounded-md px-2.5 py-2 text-xs bg-gray-50 focus:outline-none focus:border-gray-900 font-mono resize-y"
-                    />
-                  </div>
-                </div>
-                <div className="mt-4 flex items-center gap-2">
-                  <button
-                    onClick={handleClaudeCall}
-                    disabled={!canCall}
-                    className="bg-gray-900 text-white rounded-md px-4 py-1.5 text-xs hover:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    {callSending ? '调用中 ...' : '发送'}
-                  </button>
-                  {callResult && (
-                    <button
-                      onClick={() => { setCallResult(null); setCallError(null) }}
-                      className="border border-gray-200 rounded-md px-3 py-1 text-[11px] text-gray-500 hover:bg-gray-50"
-                    >
-                      清空结果
-                    </button>
-                  )}
-                  <span className="text-[10px] text-gray-400">真实计费 · 请节制</span>
-                </div>
-
-                {(callError || callResult) && (
-                  <div className="mt-4 border-t border-gray-100 pt-4 space-y-2">
-                    {callError && (
-                      <div className="bg-rose-50 border border-rose-100 text-rose-700 text-xs rounded-md px-3 py-2 whitespace-pre-wrap break-all">
-                        请求失败：{callError}
-                      </div>
-                    )}
-                    {callResult && (
-                      <>
-                        <div className="flex items-center gap-2 text-[11px] flex-wrap">
-                          <span
-                            className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                              callResult.error
-                                ? 'bg-rose-100 text-rose-700'
-                                : callResult.status >= 200 && callResult.status < 300
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : 'bg-amber-100 text-amber-800'
-                            }`}
-                          >
-                            {callResult.error ? 'error' : `HTTP ${callResult.status || 0}`}
-                          </span>
-                          <span className="text-gray-500 tabular-nums">{fmtElapsed(callResult.latency_ms)}</span>
-                          {callResult.stop_reason && (
-                            <span className="text-gray-400">stop: <span className="font-mono">{callResult.stop_reason}</span></span>
-                          )}
-                        </div>
-                        {callResult.error ? (
-                          <pre className="bg-rose-50 border border-rose-100 text-rose-700 text-[11px] rounded-md px-3 py-2 whitespace-pre-wrap break-all font-mono max-h-64 overflow-auto">
-                            {callResult.error}
-                          </pre>
-                        ) : (
-                          <div className="bg-gray-50 border border-gray-100 rounded-md px-3 py-2 whitespace-pre-wrap text-xs text-gray-800 max-h-72 overflow-auto">
-                            {callResult.text || <span className="text-gray-400">（无文本内容）</span>}
-                          </div>
-                        )}
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px] text-gray-500">
-                          <div>
-                            <div className="text-[10px] uppercase tracking-wider text-gray-400">Input</div>
-                            <div className="tabular-nums text-gray-800">{callResult.usage.input_tokens.toLocaleString()}</div>
-                          </div>
-                          <div>
-                            <div className="text-[10px] uppercase tracking-wider text-gray-400">Output</div>
-                            <div className="tabular-nums text-gray-800">{callResult.usage.output_tokens.toLocaleString()}</div>
-                          </div>
-                          <div>
-                            <div className="text-[10px] uppercase tracking-wider text-gray-400">Cache read</div>
-                            <div className="tabular-nums text-emerald-700">{callResult.usage.cache_read_tokens.toLocaleString()}</div>
-                          </div>
-                          <div>
-                            <div className="text-[10px] uppercase tracking-wider text-gray-400">Cache write</div>
-                            <div className="tabular-nums text-rose-600">{callResult.usage.cache_write_tokens.toLocaleString()}</div>
-                          </div>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                )}
               </div>
 
               {/* Run history */}
@@ -686,6 +565,42 @@ export default function ProviderTesting() {
                 placeholder="sk-..."
               />
             </div>
+
+            <div className="pt-3 border-t border-gray-100">
+              <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1">Grader（可选）</div>
+              <div className="text-[10px] text-gray-400 mb-2 leading-relaxed">
+                指定另一个 Anthropic 兼容 endpoint 来跑评分。留空则本项目跑测试时不生成 report.md。
+              </div>
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Grader URL</label>
+              <input
+                value={newGraderUrl}
+                onChange={e => setNewGraderUrl(e.target.value)}
+                className="w-full border border-gray-200 rounded-md px-2.5 py-2 text-xs bg-gray-50 focus:outline-none focus:border-gray-900 font-mono"
+                placeholder="https://api.anthropic.com"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Grader API Key</label>
+              <input
+                type="password"
+                value={newGraderKey}
+                onChange={e => setNewGraderKey(e.target.value)}
+                className="w-full border border-gray-200 rounded-md px-2.5 py-2 text-xs bg-gray-50 focus:outline-none focus:border-gray-900 font-mono"
+                placeholder="sk-..."
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Grader Model（可选，默认 claude-sonnet-4-6）</label>
+              <input
+                value={newGraderModel}
+                onChange={e => setNewGraderModel(e.target.value)}
+                className="w-full border border-gray-200 rounded-md px-2.5 py-2 text-xs bg-gray-50 focus:outline-none focus:border-gray-900 font-mono"
+                placeholder="claude-sonnet-4-6"
+              />
+            </div>
+
             <div className="flex items-center justify-end gap-2 pt-2">
               <button
                 onClick={() => setNewOpen(false)}
@@ -744,6 +659,45 @@ export default function ProviderTesting() {
                 className="w-full border border-gray-200 rounded-md px-2.5 py-2 text-xs bg-gray-50 focus:outline-none focus:border-gray-900 font-mono"
               />
             </div>
+
+            <div className="pt-3 border-t border-gray-100">
+              <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1">Grader（可选）</div>
+              <div className="text-[10px] text-gray-400 mb-2 leading-relaxed">
+                将 Grader URL 清空以关闭本项目的自动打分。当前存储的 grader key：
+                <span className="font-mono text-gray-500 ml-1">{selectedProject.grader_api_key || '（未设置）'}</span>
+              </div>
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Grader URL</label>
+              <input
+                value={editGraderUrl}
+                onChange={e => setEditGraderUrl(e.target.value)}
+                className="w-full border border-gray-200 rounded-md px-2.5 py-2 text-xs bg-gray-50 focus:outline-none focus:border-gray-900 font-mono"
+                placeholder="https://api.anthropic.com"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">
+                新 Grader API Key（留空则不改）
+              </label>
+              <input
+                type="password"
+                value={editGraderKey}
+                onChange={e => setEditGraderKey(e.target.value)}
+                placeholder="sk-..."
+                className="w-full border border-gray-200 rounded-md px-2.5 py-2 text-xs bg-gray-50 focus:outline-none focus:border-gray-900 font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Grader Model（可选）</label>
+              <input
+                value={editGraderModel}
+                onChange={e => setEditGraderModel(e.target.value)}
+                className="w-full border border-gray-200 rounded-md px-2.5 py-2 text-xs bg-gray-50 focus:outline-none focus:border-gray-900 font-mono"
+                placeholder="claude-sonnet-4-6"
+              />
+            </div>
+
             <div className="flex items-center justify-end gap-2 pt-2">
               <button
                 onClick={() => setEditOpen(false)}

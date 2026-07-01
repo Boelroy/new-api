@@ -2438,6 +2438,11 @@ func main() {
 			updated_at  BIGINT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_rs_test_project_created ON rs_test_project(created_at DESC)`,
+		// migration: per-project Claude grader endpoint (URL + api key + model).
+		// Empty grader_url or grader_api_key disables grading for the project.
+		`ALTER TABLE rs_test_project ADD COLUMN IF NOT EXISTS grader_url     TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE rs_test_project ADD COLUMN IF NOT EXISTS grader_api_key TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE rs_test_project ADD COLUMN IF NOT EXISTS grader_model   TEXT NOT NULL DEFAULT ''`,
 		`CREATE TABLE IF NOT EXISTS rs_test_run (
 			id           TEXT PRIMARY KEY,
 			project_id   TEXT NOT NULL REFERENCES rs_test_project(id) ON DELETE CASCADE,
@@ -2566,7 +2571,6 @@ func main() {
 	testingAPI.GET("/testing/projects/:id", handleTestingProjectGet)
 	testingAPI.PATCH("/testing/projects/:id", handleTestingProjectUpdate)
 	testingAPI.DELETE("/testing/projects/:id", handleTestingProjectDelete)
-	testingAPI.POST("/testing/projects/:id/claude-call", handleTestingProjectClaudeCall)
 	testingAPI.GET("/testing/projects/:id/runs", handleTestingRunList)
 	testingAPI.POST("/testing/projects/:id/runs", handleTestingRunStart)
 	testingAPI.GET("/testing/runs/:id", handleTestingRunDetail)

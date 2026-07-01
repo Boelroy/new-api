@@ -1,34 +1,32 @@
 package main
 
-// Claude Code (headless) grader. Spawns `claude -p` with a prompt assembled
-// from PIPELINE.md + the trace and returns the Markdown report. Auth is via
-// CLAUDE_GRADER_API_KEY → ANTHROPIC_API_KEY in the child env. The CLI itself
-// is installed in the runtime Dockerfile (`npm i -g @anthropic-ai/claude-code`).
+// Claude grader. Given a project's user-supplied grader URL + api-key +
+// (optional) model, POST the assembled prompt to /v1/messages non-stream
+// and return the concatenated text response. Empty grader creds mean
+// "skip grading" — checked at each call site.
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	graderEnvAPIKey     = "CLAUDE_GRADER_API_KEY"
-	graderEnvAuthToken  = "CLAUDE_GRADER_AUTH_TOKEN"
-	graderEnvBaseURL    = "CLAUDE_GRADER_BASE_URL"
-	graderEnvModel      = "CLAUDE_GRADER_MODEL"
 	graderEnvTimeoutSec = "CLAUDE_GRADER_TIMEOUT_SEC"
 	graderDefaultModel  = "claude-sonnet-4-6"
-	// Bumped from 5min to 15min: full eval graders through gateways with
-	// 192KB prompts can take 6-10min in practice. Overridable via env.
+	// 15min matches the previous CLI-based timeout — full eval traces at
+	// ~200KB regularly need 6-10 minutes on real gateways.
 	graderHardTimeout   = 15 * time.Minute
 	graderMaxPromptSize = 1 << 20 // 1 MiB — pipeline + trace combined safety cap
+	graderMaxTokens     = 4096    // report.md rarely exceeds 3KB; keep some slack
 )
 
 // detectGraderPrompt prompts the LLM with provider-detection PIPELINE.md +
@@ -102,25 +100,33 @@ const evalGraderInstruction = `你是 LLM endpoint **评估助手**。
 
 只输出报告本身，不要任何 meta 说明、寒暄或代码块包裹。`
 
-// graderConfigured returns true when either a direct API key or a
-// (auth-token + optional base-url) gateway combo is configured. UI uses
-// this to default the "auto-analyze" toggle.
-func graderConfigured() bool {
-	return strings.TrimSpace(os.Getenv(graderEnvAPIKey)) != "" ||
-		strings.TrimSpace(os.Getenv(graderEnvAuthToken)) != ""
+// graderCredsPresent returns true when a project has both grader URL and
+// api-key set. Used to gate whether the grader step runs at all.
+func graderCredsPresent(url, apiKey string) bool {
+	return strings.TrimSpace(url) != "" && strings.TrimSpace(apiKey) != ""
 }
 
-// runClaudeGrader spawns `claude -p` with the given prompt piped on stdin
-// and returns its stdout. Times out at graderHardTimeout. Returns an
-// error wrapping stderr when claude exits non-zero or the prompt is empty.
-func runClaudeGrader(ctx context.Context, instruction, pipelineMD, traceMD string) (string, error) {
-	apiKey := strings.TrimSpace(os.Getenv(graderEnvAPIKey))
-	authToken := strings.TrimSpace(os.Getenv(graderEnvAuthToken))
-	baseURL := strings.TrimSpace(os.Getenv(graderEnvBaseURL))
-	if apiKey == "" && authToken == "" {
-		return "", errors.New("CLAUDE_GRADER_API_KEY or CLAUDE_GRADER_AUTH_TOKEN not configured")
+// graderConfigured is a legacy shim retained so /api/auth/config keeps a
+// stable field name. Grader creds are now per-project, so from the config
+// endpoint's perspective grader is always "available" — the actual gate
+// is graderCredsPresent(project.grader_url, project.grader_api_key).
+func graderConfigured() bool { return true }
+
+// runDirectHTTPGrader POSTs the assembled (instruction + PIPELINE.md +
+// trace) prompt as a single user message to {graderURL}/v1/messages and
+// returns the concatenated text response. Empty creds → error (callers
+// should check graderCredsPresent first and skip the call altogether).
+func runDirectHTTPGrader(
+	ctx context.Context,
+	graderURL, graderAPIKey, graderModel string,
+	instruction, pipelineMD, traceMD string,
+) (string, error) {
+	graderURL = strings.TrimSpace(graderURL)
+	graderAPIKey = strings.TrimSpace(graderAPIKey)
+	if graderURL == "" || graderAPIKey == "" {
+		return "", errors.New("grader URL and api key required")
 	}
-	model := strings.TrimSpace(os.Getenv(graderEnvModel))
+	model := strings.TrimSpace(graderModel)
 	if model == "" {
 		model = graderDefaultModel
 	}
@@ -133,9 +139,8 @@ func runClaudeGrader(ctx context.Context, instruction, pipelineMD, traceMD strin
 	prompt.WriteString(traceMD)
 
 	if prompt.Len() > graderMaxPromptSize {
-		// Truncate trace from the end if we exceed the safety cap.
 		over := prompt.Len() - graderMaxPromptSize
-		traceCut := len(traceMD) - over - 256 // leave a buffer
+		traceCut := len(traceMD) - over - 256
 		if traceCut < 0 {
 			return "", fmt.Errorf("prompt too large (pipeline alone is %d bytes)", len(pipelineMD)+len(instruction))
 		}
@@ -154,46 +159,67 @@ func runClaudeGrader(ctx context.Context, instruction, pipelineMD, traceMD strin
 			timeout = time.Duration(secs) * time.Second
 		}
 	}
+
+	body := map[string]any{
+		"model":      model,
+		"max_tokens": graderMaxTokens,
+		"messages": []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{
+				{"type": "text", "text": prompt.String()},
+			},
+		}},
+	}
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return "", err
+	}
+
+	endpoint := strings.TrimRight(graderURL, "/") + "/v1/messages"
 	jobCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	req, err := http.NewRequestWithContext(jobCtx, "POST", endpoint, bytes.NewReader(buf))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("x-api-key", graderAPIKey)
+	req.Header.Set("anthropic-version", detectAnthropicVerHdr)
+	req.Header.Set("content-type", "application/json")
 
-	cmd := exec.CommandContext(jobCtx, "claude", "-p", "--model", model, "--output-format", "text")
-	// Don't inherit the entire env (which may already have ANTHROPIC_API_KEY pointing at the probed key).
-	childEnv := []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + os.Getenv("HOME"),
-		"TZ=" + os.Getenv("TZ"),
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("grader request failed: %w", err)
 	}
-	if apiKey != "" {
-		childEnv = append(childEnv, "ANTHROPIC_API_KEY="+apiKey)
-	}
-	if authToken != "" {
-		// Bearer-style auth used by Anthropic-compatible gateways. Claude CLI
-		// prefers this over ANTHROPIC_API_KEY when both are set.
-		childEnv = append(childEnv, "ANTHROPIC_AUTH_TOKEN="+authToken)
-	}
-	if baseURL != "" {
-		childEnv = append(childEnv, "ANTHROPIC_BASE_URL="+baseURL)
-	}
-	cmd.Env = childEnv
-	cmd.Stdin = bytes.NewReader(prompt.Bytes())
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		// Trim noisy stderr so the UI message stays readable.
-		stderrPreview := strings.TrimSpace(stderr.String())
-		if len(stderrPreview) > 800 {
-			stderrPreview = stderrPreview[:800] + "..."
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		msg := strings.TrimSpace(string(respBody))
+		if len(msg) > 800 {
+			msg = msg[:800] + "..."
 		}
-		if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
-			return "", fmt.Errorf("claude grader timed out after %s (stderr: %s)", graderHardTimeout, stderrPreview)
-		}
-		return "", fmt.Errorf("claude grader exited with error: %w (stderr: %s)", err, stderrPreview)
+		return "", fmt.Errorf("grader HTTP %d: %s", resp.StatusCode, msg)
 	}
-	return strings.TrimSpace(stdout.String()), nil
+
+	var parsed struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return "", fmt.Errorf("grader parse response: %w", err)
+	}
+	var sb strings.Builder
+	for _, blk := range parsed.Content {
+		if blk.Type == "text" {
+			sb.WriteString(blk.Text)
+		}
+	}
+	out := strings.TrimSpace(sb.String())
+	if out == "" {
+		return "", errors.New("grader returned empty text")
+	}
+	return out, nil
 }
 
 // readPipelineFile loads a PIPELINE.md from disk via env var.
