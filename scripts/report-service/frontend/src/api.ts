@@ -296,8 +296,8 @@ export type CacheStatsResponse = {
     reuse_x: number
   }
   range: {
-    start: number
-    end: number
+    start: string
+    end: string
     bucket: 'hour' | 'day'
     model: string
   }

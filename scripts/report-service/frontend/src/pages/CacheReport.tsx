@@ -27,13 +27,14 @@ function formatNumber(n: number): string {
 }
 
 function formatBucket(bucket: string, mode: 'hour' | 'day'): string {
-  // Backend returns TIMESTAMPTZ text like "2026-07-01 14:00:00+00".
-  const d = new Date(bucket.replace(' ', 'T'))
-  if (isNaN(d.getTime())) return bucket
-  if (mode === 'day') {
-    return d.toISOString().slice(5, 10) // MM-DD
-  }
-  return d.toISOString().slice(5, 16).replace('T', ' ') // MM-DD HH:mm
+  // Backend now returns date strings verbatim from report_daily_agg:
+  //   day  bucket → "2026-07-01"
+  //   hour bucket → "2026-07-01 14:00"
+  if (!bucket) return bucket
+  if (mode === 'day') return bucket.slice(5) // MM-DD
+  const parts = bucket.split(' ')
+  if (parts.length === 2) return parts[0].slice(5) + ' ' + parts[1] // MM-DD HH:mm
+  return bucket
 }
 
 export default function CacheReport() {

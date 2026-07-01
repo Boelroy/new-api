@@ -1815,57 +1815,69 @@ type cacheStatsBucket struct {
 }
 
 // handleCacheStats returns time-bucketed Anthropic cache metrics for the
-// admin dashboard. `bucket` accepts "hour" (default) or "day"; `start` / `end`
-// are inclusive dates. Model filter defaults to claude-*; pass model=all to
-// see everything.
+// admin dashboard. Reads from report_daily_agg (hourly pre-aggregate produced
+// by startDailyRefresh + manual /api/refresh) — logs directly would be
+// ~450× slower and JSON-parse `other` on every row.
+//
+// bucket=hour | day; start/end are inclusive UTC dates. model filter is a
+// prefix; default "claude" matches claude-* rows. Pass "all" to disable.
+// Latency to fresh data: up to 1 hour (aggregation runs on the hour). Users
+// can trigger /api/refresh to catch up today immediately.
 func handleCacheStats(c *gin.Context) {
 	bucketMode := strings.ToLower(strings.TrimSpace(c.DefaultQuery("bucket", "hour")))
 	if bucketMode != "hour" && bucketMode != "day" {
 		bucketMode = "hour"
 	}
 	// Default: last 24h (hour bucket) or last 14d (day bucket).
-	nowUnix := time.Now().Unix()
-	defaultLookback := int64(24 * 3600)
+	nowUTC := time.Now().UTC()
+	defaultStart := nowUTC.AddDate(0, 0, -1)
 	if bucketMode == "day" {
-		defaultLookback = 14 * 24 * 3600
+		defaultStart = nowUTC.AddDate(0, 0, -13)
 	}
-	startTS := nowUnix - defaultLookback
-	endTS := nowUnix
+	startDate := defaultStart.Format("2006-01-02")
+	endDate := nowUTC.Format("2006-01-02")
 	if s := c.Query("start"); s != "" {
-		if t, err := time.ParseInLocation("2006-01-02", s, time.UTC); err == nil {
-			startTS = t.Unix()
+		if _, err := time.ParseInLocation("2006-01-02", s, time.UTC); err == nil {
+			startDate = s
 		}
 	}
 	if e := c.Query("end"); e != "" {
-		if t, err := time.ParseInLocation("2006-01-02", e, time.UTC); err == nil {
-			endTS = t.AddDate(0, 0, 1).Unix()
+		if _, err := time.ParseInLocation("2006-01-02", e, time.UTC); err == nil {
+			endDate = e
 		}
 	}
-	if endTS <= startTS {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "end must be after start"})
+	if endDate < startDate {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "end must be >= start"})
 		return
 	}
 
 	modelFilter := strings.TrimSpace(c.DefaultQuery("model", "claude"))
 
-	bucketExpr := "to_timestamp(created_at - (created_at % 3600)) AT TIME ZONE 'UTC'"
+	// bucket column shape:
+	//   hour → "2026-07-01 14:00" (matches report_daily_agg.hour verbatim)
+	//   day  → "2026-07-01"
+	var bucketExpr string
 	if bucketMode == "day" {
-		bucketExpr = "to_timestamp(created_at - (created_at % 86400)) AT TIME ZONE 'UTC'"
+		bucketExpr = `date`
+	} else {
+		// hour column already looks like "YYYY-MM-DD HH:mm"; fall back to
+		// date-only when hour was empty (legacy pre-migration rows).
+		bucketExpr = `CASE WHEN hour <> '' THEN hour ELSE date END`
 	}
 
 	query := fmt.Sprintf(`
-		SELECT %s::text AS bucket,
-		       COUNT(*)::bigint AS requests,
-		       COALESCE(SUM(prompt_tokens),0)::bigint AS prompt_tokens,
-		       COALESCE(SUM(completion_tokens),0)::bigint AS completion_tokens,
-		       COALESCE(SUM(COALESCE((other::jsonb->>'cache_tokens')::bigint, 0)),0)::bigint  AS cache_read_tokens,
-		       COALESCE(SUM(COALESCE((other::jsonb->>'cache_creation_tokens')::bigint, 0)),0)::bigint AS cache_write_tokens
-		  FROM logs
-		 WHERE created_at >= $1 AND created_at < $2
-		   AND ($3 = 'all' OR model_name LIKE $3 || '-%%')
+		SELECT %s AS bucket,
+		       COALESCE(SUM(request_count),0)::bigint      AS requests,
+		       COALESCE(SUM(input_tokens),0)::bigint       AS prompt_tokens,
+		       COALESCE(SUM(output_tokens),0)::bigint      AS completion_tokens,
+		       COALESCE(SUM(cache_read_tokens),0)::bigint  AS cache_read_tokens,
+		       COALESCE(SUM(cache_write_tokens),0)::bigint AS cache_write_tokens
+		  FROM report_daily_agg
+		 WHERE date >= $1 AND date <= $2
+		   AND ($3 = 'all' OR model LIKE $3 || '-%%')
 		 GROUP BY 1 ORDER BY 1`, bucketExpr)
 
-	rows, err := db.Query(query, startTS, endTS, modelFilter)
+	rows, err := db.Query(query, startDate, endDate, modelFilter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -1910,7 +1922,7 @@ func handleCacheStats(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"buckets": buckets,
 		"summary": summary,
-		"range":   gin.H{"start": startTS, "end": endTS, "bucket": bucketMode, "model": modelFilter},
+		"range":   gin.H{"start": startDate, "end": endDate, "bucket": bucketMode, "model": modelFilter},
 	})
 }
 
