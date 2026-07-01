@@ -36,6 +36,12 @@ function BatchCreatePanel({ onCreated }: { onCreated: () => void }) {
   const [result, setResult] = useState<string | null>(null)
   const [studios, setStudios] = useState<string[]>([])
 
+  // 可配置的默认 model 列表（存在 report_config 里）
+  const [modelsCfg, setModelsCfg] = useState('')
+  const [modelsCfgOpen, setModelsCfgOpen] = useState(false)
+  const [modelsSaving, setModelsSaving] = useState(false)
+  const [modelsMsg, setModelsMsg] = useState<string | null>(null)
+
   useEffect(() => {
     void (async () => {
       try {
@@ -50,7 +56,27 @@ function BatchCreatePanel({ onCreated }: { onCreated: () => void }) {
         })
       } catch { /* leave dropdown empty on error */ }
     })()
+    void (async () => {
+      try {
+        const res = await api.getBatchCreateModels()
+        setModelsCfg(res.models)
+      } catch { /* fall back to placeholder */ }
+    })()
   }, [])
+
+  const handleSaveModels = async () => {
+    setModelsMsg(null)
+    setModelsSaving(true)
+    try {
+      const res = await api.saveBatchCreateModels(modelsCfg)
+      setModelsCfg(res.models)
+      setModelsMsg('已保存')
+    } catch (e: any) {
+      setModelsMsg('失败: ' + (e?.message || e))
+    } finally {
+      setModelsSaving(false)
+    }
+  }
 
   const handleSubmit = async () => {
     setResult(null)
@@ -174,6 +200,41 @@ function BatchCreatePanel({ onCreated }: { onCreated: () => void }) {
             className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
           />
         </div>
+      </div>
+      {/* 可折叠：默认模型列表配置。改了会作用到之后所有批量创建 */}
+      <div className="border border-gray-200 rounded-md mb-2 bg-gray-50/50">
+        <button
+          type="button"
+          onClick={() => setModelsCfgOpen(v => !v)}
+          className="w-full flex items-center justify-between px-2.5 py-1.5 text-[11px] text-gray-600 hover:bg-gray-100"
+        >
+          <span>默认模型列表 <span className="text-gray-400">({modelsCfg.split(',').filter(Boolean).length} 个)</span></span>
+          <span className="text-gray-400">{modelsCfgOpen ? '▲' : '▼'}</span>
+        </button>
+        {modelsCfgOpen && (
+          <div className="p-2.5 pt-1 space-y-2">
+            <textarea
+              value={modelsCfg}
+              onChange={e => setModelsCfg(e.target.value)}
+              rows={4}
+              placeholder={'一行或逗号分隔一个模型名，例如\nclaude-opus-4-7,claude-sonnet-4-6,claude-opus-4-6'}
+              className="w-full border border-gray-200 rounded-md p-2 text-[11px] font-mono resize-y bg-white focus:outline-none focus:border-gray-900"
+            />
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleSaveModels}
+                disabled={modelsSaving}
+                className="bg-gray-900 text-white rounded-md px-3 py-1 text-[11px] hover:opacity-85 disabled:opacity-40"
+              >
+                {modelsSaving ? '保存中…' : '保存默认模型'}
+              </button>
+              {modelsMsg && (
+                <span className={`text-[11px] ${modelsMsg === '已保存' ? 'text-emerald-600' : 'text-rose-600'}`}>{modelsMsg}</span>
+              )}
+            </div>
+          </div>
+        )}
       </div>
       <textarea
         value={input}

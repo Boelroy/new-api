@@ -358,6 +358,16 @@ export const api = {
       body: JSON.stringify({ channel_ids, priority }),
     }),
 
+  getBatchCreateModels: () =>
+    request<{ models: string }>('/api/config/batch-models'),
+
+  saveBatchCreateModels: (models: string) =>
+    request<{ models: string }>('/api/config/batch-models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ models }),
+    }),
+
   getAllKeys: (start?: string, end?: string) => {
     const params = new URLSearchParams()
     if (start) params.set('start', start)

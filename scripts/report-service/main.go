@@ -1589,7 +1589,10 @@ func handleSaveQuotas(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"saved": saved})
 }
 
-// Default model list for new Anthropic channels.
+// Default model list for new Anthropic channels. Used as the fallback when
+// the admin hasn't overridden it via report_config('batch_create_default_models').
+// Keep this list in sync with the set of Claude models the org currently sells
+// so a fresh deployment gets sensible defaults on batch create.
 var defaultAnthropicModels = strings.Join([]string{
 	"claude-opus-4-7",
 	"claude-sonnet-4-6",
@@ -1599,7 +1602,66 @@ var defaultAnthropicModels = strings.Join([]string{
 	"claude-opus-4-5-20251101",
 	"claude-opus-4-8",
 	"claude-fable-5",
+	"claude-sonnet-5",
 }, ",")
+
+// getBatchCreateModels reads the runtime-configurable model list. Admins can
+// edit it from the Key Capacity page to add / remove models without a redeploy.
+// Empty rows fall back to defaultAnthropicModels.
+func getBatchCreateModels() string {
+	var v string
+	err := db.QueryRow(`SELECT value FROM report_config WHERE key='batch_create_default_models'`).Scan(&v)
+	if err != nil || strings.TrimSpace(v) == "" {
+		return defaultAnthropicModels
+	}
+	// Preserve original ordering but strip any stray whitespace between commas.
+	parts := strings.Split(v, ",")
+	cleaned := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			cleaned = append(cleaned, p)
+		}
+	}
+	if len(cleaned) == 0 {
+		return defaultAnthropicModels
+	}
+	return strings.Join(cleaned, ",")
+}
+
+func handleGetBatchModels(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"models": getBatchCreateModels()})
+}
+
+func handleSetBatchModels(c *gin.Context) {
+	var body struct {
+		Models string `json:"models"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	// Normalize: collapse whitespace/comma/newline separators, drop empties.
+	fields := strings.FieldsFunc(body.Models, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\n' || r == '\r' || r == '\t'
+	})
+	if len(fields) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "at least one model is required"})
+		return
+	}
+	joined := strings.Join(fields, ",")
+	now := time.Now().Unix()
+	if _, err := db.Exec(
+		`INSERT INTO report_config (key, value, updated_at)
+		 VALUES ('batch_create_default_models', $1, $2)
+		 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`,
+		joined, now,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"models": joined})
+}
 
 const channelInfoDefault = `{"is_multi_key":false,"multi_key_size":0,"multi_key_status_list":null,"multi_key_polling_index":0,"multi_key_mode":""}`
 
@@ -1648,7 +1710,8 @@ func handleBatchCreateChannels(c *gin.Context) {
 	}
 
 	dateStr := time.Now().UTC().Format("0102")
-	models := strings.Split(defaultAnthropicModels, ",")
+	activeModels := getBatchCreateModels()
+	models := strings.Split(activeModels, ",")
 	now := time.Now().Unix()
 
 	tx, err := db.Begin()
@@ -1686,7 +1749,7 @@ func handleBatchCreateChannels(c *gin.Context) {
 			VALUES (14, $1, 1, $2, 0, $3, '', 'default', $4,
 			        '', '', $7, 1, 0, $5::json, $6)
 			RETURNING id`,
-			key, name, now, defaultAnthropicModels, channelInfoDefault, studio, priority).Scan(&channelID)
+			key, name, now, activeModels, channelInfoDefault, studio, priority).Scan(&channelID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("insert channel: %v", err)})
 			return
@@ -2314,6 +2377,8 @@ func main() {
 	adminAPI.POST("/keys/quota", handleSaveQuotas)
 	adminAPI.POST("/channels/batch-create", handleBatchCreateChannels)
 	adminAPI.POST("/channels/batch-priority", handleBatchUpdateChannelPriority)
+	adminAPI.GET("/config/batch-models", handleGetBatchModels)
+	adminAPI.POST("/config/batch-models", handleSetBatchModels)
 	adminAPI.POST("/keys/test", handleTestKeys)
 	adminAPI.GET("/detect/models", handleDetectModels)
 	adminAPI.POST("/refresh", handleRefresh)
