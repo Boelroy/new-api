@@ -111,24 +111,48 @@ type Props = {
   onClose: () => void
 }
 
+// Module-level cache so route changes (which remount Layout → Sidebar) reuse
+// the already-fetched values instead of flashing an empty nav for the ~50ms
+// each /api/auth/me + /api/auth/config round trip takes.
+type SidebarBoot = { role: number; showProfit: boolean; showTesting: boolean }
+let cachedBoot: SidebarBoot | null = null
+let inflightBoot: Promise<SidebarBoot> | null = null
+
+async function loadSidebarBoot(): Promise<SidebarBoot> {
+  if (cachedBoot) return cachedBoot
+  if (inflightBoot) return inflightBoot
+  inflightBoot = (async () => {
+    const [cfgRes, meRes] = await Promise.allSettled([
+      fetch('/api/auth/config').then(r => r.json()),
+      api.getAuthMe(),
+    ])
+    const cfg = cfgRes.status === 'fulfilled' ? cfgRes.value : {}
+    const me = meRes.status === 'fulfilled' ? meRes.value : { role: 0 }
+    const boot: SidebarBoot = {
+      role: typeof me?.role === 'number' ? me.role : 0,
+      showProfit: cfg?.profit_enabled === true,
+      showTesting: cfg?.r2_configured === true,
+    }
+    cachedBoot = boot
+    return boot
+  })().finally(() => {
+    inflightBoot = null
+  })
+  return inflightBoot
+}
+
 export default function Sidebar({ open, onClose }: Props) {
-  const [showProfit, setShowProfit] = useState(false)
-  const [showTesting, setShowTesting] = useState(false)
-  const [role, setRole] = useState<number | null>(null)
+  const [showProfit, setShowProfit] = useState(cachedBoot?.showProfit ?? false)
+  const [showTesting, setShowTesting] = useState(cachedBoot?.showTesting ?? false)
+  const [role, setRole] = useState<number | null>(cachedBoot ? cachedBoot.role : null)
 
   useEffect(() => {
+    if (cachedBoot) return
     void (async () => {
-      try {
-        const cfg = await fetch('/api/auth/config').then(r => r.json())
-        if (cfg.profit_enabled === true) setShowProfit(true)
-        if (cfg.r2_configured === true) setShowTesting(true)
-      } catch { /* keep hidden on error */ }
-    })()
-    void (async () => {
-      try {
-        const me = await api.getAuthMe()
-        setRole(me.role)
-      } catch { setRole(0) }
+      const boot = await loadSidebarBoot()
+      setRole(boot.role)
+      setShowProfit(boot.showProfit)
+      setShowTesting(boot.showTesting)
     })()
   }, [])
 

@@ -13,17 +13,33 @@ import { api, ROLE_ADMIN, ROLE_SUPER_ADMIN } from './api'
 // RoleGate guards a page against unauthorized roles. While the role is being
 // fetched it renders null so we don't flash protected content; on denial it
 // redirects to a sensible landing page based on the caller's tier.
+// Cached role/promise so switching between /keys, /allkeys, /tester… doesn't
+// re-fetch auth on every navigation (the Sidebar's cache lives alongside).
+let cachedRole: number | null = null
+let inflightRole: Promise<number> | null = null
+
+async function loadRole(): Promise<number> {
+  if (cachedRole !== null) return cachedRole
+  if (inflightRole) return inflightRole
+  inflightRole = (async () => {
+    try {
+      const me = await api.getAuthMe()
+      cachedRole = typeof me?.role === 'number' ? me.role : 0
+    } catch {
+      cachedRole = 0
+    }
+    return cachedRole
+  })().finally(() => {
+    inflightRole = null
+  })
+  return inflightRole
+}
+
 function RoleGate({ min, children }: { min: number; children: ReactElement }) {
-  const [role, setRole] = useState<number | null>(null)
+  const [role, setRole] = useState<number | null>(cachedRole)
   useEffect(() => {
-    void (async () => {
-      try {
-        const me = await api.getAuthMe()
-        setRole(me.role)
-      } catch {
-        setRole(0)
-      }
-    })()
+    if (cachedRole !== null) return
+    void loadRole().then(setRole)
   }, [])
   if (role === null) return null
   if (role < min) {
