@@ -19,6 +19,25 @@ function formatTime(epochSec: number): string {
   return new Date(epochSec * 1000).toLocaleString()
 }
 
+// Sentinel selected value that triggers the "create new studio" prompt.
+// Not a valid studio name (bracketed sentinel that can never match a tag).
+const NEW_STUDIO_SENTINEL = '__new_studio__'
+
+// Prompt for a fresh studio name. Returns the trimmed name, or null when
+// the user cancelled / entered something invalid.
+function askForNewStudio(existing: string[]): string | null {
+  const raw = window.prompt('New studio name (letters / digits / . _ -):')
+  if (raw === null) return null
+  const name = raw.trim()
+  if (!name) return null
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) {
+    alert('Studio name may only contain letters, digits, dot, underscore, or dash.')
+    return null
+  }
+  if (existing.includes(name)) return name // idempotent — already in list
+  return name
+}
+
 export default function Users() {
   const [me, setMe] = useState<AuthMe | null>(null)
   const [users, setUsers] = useState<AuthUser[]>([])
@@ -103,6 +122,27 @@ export default function Users() {
   }
 
   const handleChangeStudio = async (u: AuthUser, studio: string) => {
+    if (studio === NEW_STUDIO_SENTINEL) {
+      const name = askForNewStudio(studios)
+      if (!name) return
+      // Optimistically add to the local list so subsequent renders show
+      // the new studio even before reload() finishes. The backend already
+      // accepts arbitrary studio strings; listStudios() returns the union
+      // of channel tags + rs_auth_user.studio values so once we save, it
+      // will persist across reloads.
+      setStudios(prev => Array.from(new Set([...prev, name])).sort())
+      setBusyId(u.id)
+      setError(null)
+      try {
+        await api.updateUser(u.id, { studio: name })
+        await reload()
+      } catch (e: unknown) {
+        setError(e instanceof Error ? e.message : 'update failed')
+      } finally {
+        setBusyId(null)
+      }
+      return
+    }
     if (studio === u.studio) return
     setBusyId(u.id)
     setError(null)
@@ -114,6 +154,18 @@ export default function Users() {
     } finally {
       setBusyId(null)
     }
+  }
+
+  const handleSelectNewStudio = (v: string) => {
+    if (v === NEW_STUDIO_SENTINEL) {
+      const name = askForNewStudio(studios)
+      if (name) {
+        setStudios(prev => Array.from(new Set([...prev, name])).sort())
+        setNewStudio(name)
+      }
+      return
+    }
+    setNewStudio(v)
   }
 
   const handleResetPassword = async (u: AuthUser) => {
@@ -186,10 +238,11 @@ export default function Users() {
             <select
               className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm"
               value={newStudio}
-              onChange={e => setNewStudio(e.target.value)}
+              onChange={e => handleSelectNewStudio(e.target.value)}
             >
               <option value="">Studio: (no access for user-tier)</option>
               {studios.map(s => <option key={s} value={s}>{s}</option>)}
+              <option value={NEW_STUDIO_SENTINEL}>+ Create new studio…</option>
             </select>
             <button
               type="button"
@@ -275,6 +328,7 @@ export default function Users() {
                             <option value={u.studio}>{u.studio}</option>
                           )}
                           {studios.map(s => <option key={s} value={s}>{s}</option>)}
+                          <option value={NEW_STUDIO_SENTINEL}>+ Create new studio…</option>
                         </select>
                       </td>
                       <td className="px-4 py-2 text-gray-500">{formatTime(u.created_at)}</td>
