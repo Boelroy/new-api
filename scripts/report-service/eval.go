@@ -42,8 +42,11 @@ func evalScriptPath() string {
 // runEvalProbe runs `node probe.mjs --url ... --key ... --model ... --out -`
 // and returns the trace markdown on stdout. The supplied context governs
 // cancellation/timeout. Lines from stderr are forwarded to onStderr (if
-// non-nil) as they arrive.
-func runEvalProbe(ctx context.Context, url, key, model string, repeat int, onStderr func(string)) (string, error) {
+// non-nil) as they arrive. runID (when non-empty) is passed via --runid so
+// probe.mjs uses it as the cache-bust salt + seeded-RNG seed — that keeps
+// each report-service run's probes distinct from prior traces and makes
+// the same run reproducible on retry.
+func runEvalProbe(ctx context.Context, url, key, model, runID string, repeat int, onStderr func(string)) (string, error) {
 	script := evalScriptPath()
 	if _, err := os.Stat(script); err != nil {
 		return "", fmt.Errorf("probe.mjs not found at %s: %w", script, err)
@@ -63,6 +66,9 @@ func runEvalProbe(ctx context.Context, url, key, model string, repeat int, onStd
 	}
 	if repeat > 1 {
 		args = append(args, "--repeat", strconv.Itoa(repeat))
+	}
+	if runID = strings.TrimSpace(runID); runID != "" {
+		args = append(args, "--runid", runID)
 	}
 
 	cmd := exec.CommandContext(ctx, "node", args...)

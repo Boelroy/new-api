@@ -2,11 +2,16 @@
 /**
  * Pure trace collector for LLM provider evaluation (performance / IQ / features).
  *
- * Sends ~47 probes (covering 25 logical steps) against an Anthropic Messages
+ * Sends ~57 probes (covering 31 logical steps) against an Anthropic Messages
  * API endpoint, captures full HTTP traces with precise timing (TTFB, TTFT,
  * throughput), and writes a single Markdown bundle.  Performs NO scoring —
  * analysis is done by reading this bundle alongside PIPELINE.md (typically
  * by an LLM such as Claude Code).
+ *
+ * Includes per-run dynamic randomization for memorization-resistant IQ probes
+ * (Q4 math, Q27 sort, Q33 filter, Q35 boolean, Q38 unit conversion, Q39
+ * probability) and a per-run salt prepended to every user-role prompt so
+ * upstream gateway prompt-caches don't dedup across evaluation runs.
  *
  * Stdlib only.  Requires Node >= 18 (native fetch).
  */
@@ -48,6 +53,7 @@ function parseArgs() {
     out: null,
     timeout: "60000",
     repeat: "1",
+    runid: env.RUN_ID ?? null,
   };
   for (let i = 2; i < argv.length; i++) {
     const tok = argv[i];
@@ -72,17 +78,181 @@ function parseArgs() {
     }
   }
   const repeat = Math.max(1, Number(a.repeat) || 1);
+  const runId = a.runid ?? Math.random().toString(36).slice(2, 10);
   return {
     ...a,
     timeout: Number(a.timeout) || 60000,
     repeat,
+    runId,
   };
 }
 
-function help(code) {
-  console.error(`Usage: probe.mjs [--url URL] [--key KEY] [--model MODEL] [--out PATH] [--timeout MS]
+// ─── Shared per-run randomization (mirrors backend/src/services/probeLibrary/) ───
 
-Send ~47 evaluation probes to a Claude/Anthropic Messages API endpoint and
+/**
+ * Prepend a single sentence that varies the input bytes per run.
+ * Format is plain English so input-shape safety classifiers on adaptive-
+ * thinking models don't pattern-match it as machine-generated markup.
+ * See backend/src/services/probeLibrary/runSalt.ts for the historical rationale.
+ */
+function withRunSalt(content, runId) {
+  const tag = runId ? runId.slice(0, 8) : "no-run-id";
+  return `(Evaluation pass ${tag}.)\n\n${content}`;
+}
+
+/**
+ * Deterministic, runId-seeded LCG. Reproducible: same runId → same sequence.
+ * Quality is fine for "vary benchmark inputs", NOT for cryptography.
+ */
+function createSeededRng(runId) {
+  let seed = 0;
+  const src = runId ?? "unknown-run";
+  for (let i = 0; i < src.length; i++) {
+    seed = (seed * 31 + src.charCodeAt(i)) >>> 0;
+  }
+  if (seed === 0) seed = 1;
+  return () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 0x1_0000_0000;
+  };
+}
+
+/** Pick a random integer in [lo, hi] inclusive. */
+function randInt(rng, lo, hi) {
+  return lo + Math.floor(rng() * (hi - lo + 1));
+}
+
+/** Pick one element from an array. */
+function pickOne(rng, arr) {
+  return arr[Math.floor(rng() * arr.length)];
+}
+
+/**
+ * Compute the greatest common divisor of two non-negative integers. Used by
+ * the probability probe to reduce fractions to lowest terms.
+ */
+function gcd(a, b) {
+  a = Math.abs(a);
+  b = Math.abs(b);
+  while (b !== 0) {
+    const t = b;
+    b = a % b;
+    a = t;
+  }
+  return a || 1;
+}
+
+// ─── Dynamic IQ probe generators ─────────────────────────────────────────
+// Each generator takes a seeded PRNG and returns { content, expected }:
+//   content  — prompt text the model sees
+//   expected — string the judge compares against (whitespace-tolerant)
+
+/** Q4: store math. Random fruit prices + quantities. Total = ap*ac + op*oc. */
+function generateQ4Math(rng) {
+  const applePrice = randInt(rng, 2, 6);
+  const orangePrice = randInt(rng, 2, 6);
+  const appleCount = randInt(rng, 3, 12);
+  const orangeCount = randInt(rng, 2, 10);
+  const total = applePrice * appleCount + orangePrice * orangeCount;
+  return {
+    content: `A store sells apples at $${applePrice} each and oranges at $${orangePrice} each. I buy ${appleCount} apples and ${orangeCount} oranges. How much do I spend in total? Reply with just the dollar amount (a single number).`,
+    expected: String(total),
+  };
+}
+
+/** Q27: sort 8-10 distinct integers in [1, 99]. */
+function generateQ27Sort(rng) {
+  const n = randInt(rng, 8, 10);
+  const used = new Set();
+  while (used.size < n) used.add(randInt(rng, 1, 99));
+  const nums = [...used];
+  const sorted = [...nums].sort((a, b) => a - b);
+  return {
+    content: `Sort these numbers in ascending order and output ONLY the sorted list as comma-separated values, no other text: ${nums.join(", ")}`,
+    expected: sorted.join(","),
+  };
+}
+
+/** Q33: BBH object_counting — random fruit/non-fruit counts + random exclusions. */
+function generateQ33Filter(rng) {
+  const fruitsAll = ["apple", "cherry", "pear", "banana", "plum", "grape", "mango", "peach"];
+  const nonFruits = ["spoon", "fork", "napkin", "plate", "cup", "knife"];
+  const shuffled = [...fruitsAll].sort(() => rng() - 0.5);
+  const keep = shuffled.slice(0, 2);
+  const exclude = shuffled.slice(2, 4);
+  const decoys = [...nonFruits].sort(() => rng() - 0.5).slice(0, 3);
+  const items = [];
+  for (const f of keep) items.push({ name: f, count: randInt(rng, 1, 9), counted: true });
+  for (const f of exclude) items.push({ name: f, count: randInt(rng, 1, 9), counted: false });
+  for (const d of decoys) items.push({ name: d, count: randInt(rng, 1, 9), counted: false });
+  items.sort(() => rng() - 0.5);
+  const lines = items.map((it) => `${it.count} ${it.name}${it.count === 1 ? "" : "s"}`).join(", ");
+  const expected = items.filter((it) => it.counted).reduce((s, it) => s + it.count, 0);
+  const excludeLabel = exclude.map((f) => `${f}s`).join(" and ");
+  return {
+    content: `I own: ${lines}. How many pieces of fruit do I have, excluding ${excludeLabel}? Reply with just a number.`,
+    expected: String(expected),
+  };
+}
+
+/** Q35: BBH boolean — random 4-variable expression. */
+function generateQ35Boolean(rng) {
+  const tf = () => (rng() < 0.5 ? "True" : "False");
+  const op = () => (rng() < 0.5 ? "and" : "or");
+  const A = tf();
+  const B = tf();
+  const C = tf();
+  const D = tf();
+  const op1 = op();
+  const op2 = op();
+  const negD = rng() < 0.5;
+  const expr = `not (${A} ${op1} ${B}) ${op2} (${C} ${op1} ${negD ? "not " : ""}${D})`;
+  const tv = (s) => s === "True";
+  const opEval = (x, o, y) => (o === "and" ? x && y : x || y);
+  const left = !opEval(tv(A), op1, tv(B));
+  const dEff = negD ? !tv(D) : tv(D);
+  const right = opEval(tv(C), op1, dEff);
+  const result = opEval(left, op2, right);
+  return {
+    content: `Evaluate this expression and reply with only "True" or "False":\n${expr}`,
+    expected: result ? "True" : "False",
+  };
+}
+
+/** Q38: unit conversion mg/s × hours → kg. */
+function generateQ38UnitConv(rng) {
+  const rateMg = randInt(rng, 50, 500);
+  const hours = randInt(rng, 2, 12);
+  const seconds = hours * 3600;
+  const totalKg = (rateMg * seconds) / 1_000_000;
+  const expected = (Math.round(totalKg * 10000) / 10000).toString();
+  return {
+    content: `A device consumes ${rateMg} milligrams of fuel per second. How many kilograms does it consume over ${hours} hours? Reply with just the number (no units, no commas).`,
+    expected,
+  };
+}
+
+/** Q39: probability of drawing 2 reds without replacement, in lowest terms. */
+function generateQ39Probability(rng) {
+  const red = randInt(rng, 2, 6);
+  const blue = randInt(rng, 2, 6);
+  const green = randInt(rng, 2, 6);
+  const total = red + blue + green;
+  const num = red * (red - 1);
+  const den = total * (total - 1);
+  const g = gcd(num, den);
+  return {
+    content: `A bag has ${red} red, ${blue} blue, and ${green} green marbles. You draw 2 marbles without replacement. What is the probability that both are red? Reply with just a fraction in lowest terms, like "a/b".`,
+    expected: `${num / g}/${den / g}`,
+  };
+}
+// pickOne is exported for parity with the backend module; unused inside probe.mjs itself.
+void pickOne;
+
+function help(code) {
+  console.error(`Usage: probe.mjs [--url URL] [--key KEY] [--model MODEL] [--out PATH] [--timeout MS] [--runid ID]
+
+Send ~57 evaluation probes to a Claude/Anthropic Messages API endpoint and
 write a Markdown trace bundle.  No scoring logic — analysis is done by
 reading the bundle alongside PIPELINE.md (e.g. feed both to Claude Code).
 
@@ -106,21 +276,22 @@ Optional:
               streaming, long output, caching, 1M context, errors) run once
               regardless. Use --repeat 3 to dampen stochastic noise (LLM
               eval best practice; matches IFEval/Arena-Hard methodology).
+  --runid ID  Explicit run identifier (also readable from RUN_ID env var).
+              Seeds the dynamic-probe PRNG AND the per-run prompt salt so
+              reruns with the same id produce identical inputs. If omitted,
+              a random 8-char id is generated per invocation.
 
-Probes sent (~47 requests, ~180-300s wall-clock):
+Probes sent (~57 requests, ~180-360s wall-clock):
   Step 0  :  GET /v1/models
   Step 1  :  Plain instruction compliance (non-streaming)
   Step 2  :  Streaming count 1-20 (TTFT + throughput)
   Step 3  :  Tool use (forced via tool_choice)
-  Step 4  :  Math reasoning (verifiable answer)
+  Step 3f :  Tool use (auto tool_choice) — fallback if forced was rejected
+  Step 4  :  Math reasoning — dynamic per-run inputs (verifiable answer)
   Step 4b :  Instruction resistance (STOP trap)
-  Step 4c-4D:  IQ test battery (Q12-Q28 + Q31-Q41, 28 tests covering negative
-              constraints, char-level, theory of mind, ICL, syllogism,
-              spatial, hallucination, code, translation, causality,
-              temporal, self-correction, sorting, counterfactual, ARC-style
-              abstract rule induction, multi-hop bridge, negation+filter,
-              code trace, boolean expr, state tracking, 2D nav, unit
-              conversion, probability, acrostic, morphological analogy)
+  Step 4c-4D:  IQ test battery (Q12-Q28 + Q31-Q41, 28 tests). Q27 sort, Q33
+              filter, Q35 boolean, Q38 unit conv, Q39 probability are DYNAMIC
+              (fresh inputs per run, expected value computed per run).
   Step 5  :  JSON structured output (free-form)
   Step 6  :  Long output (sustained throughput)
   Step 7  :  Multi-turn context recall
@@ -131,9 +302,17 @@ Probes sent (~47 requests, ~180-300s wall-clock):
   Step 11 :  Structured output (json_schema)
   Step 12 :  1M context test (needle-in-haystack, ~1M input tokens)
   Step 13 :  Vision multimodal (image input — uses test-image.png)
-  Step 14 :  Extended thinking (thinking={budget_tokens:1024})
+  Step 14 :  Extended thinking (adaptive or legacy schema)
+  Step 14f:  Extended thinking (fallback schema) — if primary was rejected
   Step 15a:  Error recovery — bad request (role='alien')
   Step 15b:  Error recovery — valid request after error
+  Step 16 :  Tool search tool (F15 — beta: tool-search-tool-2025-10-19)
+  Step 16f:  Tool search fallback header (advanced-tool-use-2025-11-20)
+  Step 17 :  Context-management edits / clear_tool_uses_20250919 (F16)
+  Step 18 :  Server-side compaction / compact_20260112 (F17)
+  Step 19 :  Computer use beta header + computer_20251124 tool (F18)
+  Step 20 :  Fine-grained tool streaming / eager_input_streaming (F19)
+  Step 21 :  Multi-beta header coexistence (F20)
 `);
   exit(code);
 }
@@ -160,7 +339,86 @@ function withMeta(body) {
   return { ...body, metadata: { user_id: STICKY_USER_ID, ...(body.metadata || {}) } };
 }
 
-async function probe(url, key, path, body, label, intent, timeoutMs) {
+// Global run id + salt callable. Set once in main(); referenced by probe/streamProbe.
+let CURRENT_RUN_ID = null;
+
+/**
+ * Return a shallow-cloned body with the per-run salt prepended to the FIRST
+ * user-role message's first text content. Non-user roles are skipped so the
+ * bad-request probe (role='alien') still triggers the intended 4xx.
+ *
+ * Anthropic message content shape handled:
+ *   - string             → prepended directly
+ *   - array of blocks    → first block with type 'text' has its .text prepended
+ * Non-text blocks (image, tool_use, tool_result, thinking) are left alone.
+ */
+function applySaltToBody(body, runId) {
+  if (!body || typeof body !== "object" || !Array.isArray(body.messages) || !runId) {
+    return body;
+  }
+  const newMessages = body.messages.slice();
+  for (let i = 0; i < newMessages.length; i++) {
+    const msg = newMessages[i];
+    if (!msg || msg.role !== "user") continue;
+    if (typeof msg.content === "string") {
+      newMessages[i] = { ...msg, content: withRunSalt(msg.content, runId) };
+    } else if (Array.isArray(msg.content)) {
+      const newContent = msg.content.slice();
+      for (let j = 0; j < newContent.length; j++) {
+        const block = newContent[j];
+        if (block && block.type === "text" && typeof block.text === "string") {
+          newContent[j] = { ...block, text: withRunSalt(block.text, runId) };
+          break;
+        }
+      }
+      newMessages[i] = { ...msg, content: newContent };
+    }
+    break; // only salt the first user-role message
+  }
+  return { ...body, messages: newMessages };
+}
+
+// ─── F13 (extended thinking) per-model schema dispatch ───────────────────
+// Mirrors backend/src/services/evalProbes/runner.ts:pickThinkingSchema.
+// Anthropic split the thinking-config schema across model families:
+//   - opus-4-7 / 4-8 / fable-5 / mythos-5: adaptive-only. Manual
+//     enabled+budget_tokens returns HTTP 400.
+//   - opus-4-6 / sonnet-4-6: both work; adaptive preferred (legacy deprecated).
+//   - opus/sonnet/haiku-4-5 and earlier: legacy enabled+budget_tokens only.
+//   - Unknown / proxy-prefixed ids: legacy first, 14-fallback upgrades.
+function pickThinkingSchema(model) {
+  const last = model.toLowerCase().split("/").pop() ?? "";
+  const id = last.replace(/-\d{8}$/, "").replace(/-\d{4}-\d{2}-\d{2}$/, "");
+  if (
+    id === "claude-opus-4-7" ||
+    id === "claude-opus-4-8" ||
+    id === "claude-fable-5" ||
+    id === "claude-mythos-5" ||
+    id.startsWith("claude-opus-4-7-") ||
+    id.startsWith("claude-opus-4-8-") ||
+    id.startsWith("claude-mythos-preview")
+  ) {
+    return "adaptive";
+  }
+  if (id === "claude-opus-4-6" || id === "claude-sonnet-4-6") {
+    return "adaptive";
+  }
+  return "legacy";
+}
+
+function adaptiveThinkingPayload() {
+  return {
+    thinking: { type: "adaptive", display: "summarized" },
+    output_config: { effort: "high" },
+  };
+}
+
+function legacyThinkingPayload() {
+  return { thinking: { type: "enabled", budget_tokens: 1024 } };
+}
+
+async function probe(url, key, path, body, label, intent, timeoutMs, opts2 = {}) {
+  const { skipSalt = false, extraHeaders = null } = opts2;
   const t0 = performance.now();
   let ttfbMs = null;
   let status = 0;
@@ -169,6 +427,13 @@ async function probe(url, key, path, body, label, intent, timeoutMs) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
+    const saltedBody = skipSalt ? body : applySaltToBody(body, CURRENT_RUN_ID);
+    const postHeaders = {
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    };
+    if (extraHeaders) Object.assign(postHeaders, extraHeaders);
     const opts =
       body == null
         ? {
@@ -178,12 +443,8 @@ async function probe(url, key, path, body, label, intent, timeoutMs) {
           }
         : {
             method: "POST",
-            headers: {
-              "x-api-key": key,
-              "anthropic-version": "2023-06-01",
-              "content-type": "application/json",
-            },
-            body: JSON.stringify(withMeta(body)),
+            headers: postHeaders,
+            body: JSON.stringify(withMeta(saltedBody)),
             signal: ctrl.signal,
           };
     const r = await fetch(`${url}${path}`, opts);
@@ -210,7 +471,8 @@ async function probe(url, key, path, body, label, intent, timeoutMs) {
   };
 }
 
-async function streamProbe(url, key, body, label, intent, timeoutMs) {
+async function streamProbe(url, key, body, label, intent, timeoutMs, opts2 = {}) {
+  const { skipSalt = false, extraHeaders = null } = opts2;
   const t0 = performance.now();
   let ttfbMs = null;
   let ttftMs = null;
@@ -223,14 +485,17 @@ async function streamProbe(url, key, body, label, intent, timeoutMs) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
+    const saltedBody = skipSalt ? body : applySaltToBody(body, CURRENT_RUN_ID);
+    const postHeaders = {
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    };
+    if (extraHeaders) Object.assign(postHeaders, extraHeaders);
     const r = await fetch(`${url}/v1/messages`, {
       method: "POST",
-      headers: {
-        "x-api-key": key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ ...withMeta(body), stream: true }),
+      headers: postHeaders,
+      body: JSON.stringify({ ...withMeta(saltedBody), stream: true }),
       signal: ctrl.signal,
     });
     ttfbMs = Math.round(performance.now() - t0);
@@ -354,7 +619,9 @@ ${fmtBody(t) || "<empty>"}
 // ---------------------------------------------------------------------------
 
 async function main() {
-  const { url, key, model, out, timeout, repeat } = parseArgs();
+  const { url, key, model, out, timeout, repeat, runId } = parseArgs();
+  CURRENT_RUN_ID = runId;
+  const rng = createSeededRng(runId);
   const startedAt = new Date().toISOString();
   const traces = [];
 
@@ -476,7 +743,46 @@ async function main() {
     ),
   );
 
+  // Step 3 schema-fallback: if the model rejected forced tool_choice (Fable
+  // 5+ adaptive-sampling family returns 4xx "tool_choice ... not compatible"),
+  // retry with `tool_choice: 'auto'` so we can still measure whether tools
+  // work at all. Featscorer downstream prefers this trace for F2 (capability)
+  // while F3 (forced-mode honored) continues to judge off Step 3.
+  {
+    const last = traces[traces.length - 1];
+    const forcedRejected =
+      last.status >= 400 &&
+      last.status < 500 &&
+      /tool_choice[^"]*not\s+compatible/i.test(last.body ?? "");
+    if (forcedRejected) {
+      traces.push(
+        await probe(
+          url,
+          key,
+          "/v1/messages",
+          {
+            model,
+            max_tokens: 1500,
+            tools: [TOOL],
+            tool_choice: { type: "auto" },
+            messages: [
+              {
+                role: "user",
+                content: "What is the weather in Tokyo right now?",
+              },
+            ],
+          },
+          "Step 3 fallback: Tool use (auto tool_choice)",
+          "F2 fallback for adaptive-sampling models that reject forced tool_choice.",
+          timeout,
+        ),
+      );
+    }
+  }
+
   // Step 4 ────────────────────────────────────────────────────────────────
+  // Dynamic per-run randomization — prices + quantities vary each run.
+  const q4 = generateQ4Math(rng);
   traces.push(
     await probe(
       url,
@@ -488,13 +794,12 @@ async function main() {
         messages: [
           {
             role: "user",
-            content:
-              "A store sells apples at $3 each and oranges at $5 each. I buy 7 apples and 4 oranges. How much do I spend in total? Reply with just the dollar amount (a single number).",
+            content: q4.content,
           },
         ],
       },
       "Step 4: Math reasoning",
-      "IQ: math reasoning — correct answer is 41 (7×3 + 4×5 = 21 + 20). Check if model shows correct reasoning and arrives at 41.",
+      `IQ Q4: math reasoning — dynamic per-run prices and quantities. Expected: ${q4.expected}`,
       timeout,
     ),
   );
@@ -628,10 +933,11 @@ async function main() {
     )));
 
   // Step 4r ───────────────────────────────────────────────────────────────
+  const q27 = generateQ27Sort(rng);
   traces.push(...(await iqProbe(
       "Step 4r: Numerical sorting",
-      "IQ Q27: list manipulation / algorithmic correctness. Correct sorted output = 1, 3, 7, 15, 19, 42, 56, 88.",
-      "Sort these numbers in ascending order and output ONLY the sorted list as comma-separated values, no other text: 42, 7, 19, 3, 88, 15, 56, 1",
+      `IQ Q27: list manipulation / algorithmic correctness — dynamic per-run integers. Expected: ${q27.expected}`,
+      q27.content,
     )));
 
   // Step 4s ───────────────────────────────────────────────────────────────
@@ -656,10 +962,11 @@ async function main() {
     )));
 
   // Step 4v ───────────────────────────────────────────────────────────────
+  const q33 = generateQ33Filter(rng);
   traces.push(...(await iqProbe(
       "Step 4v: Negation + category filter (BBH object_counting)",
-      "IQ Q33: negation handling + category filter (BBH object_counting variant, Suzgun 2022). Items have 7 categories; need to (a) identify fruits (apples 1, plums 2, cherries 4, pears 6), (b) exclude plums and pears, (c) sum remaining = 1+4 = 5. Common errors: 13 (sum all numbers), 7 (forget cherries are fruit), 12 (count all items minus exclusions).",
-      "I own: 1 apple, 2 plums, 3 spoons, 4 cherries, 5 forks, 6 pears, and 7 napkins. How many pieces of fruit do I have, excluding plums and pears? Reply with just a number.",
+      `IQ Q33: negation handling + category filter (BBH object_counting variant, Suzgun 2022) — dynamic per-run items and exclusions. Expected: ${q33.expected}`,
+      q33.content,
     )));
 
   // Step 4w ───────────────────────────────────────────────────────────────
@@ -670,10 +977,11 @@ async function main() {
     )));
 
   // Step 4x ───────────────────────────────────────────────────────────────
+  const q35 = generateQ35Boolean(rng);
   traces.push(...(await iqProbe(
       "Step 4x: Boolean expression evaluation (BBH)",
-      "IQ Q35: symbolic Boolean with operator precedence (BBH boolean_expressions, Suzgun 2022). not(T and F)=not(F)=T; (F and not T)=(F and F)=F; T or F=T. Correct = 'True'. Common error: drop outer not, get False.",
-      'Evaluate this expression and reply with only "True" or "False":\nnot (True and False) or (False and not True)',
+      `IQ Q35: symbolic Boolean with operator precedence (BBH boolean_expressions, Suzgun 2022) — dynamic per-run 4-variable expression. Expected: ${q35.expected}`,
+      q35.content,
     )));
 
   // Step 4y ───────────────────────────────────────────────────────────────
@@ -691,17 +999,19 @@ async function main() {
     )));
 
   // Step 4A ───────────────────────────────────────────────────────────────
+  const q38 = generateQ38UnitConv(rng);
   traces.push(...(await iqProbe(
       "Step 4A: Unit conversion / dimensional analysis",
-      "IQ Q38: two-stage unit conversion (mg→kg ×10^-6, sec→hr ×3600). 250 mg/s × 3600 × 8 = 7,200,000 mg = 7.2 kg. Correct = '7.2'. Common errors: 7200 (forgot mg→kg), 0.0072 (inverted scale), 28800 (only seconds).",
-      "A device consumes 250 milligrams of fuel per second. How many kilograms does it consume over 8 hours? Reply with just the number (no units, no commas).",
+      `IQ Q38: two-stage unit conversion (mg→kg ×10^-6, sec→hr ×3600) — dynamic per-run rate and duration. Expected: ${q38.expected}`,
+      q38.content,
     )));
 
   // Step 4B ───────────────────────────────────────────────────────────────
+  const q39 = generateQ39Probability(rng);
   traces.push(...(await iqProbe(
       "Step 4B: Probability in lowest-terms fraction (MATH)",
-      "IQ Q39: probability + fraction simplification (MATH, Hendrycks 2021). P(2 red without replacement) = 3/10 × 2/9 = 6/90 = 1/15. Correct (strict) = '1/15'. Loose = '6/90' or '0.0667' (correct value, not simplified). Fail = '9/100' (with-replacement error) or '3/10' (single-draw error).",
-      'A bag has 3 red, 5 blue, and 2 green marbles. You draw 2 marbles without replacement. What is the probability that both are red? Reply with just a fraction in lowest terms, like "a/b".',
+      `IQ Q39: probability + fraction simplification (MATH, Hendrycks 2021) — dynamic per-run marble counts. Expected: ${q39.expected}`,
+      q39.content,
     )));
 
   // Step 4C ───────────────────────────────────────────────────────────────
@@ -1063,10 +1373,17 @@ async function main() {
   }
 
   // Step 14 ───────────────────────────────────────────────────────────────
-  // Extended thinking: only meaningful if the configured model supports it.
-  // Detect by model id substring "thinking" — if not present, send the request
-  // with a thinking block anyway and capture how the endpoint responds (some
-  // routers will 4xx, some will silently ignore the field).
+  // Extended thinking. Anthropic split the thinking-config schema across
+  // model families (see pickThinkingSchema comment). We send the schema
+  // appropriate for the detected family; Step 14 fallback handles gateways
+  // that disagree in either direction (legacy→adaptive or adaptive→legacy).
+  const primarySchema = pickThinkingSchema(model);
+  const primaryThinking =
+    primarySchema === "adaptive"
+      ? adaptiveThinkingPayload()
+      : legacyThinkingPayload();
+  const step14Prompt =
+    "A farmer has 17 sheep. All but 9 die. How many sheep are left? Think step by step, then give the final answer as a single number on the last line.";
   traces.push(
     await probe(
       url,
@@ -1075,18 +1392,314 @@ async function main() {
       {
         model,
         max_tokens: 4096,
-        thinking: { type: "enabled", budget_tokens: 1024 },
+        ...primaryThinking,
         messages: [
           {
             role: "user",
-            content:
-              "A farmer has 17 sheep. All but 9 die. How many sheep are left? Think step by step, then give the final answer as a single number on the last line.",
+            content: step14Prompt,
           },
         ],
       },
-      "Step 14: Extended thinking",
-      "Feature F13: extended thinking support — sends thinking={type:'enabled', budget_tokens:1024}. HTTP 200 + content[] containing a 'thinking' block = supported. 4xx 'thinking not supported' / 'unknown field' = unsupported. IQ Q30: trick-question reasoning — correct answer is 9 (not 8); 'all but 9 die' means 9 survive. Tests whether the model parses 'all but X' correctly.",
+      `Step 14: Extended thinking (${primarySchema} schema)`,
+      `Feature F13: thinking block. IQ Q30: 'all but X' semantics — expect 9. Schema=${primarySchema}. HTTP 200 + content[] containing a 'thinking' block = supported. 4xx 'thinking not supported' / 'unknown field' = unsupported.`,
       timeout,
+    ),
+  );
+
+  // Step 14 schema-fallback: bidirectional schema disagreement recovery.
+  //   - legacy sent + upstream points at `output_config.effort` / `adaptive` → retry adaptive.
+  //   - adaptive sent + upstream points at legacy `enabled+budget_tokens` → retry legacy.
+  {
+    const last = traces[traces.length - 1];
+    const is4xx = last.status >= 400 && last.status < 500;
+    const bodyStr = last.body ?? "";
+    const upgradeToAdaptive =
+      is4xx &&
+      primarySchema === "legacy" &&
+      /output_config\.effort|thinking\.adaptive|type.*adaptive/i.test(bodyStr);
+    const downgradeToLegacy =
+      is4xx &&
+      primarySchema === "adaptive" &&
+      /thinking.*enabled|budget_tokens|type.*enabled/i.test(bodyStr);
+    const fallbackSchema = upgradeToAdaptive
+      ? "adaptive"
+      : downgradeToLegacy
+        ? "legacy"
+        : null;
+    if (fallbackSchema) {
+      const fallbackThinking =
+        fallbackSchema === "adaptive"
+          ? adaptiveThinkingPayload()
+          : legacyThinkingPayload();
+      traces.push(
+        await probe(
+          url,
+          key,
+          "/v1/messages",
+          {
+            model,
+            max_tokens: 4096,
+            ...fallbackThinking,
+            messages: [
+              {
+                role: "user",
+                content: step14Prompt,
+              },
+            ],
+          },
+          `Step 14 fallback: Extended thinking (${fallbackSchema} schema)`,
+          `F13 fallback after primary schema (${primarySchema}) was rejected with HTTP ${last.status}.`,
+          timeout,
+        ),
+      );
+    }
+  }
+
+  // ─── Steps 16-21: 2025-2026 Anthropic beta features (F15-F20) ─────────────
+  //
+  // These probe the newer beta surfaces that don't fit the F1-F14 schema:
+  //   F15 Tool Search Tool         (tool-search-tool-2025-10-19)
+  //   F16 Context Management edits (context-management-2025-06-27, clear_tool_uses_20250919)
+  //   F17 Compaction               (compact-2026-01-12, compact_20260112)
+  //   F18 Computer Use             (computer-use-2025-11-24, computer_20251124)
+  //   F19 Fine-grained Tool Stream (fine-grained-tool-streaming-2025-05-14 / eager_input_streaming)
+  //   F20 Multi-beta combo         (3 beta headers at once — header coexistence)
+
+  // Step 16: Tool Search Tool (F15).
+  traces.push(
+    await probe(
+      url,
+      key,
+      "/v1/messages",
+      {
+        model,
+        max_tokens: 1024,
+        tools: [
+          { type: "tool_search_tool_regex_20251119", name: "tool_search_tool_regex" },
+          {
+            name: "get_weather",
+            description: "Get current weather for a location",
+            input_schema: {
+              type: "object",
+              properties: { location: { type: "string" } },
+              required: ["location"],
+            },
+            defer_loading: true,
+          },
+        ],
+        messages: [{ role: "user", content: "What's the weather in Seattle?" }],
+      },
+      "Step 16: Tool search tool",
+      "Feature F15: server-side tool_search via `tool_search_tool_regex` + `defer_loading`. Beta header: tool-search-tool-2025-10-19.",
+      timeout,
+      { extraHeaders: { "anthropic-beta": "tool-search-tool-2025-10-19" } },
+    ),
+  );
+
+  // Step 16 fallback: alternate beta-header name for gateways that only
+  // recognize the Anthropic-native form (advanced-tool-use-2025-11-20).
+  {
+    const last = traces[traces.length - 1];
+    if (
+      last.status >= 400 &&
+      last.status < 500 &&
+      /invalid.*beta|unsupported.*beta|unknown.*beta/i.test(last.body ?? "")
+    ) {
+      traces.push(
+        await probe(
+          url,
+          key,
+          "/v1/messages",
+          {
+            model,
+            max_tokens: 1024,
+            tools: [
+              { type: "tool_search_tool_regex_20251119", name: "tool_search_tool_regex" },
+              {
+                name: "get_weather",
+                description: "Get current weather for a location",
+                input_schema: {
+                  type: "object",
+                  properties: { location: { type: "string" } },
+                  required: ["location"],
+                },
+                defer_loading: true,
+              },
+            ],
+            messages: [{ role: "user", content: "What's the weather in Seattle?" }],
+          },
+          "Step 16 fallback: Tool search (advanced-tool-use header)",
+          `F15 fallback: primary tool-search-tool-2025-10-19 header rejected with HTTP ${last.status}; retry with advanced-tool-use-2025-11-20.`,
+          timeout,
+          { extraHeaders: { "anthropic-beta": "advanced-tool-use-2025-11-20" } },
+        ),
+      );
+    }
+  }
+
+  // Step 17: Context Management edits — clear_tool_uses_20250919 (F16).
+  // Build multi-turn tool_use history with enough bulk that clearing is
+  // worthwhile (8 × ~4KB tool_result payloads, trigger=5000, keep=2).
+  {
+    const bigToolResult = "A".repeat(4000);
+    const ctxMessages = [
+      { role: "user", content: "Get weather for several cities" },
+    ];
+    for (let i = 0; i < 8; i++) {
+      const tid = `toolu_${String(i).padStart(2, "0")}`;
+      ctxMessages.push({
+        role: "assistant",
+        content: [{ type: "tool_use", id: tid, name: "get_weather", input: { city: `City${i}` } }],
+      });
+      ctxMessages.push({
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: tid, content: `weather ${i}: ${bigToolResult}` }],
+      });
+    }
+    ctxMessages.push({ role: "user", content: "Summarize all the data above." });
+    traces.push(
+      await probe(
+        url,
+        key,
+        "/v1/messages",
+        {
+          model,
+          max_tokens: 256,
+          context_management: {
+            edits: [
+              {
+                type: "clear_tool_uses_20250919",
+                trigger: { type: "input_tokens", value: 5000 },
+                keep: { type: "tool_uses", value: 2 },
+              },
+            ],
+          },
+          tools: [
+            {
+              name: "get_weather",
+              description: "weather",
+              input_schema: { type: "object", properties: { city: { type: "string" } } },
+            },
+          ],
+          messages: ctxMessages,
+        },
+        "Step 17: Context-management edits (clear_tool_uses)",
+        "Feature F16: clear_tool_uses_20250919 with trigger=5000, keep=2, 8 tool_use rounds × 4KB. Verifies upstream actually clears, not just echoes the field.",
+        timeout,
+        {
+          extraHeaders: { "anthropic-beta": "context-management-2025-06-27" },
+        },
+      ),
+    );
+  }
+
+  // Step 18: Compaction — compact_20260112 (F17).
+  // Requires actual input_tokens > trigger to fire; minimum trigger is 50000.
+  // Send ~77K tokens of filler to force firing.
+  {
+    const filler = "The quick brown fox jumps over the lazy dog. ".repeat(7000);
+    traces.push(
+      await probe(
+        url,
+        key,
+        "/v1/messages",
+        {
+          model,
+          max_tokens: 128,
+          context_management: {
+            edits: [{ type: "compact_20260112", trigger: { type: "input_tokens", value: 50000 } }],
+          },
+          messages: [{ role: "user", content: `${filler}\n\nReply with the word DONE.` }],
+        },
+        "Step 18: Server-side compaction",
+        "Feature F17: compact_20260112 with trigger=50000 (minimum), ~77K-token input forces firing. Verifies compaction block / iterations actually generated.",
+        timeout * 2,
+        { extraHeaders: { "anthropic-beta": "compact-2026-01-12" } },
+      ),
+    );
+  }
+
+  // Step 19: Computer use header recognition (F18).
+  // Field-recognition level only: send the beta header + a `computer_20251124`
+  // tool definition with a simple text prompt. Pass if 200.
+  traces.push(
+    await probe(
+      url,
+      key,
+      "/v1/messages",
+      {
+        model,
+        max_tokens: 256,
+        tools: [
+          {
+            type: "computer_20251124",
+            name: "computer",
+            display_width_px: 1024,
+            display_height_px: 768,
+            display_number: 1,
+          },
+        ],
+        messages: [{ role: "user", content: "Reply with the word OK and nothing else." }],
+      },
+      "Step 19: Computer use beta header",
+      "Feature F18: computer-use-2025-11-24 + computer_20251124 tool definition. Header-recognition probe.",
+      timeout,
+      { extraHeaders: { "anthropic-beta": "computer-use-2025-11-24" } },
+    ),
+  );
+
+  // Step 20: Fine-grained tool streaming (F19).
+  // Per-tool `eager_input_streaming: true` (canonical modern surface) plus
+  // the legacy header `fine-grained-tool-streaming-2025-05-14` sent together
+  // so the probe passes if EITHER path is honoured. Non-streaming on
+  // purpose: we're checking field/header recognition, not streaming behaviour.
+  traces.push(
+    await probe(
+      url,
+      key,
+      "/v1/messages",
+      {
+        model,
+        max_tokens: 256,
+        tools: [
+          {
+            name: "get_weather",
+            description: "weather",
+            eager_input_streaming: true,
+            input_schema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+          },
+        ],
+        messages: [{ role: "user", content: "Get the weather in Seattle." }],
+      },
+      "Step 20: Fine-grained tool streaming (eager_input_streaming)",
+      "Feature F19: eager_input_streaming:true per-tool field + legacy fine-grained-tool-streaming-2025-05-14 header. Compat probe.",
+      timeout,
+      { extraHeaders: { "anthropic-beta": "fine-grained-tool-streaming-2025-05-14" } },
+    ),
+  );
+
+  // Step 21: Multi-beta header coexistence (F20).
+  // Send 3 distinct beta headers at once with a minimal body. Pass if 200 —
+  // verifies gateway tolerates beta-header lists without choking.
+  traces.push(
+    await probe(
+      url,
+      key,
+      "/v1/messages",
+      {
+        model,
+        max_tokens: 64,
+        messages: [{ role: "user", content: "Reply with OK." }],
+      },
+      "Step 21: Multi-beta header coexistence",
+      "Feature F20: three beta headers in one anthropic-beta value (computer-use + fine-grained-tool-streaming + tool-search). Coexistence smoke test.",
+      timeout,
+      {
+        extraHeaders: {
+          "anthropic-beta":
+            "computer-use-2025-11-24,fine-grained-tool-streaming-2025-05-14,tool-search-tool-2025-10-19",
+        },
+      },
     ),
   );
 
@@ -1136,6 +1749,7 @@ async function main() {
 
 - **URL**: \`${url}\`
 - **Model**: \`${model}\`
+- **Run ID**: \`${runId}\`
 - **Started at**: ${startedAt}
 - **Probes**: ${traces.length}
 

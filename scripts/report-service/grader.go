@@ -67,7 +67,7 @@ const evalGraderInstruction = `你是 LLM endpoint **评估助手**。
 
 下面会附上两份资料：
 1. PIPELINE.md — provider-eval 方法论 + §2 性能 / §3 智商 / §4 功能信号面板 + §6 评分规则
-2. Trace — probe.mjs 产出的完整 trace（~47 个 probe，覆盖 25 步）
+2. Trace — probe.mjs 产出的完整 trace（覆盖 §2/§3/§4 全部维度的多组 probe）
 
 请按 PIPELINE.md §0.3-§0.4 分析 trace，用**简体中文**输出三维评估报告：
 

@@ -1064,7 +1064,7 @@ func runCombinedTestJob(ctx context.Context, mem *testRunMem, proj *projectRow,
 	mem.appendStderr(fmt.Sprintf("=== eval: probe.mjs (pass@%d) against %s ===", passAt, proj.URL))
 	_, _ = db.Exec(`UPDATE rs_test_run SET status='running' WHERE id=$1`, runID)
 	mem.setStatus("running")
-	evalTraceMD, eErr := runEvalProbe(ctx, proj.URL, proj.APIKey, model, passAt, mem.appendStderr)
+	evalTraceMD, eErr := runEvalProbe(ctx, proj.URL, proj.APIKey, model, runID, passAt, mem.appendStderr)
 	if eErr != nil {
 		mem.appendStderr("eval error: " + eErr.Error())
 		// Don't fail the whole run — detect already succeeded. Note the error and continue.
