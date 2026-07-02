@@ -306,10 +306,12 @@ export type CacheStatsResponse = {
   }
 }
 
-// Mirrors the role tiers enforced on the backend. ROLE_TESTER is a
-// horizontal specialization (Key Tester + Provider Testing only) and does
-// NOT inherit admin permissions via numeric compare.
+// Mirrors the role tiers enforced on the backend. ROLE_TESTER and
+// ROLE_STUDIO_OPERATOR are horizontal specializations (Key Tester +
+// Provider Testing / batch-create scoped to bound studio) and do NOT
+// inherit admin permissions via numeric compare.
 export const ROLE_USER = 1
+export const ROLE_STUDIO_OPERATOR = 2
 export const ROLE_TESTER = 5
 export const ROLE_ADMIN = 10
 export const ROLE_SUPER_ADMIN = 100

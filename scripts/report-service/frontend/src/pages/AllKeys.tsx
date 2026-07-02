@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo } from 'react'
 import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
-import { api, ChannelRow, ROLE_ADMIN } from '../api'
+import BatchCreatePanel from '../components/BatchCreatePanel'
+import { api, ChannelRow, ROLE_ADMIN, ROLE_STUDIO_OPERATOR } from '../api'
 
 const STATUS_LABEL: Record<number, string> = { 1: '启用', 2: '手动禁用', 3: '自动禁用' }
 const STATUS_CLS: Record<number, string> = {
@@ -42,9 +43,13 @@ export default function AllKeys() {
 
   // role gates the pricing-edit UI. /api/keys/pricing is admin-only on the
   // backend, so non-admins would just hit 403 — surface that by hiding the
-  // controls entirely.
+  // controls entirely. studio scopes the Studio Operator's batch-create
+  // panel to their bound studio.
   const [role, setRole] = useState<number | null>(null)
+  const [studio, setStudio] = useState<string>('')
   const canEditPricing = role !== null && role >= ROLE_ADMIN
+  const canBatchCreate = role !== null && (role >= ROLE_ADMIN || role === ROLE_STUDIO_OPERATOR)
+  const isStudioOperator = role === ROLE_STUDIO_OPERATOR
 
   // Per-row inline price edits (channel_id -> raw input string).
   const [priceEdits, setPriceEdits] = useState<Record<number, string>>({})
@@ -61,6 +66,7 @@ export default function AllKeys() {
       try {
         const me = await api.getAuthMe()
         setRole(me.role)
+        setStudio(me.studio ?? '')
       } catch {
         setRole(0)
       }
@@ -168,6 +174,16 @@ export default function AllKeys() {
         { label: '总额度', value: summary.totalQuota ? '$' + summary.totalQuota.toFixed(2) : '未配置' },
         { label: '总剩余', value: summary.totalRemaining ? '$' + summary.totalRemaining.toFixed(2) : '—', color: 'text-emerald-600' },
       ]} />
+
+      {canBatchCreate && (
+        <div className="mb-4">
+          <BatchCreatePanel
+            onCreated={() => load(start, end)}
+            lockedStudio={isStudioOperator ? studio : undefined}
+            canConfigureModels={!isStudioOperator}
+          />
+        </div>
+      )}
 
       {canEditPricing && (
       <div className="bg-white border border-gray-200 rounded-xl mb-4">

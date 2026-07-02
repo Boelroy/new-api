@@ -50,15 +50,17 @@ var (
 // Role tiers mirror common.RoleCommonUser / RoleAdminUser / RoleRootUser in
 // the main service. Routes are gated against these via requireRole.
 //
-// minTesterRole is a horizontal specialization, not a tier: role=5 is only
-// granted access to Key Tester + Provider Testing via requireRoleOrTester,
-// and does NOT inherit admin permissions by virtue of being numerically
-// above minUserRole.
+// minTesterRole and minStudioOperatorRole are horizontal specializations,
+// not tiers: they grant access to a narrow set of endpoints
+// (Key Tester + Provider Testing for tester; batch channel creation scoped
+// to their bound studio for studio operator) without inheriting admin
+// permissions by virtue of being numerically above minUserRole.
 const (
-	minUserRole       = 1   // any authenticated main-service user
-	minTesterRole     = 5   // Key Tester + Provider Testing only
-	minAdminRole      = 10  // common.RoleAdminUser
-	minSuperAdminRole = 100 // common.RoleRootUser
+	minUserRole           = 1   // any authenticated main-service user
+	minStudioOperatorRole = 2   // batch-create channels, scoped to bound studio
+	minTesterRole         = 5   // Key Tester + Provider Testing only
+	minAdminRole          = 10  // common.RoleAdminUser
+	minSuperAdminRole     = 100 // common.RoleRootUser
 )
 
 // SSO session cache: maps session cookie value → (role, expiry).
@@ -232,6 +234,24 @@ func requireRoleOrTester(min int) gin.HandlerFunc {
 		roleAny, _ := c.Get("role")
 		role, _ := roleAny.(int)
 		if role >= min || role == minTesterRole {
+			c.Next()
+			return
+		}
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		c.Abort()
+	}
+}
+
+// requireRoleOrStudioOperator grants access to callers at min tier OR the
+// studio-operator role. Studio operator (role=2) is a horizontal
+// specialization: they can batch-create channels but only into the studio
+// bound to their account. handleBatchCreateChannels enforces the studio
+// lock; this middleware just opens the endpoint to them.
+func requireRoleOrStudioOperator(min int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		roleAny, _ := c.Get("role")
+		role, _ := roleAny.(int)
+		if role >= min || role == minStudioOperatorRole {
 			c.Next()
 			return
 		}
@@ -1182,7 +1202,7 @@ func handleLogout(c *gin.Context) {
 
 func isValidRoleTier(role int) bool {
 	switch role {
-	case minUserRole, minTesterRole, minAdminRole, minSuperAdminRole:
+	case minUserRole, minStudioOperatorRole, minTesterRole, minAdminRole, minSuperAdminRole:
 		return true
 	}
 	return false
@@ -1227,7 +1247,7 @@ func handleUserCreate(c *gin.Context) {
 		return
 	}
 	if !isValidRoleTier(body.Role) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 10, or 100"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 5, 10, or 100"})
 		return
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
@@ -1284,7 +1304,7 @@ func handleUserUpdate(c *gin.Context) {
 	// out, and cannot demote the last remaining super admin via this handler.
 	if body.Role != nil {
 		if !isValidRoleTier(*body.Role) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 10, or 100"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 5, 10, or 100"})
 			return
 		}
 		if target.Role >= minSuperAdminRole && *body.Role < minSuperAdminRole {
@@ -1714,8 +1734,22 @@ func handleBatchCreateChannels(c *gin.Context) {
 	}
 	studio := strings.TrimSpace(payload.Studio)
 	suffix := strings.TrimSpace(payload.Suffix)
-	// Backward compat: older clients only sent `suffix`. Keep the legacy
-	// `pipi` literal so previously-named batches stay consistent.
+	// Studio Operator (role=2) is locked to their bound studio: ignore the
+	// payload and use the JWT claim. Admin+ retain the ability to pick any
+	// studio (including creating a new one) via the payload.
+	roleAny, _ := c.Get("role")
+	if role, _ := roleAny.(int); role == minStudioOperatorRole {
+		userStudioAny, _ := c.Get("studio")
+		userStudio, _ := userStudioAny.(string)
+		userStudio = strings.TrimSpace(userStudio)
+		if userStudio == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "your account has no studio binding; ask an admin to bind one before uploading keys"})
+			return
+		}
+		studio = userStudio
+	}
+	// Backward compat: older admin clients only sent `suffix`. Keep the
+	// legacy `pipi` literal so previously-named batches stay consistent.
 	if studio == "" {
 		studio = "pipi"
 	}
@@ -2528,6 +2562,13 @@ func main() {
 	api := r.Group("/api", authMiddleware)
 	api.GET("/auth/me", handleAuthMe)
 	api.GET("/allkeys/data", handleAllKeysData)
+	// Studio Operator (role=2) can batch-create channels scoped to their
+	// bound studio. The handler enforces the studio lock; admin+ retain
+	// full freedom. GET /config/batch-models is opened at the same tier
+	// so the operator can see which models will be assigned; POST stays
+	// admin-only so they can't change the default list.
+	api.POST("/channels/batch-create", requireRoleOrStudioOperator(minAdminRole), handleBatchCreateChannels)
+	api.GET("/config/batch-models", requireRoleOrStudioOperator(minAdminRole), handleGetBatchModels)
 
 	adminAPI := api.Group("", requireRole(minAdminRole))
 	adminAPI.GET("/report", handleReport)
@@ -2535,9 +2576,7 @@ func main() {
 	adminAPI.GET("/export/html", handleExportHTML)
 	adminAPI.GET("/keys/data", handleKeysData)
 	adminAPI.POST("/keys/quota", handleSaveQuotas)
-	adminAPI.POST("/channels/batch-create", handleBatchCreateChannels)
 	adminAPI.POST("/channels/batch-priority", handleBatchUpdateChannelPriority)
-	adminAPI.GET("/config/batch-models", handleGetBatchModels)
 	adminAPI.POST("/config/batch-models", handleSetBatchModels)
 	adminAPI.GET("/cache-stats", handleCacheStats)
 	adminAPI.POST("/refresh", handleRefresh)

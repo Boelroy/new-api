@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import Layout from '../components/Layout'
-import { api, ROLE_ADMIN, ROLE_SUPER_ADMIN, ROLE_TESTER, ROLE_USER, type AuthMe, type AuthUser } from '../api'
+import { api, ROLE_ADMIN, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_TESTER, ROLE_USER, type AuthMe, type AuthUser } from '../api'
 
 const ROLE_OPTIONS: { value: number; label: string }[] = [
   { value: ROLE_USER, label: 'User (All Keys only)' },
+  { value: ROLE_STUDIO_OPERATOR, label: 'Studio Operator (batch-create, locked to bound studio)' },
   { value: ROLE_TESTER, label: 'Tester (Key Tester + Provider Testing only)' },
   { value: ROLE_ADMIN, label: 'Admin (no Profit / Provider Testing)' },
   { value: ROLE_SUPER_ADMIN, label: 'Super Admin (all features)' },
@@ -200,9 +201,10 @@ export default function Users() {
             </button>
           </div>
           <p className="text-xs text-gray-400 mt-2">
-            Studio binds a User-role account to channels whose tag matches it.
-            Without a studio binding, a User-role account sees no channels at
-            all. Admin / super admin ignore studio. Add new studios by creating
+            Studio binds a User-role or Studio Operator account to channels
+            whose tag matches it. Without a studio binding, a User sees no
+            channels, and a Studio Operator can't batch-create (returns 400).
+            Admin / super admin ignore studio. Add new studios by creating
             channels with that tag in Key Capacity → Batch create.
           </p>
         </section>
