@@ -92,6 +92,23 @@ const USERS_ITEM: Item = {
   ),
 }
 
+// Remote New-API inspector: super admin only. Lives right after the
+// admin nav items in the super-admin render path below.
+const REMOTE_CHANNELS_ITEM: Item = {
+  to: '/remote-channels',
+  label: 'Remote Channels',
+  icon: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 6h16" />
+      <path d="M4 12h16" />
+      <path d="M4 18h16" />
+      <circle cx="20" cy="6" r="2" fill="currentColor" />
+      <circle cx="4" cy="12" r="2" fill="currentColor" />
+      <circle cx="20" cy="18" r="2" fill="currentColor" />
+    </svg>
+  ),
+}
+
 // Shown only when the server reports r2_configured=true, i.e. R2 is wired up
 // so trace + report artifacts can actually persist.
 const TESTING_ITEM: Item = {
@@ -179,7 +196,7 @@ export default function Sidebar({ open, onClose }: Props) {
     if (role >= ROLE_SUPER_ADMIN) {
       if (showProfit) items = [items[0], PROFIT_ITEM, ...items.slice(1)]
       if (showTesting) items = [...items, TESTING_ITEM]
-      items = [...items, USERS_ITEM]
+      items = [...items, REMOTE_CHANNELS_ITEM, USERS_ITEM]
     }
   } else if (role === ROLE_TESTER) {
     // Tester is scoped to Provider Testing only (shown when R2 is wired up).

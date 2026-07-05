@@ -2531,6 +2531,18 @@ func main() {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_rs_login_attempt_user ON rs_login_attempt(username, attempted_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_rs_login_attempt_ip   ON rs_login_attempt(ip,       attempted_at DESC)`,
+		// Saved remote new-api credentials. access_token is stored as
+		// AES-256-GCM(nonce || ciphertext) base64-encoded, keyed by
+		// SHA-256(jwtSecret). Super admin only.
+		`CREATE TABLE IF NOT EXISTS remote_newapi_profile (
+			id              BIGSERIAL PRIMARY KEY,
+			name            TEXT NOT NULL UNIQUE,
+			host            TEXT NOT NULL,
+			user_id         BIGINT NOT NULL,
+			access_token_enc TEXT NOT NULL,
+			created_at      BIGINT NOT NULL,
+			updated_at      BIGINT NOT NULL
+		)`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
@@ -2598,6 +2610,15 @@ func main() {
 	superAPI.POST("/users", handleUserCreate)
 	superAPI.PATCH("/users/:id", handleUserUpdate)
 	superAPI.DELETE("/users/:id", handleUserDelete)
+
+	// Remote New-API inspector: lets super admin save credentials for
+	// external new-api deployments and pull channel + used_quota data.
+	// Token is AES-GCM encrypted at rest.
+	superAPI.GET("/remote-newapi/profiles", handleRemoteProfileList)
+	superAPI.POST("/remote-newapi/profiles", handleRemoteProfileCreate)
+	superAPI.PATCH("/remote-newapi/profiles/:id", handleRemoteProfileUpdate)
+	superAPI.DELETE("/remote-newapi/profiles/:id", handleRemoteProfileDelete)
+	superAPI.POST("/remote-newapi/channels", handleRemoteFetchChannels)
 
 	// Provider Testing: super_admin or tester role.
 	testingAPI := api.Group("", requireRoleOrTester(minSuperAdminRole))

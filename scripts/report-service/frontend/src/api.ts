@@ -332,6 +332,38 @@ export type AuthUser = {
   updated_at: number
 }
 
+export type RemoteProfile = {
+  id: number
+  name: string
+  host: string
+  user_id: number
+  has_token: boolean
+  created_at: number
+  updated_at: number
+}
+
+export type RemoteChannel = {
+  id: number
+  name: string
+  type: number
+  status: number
+  group: string
+  tag: string
+  priority: number
+  weight: number
+  models: string
+  used_quota: number
+  created_time: number
+}
+
+export type RemoteChannelListResponse = {
+  channels: RemoteChannel[]
+  total: number
+  host: string
+  user_id: number
+  truncated: boolean
+}
+
 export const api = {
   login: (username: string, password: string) =>
     fetch('/api/login', {
@@ -439,6 +471,45 @@ export const api = {
     const qs = new URLSearchParams({ url, key }).toString()
     return request<DetectModelsResponse>(`/api/detect/models?${qs}`)
   },
+
+  // ---- Remote New-API inspector ----
+
+  remoteProfiles: () =>
+    request<{ profiles: RemoteProfile[] }>('/api/remote-newapi/profiles'),
+
+  remoteProfileCreate: (payload: {
+    name: string
+    host: string
+    user_id: number
+    access_token: string
+  }) =>
+    request<RemoteProfile>('/api/remote-newapi/profiles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  remoteProfileUpdate: (
+    id: number,
+    payload: { name?: string; host?: string; user_id?: number; access_token?: string },
+  ) =>
+    request<{ ok: boolean }>(`/api/remote-newapi/profiles/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  remoteProfileDelete: (id: number) =>
+    request<{ ok: boolean }>(`/api/remote-newapi/profiles/${id}`, { method: 'DELETE' }),
+
+  remoteFetchChannels: (
+    payload: { profile_id?: number; host?: string; user_id?: number; access_token?: string; group?: string; status?: string; type?: string; page_size?: number },
+  ) =>
+    request<RemoteChannelListResponse>('/api/remote-newapi/channels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
 
   // ---- Provider Testing ----
 

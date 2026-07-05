@@ -9,6 +9,7 @@ import ProviderTesting from './pages/ProviderTesting'
 import Profit from './pages/Profit'
 import Users from './pages/Users'
 import CacheReport from './pages/CacheReport'
+import RemoteChannels from './pages/RemoteChannels'
 import { api, ROLE_ADMIN, ROLE_SUPER_ADMIN, ROLE_TESTER } from './api'
 
 // RoleGate guards a page against unauthorized roles. While the role is being
@@ -79,6 +80,7 @@ export default function App() {
         <Route path="/testing" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
         <Route path="/testing/:projectId" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
         <Route path="/users" element={<RoleGate min={ROLE_SUPER_ADMIN}><Users /></RoleGate>} />
+        <Route path="/remote-channels" element={<RoleGate min={ROLE_SUPER_ADMIN}><RemoteChannels /></RoleGate>} />
         <Route path="/detect" element={<Navigate to="/testing" replace />} />
         <Route path="/eval" element={<Navigate to="/testing" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />
