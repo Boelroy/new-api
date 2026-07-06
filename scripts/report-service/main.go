@@ -830,18 +830,22 @@ func startDailyRefresh() {
 // ---- Key data ----
 
 type ChannelRow struct {
-	ID            int      `json:"id"`
-	Name          string   `json:"name"`
-	Key           string   `json:"key"`
-	Status        int      `json:"status"`
-	Type          int      `json:"type"`
-	Tag           string   `json:"tag"`
-	Priority      int      `json:"priority"`
-	UsedUSD       float64  `json:"used_usd"`
-	LastHourUSD   float64  `json:"last_hour_usd"`
-	QuotaUSD      *float64 `json:"quota_usd"`
-	UnitPriceCNY  *float64 `json:"unit_price_cny"`
-	Note          string   `json:"note"`
+	ID           int      `json:"id"`
+	Name         string   `json:"name"`
+	Key          string   `json:"key"`
+	Status       int      `json:"status"`
+	Type         int      `json:"type"`
+	Tag          string   `json:"tag"`
+	Priority     int      `json:"priority"`
+	UsedUSD      float64  `json:"used_usd"`
+	LastHourUSD  float64  `json:"last_hour_usd"`
+	// Rpm mirrors newapi's usage-log RPM (count of type=2 rows in the last
+	// 60s). Populated per-channel by queryAllKeys so the client can sum
+	// them into a system-wide real-time total. queryKeyData leaves it 0.
+	Rpm          int      `json:"rpm"`
+	QuotaUSD     *float64 `json:"quota_usd"`
+	UnitPriceCNY *float64 `json:"unit_price_cny"`
+	Note         string   `json:"note"`
 }
 
 type KeySummary struct {
@@ -951,6 +955,7 @@ func queryAllKeys(startTS, endTS int64, studio string) ([]ChannelRow, error) {
 	defer rows.Close()
 
 	channels := make([]ChannelRow, 0)
+	idxMap := make(map[int]int)
 	for rows.Next() {
 		var r ChannelRow
 		var usedQuota int64
@@ -970,7 +975,27 @@ func queryAllKeys(startTS, endTS int64, studio string) ([]ChannelRow, error) {
 		if len(r.Key) > 8 {
 			r.Key = "…" + r.Key[len(r.Key)-8:]
 		}
+		idxMap[r.ID] = len(channels)
 		channels = append(channels, r)
+	}
+
+	// Real-time RPM: count of type=2 rows in the last 60s, grouped by
+	// channel_id. Frontend sums these into a system-wide RPM. Same window
+	// newapi's usage-log page uses.
+	rpmSince := time.Now().Add(-60 * time.Second).Unix()
+	rpmRows, err := db.Query(`SELECT channel_id, COUNT(*) FROM logs WHERE type=2 AND created_at >= $1 GROUP BY channel_id`, rpmSince)
+	if err != nil {
+		return nil, err
+	}
+	defer rpmRows.Close()
+	for rpmRows.Next() {
+		var chID, cnt int
+		if err := rpmRows.Scan(&chID, &cnt); err != nil {
+			return nil, err
+		}
+		if idx, ok := idxMap[chID]; ok {
+			channels[idx].Rpm = cnt
+		}
 	}
 	return channels, nil
 }

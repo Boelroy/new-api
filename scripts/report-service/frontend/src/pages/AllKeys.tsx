@@ -86,6 +86,15 @@ export default function AllKeys() {
 
   useEffect(() => { load(start, end) }, [])
 
+  // Poll every 20s so the RPM column stays live (RPM window on the backend
+  // is 60s, so 20s cadence gives ~3 samples per window). Reset the timer
+  // whenever the date range changes so the follow-up query respects the
+  // new bounds.
+  useEffect(() => {
+    const t = setInterval(() => { void load(start, end) }, 20000)
+    return () => clearInterval(t)
+  }, [start, end])
+
   const handleQuery = () => load(start, end)
   const handleAll = () => { setStart(''); setEnd(''); load() }
 
@@ -94,7 +103,11 @@ export default function AllKeys() {
     const totalQuota = rows.reduce((s, r) => s + (r.quota_usd ?? 0), 0)
     const totalRemaining = rows.reduce((s, r) => r.quota_usd != null ? s + Math.max(0, r.quota_usd - r.used_usd) : s, 0)
     const unpriced = rows.filter(r => r.unit_price_cny == null).length
-    return { count: rows.length, totalUsed, totalQuota, totalRemaining, unpriced }
+    // System-wide real-time RPM: sum of per-channel RPMs the backend
+    // computed over the last 60s window. Studio-scoped naturally: the
+    // response already only contains channels visible to the caller.
+    const totalRpm = rows.reduce((s, r) => s + (r.rpm ?? 0), 0)
+    return { count: rows.length, totalUsed, totalQuota, totalRemaining, unpriced, totalRpm }
   }, [rows])
 
   const filteredRows = useMemo(() => {
@@ -169,6 +182,7 @@ export default function AllKeys() {
     >
       <SummaryCards cards={[
         { label: 'Key 总数', value: String(summary.count), color: 'text-blue-600' },
+        { label: '实时 RPM', value: String(summary.totalRpm), color: summary.totalRpm > 0 ? 'text-emerald-600' : 'text-gray-400' },
         { label: '未配单价', value: String(summary.unpriced), color: 'text-amber-600' },
         { label: '总已用', value: '$' + summary.totalUsed.toFixed(2), color: 'text-rose-600' },
         { label: '总额度', value: summary.totalQuota ? '$' + summary.totalQuota.toFixed(2) : '未配置' },

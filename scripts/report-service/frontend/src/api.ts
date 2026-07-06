@@ -31,6 +31,9 @@ export type ChannelRow = {
   priority: number
   used_usd: number
   last_hour_usd: number
+  // Real-time RPM: count of type=2 log rows in the last 60s. Populated by
+  // /api/allkeys/data; other endpoints leave it as 0.
+  rpm: number
   quota_usd: number | null
   unit_price_cny: number | null
   note: string
