@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +18,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -277,19 +281,101 @@ func handleRemoteProfileDelete(c *gin.Context) {
 
 // remoteChannel is a lean projection of new-api's Channel struct. Fields
 // that don't roundtrip well (nested json blobs) are omitted; used_quota
-// is what we mostly care about here.
+// is what we mostly care about here. QuotaUSD/Note come from the local
+// remote_channel_meta table and are merged in on read.
 type remoteChannel struct {
-	ID          int64  `json:"id"`
-	Name        string `json:"name"`
-	Type        int    `json:"type"`
-	Status      int    `json:"status"`
-	Group       string `json:"group"`
-	Tag         string `json:"tag"`
-	Priority    int64  `json:"priority"`
-	Weight      int64  `json:"weight"`
-	Models      string `json:"models"`
-	UsedQuota   int64  `json:"used_quota"`
-	CreatedTime int64  `json:"created_time"`
+	ID          int64    `json:"id"`
+	Name        string   `json:"name"`
+	Type        int      `json:"type"`
+	Status      int      `json:"status"`
+	Group       string   `json:"group"`
+	Tag         string   `json:"tag"`
+	Priority    int64    `json:"priority"`
+	Weight      int64    `json:"weight"`
+	Models      string   `json:"models"`
+	UsedQuota   int64    `json:"used_quota"`
+	CreatedTime int64    `json:"created_time"`
+	QuotaUSD    *float64 `json:"quota_usd,omitempty"`
+	Note        string   `json:"note,omitempty"`
+}
+
+// remoteChannelMeta is the local operator-only overlay for a remote channel.
+type remoteChannelMeta struct {
+	QuotaUSD  *float64
+	Note      string
+	UpdatedAt int64
+}
+
+// loadMetaMap fetches operator metadata for a set of channels of one profile.
+func loadMetaMap(profileID int64, channelIDs []int64) (map[int64]remoteChannelMeta, error) {
+	out := make(map[int64]remoteChannelMeta)
+	if len(channelIDs) == 0 {
+		return out, nil
+	}
+	// Build placeholders $2..$N+1 (profile_id occupies $1) — keeps the query
+	// portable to any db/sql driver that expects numbered params.
+	placeholders := make([]string, 0, len(channelIDs))
+	args := make([]any, 0, len(channelIDs)+1)
+	args = append(args, profileID)
+	for i, id := range channelIDs {
+		placeholders = append(placeholders, "$"+strconv.Itoa(i+2))
+		args = append(args, id)
+	}
+	q := `SELECT remote_channel_id, quota_usd, note, updated_at
+	      FROM remote_channel_meta
+	      WHERE profile_id=$1 AND remote_channel_id IN (` + strings.Join(placeholders, ",") + `)`
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var chID int64
+		var quota sql.NullFloat64
+		var note string
+		var updatedAt int64
+		if err := rows.Scan(&chID, &quota, &note, &updatedAt); err != nil {
+			return nil, err
+		}
+		m := remoteChannelMeta{Note: note, UpdatedAt: updatedAt}
+		if quota.Valid {
+			v := quota.Float64
+			m.QuotaUSD = &v
+		}
+		out[chID] = m
+	}
+	return out, nil
+}
+
+func upsertMeta(profileID, channelID int64, quotaUSD *float64, note string) error {
+	now := time.Now().Unix()
+	// Try UPDATE first; if 0 rows, INSERT. Portable to any driver.
+	res, err := db.Exec(
+		`UPDATE remote_channel_meta SET quota_usd=$1, note=$2, updated_at=$3
+		 WHERE profile_id=$4 AND remote_channel_id=$5`,
+		quotaUSD, note, now, profileID, channelID,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		return nil
+	}
+	_, err = db.Exec(
+		`INSERT INTO remote_channel_meta (profile_id, remote_channel_id, quota_usd, note, updated_at)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		profileID, channelID, quotaUSD, note, now,
+	)
+	return err
+}
+
+func deleteMeta(profileID, channelID int64) error {
+	_, err := db.Exec(
+		`DELETE FROM remote_channel_meta WHERE profile_id=$1 AND remote_channel_id=$2`,
+		profileID, channelID,
+	)
+	return err
 }
 
 // remoteChannelListResp mirrors the shape returned by new-api's
@@ -342,6 +428,97 @@ func resolveProfile(c *gin.Context, body struct {
 	return host, body.UserID, strings.TrimSpace(body.AccessToken), nil
 }
 
+// remoteEnvelope matches new-api's standard `{success, message, data}` shape.
+type remoteEnvelope struct {
+	Success bool            `json:"success"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data"`
+}
+
+// remoteDoJSON performs an authenticated HTTP call against a remote new-api.
+// On 2xx + success=true it returns the raw `data` payload. On any other
+// outcome it returns a wrapped error including a snippet of the body.
+func remoteDoJSON(ctx context.Context, method, host, path, token string, userID int64, query url.Values, body any) (json.RawMessage, error) {
+	endpoint := host + path
+	if query != nil && len(query) > 0 {
+		if strings.Contains(endpoint, "?") {
+			endpoint += "&" + query.Encode()
+		} else {
+			endpoint += "?" + query.Encode()
+		}
+	}
+	var reader io.Reader
+	if body != nil {
+		buf, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("marshal body: %v", err)
+		}
+		reader = bytes.NewReader(buf)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", token)
+	req.Header.Set("New-Api-User", strconv.FormatInt(userID, 10))
+	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024*1024))
+	if err != nil {
+		return nil, fmt.Errorf("read body: %v", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		snippet := strings.TrimSpace(string(raw))
+		if len(snippet) > 200 {
+			snippet = snippet[:200] + "…"
+		}
+		return nil, fmt.Errorf("remote returned %d: %s", resp.StatusCode, snippet)
+	}
+	var env remoteEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, fmt.Errorf("decode envelope: %v", err)
+	}
+	if !env.Success {
+		return nil, fmt.Errorf("remote: %s", env.Message)
+	}
+	return env.Data, nil
+}
+
+// loadRemoteProfileByID hydrates saved credentials for a profile row. Never
+// returns the ciphertext, only the plaintext token.
+func loadRemoteProfileByID(profileID int64) (host string, userID int64, token string, err error) {
+	var enc string
+	row := db.QueryRow(
+		`SELECT host, user_id, access_token_enc FROM remote_newapi_profile WHERE id=$1`,
+		profileID,
+	)
+	if err = row.Scan(&host, &userID, &enc); err != nil {
+		return "", 0, "", fmt.Errorf("profile not found: %v", err)
+	}
+	token, err = decryptRemoteToken(enc)
+	if err != nil {
+		return "", 0, "", fmt.Errorf("decrypt token: %v", err)
+	}
+	return host, userID, token, nil
+}
+
+// keySha8 returns the first 8 hex chars of SHA256(key). Used as a
+// deterministic, low-entropy tag we can embed in the remote channel `name`
+// so we can reverse-lookup the newly created channel_id via /channel/search
+// without ever transmitting the raw key over the URL.
+func keySha8(key string) string {
+	h := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(h[:])[:8]
+}
+
 // fetchRemoteChannelPage calls one page of GET /api/channel/ on the
 // remote and returns the parsed items + reported total.
 func fetchRemoteChannelPage(ctx context.Context, host, token string, userID int64, page, pageSize int, filters map[string]string) ([]remoteChannel, int64, error) {
@@ -354,38 +531,9 @@ func fetchRemoteChannelPage(ctx context.Context, host, token string, userID int6
 			q.Set(k, v)
 		}
 	}
-	endpoint := host + "/api/channel/?" + q.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/channel/", token, userID, q, nil)
 	if err != nil {
 		return nil, 0, err
-	}
-	req.Header.Set("Authorization", token)
-	req.Header.Set("New-Api-User", strconv.FormatInt(userID, 10))
-	req.Header.Set("Accept", "application/json")
-
-	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, 0, fmt.Errorf("http: %v", err)
-	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024*1024))
-	if err != nil {
-		return nil, 0, fmt.Errorf("read body: %v", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		snippet := strings.TrimSpace(string(raw))
-		if len(snippet) > 200 {
-			snippet = snippet[:200] + "…"
-		}
-		return nil, 0, fmt.Errorf("remote returned %d: %s", resp.StatusCode, snippet)
-	}
-	var envelope remoteChannelListResp
-	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return nil, 0, fmt.Errorf("decode envelope: %v", err)
-	}
-	if !envelope.Success {
-		return nil, 0, fmt.Errorf("remote: %s", envelope.Message)
 	}
 	// Modern new-api returns { items: [...], total: N, page: p, page_size: n }.
 	var paged struct {
@@ -394,20 +542,21 @@ func fetchRemoteChannelPage(ctx context.Context, host, token string, userID int6
 		Page     int             `json:"page"`
 		PageSize int             `json:"page_size"`
 	}
-	if err := json.Unmarshal(envelope.Data, &paged); err == nil && paged.Items != nil {
+	if err := json.Unmarshal(data, &paged); err == nil && paged.Items != nil {
 		return paged.Items, paged.Total, nil
 	}
 	// Legacy fallback: bare array.
 	var arr []remoteChannel
-	if err := json.Unmarshal(envelope.Data, &arr); err != nil {
+	if err := json.Unmarshal(data, &arr); err != nil {
 		return nil, 0, fmt.Errorf("decode data: %v", err)
 	}
 	return arr, int64(len(arr)), nil
 }
 
 // handleRemoteFetchChannels iterates the remote's paginated channel list
-// exhaustively (up to a cap) and returns the flat list. The remote may
-// have thousands of channels; we cap at 5000 to avoid runaway calls.
+// exhaustively (up to a cap) and returns the flat list merged with local
+// operator metadata (quota_usd/note). The remote may have thousands of
+// channels; we cap at 5000 to avoid runaway calls.
 func handleRemoteFetchChannels(c *gin.Context) {
 	var body struct {
 		ProfileID   int64  `json:"profile_id,omitempty"`
@@ -452,8 +601,8 @@ func handleRemoteFetchChannels(c *gin.Context) {
 		if err != nil {
 			// Return whatever we have so the caller can at least see partial data.
 			c.JSON(http.StatusBadGateway, gin.H{
-				"error":        err.Error(),
-				"partial_data": all,
+				"error":         err.Error(),
+				"partial_data":  all,
 				"pages_fetched": page - 1,
 			})
 			return
@@ -470,6 +619,24 @@ func handleRemoteFetchChannels(c *gin.Context) {
 		}
 	}
 
+	// Merge operator meta (quota_usd/note) only for saved profiles — ad-hoc
+	// requests (host+token typed in place) have no profile_id to key off.
+	if body.ProfileID > 0 && len(all) > 0 {
+		ids := make([]int64, len(all))
+		for i, ch := range all {
+			ids[i] = ch.ID
+		}
+		metaMap, err := loadMetaMap(body.ProfileID, ids)
+		if err == nil {
+			for i := range all {
+				if m, ok := metaMap[all[i].ID]; ok {
+					all[i].QuotaUSD = m.QuotaUSD
+					all[i].Note = m.Note
+				}
+			}
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"channels":  all,
 		"total":     total,
@@ -477,4 +644,475 @@ func handleRemoteFetchChannels(c *gin.Context) {
 		"user_id":   userID,
 		"truncated": len(all) < int(total) && total > 0,
 	})
+}
+
+// ---- Handler: single-channel GET (fresh used_quota after edit) ----
+
+// handleRemoteChannelGet returns one channel from the remote, plus its local
+// operator meta. Handy for refreshing a single row after an edit without
+// re-pulling the whole list.
+func handleRemoteChannelGet(c *gin.Context) {
+	profileID, err := strconv.ParseInt(c.Query("profile_id"), 10, 64)
+	if err != nil || profileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	channelID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || channelID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid channel id"})
+		return
+	}
+	host, userID, token, err := loadRemoteProfileByID(profileID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
+	defer cancel()
+	data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/channel/"+strconv.FormatInt(channelID, 10), token, userID, nil, nil)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	var ch remoteChannel
+	if err := json.Unmarshal(data, &ch); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "decode: " + err.Error()})
+		return
+	}
+	if metaMap, err := loadMetaMap(profileID, []int64{ch.ID}); err == nil {
+		if m, ok := metaMap[ch.ID]; ok {
+			ch.QuotaUSD = m.QuotaUSD
+			ch.Note = m.Note
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"channel": ch})
+}
+
+// ---- Handler: batch-create channels on the remote ----
+
+// remoteChannelCreateItem is one entry in the batch upload payload.
+type remoteChannelCreateItem struct {
+	Key      string   `json:"key"`
+	QuotaUSD *float64 `json:"quota_usd,omitempty"`
+	Note     string   `json:"note,omitempty"`
+}
+
+// batchCreateResult mirrors what the frontend renders per key.
+type batchCreateResult struct {
+	Key       string `json:"key"`                 // last 8 chars only
+	OK        bool   `json:"ok"`
+	ChannelID int64  `json:"channel_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// handleRemoteChannelCreate uploads a batch of keys to the remote new-api as
+// individual channels (mode=single). Each channel gets a deterministic name
+// suffix (sha8(key)) so we can reverse-lookup the newly assigned id via
+// GET /api/channel/search?keyword=<sha8>. Any per-key operator meta
+// (quota_usd, note) is stored locally against the returned channel id.
+func handleRemoteChannelCreate(c *gin.Context) {
+	var body struct {
+		ProfileID  int64                     `json:"profile_id"`
+		NamePrefix string                    `json:"name_prefix"`
+		Type       int                       `json:"type"`
+		Models     string                    `json:"models"`
+		Group      string                    `json:"group"`
+		Tag        string                    `json:"tag,omitempty"`
+		Priority   int64                     `json:"priority,omitempty"`
+		BaseURL    string                    `json:"base_url,omitempty"`
+		Items      []remoteChannelCreateItem `json:"items"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.ProfileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	if strings.TrimSpace(body.NamePrefix) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name_prefix is required"})
+		return
+	}
+	if len(body.Items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no items provided"})
+		return
+	}
+	if body.Type == 0 {
+		body.Type = 14 // Anthropic default in this project
+	}
+	if strings.TrimSpace(body.Models) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "models is required"})
+		return
+	}
+	if strings.TrimSpace(body.Group) == "" {
+		body.Group = "default"
+	}
+	// Enforce a per-request cap so a runaway UI can't submit thousands.
+	const maxItems = 200
+	if len(body.Items) > maxItems {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("too many items (max %d)", maxItems)})
+		return
+	}
+
+	host, userID, token, err := loadRemoteProfileByID(body.ProfileID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// Give the whole batch a generous window; each item has its own timeout
+	// inside remoteDoJSON.
+	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(60+len(body.Items)*10)*time.Second)
+	defer cancel()
+
+	results := make([]batchCreateResult, 0, len(body.Items))
+	for _, it := range body.Items {
+		key := strings.TrimSpace(it.Key)
+		masked := maskKey(key)
+		if key == "" {
+			results = append(results, batchCreateResult{Key: masked, OK: false, Error: "empty key"})
+			continue
+		}
+		sha := keySha8(key)
+		name := body.NamePrefix + "-" + sha
+
+		// Build the channel payload. Fields not sent stay as new-api defaults.
+		channelBody := gin.H{
+			"type":         body.Type,
+			"key":          key,
+			"name":         name,
+			"status":       1,
+			"models":       body.Models,
+			"group":        body.Group,
+			"priority":     body.Priority,
+			"weight":       0,
+			"created_time": time.Now().Unix(),
+			"channel_info": gin.H{
+				"is_multi_key":            false,
+				"multi_key_size":          0,
+				"multi_key_status_list":   nil,
+				"multi_key_polling_index": 0,
+				"multi_key_mode":          "",
+			},
+		}
+		if body.Tag != "" {
+			channelBody["tag"] = body.Tag
+		}
+		if body.BaseURL != "" {
+			channelBody["base_url"] = body.BaseURL
+		}
+		payload := gin.H{
+			"mode":    "single",
+			"channel": channelBody,
+		}
+		if _, err := remoteDoJSON(ctx, http.MethodPost, host, "/api/channel/", token, userID, nil, payload); err != nil {
+			results = append(results, batchCreateResult{Key: masked, OK: false, Error: err.Error()})
+			continue
+		}
+
+		// Reverse-lookup: search by the sha8 tag we embedded in the name.
+		// remoteDoJSON strips the envelope; response `data` is a bare array.
+		q := url.Values{}
+		q.Set("keyword", sha)
+		q.Set("group", body.Group)
+		data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/channel/search", token, userID, q, nil)
+		if err != nil {
+			// Channel was created but we lost the id. Report partial success so
+			// the operator can retry / manual-fix.
+			results = append(results, batchCreateResult{Key: masked, OK: false, Name: name, Error: "created but search failed: " + err.Error()})
+			continue
+		}
+		var hits []struct {
+			ID   int64  `json:"id"`
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(data, &hits); err != nil {
+			results = append(results, batchCreateResult{Key: masked, OK: false, Name: name, Error: "created but decode search failed"})
+			continue
+		}
+		var matchedID int64
+		for _, h := range hits {
+			if strings.Contains(h.Name, sha) {
+				if h.ID > matchedID {
+					matchedID = h.ID // newest wins if the sha collides across old rows
+				}
+			}
+		}
+		if matchedID == 0 {
+			results = append(results, batchCreateResult{Key: masked, OK: false, Name: name, Error: "created but reverse-lookup returned no match"})
+			continue
+		}
+
+		// Persist operator meta locally. Best-effort — a DB hiccup here doesn't
+		// invalidate the remote create.
+		if it.QuotaUSD != nil || strings.TrimSpace(it.Note) != "" {
+			_ = upsertMeta(body.ProfileID, matchedID, it.QuotaUSD, strings.TrimSpace(it.Note))
+		}
+		results = append(results, batchCreateResult{Key: masked, OK: true, ChannelID: matchedID, Name: name})
+	}
+
+	ok := 0
+	for _, r := range results {
+		if r.OK {
+			ok++
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"results": results, "ok": ok, "total": len(results)})
+}
+
+// maskKey returns "…" + last 8 chars, matching the report page convention.
+func maskKey(k string) string {
+	k = strings.TrimSpace(k)
+	if len(k) <= 8 {
+		return k
+	}
+	return "…" + k[len(k)-8:]
+}
+
+// ---- Handler: update one channel (name/tag/status/priority/group + meta) ----
+
+func handleRemoteChannelUpdate(c *gin.Context) {
+	var body struct {
+		ProfileID int64    `json:"profile_id"`
+		ChannelID int64    `json:"channel_id"`
+		Name      *string  `json:"name,omitempty"`
+		Tag       *string  `json:"tag,omitempty"`
+		Status    *int     `json:"status,omitempty"`
+		Priority  *int64   `json:"priority,omitempty"`
+		Group     *string  `json:"group,omitempty"`
+		Models    *string  `json:"models,omitempty"`
+		QuotaUSD  *float64 `json:"quota_usd,omitempty"`
+		Note      *string  `json:"note,omitempty"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.ProfileID <= 0 || body.ChannelID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id and channel_id are required"})
+		return
+	}
+	host, userID, token, err := loadRemoteProfileByID(body.ProfileID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Any remote-side change? Only call PUT if at least one channel-level
+	// field was provided.
+	remoteChanged := body.Name != nil || body.Tag != nil || body.Status != nil ||
+		body.Priority != nil || body.Group != nil || body.Models != nil
+
+	if remoteChanged {
+		// PUT /api/channel/ expects the full Channel struct. Fetch first so
+		// we can preserve fields we're not editing (avoids blanking type/key/etc).
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
+		defer cancel()
+		data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/channel/"+strconv.FormatInt(body.ChannelID, 10), token, userID, nil, nil)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "fetch current: " + err.Error()})
+			return
+		}
+		// Decode into a generic map so unknown/nested fields (channel_info,
+		// settings, etc.) round-trip untouched.
+		var current map[string]any
+		if err := json.Unmarshal(data, &current); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "decode current: " + err.Error()})
+			return
+		}
+		if body.Name != nil {
+			current["name"] = *body.Name
+		}
+		if body.Tag != nil {
+			current["tag"] = *body.Tag
+		}
+		if body.Status != nil {
+			current["status"] = *body.Status
+		}
+		if body.Priority != nil {
+			current["priority"] = *body.Priority
+		}
+		if body.Group != nil {
+			current["group"] = *body.Group
+		}
+		if body.Models != nil {
+			current["models"] = *body.Models
+		}
+		if _, err := remoteDoJSON(ctx, http.MethodPut, host, "/api/channel/", token, userID, nil, current); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "update: " + err.Error()})
+			return
+		}
+	}
+
+	// Local meta. Only touch if either field is present.
+	if body.QuotaUSD != nil || body.Note != nil {
+		// Merge onto existing meta so we don't clobber a field the caller
+		// didn't send.
+		var quotaUSD *float64
+		var note string
+		if metaMap, err := loadMetaMap(body.ProfileID, []int64{body.ChannelID}); err == nil {
+			if m, ok := metaMap[body.ChannelID]; ok {
+				quotaUSD = m.QuotaUSD
+				note = m.Note
+			}
+		}
+		if body.QuotaUSD != nil {
+			quotaUSD = body.QuotaUSD
+		}
+		if body.Note != nil {
+			note = strings.TrimSpace(*body.Note)
+		}
+		if err := upsertMeta(body.ProfileID, body.ChannelID, quotaUSD, note); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "save meta: " + err.Error()})
+			return
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ---- Handler: delete one channel on the remote + purge local meta ----
+
+func handleRemoteChannelDelete(c *gin.Context) {
+	profileID, err := strconv.ParseInt(c.Query("profile_id"), 10, 64)
+	if err != nil || profileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	channelID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || channelID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid channel id"})
+		return
+	}
+	host, userID, token, err := loadRemoteProfileByID(profileID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
+	defer cancel()
+	if _, err := remoteDoJSON(ctx, http.MethodDelete, host, "/api/channel/"+strconv.FormatInt(channelID, 10), token, userID, nil, nil); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	// Best-effort meta cleanup; a leftover row is harmless but noisy.
+	_ = deleteMeta(profileID, channelID)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ---- Handler: test one key against Anthropic directly ----
+
+// handleRemoteTestKey reuses testSingleKey which hits Anthropic directly and
+// does not touch the remote new-api at all. Kept under /remote-newapi/* so
+// the Remote Channels page can wire it up naturally.
+func handleRemoteTestKey(c *gin.Context) {
+	var body struct {
+		Key   string `json:"key"`
+		Model string `json:"model"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	key := strings.TrimSpace(body.Key)
+	model := strings.TrimSpace(body.Model)
+	if key == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "key is required"})
+		return
+	}
+	if !supportedTestModels[model] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported model"})
+		return
+	}
+	res := testSingleKey(key, model)
+	// The mask matches other endpoints; never echo the raw key back.
+	res.Key = maskKey(key)
+	c.JSON(http.StatusOK, res)
+}
+
+// ---- Handler: last-hour cost per channel (with 5-min in-memory cache) ----
+
+type lastHourEntry struct {
+	quota    int64
+	fetched  time.Time
+}
+
+var (
+	lastHourCache   = make(map[string]lastHourEntry)
+	lastHourCacheMu sync.Mutex
+)
+
+const lastHourTTL = 5 * time.Minute
+
+// handleRemoteChannelLastHour returns quota (raw units) per channel for the
+// last hour, computed from the remote's GET /api/log/stat endpoint. Cached
+// per (profile_id, channel_id) for 5 minutes so refreshing the list doesn't
+// hammer the remote.
+func handleRemoteChannelLastHour(c *gin.Context) {
+	var body struct {
+		ProfileID  int64   `json:"profile_id"`
+		ChannelIDs []int64 `json:"channel_ids"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.ProfileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	if len(body.ChannelIDs) == 0 {
+		c.JSON(http.StatusOK, gin.H{"data": map[string]int64{}})
+		return
+	}
+	const maxIDs = 200
+	if len(body.ChannelIDs) > maxIDs {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("too many channel_ids (max %d)", maxIDs)})
+		return
+	}
+	host, userID, token, err := loadRemoteProfileByID(body.ProfileID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	defer cancel()
+
+	now := time.Now()
+	oneHourAgo := now.Add(-time.Hour)
+
+	out := make(map[string]int64, len(body.ChannelIDs))
+	for _, chID := range body.ChannelIDs {
+		cacheKey := strconv.FormatInt(body.ProfileID, 10) + ":" + strconv.FormatInt(chID, 10)
+		lastHourCacheMu.Lock()
+		entry, ok := lastHourCache[cacheKey]
+		lastHourCacheMu.Unlock()
+		if ok && now.Sub(entry.fetched) < lastHourTTL {
+			out[strconv.FormatInt(chID, 10)] = entry.quota
+			continue
+		}
+		q := url.Values{}
+		q.Set("type", "2") // consume logs only
+		q.Set("channel", strconv.FormatInt(chID, 10))
+		q.Set("start_timestamp", strconv.FormatInt(oneHourAgo.Unix(), 10))
+		q.Set("end_timestamp", strconv.FormatInt(now.Unix(), 10))
+		data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/stat", token, userID, q, nil)
+		if err != nil {
+			// One channel failing shouldn't block the rest — record 0 and press on.
+			out[strconv.FormatInt(chID, 10)] = 0
+			continue
+		}
+		var stat struct {
+			Quota int64 `json:"quota"`
+		}
+		if err := json.Unmarshal(data, &stat); err != nil {
+			out[strconv.FormatInt(chID, 10)] = 0
+			continue
+		}
+		out[strconv.FormatInt(chID, 10)] = stat.Quota
+		lastHourCacheMu.Lock()
+		lastHourCache[cacheKey] = lastHourEntry{quota: stat.Quota, fetched: now}
+		lastHourCacheMu.Unlock()
+	}
+	c.JSON(http.StatusOK, gin.H{"data": out})
 }

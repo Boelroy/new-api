@@ -354,6 +354,9 @@ export type RemoteChannel = {
   models: string
   used_quota: number
   created_time: number
+  // Merged in from the local remote_channel_meta table:
+  quota_usd?: number | null
+  note?: string
 }
 
 export type RemoteChannelListResponse = {
@@ -362,6 +365,55 @@ export type RemoteChannelListResponse = {
   host: string
   user_id: number
   truncated: boolean
+}
+
+export type RemoteChannelCreateItem = {
+  key: string
+  quota_usd?: number | null
+  note?: string
+}
+
+export type RemoteChannelCreateRequest = {
+  profile_id: number
+  name_prefix: string
+  type?: number
+  models: string
+  group?: string
+  tag?: string
+  priority?: number
+  base_url?: string
+  items: RemoteChannelCreateItem[]
+}
+
+export type RemoteChannelCreateResult = {
+  key: string
+  ok: boolean
+  channel_id?: number
+  name?: string
+  error?: string
+}
+
+export type RemoteChannelCreateResponse = {
+  results: RemoteChannelCreateResult[]
+  ok: number
+  total: number
+}
+
+export type RemoteChannelUpdateRequest = {
+  profile_id: number
+  channel_id: number
+  name?: string
+  tag?: string
+  status?: number
+  priority?: number
+  group?: string
+  models?: string
+  quota_usd?: number | null
+  note?: string
+}
+
+export type RemoteChannelLastHourResponse = {
+  data: Record<string, number> // channel_id -> quota (raw units)
 }
 
 export const api = {
@@ -509,6 +561,45 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+    }),
+
+  remoteChannelGet: (profileID: number, channelID: number) =>
+    request<{ channel: RemoteChannel }>(
+      `/api/remote-newapi/channels/${channelID}?profile_id=${profileID}`,
+    ),
+
+  remoteChannelCreate: (payload: RemoteChannelCreateRequest) =>
+    request<RemoteChannelCreateResponse>('/api/remote-newapi/channels/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  remoteChannelUpdate: (payload: RemoteChannelUpdateRequest) =>
+    request<{ ok: boolean }>('/api/remote-newapi/channels', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  remoteChannelDelete: (profileID: number, channelID: number) =>
+    request<{ ok: boolean }>(
+      `/api/remote-newapi/channels/${channelID}?profile_id=${profileID}`,
+      { method: 'DELETE' },
+    ),
+
+  remoteTestKey: (key: string, model: string) =>
+    request<KeyTestResult>('/api/remote-newapi/channels/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, model }),
+    }),
+
+  remoteChannelLastHour: (profileID: number, channelIDs: number[]) =>
+    request<RemoteChannelLastHourResponse>('/api/remote-newapi/channels/last-hour', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile_id: profileID, channel_ids: channelIDs }),
     }),
 
   // ---- Provider Testing ----

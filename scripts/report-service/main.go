@@ -2543,6 +2543,17 @@ func main() {
 			created_at      BIGINT NOT NULL,
 			updated_at      BIGINT NOT NULL
 		)`,
+		// Per-channel operator metadata that does not live on the remote new-api
+		// (额度上限 / 备注). Keyed by (profile_id, remote_channel_id). We keep it
+		// local so remote `tag` retains its original grouping semantics.
+		`CREATE TABLE IF NOT EXISTS remote_channel_meta (
+			profile_id         BIGINT NOT NULL,
+			remote_channel_id  BIGINT NOT NULL,
+			quota_usd          DOUBLE PRECISION,
+			note               TEXT NOT NULL DEFAULT '',
+			updated_at         BIGINT NOT NULL,
+			PRIMARY KEY (profile_id, remote_channel_id)
+		)`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
@@ -2619,6 +2630,12 @@ func main() {
 	superAPI.PATCH("/remote-newapi/profiles/:id", handleRemoteProfileUpdate)
 	superAPI.DELETE("/remote-newapi/profiles/:id", handleRemoteProfileDelete)
 	superAPI.POST("/remote-newapi/channels", handleRemoteFetchChannels)
+	superAPI.GET("/remote-newapi/channels/:id", handleRemoteChannelGet)
+	superAPI.POST("/remote-newapi/channels/create", handleRemoteChannelCreate)
+	superAPI.PATCH("/remote-newapi/channels", handleRemoteChannelUpdate)
+	superAPI.DELETE("/remote-newapi/channels/:id", handleRemoteChannelDelete)
+	superAPI.POST("/remote-newapi/channels/test", handleRemoteTestKey)
+	superAPI.POST("/remote-newapi/channels/last-hour", handleRemoteChannelLastHour)
 
 	// Provider Testing: super_admin or tester role.
 	testingAPI := api.Group("", requireRoleOrTester(minSuperAdminRole))
