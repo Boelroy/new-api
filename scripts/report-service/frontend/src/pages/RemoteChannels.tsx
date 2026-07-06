@@ -164,6 +164,39 @@ export default function RemoteChannels() {
 
   useEffect(() => { void reloadProfiles() }, [reloadProfiles])
 
+  // Load cached channel list from local mirror as soon as a profile is
+  // selected (including on page reload). Purely local — no remote hit.
+  // The user can still click "Fetch channels" to force a live pull.
+  useEffect(() => {
+    if (!selectedID) {
+      setChannels([])
+      setMeta(null)
+      setRefreshedAt('')
+      return
+    }
+    void (async () => {
+      try {
+        const res = await api.remoteCachedChannels(selectedID)
+        setChannels(res.channels)
+        setMeta({ total: res.total, truncated: false, host: '' })
+        if (res.cached_at > 0) {
+          setRefreshedAt(new Date(res.cached_at * 1000).toLocaleTimeString('zh-CN') + ' · cached')
+        } else {
+          setRefreshedAt('')
+        }
+        // Sparkline / test / last-hour data belongs to a specific live
+        // fetch — reset when we're just showing the cached mirror.
+        setLastHour({})
+        setTestMsg({})
+        setExpandedRow(null)
+        // Pull the previous-snapshot baseline so the Δ column renders.
+        void loadSnapshotBaseline(selectedID)
+      } catch (e) {
+        console.warn('cached load failed', e)
+      }
+    })()
+  }, [selectedID])
+
   const openCreate = () => {
     setEditingID(0)
     setFormName('')

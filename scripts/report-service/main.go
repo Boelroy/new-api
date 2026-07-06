@@ -2593,6 +2593,26 @@ func main() {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_remote_snapshot_by_time
 		   ON remote_channel_snapshot(profile_id, captured_at DESC)`,
+		// Current mirror of the remote's channel list — one row per channel,
+		// UPSERTed on every sync (both cron and interactive). Lets the page
+		// render immediately on refresh without hitting the remote, and
+		// survives full report-service restarts.
+		`CREATE TABLE IF NOT EXISTS remote_channel_current (
+			profile_id         BIGINT NOT NULL,
+			remote_channel_id  BIGINT NOT NULL,
+			name               TEXT   NOT NULL DEFAULT '',
+			type               INT    NOT NULL DEFAULT 0,
+			status             INT    NOT NULL DEFAULT 0,
+			"group"            TEXT   NOT NULL DEFAULT '',
+			tag                TEXT   NOT NULL DEFAULT '',
+			priority           BIGINT NOT NULL DEFAULT 0,
+			weight             BIGINT NOT NULL DEFAULT 0,
+			models             TEXT   NOT NULL DEFAULT '',
+			used_quota         BIGINT NOT NULL DEFAULT 0,
+			created_time       BIGINT NOT NULL DEFAULT 0,
+			updated_at         BIGINT NOT NULL,
+			PRIMARY KEY (profile_id, remote_channel_id)
+		)`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
@@ -2678,6 +2698,7 @@ func main() {
 	superAPI.POST("/remote-newapi/channels/test", handleRemoteTestKey)
 	superAPI.POST("/remote-newapi/channels/last-hour", handleRemoteChannelLastHour)
 	superAPI.GET("/remote-newapi/snapshots", handleRemoteSnapshotHistory)
+	superAPI.GET("/remote-newapi/channels/cached", handleRemoteCachedChannels)
 
 	// Provider Testing: super_admin or tester role.
 	testingAPI := api.Group("", requireRoleOrTester(minSuperAdminRole))

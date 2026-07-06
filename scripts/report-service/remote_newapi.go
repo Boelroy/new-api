@@ -644,12 +644,17 @@ func handleRemoteFetchChannels(c *gin.Context) {
 				}
 			}
 		}
-		// Interactive fetch also feeds the snapshot table so the sparkline
-		// gets a fresh point whenever a human clicks. Written async so a
-		// slow DB doesn't add latency to the HTTP response.
+		// Interactive fetch also feeds both mirrors:
+		//   • remote_channel_snapshot — time-series point for the sparkline.
+		//   • remote_channel_current  — mirror of the live list so page
+		//     reloads render immediately without another remote hit.
+		// Both writes are async so a slow DB doesn't add HTTP latency.
 		go func(pid int64, snapshot []remoteChannel) {
 			if err := writeRemoteSnapshot(pid, snapshot); err != nil {
 				log.Printf("[remote-snapshot] interactive write for profile %d failed: %v", pid, err)
+			}
+			if err := upsertRemoteCurrent(pid, snapshot); err != nil {
+				log.Printf("[remote-current] interactive upsert for profile %d failed: %v", pid, err)
 			}
 		}(body.ProfileID, all)
 	}
@@ -703,6 +708,126 @@ func writeRemoteSnapshot(profileID int64, channels []remoteChannel) error {
 			return fmt.Errorf("insert snapshot: %v", err)
 		}
 	}
+	return tx.Commit()
+}
+
+// upsertRemoteCurrent writes the full current channel state into
+// remote_channel_current: one row per channel. Channels present in the
+// table but absent from `channels` are deleted, so the local mirror stays
+// exactly in sync with what the remote returned.
+//
+// Only call this on a COMPLETE fetch (all pages loaded without error) —
+// otherwise a truncated result would delete rows for channels that still
+// exist but weren't in the partial response.
+func upsertRemoteCurrent(profileID int64, channels []remoteChannel) error {
+	if profileID <= 0 {
+		return nil
+	}
+	now := time.Now().Unix()
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// UPSERT in chunks. Each row uses 12 params.
+	const chunk = 200
+	for start := 0; start < len(channels); start += chunk {
+		end := start + chunk
+		if end > len(channels) {
+			end = len(channels)
+		}
+		batch := channels[start:end]
+		args := make([]any, 0, len(batch)*12)
+		valuesFrag := make([]string, 0, len(batch))
+		for i, ch := range batch {
+			b := i * 12
+			valuesFrag = append(valuesFrag, fmt.Sprintf(
+				"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+				b+1, b+2, b+3, b+4, b+5, b+6, b+7, b+8, b+9, b+10, b+11, b+12,
+			))
+			args = append(args,
+				profileID, ch.ID, ch.Name, ch.Type, ch.Status,
+				ch.Group, ch.Tag, ch.Priority, ch.Weight, ch.Models,
+				ch.UsedQuota, ch.CreatedTime,
+			)
+		}
+		q := `INSERT INTO remote_channel_current
+		      (profile_id, remote_channel_id, name, type, status, "group", tag,
+		       priority, weight, models, used_quota, created_time, updated_at)
+		      VALUES ` + strings.Join(valuesFrag, ",")
+		// Append updated_at as the last extra param and rewrite the trailing
+		// close-paren — simpler: use a fixed updated_at column set to now via
+		// COALESCE in ON CONFLICT below. To avoid two SQL variants, just
+		// include updated_at in the row-level values.
+		q = strings.Replace(q,
+			") VALUES ",
+			", updated_at) VALUES ",
+			-1) // no-op — we already have updated_at in the column list
+		// Instead: build columns without updated_at, then upsert with a
+		// literal `updated_at=$N` where N is the last param. We tweak by
+		// appending ",<now>" to each tuple. Rewrite:
+		_ = q
+		// Rebuild the query properly with updated_at baked into each row:
+		args = args[:0]
+		valuesFrag = valuesFrag[:0]
+		for i, ch := range batch {
+			b := i * 13
+			valuesFrag = append(valuesFrag, fmt.Sprintf(
+				"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+				b+1, b+2, b+3, b+4, b+5, b+6, b+7, b+8, b+9, b+10, b+11, b+12, b+13,
+			))
+			args = append(args,
+				profileID, ch.ID, ch.Name, ch.Type, ch.Status,
+				ch.Group, ch.Tag, ch.Priority, ch.Weight, ch.Models,
+				ch.UsedQuota, ch.CreatedTime, now,
+			)
+		}
+		q = `INSERT INTO remote_channel_current
+		     (profile_id, remote_channel_id, name, type, status, "group", tag,
+		      priority, weight, models, used_quota, created_time, updated_at)
+		     VALUES ` + strings.Join(valuesFrag, ",") + `
+		     ON CONFLICT (profile_id, remote_channel_id) DO UPDATE SET
+		       name         = EXCLUDED.name,
+		       type         = EXCLUDED.type,
+		       status       = EXCLUDED.status,
+		       "group"      = EXCLUDED."group",
+		       tag          = EXCLUDED.tag,
+		       priority     = EXCLUDED.priority,
+		       weight       = EXCLUDED.weight,
+		       models       = EXCLUDED.models,
+		       used_quota   = EXCLUDED.used_quota,
+		       created_time = EXCLUDED.created_time,
+		       updated_at   = EXCLUDED.updated_at`
+		if _, err := tx.Exec(q, args...); err != nil {
+			return fmt.Errorf("upsert current: %v", err)
+		}
+	}
+
+	// Reconcile: delete rows for channels that are no longer on the remote.
+	// Use `NOT IN (…)` since the channel-id set is small enough (<5000) to
+	// fit in a single statement comfortably.
+	if len(channels) > 0 {
+		ids := make([]string, len(channels))
+		for i, ch := range channels {
+			ids[i] = strconv.FormatInt(ch.ID, 10)
+		}
+		q := fmt.Sprintf(
+			`DELETE FROM remote_channel_current
+			  WHERE profile_id=$1 AND remote_channel_id NOT IN (%s)`,
+			strings.Join(ids, ","),
+		)
+		if _, err := tx.Exec(q, profileID); err != nil {
+			return fmt.Errorf("reconcile delete: %v", err)
+		}
+	} else {
+		// Empty result — wipe everything for this profile.
+		if _, err := tx.Exec(`DELETE FROM remote_channel_current WHERE profile_id=$1`, profileID); err != nil {
+			return fmt.Errorf("reconcile wipe: %v", err)
+		}
+	}
+
 	return tx.Commit()
 }
 
@@ -807,20 +932,26 @@ func syncAllRemoteProfilesOnce() {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
-			channels, _, err := iterateRemoteChannels(ctx, p.host, token, p.userID, 100, nil)
-			if err != nil {
-				log.Printf("[remote-snapshot] fetch profile %d (%s): %v", p.id, p.host, err)
-				// Still write whatever we got — a partial snapshot beats nothing
-				// when a large remote hits a mid-pagination timeout.
+			channels, _, fetchErr := iterateRemoteChannels(ctx, p.host, token, p.userID, 100, nil)
+			if fetchErr != nil {
+				log.Printf("[remote-snapshot] fetch profile %d (%s): %v", p.id, p.host, fetchErr)
+				// Partial snapshot is still worth appending (time series
+				// tolerates gaps), but DO NOT reconcile current — a
+				// truncated list would delete rows for channels that
+				// actually still exist upstream.
 			}
 			if len(channels) == 0 {
 				return
 			}
 			if err := writeRemoteSnapshot(p.id, channels); err != nil {
 				log.Printf("[remote-snapshot] write profile %d: %v", p.id, err)
-				return
 			}
-			log.Printf("[remote-snapshot] profile %d: wrote %d rows", p.id, len(channels))
+			if fetchErr == nil {
+				if err := upsertRemoteCurrent(p.id, channels); err != nil {
+					log.Printf("[remote-current] upsert profile %d: %v", p.id, err)
+				}
+			}
+			log.Printf("[remote-snapshot] profile %d: wrote %d rows (complete=%t)", p.id, len(channels), fetchErr == nil)
 		}(p)
 	}
 }
@@ -853,6 +984,77 @@ func startRemoteSnapshotPrune() {
 // specific channel (profile_id + channel_id + since) or all channels of a
 // profile at a coarser aggregation (used by the "total burn" chart). Keep
 // the API narrow — sparkline / bulk shape only.
+// handleRemoteCachedChannels reads the locally-mirrored channel list from
+// remote_channel_current (kept fresh by the sync loop + interactive fetch).
+// No remote call — this is what powers the "refresh brings you back to
+// where you were" behaviour.
+//
+// Returns the same channel shape as handleRemoteFetchChannels, plus a
+// `cached_at` epoch (the freshest updated_at across all rows for the
+// profile) so the UI can label the view as "cached · N min ago".
+func handleRemoteCachedChannels(c *gin.Context) {
+	profileID, err := strconv.ParseInt(c.Query("profile_id"), 10, 64)
+	if err != nil || profileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	rows, err := db.Query(
+		`SELECT remote_channel_id, name, type, status, "group", tag,
+		        priority, weight, models, used_quota, created_time, updated_at
+		   FROM remote_channel_current
+		  WHERE profile_id = $1
+		  ORDER BY remote_channel_id ASC`,
+		profileID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	all := make([]remoteChannel, 0)
+	var cachedAt int64
+	for rows.Next() {
+		var ch remoteChannel
+		var updatedAt int64
+		if err := rows.Scan(
+			&ch.ID, &ch.Name, &ch.Type, &ch.Status, &ch.Group, &ch.Tag,
+			&ch.Priority, &ch.Weight, &ch.Models, &ch.UsedQuota, &ch.CreatedTime, &updatedAt,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if updatedAt > cachedAt {
+			cachedAt = updatedAt
+		}
+		all = append(all, ch)
+	}
+
+	// Merge operator meta (quota_usd / note).
+	if len(all) > 0 {
+		ids := make([]int64, len(all))
+		for i, ch := range all {
+			ids[i] = ch.ID
+		}
+		metaMap, err := loadMetaMap(profileID, ids)
+		if err == nil {
+			for i := range all {
+				if m, ok := metaMap[all[i].ID]; ok {
+					all[i].QuotaUSD = m.QuotaUSD
+					all[i].Note = m.Note
+				}
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"channels":  all,
+		"total":     int64(len(all)),
+		"cached_at": cachedAt,
+		"cached":    true,
+	})
+}
+
 func handleRemoteSnapshotHistory(c *gin.Context) {
 	profileID, err := strconv.ParseInt(c.Query("profile_id"), 10, 64)
 	if err != nil || profileID <= 0 {

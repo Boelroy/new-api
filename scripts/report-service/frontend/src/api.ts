@@ -557,6 +557,14 @@ export const api = {
   remoteProfileDelete: (id: number) =>
     request<{ ok: boolean }>(`/api/remote-newapi/profiles/${id}`, { method: 'DELETE' }),
 
+  // Read cached channel list from local mirror (remote_channel_current).
+  // No hit to the remote — used to render the page immediately on refresh
+  // or profile switch. Content freshness comes from the cron sync loop.
+  remoteCachedChannels: (profileID: number) =>
+    request<{ channels: RemoteChannel[]; total: number; cached_at: number; cached: boolean }>(
+      `/api/remote-newapi/channels/cached?profile_id=${profileID}`,
+    ),
+
   remoteFetchChannels: (
     payload: { profile_id?: number; host?: string; user_id?: number; access_token?: string; group?: string; status?: string; type?: string; page_size?: number },
   ) =>
