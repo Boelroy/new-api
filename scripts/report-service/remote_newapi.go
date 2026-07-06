@@ -1177,10 +1177,14 @@ func handleRemoteChannelGet(c *gin.Context) {
 // ---- Handler: batch-create channels on the remote ----
 
 // remoteChannelCreateItem is one entry in the batch upload payload.
+// Priority is optional — when set, overrides the batch-level priority
+// so callers can implement per-key sequential priorities (each key one
+// step below or above the previous).
 type remoteChannelCreateItem struct {
 	Key      string   `json:"key"`
 	QuotaUSD *float64 `json:"quota_usd,omitempty"`
 	Note     string   `json:"note,omitempty"`
+	Priority *int64   `json:"priority,omitempty"`
 }
 
 // batchCreateResult mirrors what the frontend renders per key.
@@ -1263,6 +1267,14 @@ func handleRemoteChannelCreate(c *gin.Context) {
 		sha := keySha8(key)
 		name := body.NamePrefix + "-" + sha
 
+		// Per-item priority (from sequential-priority mode) overrides the
+		// batch-level default. Same 1-minimum clamp as BatchCreatePanel.
+		itemPriority := body.Priority
+		if it.Priority != nil {
+			if *it.Priority > 0 {
+				itemPriority = *it.Priority
+			}
+		}
 		// Build the channel payload. Fields not sent stay as new-api defaults.
 		channelBody := gin.H{
 			"type":         body.Type,
@@ -1271,7 +1283,7 @@ func handleRemoteChannelCreate(c *gin.Context) {
 			"status":       1,
 			"models":       body.Models,
 			"group":        body.Group,
-			"priority":     body.Priority,
+			"priority":     itemPriority,
 			"weight":       0,
 			"created_time": time.Now().Unix(),
 			"channel_info": gin.H{

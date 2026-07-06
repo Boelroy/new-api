@@ -109,6 +109,11 @@ export default function RemoteChannels() {
   const [seriesCache, setSeriesCache] = useState<Record<number, { t: number; q: number }[]>>({})
   const [seriesLoading, setSeriesLoading] = useState<number | null>(null)
 
+  // Date filter: client-side by channel.created_time. Empty = no bound on
+  // that side. Applied to the table + summary + CSV export.
+  const [filterStart, setFilterStart] = useState('')
+  const [filterEnd, setFilterEnd] = useState('')
+
   // Create / edit form. `editingID = 0` means we're creating a new profile.
   const [formOpen, setFormOpen] = useState(false)
   const [editingID, setEditingID] = useState<number | null>(null)
@@ -125,6 +130,11 @@ export default function RemoteChannels() {
   const [batchGroup, setBatchGroup] = useState('default')
   const [batchTag, setBatchTag] = useState('')
   const [batchPriority, setBatchPriority] = useState('')
+  // Sequential-priority mode: same UX as BatchCreatePanel.
+  //   same → all keys share `batchPriority`
+  //   desc → key[i] = batchPriority − i (higher priority up front)
+  //   asc  → key[i] = batchPriority + i
+  const [batchPrioMode, setBatchPrioMode] = useState<'same' | 'desc' | 'asc'>('same')
   const [batchModels, setBatchModels] = useState(DEFAULT_ANTHROPIC_MODELS)
   const [batchInput, setBatchInput] = useState('')
   const [batchBusy, setBatchBusy] = useState(false)
@@ -364,14 +374,14 @@ export default function RemoteChannels() {
     setBatchErr(null)
     if (!batchPrefix.trim()) return setBatchErr('name_prefix is required')
     if (!batchModels.trim()) return setBatchErr('models is required')
-    const items: { key: string; quota_usd?: number; note?: string }[] = []
+    const items: { key: string; quota_usd?: number; note?: string; priority?: number }[] = []
     for (const raw of batchInput.split('\n')) {
       const t = raw.trim()
       if (!t || t.startsWith('#')) continue
       const parts = t.split(/[\s,]+/)
       const key = parts[0]
       if (!key) continue
-      const item: { key: string; quota_usd?: number; note?: string } = { key }
+      const item: { key: string; quota_usd?: number; note?: string; priority?: number } = { key }
       if (parts[1]) {
         const q = parseFloat(parts[1])
         if (!isNaN(q) && q > 0) item.quota_usd = q
@@ -382,7 +392,20 @@ export default function RemoteChannels() {
       items.push(item)
     }
     if (items.length === 0) return setBatchErr('未解析到有效行')
-    const priority = batchPriority.trim() ? parseInt(batchPriority.trim(), 10) : undefined
+
+    const basePriority = batchPriority.trim() ? parseInt(batchPriority.trim(), 10) : NaN
+    // In 'same' mode we pass the priority at batch level and every item
+    // inherits it. In sequential modes we compute per-item priority so the
+    // backend applies each independently.
+    let batchLevelPriority: number | undefined
+    if (!isNaN(basePriority) && basePriority > 0) {
+      if (batchPrioMode === 'same') {
+        batchLevelPriority = basePriority
+      } else {
+        const step = batchPrioMode === 'desc' ? -1 : 1
+        items.forEach((it, i) => { it.priority = Math.max(1, basePriority + i * step) })
+      }
+    }
     setBatchBusy(true)
     try {
       const res = await api.remoteChannelCreate({
@@ -390,7 +413,7 @@ export default function RemoteChannels() {
         name_prefix: batchPrefix.trim(),
         group: batchGroup.trim() || 'default',
         tag: batchTag.trim() || undefined,
-        priority: !isNaN(priority as number) ? priority : undefined,
+        priority: batchLevelPriority,
         models: batchModels.trim(),
         items,
       })
@@ -485,15 +508,96 @@ export default function RemoteChannels() {
     }
   }
 
+  // Client-side date filter on channel.created_time. Dates are interpreted
+  // in local time, upper bound exclusive so [today, today] = "just today".
+  const filteredChannels = useMemo(() => {
+    const startTS = filterStart ? Math.floor(new Date(filterStart + 'T00:00:00').getTime() / 1000) : 0
+    const endTS = filterEnd ? Math.floor(new Date(filterEnd + 'T00:00:00').getTime() / 1000) + 86400 : 0
+    if (!startTS && !endTS) return channels
+    return channels.filter(c => {
+      const t = c.created_time || 0
+      if (startTS && t < startTS) return false
+      if (endTS && t >= endTS) return false
+      return true
+    })
+  }, [channels, filterStart, filterEnd])
+
   const summary = useMemo(() => {
-    const totalUsedUSD = channels.reduce((s, c) => s + usdFromQuota(c.used_quota), 0)
-    const enabled = channels.filter(c => c.status === 1).length
-    const disabled = channels.length - enabled
-    return { count: channels.length, totalUsedUSD, enabled, disabled }
-  }, [channels])
+    const totalUsedUSD = filteredChannels.reduce((s, c) => s + usdFromQuota(c.used_quota), 0)
+    const enabled = filteredChannels.filter(c => c.status === 1).length
+    const disabled = filteredChannels.length - enabled
+    return { count: filteredChannels.length, totalUsedUSD, enabled, disabled }
+  }, [filteredChannels])
+
+  const exportCSV = () => {
+    if (filteredChannels.length === 0) return
+    const header = ['ID', 'Name', 'Type', 'Group', 'Tag', 'Priority', 'Used USD', 'Δ USD (since baseline)', '额度 USD', 'Last 1h USD', 'Status', 'Created', 'Note']
+    const escape = (v: unknown) => {
+      const s = v == null ? '' : String(v)
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
+    }
+    const rows = filteredChannels.map(c => {
+      const usedUSD = usdFromQuota(c.used_quota)
+      const baseline = snapshotBaseline[c.id]
+      const deltaUSD = baseline ? usdFromQuota(c.used_quota - baseline.used_quota) : null
+      const lh = lastHour[c.id]
+      return [
+        c.id, c.name, c.type, c.group, c.tag, c.priority,
+        usedUSD.toFixed(4),
+        deltaUSD != null ? deltaUSD.toFixed(4) : '',
+        c.quota_usd != null ? c.quota_usd.toFixed(2) : '',
+        lh != null ? lh.toFixed(4) : '',
+        STATUS_LABEL[c.status] ?? c.status,
+        c.created_time ? new Date(c.created_time * 1000).toISOString() : '',
+        c.note || '',
+      ].map(escape).join(',')
+    })
+    const csv = [header.join(','), ...rows].join('\n')
+    // BOM so Excel opens it as UTF-8 without garbling.
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    const suffix = (filterStart || filterEnd) ? `_${filterStart || 'any'}_${filterEnd || 'any'}` : ''
+    const profileName = profiles.find(p => p.id === selectedID)?.name || 'remote'
+    a.href = url
+    a.download = `remote-channels_${profileName}${suffix}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
 
   const actions = (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-2 flex-wrap">
+      <div className="flex items-center gap-1">
+        <input
+          type="date"
+          value={filterStart}
+          onChange={e => setFilterStart(e.target.value)}
+          className="border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-white"
+          title="创建时间 ≥"
+        />
+        <span className="text-gray-300 text-xs">→</span>
+        <input
+          type="date"
+          value={filterEnd}
+          onChange={e => setFilterEnd(e.target.value)}
+          className="border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-white"
+          title="创建时间 ≤"
+        />
+        {(filterStart || filterEnd) && (
+          <button
+            onClick={() => { setFilterStart(''); setFilterEnd('') }}
+            className="text-[10px] text-gray-400 hover:text-gray-700 px-1"
+            title="清除日期筛选"
+          >×</button>
+        )}
+      </div>
+      <button
+        onClick={exportCSV}
+        disabled={filteredChannels.length === 0}
+        className="border border-gray-300 text-gray-700 rounded-md px-3 py-1.5 text-xs hover:bg-gray-50 disabled:opacity-40"
+      >
+        导出 CSV
+      </button>
       <button
         onClick={openCreate}
         className="border border-gray-300 text-gray-700 rounded-md px-3 py-1.5 text-xs hover:bg-gray-50"
@@ -621,7 +725,7 @@ export default function RemoteChannels() {
                     </tr>
                   </thead>
                   <tbody>
-                    {channels.map(c => {
+                    {filteredChannels.map(c => {
                       const usedUSD = usdFromQuota(c.used_quota)
                       const pct = c.quota_usd && c.quota_usd > 0 ? Math.min(100, (usedUSD / c.quota_usd) * 100) : null
                       // Δ vs last background snapshot. If we have no baseline
@@ -780,15 +884,27 @@ export default function RemoteChannels() {
                   className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
                 />
               </Field>
-              <Field label="Priority（可选）">
-                <input
-                  type="number"
-                  min="0"
-                  value={batchPriority}
-                  onChange={e => setBatchPriority(e.target.value)}
-                  placeholder="例如 1001"
-                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-gray-900"
-                />
+              <Field label={`Priority${batchPrioMode === 'desc' ? '（base − i）' : batchPrioMode === 'asc' ? '（base + i）' : '（可选）'}`}>
+                <div className="flex gap-1">
+                  <input
+                    type="number"
+                    min="0"
+                    value={batchPriority}
+                    onChange={e => setBatchPriority(e.target.value)}
+                    placeholder={batchPrioMode === 'same' ? '例如 1001' : '起始 base'}
+                    className="flex-1 border border-gray-300 rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-gray-900"
+                  />
+                  <select
+                    value={batchPrioMode}
+                    onChange={e => setBatchPrioMode(e.target.value as 'same' | 'desc' | 'asc')}
+                    className="border border-gray-300 rounded-md px-2 py-1.5 text-sm bg-white focus:outline-none focus:border-gray-900"
+                    title="统一 = 所有 key 用同一 priority；顺序 = 每个 key 依次递减/递增"
+                  >
+                    <option value="same">统一</option>
+                    <option value="desc">顺序 ↓</option>
+                    <option value="asc">顺序 ↑</option>
+                  </select>
+                </div>
               </Field>
             </div>
             <Field label="Models（逗号分隔）">

@@ -18,6 +18,10 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   const [suffix, setSuffix] = useState('')
   const [costInput, setCostInput] = useState('')          // per-key 上游单价 (CNY)
   const [priorityInput, setPriorityInput] = useState('')  // channels.priority
+  // 'same' = every key uses `priorityInput` as-is.
+  // 'desc' = key[i] gets priorityInput - i (higher priority on the earlier keys).
+  // 'asc'  = key[i] gets priorityInput + i.
+  const [prioMode, setPrioMode] = useState<'same' | 'desc' | 'asc'>('same')
   const [input, setInput] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [result, setResult] = useState<string | null>(null)
@@ -82,7 +86,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       setResult('请填写后缀')
       return
     }
-    const channels: { key: string; quota_usd: number }[] = []
+    const channels: { key: string; quota_usd: number; priority?: number }[] = []
     input.split('\n').forEach(line => {
       const t = line.trim()
       if (!t || t.startsWith('#')) return
@@ -96,14 +100,28 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       setResult('未解析到有效行')
       return
     }
+
+    // Sequential-priority mode assigns per-channel priorities BEFORE the
+    // request goes out. In 'same' mode we leave channels[i].priority unset
+    // and rely on the batch-level `defaults.priority` (existing behaviour).
     const defaults: { priority?: number; unit_price_cny?: number } = {}
     if (costInput.trim()) {
       const c = parseFloat(costInput.trim())
       if (!isNaN(c) && c > 0) defaults.unit_price_cny = c
     }
-    if (priorityInput.trim()) {
-      const p = parseInt(priorityInput.trim(), 10)
-      if (!isNaN(p) && p > 0) defaults.priority = p
+    const basePriority = priorityInput.trim() ? parseInt(priorityInput.trim(), 10) : NaN
+    if (!isNaN(basePriority) && basePriority > 0) {
+      if (prioMode === 'same') {
+        defaults.priority = basePriority
+      } else {
+        const step = prioMode === 'desc' ? -1 : 1
+        for (let i = 0; i < channels.length; i++) {
+          // Never emit a non-positive priority — new-api treats those as
+          // "unset" and falls back to legacy default. Clamp at 1 instead.
+          const p = Math.max(1, basePriority + i * step)
+          channels[i].priority = p
+        }
+      }
     }
     setSubmitting(true)
     try {
@@ -190,16 +208,34 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
           />
         </div>
         <div>
-          <label className="block text-[11px] text-gray-500 mb-1">默认优先级</label>
-          <input
-            type="number"
-            step="1"
-            min="1"
-            value={priorityInput}
-            onChange={e => setPriorityInput(e.target.value)}
-            placeholder="例如 2，空=默认 1001"
-            className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
-          />
+          <label className="block text-[11px] text-gray-500 mb-1">
+            默认优先级
+            <span className="text-gray-400 font-normal">
+              {prioMode === 'desc' && '（起始值 base，key[i] = base − i）'}
+              {prioMode === 'asc' && '（起始值 base，key[i] = base + i）'}
+            </span>
+          </label>
+          <div className="flex gap-1">
+            <input
+              type="number"
+              step="1"
+              min="1"
+              value={priorityInput}
+              onChange={e => setPriorityInput(e.target.value)}
+              placeholder={prioMode === 'same' ? '例如 2，空=默认 1001' : '起始 base'}
+              className="flex-1 border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
+            />
+            <select
+              value={prioMode}
+              onChange={e => setPrioMode(e.target.value as 'same' | 'desc' | 'asc')}
+              className="border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-white focus:outline-none focus:border-gray-900"
+              title="统一 = 所有 key 用同一 priority；顺序 = 每个 key 依次递减/递增"
+            >
+              <option value="same">统一</option>
+              <option value="desc">顺序 ↓</option>
+              <option value="asc">顺序 ↑</option>
+            </select>
+          </div>
         </div>
       </div>
       {/* 可折叠：默认模型列表配置。改了会作用到之后所有批量创建。
