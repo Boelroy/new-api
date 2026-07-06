@@ -521,6 +521,28 @@ func keySha8(key string) string {
 	return hex.EncodeToString(h[:])[:8]
 }
 
+// channelKeyTail returns the last `n` alphanumeric chars of a key, meant to
+// be embedded in the human-readable channel name. Non-alphanumeric chars
+// (dashes, plus, equals from base64-ish encodings) are dropped so the tail
+// stays safe to substring-search on. Returns the whole key when it has
+// fewer than n alphanumeric chars.
+func channelKeyTail(key string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	cleaned := make([]byte, 0, len(key))
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			cleaned = append(cleaned, c)
+		}
+	}
+	if len(cleaned) <= n {
+		return string(cleaned)
+	}
+	return string(cleaned[len(cleaned)-n:])
+}
+
 // fetchRemoteChannelPage calls one page of GET /api/channel/ on the
 // remote and returns the parsed items + reported total.
 func fetchRemoteChannelPage(ctx context.Context, host, token string, userID int64, page, pageSize int, filters map[string]string) ([]remoteChannel, int64, error) {
@@ -1265,7 +1287,13 @@ func handleRemoteChannelCreate(c *gin.Context) {
 			continue
 		}
 		sha := keySha8(key)
-		name := body.NamePrefix + "-" + sha
+		// Name shape: <prefix>-<key-tail>-<sha8>
+		//   key-tail: last 8 alphanumeric chars of the key. Human-friendly so
+		//     an operator can eyeball or `grep` a specific key in the list.
+		//   sha:      guarantees uniqueness in case two different keys share
+		//     the same tail (unlikely but possible), and is what we still
+		//     search by in the reverse-lookup below.
+		name := body.NamePrefix + "-" + channelKeyTail(key, 8) + "-" + sha
 
 		// Per-item priority (from sequential-priority mode) overrides the
 		// batch-level default. Same 1-minimum clamp as BatchCreatePanel.
