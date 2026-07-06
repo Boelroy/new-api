@@ -1413,6 +1413,61 @@ func handleStudiosList(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"studios": out})
 }
 
+// handleUserResetPassword lets admin+ callers reset any user's password
+// without granting them the full user-management surface. Anti-escalation
+// guard: caller cannot reset the password of a user at equal-or-higher
+// tier (super admin bypasses the check and can reset anyone including
+// themselves).
+func handleUserResetPassword(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	callerRoleAny, _ := c.Get("role")
+	callerRole, _ := callerRoleAny.(int)
+
+	var targetRole int
+	if err := db.QueryRow(`SELECT role FROM rs_auth_user WHERE id=$1`, id).Scan(&targetRole); err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+	if callerRole < minSuperAdminRole && callerRole <= targetRole {
+		c.JSON(http.StatusForbidden, gin.H{"error": "cannot reset password of a peer or higher-privileged user"})
+		return
+	}
+
+	var body struct {
+		Password string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	if len(body.Password) < 6 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 6 characters"})
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "hash error"})
+		return
+	}
+	now := time.Now().Unix()
+	if _, err := db.Exec(
+		`UPDATE rs_auth_user SET password_hash=$1, updated_at=$2 WHERE id=$3`,
+		string(hash), now, id,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func handleUserDelete(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
@@ -2675,10 +2730,14 @@ func main() {
 	adminAPI.GET("/studios", handleStudiosList)
 	adminAPI.POST("/keys/test", handleTestKeys)
 	adminAPI.GET("/detect/models", handleDetectModels)
+	// Admin can see the user list and reset passwords of users below their
+	// own tier (see handleUserResetPassword for the anti-escalation guard).
+	// Create / role or studio changes / delete stay super admin only below.
+	adminAPI.GET("/users", handleUsersList)
+	adminAPI.POST("/users/:id/reset-password", handleUserResetPassword)
 
-	// User management + Profit stay super-admin-only.
+	// Full user management + Profit stay super-admin-only.
 	superAPI := api.Group("", requireRole(minSuperAdminRole))
-	superAPI.GET("/users", handleUsersList)
 	superAPI.POST("/users", handleUserCreate)
 	superAPI.PATCH("/users/:id", handleUserUpdate)
 	superAPI.DELETE("/users/:id", handleUserDelete)

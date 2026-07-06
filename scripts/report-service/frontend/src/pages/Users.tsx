@@ -45,6 +45,11 @@ export default function Users() {
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<number | null>(null)
 
+  // Super admin gets full CRUD; admin gets read + password reset only,
+  // and even that only for users strictly below their tier.
+  const isSuperAdmin = (me?.role ?? 0) >= ROLE_SUPER_ADMIN
+  const myRole = me?.role ?? 0
+
   const [newUsername, setNewUsername] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [newRole, setNewRole] = useState<number>(ROLE_USER)
@@ -171,10 +176,19 @@ export default function Users() {
   const handleResetPassword = async (u: AuthUser) => {
     const next = window.prompt(`Enter new password for ${u.username}:`)
     if (!next) return
+    if (next.length < 6) {
+      setError('password must be at least 6 characters')
+      return
+    }
     setBusyId(u.id)
     setError(null)
     try {
-      await api.updateUser(u.id, { password: next })
+      // Admin uses the dedicated endpoint (no role/studio side-effect,
+      // enforces anti-escalation server-side). Super admin can still
+      // reset any password via the generic PATCH — kept as a fallback
+      // when API responses want to be uniform, but the dedicated call
+      // works for both tiers so we just always use it.
+      await api.resetUserPassword(u.id, next)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'reset failed')
     } finally {
@@ -208,6 +222,7 @@ export default function Users() {
           </div>
         )}
 
+        {isSuperAdmin && (
         <section className="rounded-lg border border-gray-200 bg-white p-4">
           <h2 className="text-sm font-medium text-gray-900 mb-3">Create user</h2>
           <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
@@ -261,6 +276,7 @@ export default function Users() {
             channels with that tag in Key Capacity → Batch create.
           </p>
         </section>
+        )}
 
         <section className="rounded-lg border border-gray-200 bg-white">
           <div className="border-b border-gray-100 px-4 py-3 flex items-center justify-between">
@@ -301,56 +317,69 @@ export default function Users() {
                         {u.username}{isSelf && <span className="ml-2 text-xs text-gray-400">(you)</span>}
                       </td>
                       <td className="px-4 py-2">
-                        <select
-                          className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs"
-                          value={u.role}
-                          disabled={disabled}
-                          onChange={e => void handleChangeRole(u, Number(e.target.value))}
-                          title={roleLabel(u.role)}
-                        >
-                          {ROLE_OPTIONS.map(o => (
-                            <option key={o.value} value={o.value}>{o.label}</option>
-                          ))}
-                        </select>
+                        {isSuperAdmin ? (
+                          <select
+                            className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs"
+                            value={u.role}
+                            disabled={disabled}
+                            onChange={e => void handleChangeRole(u, Number(e.target.value))}
+                            title={roleLabel(u.role)}
+                          >
+                            {ROLE_OPTIONS.map(o => (
+                              <option key={o.value} value={o.value}>{o.label}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span className="text-xs text-gray-600" title={roleLabel(u.role)}>
+                            {roleLabel(u.role)}
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-2">
-                        <select
-                          className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs w-full min-w-[8rem]"
-                          value={u.studio}
-                          disabled={disabled}
-                          onChange={e => void handleChangeStudio(u, e.target.value)}
-                        >
-                          <option value="">(no access)</option>
-                          {/* Preserve current value as an option even when not in
-                              the channel-tag list, so a freshly-bound studio
-                              that no channel uses yet still displays here. */}
-                          {u.studio && !studios.includes(u.studio) && (
-                            <option value={u.studio}>{u.studio}</option>
-                          )}
-                          {studios.map(s => <option key={s} value={s}>{s}</option>)}
-                          <option value={NEW_STUDIO_SENTINEL}>+ Create new studio…</option>
-                        </select>
+                        {isSuperAdmin ? (
+                          <select
+                            className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs w-full min-w-[8rem]"
+                            value={u.studio}
+                            disabled={disabled}
+                            onChange={e => void handleChangeStudio(u, e.target.value)}
+                          >
+                            <option value="">(no access)</option>
+                            {u.studio && !studios.includes(u.studio) && (
+                              <option value={u.studio}>{u.studio}</option>
+                            )}
+                            {studios.map(s => <option key={s} value={s}>{s}</option>)}
+                            <option value={NEW_STUDIO_SENTINEL}>+ Create new studio…</option>
+                          </select>
+                        ) : (
+                          <span className="text-xs text-gray-500">{u.studio || '—'}</span>
+                        )}
                       </td>
                       <td className="px-4 py-2 text-gray-500">{formatTime(u.created_at)}</td>
                       <td className="px-4 py-2 text-gray-500">{formatTime(u.updated_at)}</td>
                       <td className="px-4 py-2 text-right whitespace-nowrap">
-                        <button
-                          type="button"
-                          onClick={() => void handleResetPassword(u)}
-                          disabled={disabled}
-                          className="text-xs text-gray-600 hover:text-gray-900 px-2"
-                        >
-                          Reset password
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void handleDelete(u)}
-                          disabled={disabled || isSelf}
-                          className="text-xs text-red-600 hover:text-red-700 disabled:text-gray-300 px-2"
-                          title={isSelf ? 'Cannot delete yourself' : undefined}
-                        >
-                          Delete
-                        </button>
+                        {/* Anti-escalation: admin can only reset passwords of
+                            users with a strictly lower role. Super admin bypasses. */}
+                        {(isSuperAdmin || myRole > u.role) && (
+                          <button
+                            type="button"
+                            onClick={() => void handleResetPassword(u)}
+                            disabled={disabled}
+                            className="text-xs text-gray-600 hover:text-gray-900 px-2"
+                          >
+                            Reset password
+                          </button>
+                        )}
+                        {isSuperAdmin && (
+                          <button
+                            type="button"
+                            onClick={() => void handleDelete(u)}
+                            disabled={disabled || isSelf}
+                            className="text-xs text-red-600 hover:text-red-700 disabled:text-gray-300 px-2"
+                            title={isSelf ? 'Cannot delete yourself' : undefined}
+                          >
+                            Delete
+                          </button>
+                        )}
                       </td>
                     </tr>
                   )

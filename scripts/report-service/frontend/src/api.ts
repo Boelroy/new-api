@@ -447,6 +447,16 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  // Admin+ endpoint: reset password only (no role / studio changes). The
+  // server enforces an anti-escalation check so admin can't reset a peer
+  // or higher-privileged account.
+  resetUserPassword: (id: number, password: string) =>
+    request<{ ok: boolean }>(`/api/users/${id}/reset-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    }),
+
   deleteUser: (id: number) =>
     request<{ ok: boolean }>(`/api/users/${id}`, { method: 'DELETE' }),
 

@@ -79,7 +79,7 @@ export default function App() {
         <Route path="/cache" element={<RoleGate min={ROLE_ADMIN}><CacheReport /></RoleGate>} />
         <Route path="/testing" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
         <Route path="/testing/:projectId" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
-        <Route path="/users" element={<RoleGate min={ROLE_SUPER_ADMIN}><Users /></RoleGate>} />
+        <Route path="/users" element={<RoleGate min={ROLE_ADMIN}><Users /></RoleGate>} />
         <Route path="/remote-channels" element={<RoleGate min={ROLE_SUPER_ADMIN}><RemoteChannels /></RoleGate>} />
         <Route path="/detect" element={<Navigate to="/testing" replace />} />
         <Route path="/eval" element={<Navigate to="/testing" replace />} />

@@ -74,6 +74,17 @@ function Sparkline({ points }: { points: { t: number; q: number }[] }) {
   )
 }
 
+// todayUTC returns today's date as YYYY-MM-DD in UTC. Used as the default
+// bound for the date filter — the operator sees "just today" regardless of
+// browser timezone, matching how the backend stores created_time.
+const todayUTC = (() => {
+  const n = new Date()
+  const y = n.getUTCFullYear()
+  const m = String(n.getUTCMonth() + 1).padStart(2, '0')
+  const d = String(n.getUTCDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+})()
+
 function fmtTime(epoch: number) {
   if (!epoch) return '—'
   return new Date(epoch * 1000).toLocaleString()
@@ -109,10 +120,12 @@ export default function RemoteChannels() {
   const [seriesCache, setSeriesCache] = useState<Record<number, { t: number; q: number }[]>>({})
   const [seriesLoading, setSeriesLoading] = useState<number | null>(null)
 
-  // Date filter: client-side by channel.created_time. Empty = no bound on
-  // that side. Applied to the table + summary + CSV export.
-  const [filterStart, setFilterStart] = useState('')
-  const [filterEnd, setFilterEnd] = useState('')
+  // Date filter: client-side by channel.created_time, dates interpreted in
+  // UTC so [today, today] means "since UTC 00:00 today" and doesn't shift
+  // with the operator's browser timezone. Default = today (UTC) on both
+  // ends so the page opens to just-today's channels.
+  const [filterStart, setFilterStart] = useState(todayUTC)
+  const [filterEnd, setFilterEnd] = useState(todayUTC)
 
   // Create / edit form. `editingID = 0` means we're creating a new profile.
   const [formOpen, setFormOpen] = useState(false)
@@ -509,10 +522,11 @@ export default function RemoteChannels() {
   }
 
   // Client-side date filter on channel.created_time. Dates are interpreted
-  // in local time, upper bound exclusive so [today, today] = "just today".
+  // in UTC (Z suffix) so [today, today] = "since UTC 00:00 today, up to but
+  // not including UTC 00:00 tomorrow", independent of browser timezone.
   const filteredChannels = useMemo(() => {
-    const startTS = filterStart ? Math.floor(new Date(filterStart + 'T00:00:00').getTime() / 1000) : 0
-    const endTS = filterEnd ? Math.floor(new Date(filterEnd + 'T00:00:00').getTime() / 1000) + 86400 : 0
+    const startTS = filterStart ? Math.floor(new Date(filterStart + 'T00:00:00Z').getTime() / 1000) : 0
+    const endTS = filterEnd ? Math.floor(new Date(filterEnd + 'T00:00:00Z').getTime() / 1000) + 86400 : 0
     if (!startTS && !endTS) return channels
     return channels.filter(c => {
       const t = c.created_time || 0
