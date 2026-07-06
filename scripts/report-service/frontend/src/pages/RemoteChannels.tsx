@@ -31,6 +31,49 @@ const DEFAULT_ANTHROPIC_MODELS = [
 
 const DEFAULT_TEST_MODEL = 'claude-haiku-4-5-20251001'
 
+// FragmentRow is just <>{children}</> — used so `{channels.map(...)}` can
+// emit two adjacent <tr> elements (main row + expandable sparkline) and
+// still key on the channel id at the outermost node.
+function FragmentRow({ children }: { children: React.ReactNode }) {
+  return <>{children}</>
+}
+
+// Sparkline: minimal SVG line chart for cumulative used_quota. We normalise
+// the domain to [min, max] of the visible window so idle channels still
+// show a flat readable line instead of collapsing to a single pixel.
+function Sparkline({ points }: { points: { t: number; q: number }[] }) {
+  if (points.length < 2) return null
+  const w = 640, h = 60, padX = 4, padY = 6
+  const tMin = points[0].t
+  const tMax = points[points.length - 1].t
+  const tRange = Math.max(1, tMax - tMin)
+  const qMin = Math.min(...points.map(p => p.q))
+  const qMax = Math.max(...points.map(p => p.q))
+  const qRange = Math.max(1, qMax - qMin)
+  const path = points.map((p, i) => {
+    const x = padX + ((p.t - tMin) / tRange) * (w - padX * 2)
+    const y = h - padY - ((p.q - qMin) / qRange) * (h - padY * 2)
+    return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+  const first = points[0]
+  const last = points[points.length - 1]
+  const totalDeltaUSD = usdFromQuota(last.q - first.q)
+  return (
+    <div className="flex items-center gap-4">
+      <svg width={w} height={h} className="bg-white border border-gray-200 rounded">
+        <path d={path} stroke="#10b981" strokeWidth="1.5" fill="none" />
+      </svg>
+      <div className="text-[11px] text-gray-600 space-y-0.5 tabular-nums">
+        <div>点数：{points.length}</div>
+        <div>窗口：{fmtTime(first.t)} → {fmtTime(last.t)}</div>
+        <div className={totalDeltaUSD > 0 ? 'text-rose-600 font-medium' : 'text-gray-500'}>
+          该窗口用量 Δ = ${totalDeltaUSD.toFixed(4)}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function fmtTime(epoch: number) {
   if (!epoch) return '—'
   return new Date(epoch * 1000).toLocaleString()
@@ -54,6 +97,17 @@ export default function RemoteChannels() {
   // Last-hour cost per channel (channel_id -> USD). Loaded on demand.
   const [lastHour, setLastHour] = useState<Record<number, number>>({})
   const [lastHourLoading, setLastHourLoading] = useState(false)
+
+  // Baseline used_quota per channel from the previous background snapshot.
+  // The Δ column subtracts this from live used_quota to show recent burn.
+  // Empty until fetchChannels or a manual reload populates it.
+  const [snapshotBaseline, setSnapshotBaseline] = useState<Record<number, { captured_at: number; used_quota: number }>>({})
+
+  // Sparkline state: which channel row is expanded, and cached per-channel
+  // 24h time series so re-expanding is instant.
+  const [expandedRow, setExpandedRow] = useState<number | null>(null)
+  const [seriesCache, setSeriesCache] = useState<Record<number, { t: number; q: number }[]>>({})
+  const [seriesLoading, setSeriesLoading] = useState<number | null>(null)
 
   // Create / edit form. `editingID = 0` means we're creating a new profile.
   const [formOpen, setFormOpen] = useState(false)
@@ -189,12 +243,57 @@ export default function RemoteChannels() {
       // Any prior last-hour / test state is stale against the refreshed list.
       setLastHour({})
       setTestMsg({})
+      // Cached sparkline data is per-channel time series; keep it, since
+      // adding new points doesn't invalidate older ones. Just close any
+      // currently-open sparkline so the layout resets cleanly.
+      setExpandedRow(null)
+      // Pull the latest background-captured snapshot so the Δ column can
+      // compare live used_quota against the previous known value. Fire and
+      // forget — a slow query shouldn't block the table from rendering.
+      void loadSnapshotBaseline(selectedID)
     } catch (e: any) {
       setFetchErr(e?.message || String(e))
       setChannels([])
       setMeta(null)
     } finally {
       setFetching(false)
+    }
+  }
+
+  const loadSnapshotBaseline = async (profileID: number) => {
+    try {
+      // 24h window is enough for the "recent burn" delta while keeping the
+      // response small (~5000 rows worst case).
+      const since = Math.floor(Date.now() / 1000) - 24 * 3600
+      const res = await api.remoteSnapshotLatest(profileID, since)
+      const next: Record<number, { captured_at: number; used_quota: number }> = {}
+      for (const [k, v] of Object.entries(res.latest)) {
+        next[parseInt(k, 10)] = v
+      }
+      setSnapshotBaseline(next)
+    } catch (e) {
+      // Non-fatal — the Δ column just shows "—" if we couldn't load.
+      console.warn('snapshot baseline load failed', e)
+    }
+  }
+
+  const toggleSparkline = async (channelID: number) => {
+    if (expandedRow === channelID) {
+      setExpandedRow(null)
+      return
+    }
+    setExpandedRow(channelID)
+    if (seriesCache[channelID] || !selectedID) return
+    setSeriesLoading(channelID)
+    try {
+      const since = Math.floor(Date.now() / 1000) - 24 * 3600
+      const res = await api.remoteSnapshotSeries(selectedID, channelID, since)
+      const points = res.points.map(p => ({ t: p.captured_at, q: p.used_quota }))
+      setSeriesCache(prev => ({ ...prev, [channelID]: points }))
+    } catch (e) {
+      console.warn('sparkline load failed', e)
+    } finally {
+      setSeriesLoading(null)
     }
   }
 
@@ -472,6 +571,7 @@ export default function RemoteChannels() {
                 <table className="w-full text-xs">
                   <thead className="bg-gray-50 border-b border-gray-200 text-gray-500">
                     <tr>
+                      <th className="px-3 py-2 text-left font-medium" title="点击 📈 展开 24h 曲线"></th>
                       <th className="px-3 py-2 text-left font-medium">ID</th>
                       <th className="px-3 py-2 text-left font-medium">名称</th>
                       <th className="px-3 py-2 text-left font-medium">Type</th>
@@ -479,6 +579,7 @@ export default function RemoteChannels() {
                       <th className="px-3 py-2 text-left font-medium">Tag</th>
                       <th className="px-3 py-2 text-right font-medium">Priority</th>
                       <th className="px-3 py-2 text-right font-medium">已用 (USD)</th>
+                      <th className="px-3 py-2 text-right font-medium" title="距上一次后台快照的用量增量">Δ</th>
                       <th className="px-3 py-2 text-right font-medium">额度 (USD)</th>
                       <th className="px-3 py-2 text-right font-medium">Last 1h</th>
                       <th className="px-3 py-2 text-left font-medium">状态</th>
@@ -490,69 +591,114 @@ export default function RemoteChannels() {
                     {channels.map(c => {
                       const usedUSD = usdFromQuota(c.used_quota)
                       const pct = c.quota_usd && c.quota_usd > 0 ? Math.min(100, (usedUSD / c.quota_usd) * 100) : null
+                      // Δ vs last background snapshot. If we have no baseline
+                      // yet (channel first seen this session), leave it blank
+                      // rather than showing a misleading zero.
+                      const baseline = snapshotBaseline[c.id]
+                      const deltaUSD = baseline ? usdFromQuota(c.used_quota - baseline.used_quota) : null
+                      const isOpen = expandedRow === c.id
+                      const series = seriesCache[c.id]
                       return (
-                        <tr key={c.id} className="border-b border-gray-100 hover:bg-gray-50">
-                          <td className="px-3 py-2 tabular-nums">{c.id}</td>
-                          <td className="px-3 py-2 font-mono text-[11px] max-w-[280px] truncate" title={c.name}>{c.name}</td>
-                          <td className="px-3 py-2 tabular-nums">{c.type}</td>
-                          <td className="px-3 py-2">{c.group || '—'}</td>
-                          <td className="px-3 py-2 text-gray-500">{c.tag || '—'}</td>
-                          <td className="px-3 py-2 tabular-nums text-right">{c.priority}</td>
-                          <td className="px-3 py-2 tabular-nums text-right font-medium">${usedUSD.toFixed(2)}</td>
-                          <td className="px-3 py-2 tabular-nums text-right">
-                            {c.quota_usd != null ? (
-                              <div className="flex flex-col items-end gap-0.5">
-                                <span>${c.quota_usd.toFixed(2)}</span>
-                                {pct != null && (
-                                  <div className="w-16 h-1 bg-gray-100 rounded overflow-hidden">
-                                    <div
-                                      className={`h-full ${pct >= 100 ? 'bg-rose-500' : pct >= 80 ? 'bg-amber-500' : 'bg-emerald-500'}`}
-                                      style={{ width: pct + '%' }}
-                                    />
-                                  </div>
+                        <FragmentRow key={c.id}>
+                          <tr className="border-b border-gray-100 hover:bg-gray-50">
+                            <td className="px-2 py-2 text-center">
+                              <button
+                                onClick={() => void toggleSparkline(c.id)}
+                                className={`text-[10px] ${isOpen ? 'text-emerald-600' : 'text-gray-400 hover:text-gray-700'}`}
+                                title={isOpen ? '收起' : '查看 24h 曲线'}
+                              >
+                                {isOpen ? '▾' : '▸'}
+                              </button>
+                            </td>
+                            <td className="px-3 py-2 tabular-nums">{c.id}</td>
+                            <td className="px-3 py-2 font-mono text-[11px] max-w-[280px] truncate" title={c.name}>{c.name}</td>
+                            <td className="px-3 py-2 tabular-nums">{c.type}</td>
+                            <td className="px-3 py-2">{c.group || '—'}</td>
+                            <td className="px-3 py-2 text-gray-500">{c.tag || '—'}</td>
+                            <td className="px-3 py-2 tabular-nums text-right">{c.priority}</td>
+                            <td className="px-3 py-2 tabular-nums text-right font-medium">${usedUSD.toFixed(2)}</td>
+                            <td className="px-3 py-2 tabular-nums text-right">
+                              {deltaUSD != null ? (
+                                <span
+                                  className={deltaUSD > 0 ? 'text-rose-600' : 'text-gray-400'}
+                                  title={baseline ? `since ${new Date(baseline.captured_at * 1000).toLocaleTimeString('zh-CN')}` : ''}
+                                >
+                                  {deltaUSD > 0 ? '+' : ''}${deltaUSD.toFixed(4)}
+                                </span>
+                              ) : (
+                                <span className="text-gray-300">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 tabular-nums text-right">
+                              {c.quota_usd != null ? (
+                                <div className="flex flex-col items-end gap-0.5">
+                                  <span>${c.quota_usd.toFixed(2)}</span>
+                                  {pct != null && (
+                                    <div className="w-16 h-1 bg-gray-100 rounded overflow-hidden">
+                                      <div
+                                        className={`h-full ${pct >= 100 ? 'bg-rose-500' : pct >= 80 ? 'bg-amber-500' : 'bg-emerald-500'}`}
+                                        style={{ width: pct + '%' }}
+                                      />
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-gray-300">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 tabular-nums text-right">
+                              {lastHour[c.id] != null ? '$' + lastHour[c.id].toFixed(4) : <span className="text-gray-300">—</span>}
+                            </td>
+                            <td className="px-3 py-2">
+                              <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] ${STATUS_CLS[c.status] ?? 'bg-gray-100 text-gray-600'}`}>
+                                {STATUS_LABEL[c.status] ?? c.status}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-gray-500 max-w-[180px] truncate" title={c.note || ''}>
+                              {c.note || '—'}
+                            </td>
+                            <td className="px-3 py-2">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <button
+                                  onClick={() => openRowEdit(c)}
+                                  className="text-[10px] text-gray-600 hover:text-gray-900"
+                                >编辑</button>
+                                <button
+                                  onClick={() => void testRow(c)}
+                                  disabled={testingID === c.id}
+                                  className="text-[10px] text-blue-600 hover:text-blue-800 disabled:opacity-40"
+                                >{testingID === c.id ? '测试中…' : '测试'}</button>
+                                <button
+                                  onClick={() => void deleteRow(c)}
+                                  className="text-[10px] text-rose-500 hover:text-rose-700"
+                                >删除</button>
+                                {testMsg[c.id] && (
+                                  <span
+                                    className={`text-[10px] ${testMsg[c.id].startsWith('✓') ? 'text-emerald-600' : 'text-rose-600'}`}
+                                    title={testMsg[c.id]}
+                                  >
+                                    {testMsg[c.id].length > 24 ? testMsg[c.id].slice(0, 24) + '…' : testMsg[c.id]}
+                                  </span>
                                 )}
                               </div>
-                            ) : (
-                              <span className="text-gray-300">—</span>
-                            )}
-                          </td>
-                          <td className="px-3 py-2 tabular-nums text-right">
-                            {lastHour[c.id] != null ? '$' + lastHour[c.id].toFixed(4) : <span className="text-gray-300">—</span>}
-                          </td>
-                          <td className="px-3 py-2">
-                            <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] ${STATUS_CLS[c.status] ?? 'bg-gray-100 text-gray-600'}`}>
-                              {STATUS_LABEL[c.status] ?? c.status}
-                            </span>
-                          </td>
-                          <td className="px-3 py-2 text-gray-500 max-w-[180px] truncate" title={c.note || ''}>
-                            {c.note || '—'}
-                          </td>
-                          <td className="px-3 py-2">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <button
-                                onClick={() => openRowEdit(c)}
-                                className="text-[10px] text-gray-600 hover:text-gray-900"
-                              >编辑</button>
-                              <button
-                                onClick={() => void testRow(c)}
-                                disabled={testingID === c.id}
-                                className="text-[10px] text-blue-600 hover:text-blue-800 disabled:opacity-40"
-                              >{testingID === c.id ? '测试中…' : '测试'}</button>
-                              <button
-                                onClick={() => void deleteRow(c)}
-                                className="text-[10px] text-rose-500 hover:text-rose-700"
-                              >删除</button>
-                              {testMsg[c.id] && (
-                                <span
-                                  className={`text-[10px] ${testMsg[c.id].startsWith('✓') ? 'text-emerald-600' : 'text-rose-600'}`}
-                                  title={testMsg[c.id]}
-                                >
-                                  {testMsg[c.id].length > 24 ? testMsg[c.id].slice(0, 24) + '…' : testMsg[c.id]}
-                                </span>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
+                            </td>
+                          </tr>
+                          {isOpen && (
+                            <tr className="bg-gray-50/60 border-b border-gray-100">
+                              <td colSpan={14} className="px-4 py-3">
+                                {seriesLoading === c.id ? (
+                                  <div className="text-[11px] text-gray-400">加载 24h 数据…</div>
+                                ) : series && series.length >= 2 ? (
+                                  <Sparkline points={series} />
+                                ) : (
+                                  <div className="text-[11px] text-gray-400">
+                                    暂无历史点（后台每 15 min 采一次；等下一轮就有数据了）
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                        </FragmentRow>
                       )
                     })}
                   </tbody>

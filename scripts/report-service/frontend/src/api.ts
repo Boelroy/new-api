@@ -605,6 +605,31 @@ export const api = {
       body: JSON.stringify({ profile_id: profileID, channel_ids: channelIDs }),
     }),
 
+  // Historical snapshots written by the periodic sync loop (see
+  // startRemoteSnapshotSync). Two shapes:
+  //   • without channel_id: latest snapshot per channel within `since`,
+  //     used to derive per-row Δ used_quota.
+  //   • with channel_id: full time series for that channel, used for the
+  //     sparkline that expands under a row.
+  remoteSnapshotLatest: (profileID: number, sinceEpoch?: number) => {
+    const qs = new URLSearchParams({ profile_id: String(profileID) })
+    if (sinceEpoch) qs.set('since', String(sinceEpoch))
+    return request<{ latest: Record<string, { captured_at: number; used_quota: number }> }>(
+      `/api/remote-newapi/snapshots?${qs}`,
+    )
+  },
+
+  remoteSnapshotSeries: (profileID: number, channelID: number, sinceEpoch?: number) => {
+    const qs = new URLSearchParams({
+      profile_id: String(profileID),
+      channel_id: String(channelID),
+    })
+    if (sinceEpoch) qs.set('since', String(sinceEpoch))
+    return request<{ channel_id: number; points: { captured_at: number; used_quota: number; status: number }[] }>(
+      `/api/remote-newapi/snapshots?${qs}`,
+    )
+  },
+
   // ---- Provider Testing ----
 
   testingListProjects: () =>

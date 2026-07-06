@@ -2579,6 +2579,20 @@ func main() {
 			updated_at         BIGINT NOT NULL,
 			PRIMARY KEY (profile_id, remote_channel_id)
 		)`,
+		// Time series of channel state pulled from the remote. Written by
+		// the interactive Fetch button AND by startRemoteSnapshotSync. Old
+		// rows are pruned by pruneRemoteSnapshotsLoop after
+		// REMOTE_SNAPSHOT_RETENTION_DAYS days (default 90).
+		`CREATE TABLE IF NOT EXISTS remote_channel_snapshot (
+			profile_id         BIGINT NOT NULL,
+			remote_channel_id  BIGINT NOT NULL,
+			captured_at        BIGINT NOT NULL,
+			used_quota         BIGINT NOT NULL,
+			status             INT    NOT NULL,
+			PRIMARY KEY (profile_id, remote_channel_id, captured_at)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_remote_snapshot_by_time
+		   ON remote_channel_snapshot(profile_id, captured_at DESC)`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
@@ -2591,6 +2605,8 @@ func main() {
 	startNotifyLoop()
 	startTestJobReaper()
 	startPruneLoginAttempts()
+	startRemoteSnapshotSync()
+	startRemoteSnapshotPrune()
 	if profitEnabled {
 		startPipiSync()
 	}
@@ -2661,6 +2677,7 @@ func main() {
 	superAPI.DELETE("/remote-newapi/channels/:id", handleRemoteChannelDelete)
 	superAPI.POST("/remote-newapi/channels/test", handleRemoteTestKey)
 	superAPI.POST("/remote-newapi/channels/last-hour", handleRemoteChannelLastHour)
+	superAPI.GET("/remote-newapi/snapshots", handleRemoteSnapshotHistory)
 
 	// Provider Testing: super_admin or tester role.
 	testingAPI := api.Group("", requireRoleOrTester(minSuperAdminRole))

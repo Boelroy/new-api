@@ -14,8 +14,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -557,6 +559,37 @@ func fetchRemoteChannelPage(ctx context.Context, host, token string, userID int6
 // exhaustively (up to a cap) and returns the flat list merged with local
 // operator metadata (quota_usd/note). The remote may have thousands of
 // channels; we cap at 5000 to avoid runaway calls.
+// iterateRemoteChannels walks the remote's paginated /api/channel/ list to
+// completion (up to 50 pages / 5000 channels — same hard cap as before).
+// Returns whatever it managed to collect plus the reported total; on error
+// it also returns the partial list so callers can decide what to do.
+//
+// Extracted from handleRemoteFetchChannels so the background snapshot loop
+// can reuse the exact same pagination logic without going through gin.
+func iterateRemoteChannels(ctx context.Context, host, token string, userID int64, pageSize int, filters map[string]string) ([]remoteChannel, int64, error) {
+	if pageSize <= 0 || pageSize > 200 {
+		pageSize = 100
+	}
+	const maxPages = 50
+	all := make([]remoteChannel, 0)
+	var total int64
+	for page := 1; page <= maxPages; page++ {
+		items, tot, err := fetchRemoteChannelPage(ctx, host, token, userID, page, pageSize, filters)
+		if err != nil {
+			return all, total, err
+		}
+		total = tot
+		all = append(all, items...)
+		if len(items) < pageSize {
+			break
+		}
+		if total > 0 && int64(len(all)) >= total {
+			break
+		}
+	}
+	return all, total, nil
+}
+
 func handleRemoteFetchChannels(c *gin.Context) {
 	var body struct {
 		ProfileID   int64  `json:"profile_id,omitempty"`
@@ -577,46 +610,22 @@ func handleRemoteFetchChannels(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	pageSize := body.PageSize
-	if pageSize <= 0 || pageSize > 200 {
-		pageSize = 100
-	}
 	filters := map[string]string{
 		"group":  body.Group,
 		"status": body.Status,
 		"type":   body.Type,
 	}
 
-	// Hard cap: never fetch more than 50 pages (5000 channels at page_size=100)
-	// in a single request. Prevents accidental self-DoS when a remote has
-	// tens of thousands of channels.
-	const maxPages = 50
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
 	defer cancel()
 
-	all := make([]remoteChannel, 0)
-	var total int64
-	for page := 1; page <= maxPages; page++ {
-		items, tot, err := fetchRemoteChannelPage(ctx, host, token, userID, page, pageSize, filters)
-		if err != nil {
-			// Return whatever we have so the caller can at least see partial data.
-			c.JSON(http.StatusBadGateway, gin.H{
-				"error":         err.Error(),
-				"partial_data":  all,
-				"pages_fetched": page - 1,
-			})
-			return
-		}
-		total = tot
-		all = append(all, items...)
-		if len(items) < pageSize {
-			break
-		}
-		// Also stop when we've caught up to the reported total (belt & suspenders
-		// for remotes that return short pages).
-		if total > 0 && int64(len(all)) >= total {
-			break
-		}
+	all, total, err := iterateRemoteChannels(ctx, host, token, userID, body.PageSize, filters)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":        err.Error(),
+			"partial_data": all,
+		})
+		return
 	}
 
 	// Merge operator meta (quota_usd/note) only for saved profiles — ad-hoc
@@ -635,6 +644,14 @@ func handleRemoteFetchChannels(c *gin.Context) {
 				}
 			}
 		}
+		// Interactive fetch also feeds the snapshot table so the sparkline
+		// gets a fresh point whenever a human clicks. Written async so a
+		// slow DB doesn't add latency to the HTTP response.
+		go func(pid int64, snapshot []remoteChannel) {
+			if err := writeRemoteSnapshot(pid, snapshot); err != nil {
+				log.Printf("[remote-snapshot] interactive write for profile %d failed: %v", pid, err)
+			}
+		}(body.ProfileID, all)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -644,6 +661,273 @@ func handleRemoteFetchChannels(c *gin.Context) {
 		"user_id":   userID,
 		"truncated": len(all) < int(total) && total > 0,
 	})
+}
+
+// ---- Snapshot persistence ----
+
+// writeRemoteSnapshot batch-inserts one row per channel into
+// remote_channel_snapshot. All rows share the same captured_at so the
+// series aligns cleanly across channels.
+func writeRemoteSnapshot(profileID int64, channels []remoteChannel) error {
+	if profileID <= 0 || len(channels) == 0 {
+		return nil
+	}
+	ts := time.Now().Unix()
+	// Build a single multi-row INSERT to keep the write cheap. Cap the
+	// per-INSERT chunk at 500 rows so the parameter budget stays sane on
+	// tiny Postgres instances.
+	const chunk = 500
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for start := 0; start < len(channels); start += chunk {
+		end := start + chunk
+		if end > len(channels) {
+			end = len(channels)
+		}
+		batch := channels[start:end]
+		args := make([]any, 0, len(batch)*5)
+		valuesFrag := make([]string, 0, len(batch))
+		for i, ch := range batch {
+			base := i * 5
+			valuesFrag = append(valuesFrag, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d)", base+1, base+2, base+3, base+4, base+5))
+			args = append(args, profileID, ch.ID, ts, ch.UsedQuota, ch.Status)
+		}
+		q := `INSERT INTO remote_channel_snapshot
+		      (profile_id, remote_channel_id, captured_at, used_quota, status)
+		      VALUES ` + strings.Join(valuesFrag, ",") + `
+		      ON CONFLICT (profile_id, remote_channel_id, captured_at) DO NOTHING`
+		if _, err := tx.Exec(q, args...); err != nil {
+			return fmt.Errorf("insert snapshot: %v", err)
+		}
+	}
+	return tx.Commit()
+}
+
+// remoteSnapshotIntervalDefault: 15-minute cadence gives ~96 samples/day per
+// channel — enough for a smooth sparkline, cheap enough for both the DB and
+// the remote (one paginated call per profile per interval).
+const remoteSnapshotIntervalDefault = 15 * time.Minute
+const remoteSnapshotRetentionDefault = 90 * 24 * time.Hour
+
+// remoteSnapshotInflight guards against overlapping sync attempts for a
+// given profile — if the previous fetch is still in flight (slow remote),
+// don't start another. Interactive fetches from the browser bypass this
+// guard entirely; only the background loop respects it.
+var (
+	remoteSnapshotInflightMu sync.Mutex
+	remoteSnapshotInflight   = map[int64]bool{}
+)
+
+func remoteSnapshotIntervalFromEnv() time.Duration {
+	if s := os.Getenv("REMOTE_SNAPSHOT_INTERVAL_SEC"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n >= 60 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return remoteSnapshotIntervalDefault
+}
+
+func remoteSnapshotRetentionFromEnv() time.Duration {
+	if s := os.Getenv("REMOTE_SNAPSHOT_RETENTION_DAYS"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n >= 1 {
+			return time.Duration(n) * 24 * time.Hour
+		}
+	}
+	return remoteSnapshotRetentionDefault
+}
+
+// startRemoteSnapshotSync spawns a background goroutine that periodically
+// pulls channels from every saved profile and appends a snapshot row per
+// channel. Set REMOTE_SNAPSHOT_INTERVAL_SEC=0 (or unset with a value <60)
+// to disable via env; anything ≥60 sets a custom cadence.
+func startRemoteSnapshotSync() {
+	interval := remoteSnapshotIntervalFromEnv()
+	log.Printf("[remote-snapshot] sync loop starting, interval=%s", interval)
+	go func() {
+		// Small stagger on startup so we don't slam every remote in the same
+		// second the process comes up.
+		time.Sleep(20 * time.Second)
+		syncAllRemoteProfilesOnce()
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for range t.C {
+			syncAllRemoteProfilesOnce()
+		}
+	}()
+}
+
+// syncAllRemoteProfilesOnce iterates every profile and captures one snapshot.
+// Failures on any single profile are logged and never abort the loop.
+func syncAllRemoteProfilesOnce() {
+	rows, err := db.Query(`SELECT id, host, user_id, access_token_enc FROM remote_newapi_profile`)
+	if err != nil {
+		log.Printf("[remote-snapshot] list profiles: %v", err)
+		return
+	}
+	type prof struct {
+		id     int64
+		host   string
+		userID int64
+		enc    string
+	}
+	profiles := make([]prof, 0)
+	for rows.Next() {
+		var p prof
+		if err := rows.Scan(&p.id, &p.host, &p.userID, &p.enc); err != nil {
+			log.Printf("[remote-snapshot] scan profile: %v", err)
+			continue
+		}
+		profiles = append(profiles, p)
+	}
+	rows.Close()
+
+	for _, p := range profiles {
+		remoteSnapshotInflightMu.Lock()
+		if remoteSnapshotInflight[p.id] {
+			remoteSnapshotInflightMu.Unlock()
+			log.Printf("[remote-snapshot] profile %d still in flight, skipping tick", p.id)
+			continue
+		}
+		remoteSnapshotInflight[p.id] = true
+		remoteSnapshotInflightMu.Unlock()
+
+		go func(p prof) {
+			defer func() {
+				remoteSnapshotInflightMu.Lock()
+				delete(remoteSnapshotInflight, p.id)
+				remoteSnapshotInflightMu.Unlock()
+			}()
+			token, err := decryptRemoteToken(p.enc)
+			if err != nil {
+				log.Printf("[remote-snapshot] decrypt token for profile %d: %v", p.id, err)
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			channels, _, err := iterateRemoteChannels(ctx, p.host, token, p.userID, 100, nil)
+			if err != nil {
+				log.Printf("[remote-snapshot] fetch profile %d (%s): %v", p.id, p.host, err)
+				// Still write whatever we got — a partial snapshot beats nothing
+				// when a large remote hits a mid-pagination timeout.
+			}
+			if len(channels) == 0 {
+				return
+			}
+			if err := writeRemoteSnapshot(p.id, channels); err != nil {
+				log.Printf("[remote-snapshot] write profile %d: %v", p.id, err)
+				return
+			}
+			log.Printf("[remote-snapshot] profile %d: wrote %d rows", p.id, len(channels))
+		}(p)
+	}
+}
+
+// startRemoteSnapshotPrune deletes snapshot rows older than the retention
+// window. Runs once every 6 hours; the exact cadence isn't important as
+// long as the window doesn't drift.
+func startRemoteSnapshotPrune() {
+	retention := remoteSnapshotRetentionFromEnv()
+	log.Printf("[remote-snapshot] prune loop starting, retention=%s", retention)
+	go func() {
+		// Delay first prune so schema init has clearly finished.
+		time.Sleep(2 * time.Minute)
+		for {
+			cutoff := time.Now().Add(-retention).Unix()
+			res, err := db.Exec(`DELETE FROM remote_channel_snapshot WHERE captured_at < $1`, cutoff)
+			if err != nil {
+				log.Printf("[remote-snapshot] prune: %v", err)
+			} else if n, _ := res.RowsAffected(); n > 0 {
+				log.Printf("[remote-snapshot] pruned %d rows older than %s", n, time.Unix(cutoff, 0).UTC().Format(time.RFC3339))
+			}
+			time.Sleep(6 * time.Hour)
+		}
+	}()
+}
+
+// ---- Handler: snapshot history query ----
+
+// handleRemoteSnapshotHistory returns the time series for either one
+// specific channel (profile_id + channel_id + since) or all channels of a
+// profile at a coarser aggregation (used by the "total burn" chart). Keep
+// the API narrow — sparkline / bulk shape only.
+func handleRemoteSnapshotHistory(c *gin.Context) {
+	profileID, err := strconv.ParseInt(c.Query("profile_id"), 10, 64)
+	if err != nil || profileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	// since: epoch seconds. Default 24h back.
+	since, _ := strconv.ParseInt(c.Query("since"), 10, 64)
+	if since <= 0 {
+		since = time.Now().Add(-24 * time.Hour).Unix()
+	}
+
+	channelIDStr := c.Query("channel_id")
+	if channelIDStr != "" {
+		channelID, err := strconv.ParseInt(channelIDStr, 10, 64)
+		if err != nil || channelID <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid channel_id"})
+			return
+		}
+		rows, err := db.Query(
+			`SELECT captured_at, used_quota, status
+			   FROM remote_channel_snapshot
+			  WHERE profile_id=$1 AND remote_channel_id=$2 AND captured_at>=$3
+			  ORDER BY captured_at ASC`,
+			profileID, channelID, since,
+		)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		defer rows.Close()
+		type point struct {
+			CapturedAt int64 `json:"captured_at"`
+			UsedQuota  int64 `json:"used_quota"`
+			Status     int   `json:"status"`
+		}
+		out := make([]point, 0)
+		for rows.Next() {
+			var p point
+			if err := rows.Scan(&p.CapturedAt, &p.UsedQuota, &p.Status); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			out = append(out, p)
+		}
+		c.JSON(http.StatusOK, gin.H{"channel_id": channelID, "points": out})
+		return
+	}
+
+	// Bulk mode: latest snapshot per (profile, channel) since `since`, so the
+	// UI can show a per-row Δ quickly. Uses DISTINCT ON — Postgres-specific
+	// but this service is Postgres-only anyway.
+	rows, err := db.Query(
+		`SELECT DISTINCT ON (remote_channel_id)
+		        remote_channel_id, captured_at, used_quota
+		   FROM remote_channel_snapshot
+		  WHERE profile_id=$1 AND captured_at>=$2
+		  ORDER BY remote_channel_id, captured_at DESC`,
+		profileID, since,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	byID := make(map[int64]map[string]int64)
+	for rows.Next() {
+		var cid, ts, quota int64
+		if err := rows.Scan(&cid, &ts, &quota); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		byID[cid] = map[string]int64{"captured_at": ts, "used_quota": quota}
+	}
+	c.JSON(http.StatusOK, gin.H{"latest": byID})
 }
 
 // ---- Handler: single-channel GET (fresh used_quota after edit) ----
