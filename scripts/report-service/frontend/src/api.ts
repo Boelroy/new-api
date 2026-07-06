@@ -331,6 +331,8 @@ export type AuthUser = {
   username: string
   role: number
   studio: string
+  status: number       // 1 = enabled, 0 = disabled
+  disabled_at: number  // last time disabled; 0 = never
   created_at: number
   updated_at: number
 }
@@ -456,6 +458,15 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password }),
     }),
+
+  // Admin+ endpoints. status=0 also revokes any JWT issued before the
+  // disable moment; the user is forced back to login on their next
+  // request. Anti-escalation enforced on both server-side.
+  disableUser: (id: number) =>
+    request<{ ok: boolean; status: number }>(`/api/users/${id}/disable`, { method: 'POST' }),
+
+  enableUser: (id: number) =>
+    request<{ ok: boolean; status: number }>(`/api/users/${id}/enable`, { method: 'POST' }),
 
   deleteUser: (id: number) =>
     request<{ ok: boolean }>(`/api/users/${id}`, { method: 'DELETE' }),

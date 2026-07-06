@@ -169,6 +169,7 @@ func authMiddleware(c *gin.Context) {
 			// admin (super admin) so existing sessions stay functional.
 			role := minSuperAdminRole
 			var userID int64
+			var iat int64
 			var username, studio string
 			if claims, ok := parsed.Claims.(jwt.MapClaims); ok {
 				if r, ok := claims["role"].(float64); ok {
@@ -177,11 +178,47 @@ func authMiddleware(c *gin.Context) {
 				if u, ok := claims["user_id"].(float64); ok {
 					userID = int64(u)
 				}
+				if v, ok := claims["iat"].(float64); ok {
+					iat = int64(v)
+				}
 				if u, ok := claims["username"].(string); ok {
 					username = u
 				}
 				if s, ok := claims["studio"].(string); ok {
 					studio = s
+				}
+			}
+			// Local accounts (user_id > 0) get an additional live DB check:
+			// status=0 or iat < disabled_at means the token is revoked, even
+			// though it's still cryptographically valid. Tokens issued before
+			// the process learned about disable stop working immediately.
+			if userID > 0 {
+				var status int
+				var disabledAt int64
+				dbErr := db.QueryRow(
+					`SELECT status, disabled_at FROM rs_auth_user WHERE id=$1`,
+					userID,
+				).Scan(&status, &disabledAt)
+				if dbErr == sql.ErrNoRows {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "account no longer exists"})
+					c.Abort()
+					return
+				}
+				if dbErr != nil {
+					log.Printf("[auth] status lookup for user %d failed: %v", userID, dbErr)
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "auth lookup failed"})
+					c.Abort()
+					return
+				}
+				if status == 0 {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "account disabled"})
+					c.Abort()
+					return
+				}
+				if disabledAt > 0 && iat > 0 && iat < disabledAt {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "token revoked (issued before account was disabled)"})
+					c.Abort()
+					return
 				}
 			}
 			c.Set("role", role)
@@ -280,33 +317,35 @@ func handleAuthMe(c *gin.Context) {
 // ---- Local user store (rs_auth_user) ----
 
 type authUser struct {
-	ID        int64  `json:"id"`
-	Username  string `json:"username"`
-	Role      int    `json:"role"`
-	Studio    string `json:"studio"`
-	CreatedAt int64  `json:"created_at"`
-	UpdatedAt int64  `json:"updated_at"`
+	ID         int64  `json:"id"`
+	Username   string `json:"username"`
+	Role       int    `json:"role"`
+	Studio     string `json:"studio"`
+	Status     int    `json:"status"`
+	DisabledAt int64  `json:"disabled_at"`
+	CreatedAt  int64  `json:"created_at"`
+	UpdatedAt  int64  `json:"updated_at"`
 }
 
 // authUserFromRow scans the user-facing columns (no password hash). Used by
 // list/get endpoints that must never echo the hash back to clients.
 func authUserFromRow(row interface{ Scan(...any) error }) (authUser, error) {
 	var u authUser
-	err := row.Scan(&u.ID, &u.Username, &u.Role, &u.Studio, &u.CreatedAt, &u.UpdatedAt)
+	err := row.Scan(&u.ID, &u.Username, &u.Role, &u.Studio, &u.Status, &u.DisabledAt, &u.CreatedAt, &u.UpdatedAt)
 	return u, err
 }
 
-func authUserByUsername(username string) (id int64, hash string, role int, studio string, err error) {
+func authUserByUsername(username string) (id int64, hash string, role int, studio string, status int, err error) {
 	err = db.QueryRow(
-		`SELECT id, password_hash, role, studio FROM rs_auth_user WHERE username=$1`,
+		`SELECT id, password_hash, role, studio, status FROM rs_auth_user WHERE username=$1`,
 		username,
-	).Scan(&id, &hash, &role, &studio)
+	).Scan(&id, &hash, &role, &studio, &status)
 	return
 }
 
 func authUserByID(id int64) (authUser, error) {
 	row := db.QueryRow(
-		`SELECT id, username, role, studio, created_at, updated_at FROM rs_auth_user WHERE id=$1`,
+		`SELECT id, username, role, studio, status, disabled_at, created_at, updated_at FROM rs_auth_user WHERE id=$1`,
 		id,
 	)
 	return authUserFromRow(row)
@@ -1200,11 +1239,17 @@ func handleLogin(c *gin.Context) {
 		return
 	}
 
-	id, hash, role, studio, err := authUserByUsername(body.Username)
+	id, hash, role, studio, status, err := authUserByUsername(body.Username)
 	if err != nil || bcrypt.CompareHashAndPassword([]byte(hash), []byte(body.Password)) != nil {
 		recordLoginAttempt(body.Username, ip, false)
 		log.Printf("[login] failed user=%s ip=%s", body.Username, ip)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		return
+	}
+	if status == 0 {
+		recordLoginAttempt(body.Username, ip, false)
+		log.Printf("[login] disabled account user=%s id=%d ip=%s", body.Username, id, ip)
+		c.JSON(http.StatusForbidden, gin.H{"error": "account disabled"})
 		return
 	}
 	tokenStr, err := newJWT(id, body.Username, role, studio)
@@ -1235,7 +1280,8 @@ func isValidRoleTier(role int) bool {
 
 func handleUsersList(c *gin.Context) {
 	rows, err := db.Query(
-		`SELECT id, username, role, studio, created_at, updated_at FROM rs_auth_user ORDER BY id ASC`,
+		`SELECT id, username, role, studio, status, disabled_at, created_at, updated_at
+		   FROM rs_auth_user ORDER BY id ASC`,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1273,6 +1319,14 @@ func handleUserCreate(c *gin.Context) {
 	}
 	if !isValidRoleTier(body.Role) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 5, 10, or 100"})
+		return
+	}
+	// Anti-escalation on create: an admin (non-super) can only mint accounts
+	// at a strictly lower tier. Super admin can create any tier.
+	callerRoleAny, _ := c.Get("role")
+	callerRole, _ := callerRoleAny.(int)
+	if callerRole < minSuperAdminRole && body.Role >= callerRole {
+		c.JSON(http.StatusForbidden, gin.H{"error": "cannot create a user at your own tier or higher"})
 		return
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
@@ -1468,6 +1522,79 @@ func handleUserResetPassword(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+// callerCanManage returns whether the calling admin+ is authorised to
+// mutate `target`. Super admin can mutate anyone (including themselves,
+// with the exception of "last-of-tier" guards elsewhere). Non-super
+// callers must be strictly higher tier than the target, so admin cannot
+// touch peer admins or super admins.
+func callerCanManage(c *gin.Context, target authUser) (int, bool) {
+	roleAny, _ := c.Get("role")
+	callerRole, _ := roleAny.(int)
+	if callerRole >= minSuperAdminRole {
+		return callerRole, true
+	}
+	if callerRole > target.Role {
+		return callerRole, true
+	}
+	return callerRole, false
+}
+
+// handleUserSetStatus toggles rs_auth_user.status. status=0 also stamps
+// disabled_at=now so any JWT issued before this moment is rejected on
+// the next request (see authMiddleware). Re-enabling flips status back
+// to 1 but leaves disabled_at as-is — the user must log in again to get
+// a fresh token whose iat >= disabled_at.
+func handleUserSetStatus(c *gin.Context, disable bool) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	target, err := authUserByID(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+	if _, ok := callerCanManage(c, target); !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": "cannot disable a peer or higher-privileged user"})
+		return
+	}
+	// Never let anyone disable the only remaining active super admin — that
+	// would lock everyone out of user management + Remote Channels.
+	if disable && target.Role >= minSuperAdminRole {
+		var others int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM rs_auth_user WHERE role >= $1 AND status = 1 AND id <> $2`,
+			minSuperAdminRole, id,
+		).Scan(&others); err == nil && others == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "cannot disable the last active super admin"})
+			return
+		}
+	}
+	now := time.Now().Unix()
+	if disable {
+		if _, err := db.Exec(
+			`UPDATE rs_auth_user SET status=0, disabled_at=$1, updated_at=$1 WHERE id=$2`,
+			now, id,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	} else {
+		if _, err := db.Exec(
+			`UPDATE rs_auth_user SET status=1, updated_at=$1 WHERE id=$2`,
+			now, id,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "status": map[bool]int{true: 0, false: 1}[disable]})
+}
+
+func handleUserDisable(c *gin.Context) { handleUserSetStatus(c, true) }
+func handleUserEnable(c *gin.Context)  { handleUserSetStatus(c, false) }
+
 func handleUserDelete(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
@@ -1485,6 +1612,13 @@ func handleUserDelete(c *gin.Context) {
 	target, err := authUserByID(id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+	// Anti-escalation: admin (role < super) can only delete strict-lower
+	// tier users. Super admin can delete anyone (subject to the last-super
+	// guard below).
+	if _, ok := callerCanManage(c, target); !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": "cannot delete a peer or higher-privileged user"})
 		return
 	}
 	if target.Role >= minSuperAdminRole {
@@ -2600,6 +2734,14 @@ func main() {
 			updated_at    BIGINT NOT NULL
 		)`,
 		`ALTER TABLE rs_auth_user ADD COLUMN IF NOT EXISTS studio TEXT NOT NULL DEFAULT ''`,
+		// User disable state. status=1 enabled, status=0 disabled. When a
+		// user is disabled we also set disabled_at=now so authMiddleware can
+		// reject any JWT whose iat < disabled_at, effectively cutting off
+		// tokens issued before the disable moment. Re-enabling flips status
+		// back to 1 but leaves disabled_at as-is; the user must log in again
+		// to get a fresh token whose iat >= disabled_at.
+		`ALTER TABLE rs_auth_user ADD COLUMN IF NOT EXISTS status INT NOT NULL DEFAULT 1`,
+		`ALTER TABLE rs_auth_user ADD COLUMN IF NOT EXISTS disabled_at BIGINT NOT NULL DEFAULT 0`,
 		// Login attempts log — used for per-username lockout and per-IP rate
 		// limiting on /api/login. Pruned to ~24h by startPruneLoginAttempts.
 		`CREATE TABLE IF NOT EXISTS rs_login_attempt (
@@ -2730,17 +2872,23 @@ func main() {
 	adminAPI.GET("/studios", handleStudiosList)
 	adminAPI.POST("/keys/test", handleTestKeys)
 	adminAPI.GET("/detect/models", handleDetectModels)
-	// Admin can see the user list and reset passwords of users below their
-	// own tier (see handleUserResetPassword for the anti-escalation guard).
-	// Create / role or studio changes / delete stay super admin only below.
+	// Admin (role >= 10) gets the full user-list + create + delete +
+	// disable/enable + password-reset surface. Each handler enforces the
+	// anti-escalation guard (callerCanManage / callerRole > body.Role) so
+	// admin can only touch users strictly below their own tier.
+	// Editing role and studio still requires super admin — a tier change
+	// is the one operation admin can't do without letting them promote a
+	// puppet account to their own level.
 	adminAPI.GET("/users", handleUsersList)
+	adminAPI.POST("/users", handleUserCreate)
 	adminAPI.POST("/users/:id/reset-password", handleUserResetPassword)
+	adminAPI.POST("/users/:id/disable", handleUserDisable)
+	adminAPI.POST("/users/:id/enable", handleUserEnable)
+	adminAPI.DELETE("/users/:id", handleUserDelete)
 
-	// Full user management + Profit stay super-admin-only.
+	// PATCH (role/studio changes) + Profit stay super-admin-only.
 	superAPI := api.Group("", requireRole(minSuperAdminRole))
-	superAPI.POST("/users", handleUserCreate)
 	superAPI.PATCH("/users/:id", handleUserUpdate)
-	superAPI.DELETE("/users/:id", handleUserDelete)
 
 	// Remote New-API inspector: lets super admin save credentials for
 	// external new-api deployments and pull channel + used_quota data.

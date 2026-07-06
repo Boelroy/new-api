@@ -1310,7 +1310,9 @@ func handleRemoteChannelCreate(c *gin.Context) {
 		}
 
 		// Reverse-lookup: search by the sha8 tag we embedded in the name.
-		// remoteDoJSON strips the envelope; response `data` is a bare array.
+		// remoteDoJSON strips the envelope; on modern new-api the returned
+		// `data` is {items: [...], total, type_counts}, on older builds it
+		// was a bare array — accept either shape.
 		q := url.Values{}
 		q.Set("keyword", sha)
 		q.Set("group", body.Group)
@@ -1321,12 +1323,22 @@ func handleRemoteChannelCreate(c *gin.Context) {
 			results = append(results, batchCreateResult{Key: masked, OK: false, Name: name, Error: "created but search failed: " + err.Error()})
 			continue
 		}
-		var hits []struct {
+		type hit struct {
 			ID   int64  `json:"id"`
 			Name string `json:"name"`
 		}
-		if err := json.Unmarshal(data, &hits); err != nil {
-			results = append(results, batchCreateResult{Key: masked, OK: false, Name: name, Error: "created but decode search failed"})
+		var hits []hit
+		var paged struct {
+			Items []hit `json:"items"`
+		}
+		if err := json.Unmarshal(data, &paged); err == nil && paged.Items != nil {
+			hits = paged.Items
+		} else if err := json.Unmarshal(data, &hits); err != nil {
+			snippet := string(data)
+			if len(snippet) > 160 {
+				snippet = snippet[:160] + "…"
+			}
+			results = append(results, batchCreateResult{Key: masked, OK: false, Name: name, Error: "created but decode search failed: " + snippet})
 			continue
 		}
 		var matchedID int64

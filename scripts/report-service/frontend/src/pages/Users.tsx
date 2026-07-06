@@ -45,9 +45,11 @@ export default function Users() {
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<number | null>(null)
 
-  // Super admin gets full CRUD; admin gets read + password reset only,
-  // and even that only for users strictly below their tier.
+  // Super admin gets full CRUD including role/studio edits and PATCH.
+  // Admin+ can create/delete/disable/reset users strictly below their tier
+  // (anti-escalation enforced server-side, mirrored in the UI).
   const isSuperAdmin = (me?.role ?? 0) >= ROLE_SUPER_ADMIN
+  const canManageUsers = (me?.role ?? 0) >= ROLE_ADMIN
   const myRole = me?.role ?? 0
 
   const [newUsername, setNewUsername] = useState('')
@@ -196,6 +198,23 @@ export default function Users() {
     }
   }
 
+  const handleToggleStatus = async (u: AuthUser) => {
+    const disable = u.status === 1
+    const verb = disable ? '禁用' : '重新启用'
+    if (!window.confirm(`${verb}用户 "${u.username}"？${disable ? '\n\n他现有的登录 token 会立即失效，需要重新登录（如果重新启用他）。' : ''}`)) return
+    setBusyId(u.id)
+    setError(null)
+    try {
+      if (disable) await api.disableUser(u.id)
+      else await api.enableUser(u.id)
+      await reload()
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : `${verb}失败`)
+    } finally {
+      setBusyId(null)
+    }
+  }
+
   const handleDelete = async (u: AuthUser) => {
     if (!window.confirm(`Delete user "${u.username}"? This cannot be undone.`)) return
     setBusyId(u.id)
@@ -222,7 +241,7 @@ export default function Users() {
           </div>
         )}
 
-        {isSuperAdmin && (
+        {canManageUsers && (
         <section className="rounded-lg border border-gray-200 bg-white p-4">
           <h2 className="text-sm font-medium text-gray-900 mb-3">Create user</h2>
           <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
@@ -246,7 +265,10 @@ export default function Users() {
               value={newRole}
               onChange={e => setNewRole(Number(e.target.value))}
             >
-              {ROLE_OPTIONS.map(o => (
+              {/* Anti-escalation on create: non-super admins can only mint
+                  users strictly below their own tier, mirroring the
+                  server-side check. Super admin sees every tier. */}
+              {ROLE_OPTIONS.filter(o => isSuperAdmin || o.value < myRole).map(o => (
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
             </select>
@@ -297,6 +319,7 @@ export default function Users() {
                   <th className="px-4 py-2 text-left font-medium">Username</th>
                   <th className="px-4 py-2 text-left font-medium">Role</th>
                   <th className="px-4 py-2 text-left font-medium">Studio</th>
+                  <th className="px-4 py-2 text-left font-medium">Status</th>
                   <th className="px-4 py-2 text-left font-medium">Created</th>
                   <th className="px-4 py-2 text-left font-medium">Updated</th>
                   <th className="px-4 py-2 text-right font-medium">Actions</th>
@@ -304,9 +327,9 @@ export default function Users() {
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {loading ? (
-                  <tr><td colSpan={7} className="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
+                  <tr><td colSpan={8} className="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
                 ) : users.length === 0 ? (
-                  <tr><td colSpan={7} className="px-4 py-6 text-center text-gray-400">No users yet.</td></tr>
+                  <tr><td colSpan={8} className="px-4 py-6 text-center text-gray-400">No users yet.</td></tr>
                 ) : users.map(u => {
                   const isSelf = me?.user_id === u.id
                   const disabled = busyId === u.id
@@ -354,11 +377,25 @@ export default function Users() {
                           <span className="text-xs text-gray-500">{u.studio || '—'}</span>
                         )}
                       </td>
+                      <td className="px-4 py-2">
+                        {u.status === 1 ? (
+                          <span className="inline-block px-2 py-0.5 rounded-full text-[10px] bg-emerald-100 text-emerald-800">
+                            Enabled
+                          </span>
+                        ) : (
+                          <span
+                            className="inline-block px-2 py-0.5 rounded-full text-[10px] bg-red-100 text-red-700"
+                            title={u.disabled_at ? `since ${formatTime(u.disabled_at)}` : undefined}
+                          >
+                            Disabled
+                          </span>
+                        )}
+                      </td>
                       <td className="px-4 py-2 text-gray-500">{formatTime(u.created_at)}</td>
                       <td className="px-4 py-2 text-gray-500">{formatTime(u.updated_at)}</td>
                       <td className="px-4 py-2 text-right whitespace-nowrap">
-                        {/* Anti-escalation: admin can only reset passwords of
-                            users with a strictly lower role. Super admin bypasses. */}
+                        {/* Anti-escalation: admin+ can only touch users with a
+                            strictly lower role. Super admin bypasses. */}
                         {(isSuperAdmin || myRole > u.role) && (
                           <button
                             type="button"
@@ -369,7 +406,17 @@ export default function Users() {
                             Reset password
                           </button>
                         )}
-                        {isSuperAdmin && (
+                        {(isSuperAdmin || myRole > u.role) && !isSelf && (
+                          <button
+                            type="button"
+                            onClick={() => void handleToggleStatus(u)}
+                            disabled={disabled}
+                            className={`text-xs px-2 ${u.status === 1 ? 'text-amber-600 hover:text-amber-800' : 'text-emerald-600 hover:text-emerald-800'}`}
+                          >
+                            {u.status === 1 ? 'Disable' : 'Enable'}
+                          </button>
+                        )}
+                        {(isSuperAdmin || myRole > u.role) && (
                           <button
                             type="button"
                             onClick={() => void handleDelete(u)}
