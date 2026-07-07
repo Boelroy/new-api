@@ -51,6 +51,11 @@ export default function Profit() {
   const [rdsNewNote, setRdsNewNote] = useState('')
   const [rdsSaving, setRdsSaving] = useState(false)
 
+  // Remote profit view: collapse channels into per-profile rows by default.
+  // Individual channel rows expand under each profile when the operator
+  // clicks the ▸ chevron.
+  const [expandedProfiles, setExpandedProfiles] = useState<Set<number>>(new Set())
+
   const reloadRds = async () => {
     try {
       const [profRes, itemsRes] = await Promise.all([
@@ -512,13 +517,63 @@ export default function Profit() {
       {/* Remote Channels — one row per (profile, channel) with local
           upstream (unit_price_cny) vs configured downstream (downstream_cny)
           applied to daily deltas from remote_channel_snapshot. */}
-      {profit && profit.by_remote_channel && profit.by_remote_channel.length > 0 && (
+      {profit && profit.by_remote_channel && profit.by_remote_channel.length > 0 && (() => {
+        // Collapse channels into per-profile rows so 196 rows don't drown
+        // the section. Each aggregate row shows totals; expanding reveals
+        // the underlying channel rows sorted by profit desc.
+        type Agg = {
+          profileID: number
+          profileName: string
+          channelCount: number
+          usedUSD: number
+          costUSD: number
+          revenueUSD: number
+          profitUSD: number
+          discount: number | null
+        }
+        const byProfile = new Map<number, Agg>()
+        for (const r of profit.by_remote_channel!) {
+          let a = byProfile.get(r.profile_id)
+          if (!a) {
+            a = {
+              profileID: r.profile_id,
+              profileName: r.profile_name || String(r.profile_id),
+              channelCount: 0,
+              usedUSD: 0,
+              costUSD: 0,
+              revenueUSD: 0,
+              profitUSD: 0,
+              discount: null,
+            }
+            byProfile.set(r.profile_id, a)
+          }
+          a.channelCount += 1
+          a.usedUSD += r.used_usd
+          a.costUSD += r.cost_usd
+          a.revenueUSD += r.revenue_usd
+          a.profitUSD += r.profit_usd
+          // Prefer the largest discount seen so the collapsed row shows
+          // the operator-configured multiplier when it's consistent.
+          if (r.downstream_discount != null) {
+            a.discount = a.discount == null ? r.downstream_discount : Math.max(a.discount, r.downstream_discount)
+          }
+        }
+        const aggRows = Array.from(byProfile.values()).sort((a, b) => b.profitUSD - a.profitUSD)
+        const toggleProfile = (pid: number) => {
+          setExpandedProfiles(prev => {
+            const next = new Set(prev)
+            if (next.has(pid)) next.delete(pid)
+            else next.add(pid)
+            return next
+          })
+        }
+        return (
         <div className="bg-white border border-gray-200 rounded-xl mb-4">
           <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
             <div>
               <div className="text-sm font-semibold">Remote Channels 毛利</div>
               <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">
-                Remote Channels · used = ${(profit.remote_used_usd ?? 0).toFixed(2)} · cost = ${(profit.remote_cost_usd ?? 0).toFixed(2)} · revenue = ${(profit.remote_revenue_usd ?? 0).toFixed(2)} · profit = <span className={(profit.remote_profit_usd ?? 0) >= 0 ? 'text-emerald-600' : 'text-rose-700'}>${(profit.remote_profit_usd ?? 0).toFixed(2)}</span>
+                {profit.by_remote_channel!.length} channels across {aggRows.length} profile{aggRows.length === 1 ? '' : 's'} · used = ${(profit.remote_used_usd ?? 0).toFixed(2)} · cost = ${(profit.remote_cost_usd ?? 0).toFixed(2)} · revenue = ${(profit.remote_revenue_usd ?? 0).toFixed(2)} · profit = <span className={(profit.remote_profit_usd ?? 0) >= 0 ? 'text-emerald-600' : 'text-rose-700'}>${(profit.remote_profit_usd ?? 0).toFixed(2)}</span>
               </div>
             </div>
           </div>
@@ -526,10 +581,10 @@ export default function Profit() {
             <table className="w-full text-xs">
               <thead className="bg-gray-50">
                 <tr>
+                  <th className="px-2 py-2 w-6"></th>
                   <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Profile</th>
-                  <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Channel</th>
+                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">渠道数</th>
                   <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">用量 USD</th>
-                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">上游 CNY</th>
                   <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400" title="profile 当日下游折扣 (最大值)">下游 ×</th>
                   <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">上游成本 USD</th>
                   <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">下游收入 USD</th>
@@ -538,27 +593,58 @@ export default function Profit() {
                 </tr>
               </thead>
               <tbody>
-                {profit.by_remote_channel.map(r => (
-                  <tr key={`${r.profile_id}-${r.channel_id}`} className="hover:bg-gray-50 border-t border-gray-100">
-                    <td className="px-3 py-1.5 text-gray-500">{r.profile_name || r.profile_id}</td>
-                    <td className="px-3 py-1.5 font-mono max-w-[280px] truncate" title={r.channel_name}>{r.channel_name || `#${r.channel_id}`}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{r.used_usd.toFixed(2)}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums text-gray-500">{r.unit_price_cny != null ? '¥' + r.unit_price_cny.toFixed(4) : '—'}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums text-blue-600">{r.downstream_discount != null ? '×' + r.downstream_discount.toFixed(4) : '—'}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums text-rose-600">{r.cost_usd.toFixed(4)}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums text-blue-600">{r.revenue_usd.toFixed(4)}</td>
-                    <td className={`px-3 py-1.5 text-right tabular-nums font-medium ${r.profit_usd >= 0 ? 'text-emerald-600' : 'text-rose-700'}`}>{r.profit_usd.toFixed(4)}</td>
-                    <td className={`px-3 py-1.5 text-right tabular-nums ${r.profit_rate >= 0 ? '' : 'text-rose-700'}`}>{fmtPct(r.profit_rate)}</td>
-                  </tr>
-                ))}
+                {aggRows.map(a => {
+                  const isOpen = expandedProfiles.has(a.profileID)
+                  const profitRate = a.usedUSD > 0 ? (a.revenueUSD - a.costUSD) / a.usedUSD : 0
+                  return (
+                    <>
+                      <tr key={`p-${a.profileID}`} className="hover:bg-gray-50 border-t border-gray-100 font-medium">
+                        <td className="px-2 py-1.5 text-center">
+                          <button
+                            onClick={() => toggleProfile(a.profileID)}
+                            className={`text-[10px] ${isOpen ? 'text-emerald-600' : 'text-gray-400 hover:text-gray-700'}`}
+                          >
+                            {isOpen ? '▾' : '▸'}
+                          </button>
+                        </td>
+                        <td className="px-3 py-1.5">{a.profileName}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums text-gray-500">{a.channelCount}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums">{a.usedUSD.toFixed(2)}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums text-blue-600">{a.discount != null ? '×' + a.discount.toFixed(4) : '—'}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums text-rose-600">{a.costUSD.toFixed(4)}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums text-blue-600">{a.revenueUSD.toFixed(4)}</td>
+                        <td className={`px-3 py-1.5 text-right tabular-nums ${a.profitUSD >= 0 ? 'text-emerald-600' : 'text-rose-700'}`}>{a.profitUSD.toFixed(4)}</td>
+                        <td className={`px-3 py-1.5 text-right tabular-nums ${profitRate >= 0 ? '' : 'text-rose-700'}`}>{fmtPct(profitRate)}</td>
+                      </tr>
+                      {isOpen && profit.by_remote_channel!
+                        .filter(r => r.profile_id === a.profileID)
+                        .sort((x, y) => y.profit_usd - x.profit_usd)
+                        .map(r => (
+                          <tr key={`p-${a.profileID}-c-${r.channel_id}`} className="bg-gray-50/40 hover:bg-gray-50 border-t border-gray-100">
+                            <td className="px-2 py-1.5"></td>
+                            <td className="px-3 py-1.5 font-mono text-[11px] text-gray-500 truncate max-w-[280px]" title={r.channel_name} colSpan={2}>
+                              ↳ {r.channel_name || `#${r.channel_id}`}
+                            </td>
+                            <td className="px-3 py-1.5 text-right tabular-nums">{r.used_usd.toFixed(2)}</td>
+                            <td className="px-3 py-1.5 text-right tabular-nums text-blue-600">{r.downstream_discount != null ? '×' + r.downstream_discount.toFixed(4) : '—'}</td>
+                            <td className="px-3 py-1.5 text-right tabular-nums text-rose-600">{r.cost_usd.toFixed(4)}</td>
+                            <td className="px-3 py-1.5 text-right tabular-nums text-blue-600">{r.revenue_usd.toFixed(4)}</td>
+                            <td className={`px-3 py-1.5 text-right tabular-nums ${r.profit_usd >= 0 ? 'text-emerald-600' : 'text-rose-700'}`}>{r.profit_usd.toFixed(4)}</td>
+                            <td className={`px-3 py-1.5 text-right tabular-nums ${r.profit_rate >= 0 ? '' : 'text-rose-700'}`}>{fmtPct(r.profit_rate)}</td>
+                          </tr>
+                        ))}
+                    </>
+                  )
+                })}
               </tbody>
             </table>
           </div>
           <div className="px-4 py-2 text-[10px] text-gray-400 border-t border-gray-100">
-            用量 = last snapshot(day D) − last snapshot(day D−1)（15min cron 采样）· 上游/下游未配置时该项按 0 处理
+            用量 = last snapshot(day D) − last snapshot(day D−1)（15min cron 采样）· 上游/下游未配置时该项按 0 处理 · 点 ▸ 展开看渠道明细
           </div>
         </div>
-      )}
+        )
+      })()}
 
       <div className="bg-white border border-gray-200 rounded-xl mb-4">
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
