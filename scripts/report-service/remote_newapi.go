@@ -316,26 +316,28 @@ func handleRemoteProfileDelete(c *gin.Context) {
 // is what we mostly care about here. QuotaUSD/Note come from the local
 // remote_channel_meta table and are merged in on read.
 type remoteChannel struct {
-	ID          int64    `json:"id"`
-	Name        string   `json:"name"`
-	Type        int      `json:"type"`
-	Status      int      `json:"status"`
-	Group       string   `json:"group"`
-	Tag         string   `json:"tag"`
-	Priority    int64    `json:"priority"`
-	Weight      int64    `json:"weight"`
-	Models      string   `json:"models"`
-	UsedQuota   int64    `json:"used_quota"`
-	CreatedTime int64    `json:"created_time"`
-	QuotaUSD    *float64 `json:"quota_usd,omitempty"`
-	Note        string   `json:"note,omitempty"`
+	ID           int64    `json:"id"`
+	Name         string   `json:"name"`
+	Type         int      `json:"type"`
+	Status       int      `json:"status"`
+	Group        string   `json:"group"`
+	Tag          string   `json:"tag"`
+	Priority     int64    `json:"priority"`
+	Weight       int64    `json:"weight"`
+	Models       string   `json:"models"`
+	UsedQuota    int64    `json:"used_quota"`
+	CreatedTime  int64    `json:"created_time"`
+	QuotaUSD     *float64 `json:"quota_usd,omitempty"`
+	UnitPriceCNY *float64 `json:"unit_price_cny,omitempty"`
+	Note         string   `json:"note,omitempty"`
 }
 
 // remoteChannelMeta is the local operator-only overlay for a remote channel.
 type remoteChannelMeta struct {
-	QuotaUSD  *float64
-	Note      string
-	UpdatedAt int64
+	QuotaUSD     *float64
+	UnitPriceCNY *float64
+	Note         string
+	UpdatedAt    int64
 }
 
 // loadMetaMap fetches operator metadata for a set of channels of one profile.
@@ -353,7 +355,7 @@ func loadMetaMap(profileID int64, channelIDs []int64) (map[int64]remoteChannelMe
 		placeholders = append(placeholders, "$"+strconv.Itoa(i+2))
 		args = append(args, id)
 	}
-	q := `SELECT remote_channel_id, quota_usd, note, updated_at
+	q := `SELECT remote_channel_id, quota_usd, unit_price_cny, note, updated_at
 	      FROM remote_channel_meta
 	      WHERE profile_id=$1 AND remote_channel_id IN (` + strings.Join(placeholders, ",") + `)`
 	rows, err := db.Query(q, args...)
@@ -363,10 +365,10 @@ func loadMetaMap(profileID int64, channelIDs []int64) (map[int64]remoteChannelMe
 	defer rows.Close()
 	for rows.Next() {
 		var chID int64
-		var quota sql.NullFloat64
+		var quota, price sql.NullFloat64
 		var note string
 		var updatedAt int64
-		if err := rows.Scan(&chID, &quota, &note, &updatedAt); err != nil {
+		if err := rows.Scan(&chID, &quota, &price, &note, &updatedAt); err != nil {
 			return nil, err
 		}
 		m := remoteChannelMeta{Note: note, UpdatedAt: updatedAt}
@@ -374,32 +376,57 @@ func loadMetaMap(profileID int64, channelIDs []int64) (map[int64]remoteChannelMe
 			v := quota.Float64
 			m.QuotaUSD = &v
 		}
+		if price.Valid {
+			v := price.Float64
+			m.UnitPriceCNY = &v
+		}
 		out[chID] = m
 	}
 	return out, nil
 }
 
-func upsertMeta(profileID, channelID int64, quotaUSD *float64, note string) error {
+// upsertMeta writes only the fields the caller cared about, leaving the
+// others untouched. Pass nil for a pointer field to preserve the existing
+// value; note is likewise only overwritten when non-empty.
+func upsertMeta(profileID, channelID int64, quotaUSD, unitPriceCNY *float64, note string) error {
 	now := time.Now().Unix()
-	// Try UPDATE first; if 0 rows, INSERT. Portable to any driver.
-	res, err := db.Exec(
-		`UPDATE remote_channel_meta SET quota_usd=$1, note=$2, updated_at=$3
-		 WHERE profile_id=$4 AND remote_channel_id=$5`,
-		quotaUSD, note, now, profileID, channelID,
-	)
-	if err != nil {
+	// Ensure the row exists first — subsequent updates are then column-scoped.
+	if _, err := db.Exec(
+		`INSERT INTO remote_channel_meta (profile_id, remote_channel_id, quota_usd, unit_price_cny, note, updated_at)
+		 VALUES ($1, $2, NULL, NULL, '', $3)
+		 ON CONFLICT (profile_id, remote_channel_id) DO NOTHING`,
+		profileID, channelID, now,
+	); err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
-	if n > 0 {
-		return nil
+	if quotaUSD != nil {
+		if _, err := db.Exec(
+			`UPDATE remote_channel_meta SET quota_usd=$1, updated_at=$2
+			  WHERE profile_id=$3 AND remote_channel_id=$4`,
+			*quotaUSD, now, profileID, channelID,
+		); err != nil {
+			return err
+		}
 	}
-	_, err = db.Exec(
-		`INSERT INTO remote_channel_meta (profile_id, remote_channel_id, quota_usd, note, updated_at)
-		 VALUES ($1, $2, $3, $4, $5)`,
-		profileID, channelID, quotaUSD, note, now,
-	)
-	return err
+	if unitPriceCNY != nil {
+		if _, err := db.Exec(
+			`UPDATE remote_channel_meta SET unit_price_cny=$1, updated_at=$2
+			  WHERE profile_id=$3 AND remote_channel_id=$4`,
+			*unitPriceCNY, now, profileID, channelID,
+		); err != nil {
+			return err
+		}
+	}
+	if note != "" {
+		if _, err := db.Exec(
+			`UPDATE remote_channel_meta SET note=$1, updated_at=$2
+			  WHERE profile_id=$3 AND remote_channel_id=$4`,
+			note, now, profileID, channelID,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func deleteMeta(profileID, channelID int64) error {
@@ -692,6 +719,7 @@ func handleRemoteFetchChannels(c *gin.Context) {
 			for i := range all {
 				if m, ok := metaMap[all[i].ID]; ok {
 					all[i].QuotaUSD = m.QuotaUSD
+					all[i].UnitPriceCNY = m.UnitPriceCNY
 					all[i].Note = m.Note
 				}
 			}
@@ -1258,27 +1286,31 @@ func handlePendingKeyDelete(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"deleted": n})
 }
 
-// pendingSchedulerNudge lets the enqueue handler skip the 60s wait for
+// pendingSchedulerNudge lets the enqueue handler skip the tick wait for
 // immediate (pool_size=0) uploads. Buffered=1 so overlapping enqueues
 // coalesce into one wake-up.
 var pendingSchedulerNudge = make(chan struct{}, 1)
 
-// startRemotePendingScheduler runs the drip logic. Every 60s (or on
+// startRemotePendingScheduler runs the drip logic. Every 20s (or on
+// nudge) it:
+//   • Marks active keys as `used` when their remote channel is disabled
+//     (status ≠ 1) or missing from the local mirror.
+// startRemotePendingScheduler runs the drip logic. Every 20s (or on
 // nudge) it:
 //   • Marks active keys as `used` when their remote channel is disabled
 //     (status ≠ 1) or missing from the local mirror.
 //   • Uploads all pool_size=0 pending items.
-//   • For each pool_size > 0, ensures at most that many active items.
-//     Pending items are picked oldest-first.
+//   • For each pool_size > 0, only refills when the entire pool has
+//     drained — the "2 个用完再一起上下 2 个" batch drip pattern.
 //   • On upload failure increments attempts; ≥ 3 → status='failed'.
 func startRemotePendingScheduler() {
-	log.Printf("[pending-scheduler] starting, tick=60s, retries=3")
+	log.Printf("[pending-scheduler] starting, tick=20s, retries=3, batch drip")
 	go func() {
 		// Modest stagger so the process doesn't hammer the remote in the
 		// very second it boots.
 		time.Sleep(15 * time.Second)
 		runPendingTickAllProfiles()
-		t := time.NewTicker(60 * time.Second)
+		t := time.NewTicker(20 * time.Second)
 		defer t.Stop()
 		for {
 			select {
@@ -1393,11 +1425,21 @@ func runPendingTickForProfile(profileID int64) {
 			log.Printf("[pending-scheduler] count active pool=%d: %v", size, err)
 			continue
 		}
-		need := size - activeCount
-		if need <= 0 {
+		// Batch drip: only start the next batch when the current one has
+		// completely drained. Matches the "2 个用完再一起上下 2 个" mental
+		// model — clean cutover rather than a rolling shuffle. Set
+		// REMOTE_PENDING_ROLLING_DRIP=1 in env to fall back to the old
+		// keep-N-active behaviour if it ever proves useful.
+		if activeCount > 0 {
+			if os.Getenv("REMOTE_PENDING_ROLLING_DRIP") == "1" {
+				need := size - activeCount
+				if need > 0 {
+					uploadEligiblePending(host, token, userID, profileID, size, need)
+				}
+			}
 			continue
 		}
-		uploadEligiblePending(host, token, userID, profileID, size, need)
+		uploadEligiblePending(host, token, userID, profileID, size, size)
 	}
 }
 
@@ -1529,7 +1571,7 @@ func handleRemoteCachedChannels(c *gin.Context) {
 		        priority, weight, models, used_quota, created_time, updated_at
 		   FROM remote_channel_current
 		  WHERE profile_id = $1
-		  ORDER BY remote_channel_id ASC`,
+		  ORDER BY remote_channel_id DESC`,
 		profileID,
 	)
 	if err != nil {
@@ -1567,6 +1609,7 @@ func handleRemoteCachedChannels(c *gin.Context) {
 			for i := range all {
 				if m, ok := metaMap[all[i].ID]; ok {
 					all[i].QuotaUSD = m.QuotaUSD
+					all[i].UnitPriceCNY = m.UnitPriceCNY
 					all[i].Note = m.Note
 				}
 			}
@@ -1694,6 +1737,7 @@ func handleRemoteChannelGet(c *gin.Context) {
 	if metaMap, err := loadMetaMap(profileID, []int64{ch.ID}); err == nil {
 		if m, ok := metaMap[ch.ID]; ok {
 			ch.QuotaUSD = m.QuotaUSD
+			ch.UnitPriceCNY = m.UnitPriceCNY
 			ch.Note = m.Note
 		}
 	}
@@ -1906,7 +1950,7 @@ func uploadOneKeyToRemote(ctx context.Context, p uploadOneKeyParams) (int64, err
 		return 0, fmt.Errorf("created but %v", err)
 	}
 	if p.QuotaUSD != nil || strings.TrimSpace(p.Note) != "" {
-		_ = upsertMeta(p.ProfileID, channelID, p.QuotaUSD, strings.TrimSpace(p.Note))
+		_ = upsertMeta(p.ProfileID, channelID, p.QuotaUSD, nil, strings.TrimSpace(p.Note))
 	}
 	return channelID, nil
 }
@@ -1966,16 +2010,17 @@ func maskKey(k string) string {
 
 func handleRemoteChannelUpdate(c *gin.Context) {
 	var body struct {
-		ProfileID int64    `json:"profile_id"`
-		ChannelID int64    `json:"channel_id"`
-		Name      *string  `json:"name,omitempty"`
-		Tag       *string  `json:"tag,omitempty"`
-		Status    *int     `json:"status,omitempty"`
-		Priority  *int64   `json:"priority,omitempty"`
-		Group     *string  `json:"group,omitempty"`
-		Models    *string  `json:"models,omitempty"`
-		QuotaUSD  *float64 `json:"quota_usd,omitempty"`
-		Note      *string  `json:"note,omitempty"`
+		ProfileID    int64    `json:"profile_id"`
+		ChannelID    int64    `json:"channel_id"`
+		Name         *string  `json:"name,omitempty"`
+		Tag          *string  `json:"tag,omitempty"`
+		Status       *int     `json:"status,omitempty"`
+		Priority     *int64   `json:"priority,omitempty"`
+		Group        *string  `json:"group,omitempty"`
+		Models       *string  `json:"models,omitempty"`
+		QuotaUSD     *float64 `json:"quota_usd,omitempty"`
+		UnitPriceCNY *float64 `json:"unit_price_cny,omitempty"`
+		Note         *string  `json:"note,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -2037,30 +2082,134 @@ func handleRemoteChannelUpdate(c *gin.Context) {
 		}
 	}
 
-	// Local meta. Only touch if either field is present.
-	if body.QuotaUSD != nil || body.Note != nil {
-		// Merge onto existing meta so we don't clobber a field the caller
-		// didn't send.
-		var quotaUSD *float64
-		var note string
-		if metaMap, err := loadMetaMap(body.ProfileID, []int64{body.ChannelID}); err == nil {
-			if m, ok := metaMap[body.ChannelID]; ok {
-				quotaUSD = m.QuotaUSD
-				note = m.Note
-			}
-		}
-		if body.QuotaUSD != nil {
-			quotaUSD = body.QuotaUSD
-		}
+	// Local meta. upsertMeta already writes only the fields we pass in, so
+	// no merge is needed — nil pointers preserve existing values.
+	if body.QuotaUSD != nil || body.UnitPriceCNY != nil || body.Note != nil {
+		note := ""
 		if body.Note != nil {
 			note = strings.TrimSpace(*body.Note)
 		}
-		if err := upsertMeta(body.ProfileID, body.ChannelID, quotaUSD, note); err != nil {
+		if err := upsertMeta(body.ProfileID, body.ChannelID, body.QuotaUSD, body.UnitPriceCNY, note); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "save meta: " + err.Error()})
 			return
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// handleRemoteMetaBulkUpdate writes the same meta fields to a bunch of
+// channels at once. Only fields the caller sends are touched. Purely
+// local — never talks to the remote. Meant for the "select N rows +
+// set their unit_price_cny" flow.
+func handleRemoteMetaBulkUpdate(c *gin.Context) {
+	var body struct {
+		ProfileID    int64    `json:"profile_id"`
+		ChannelIDs   []int64  `json:"channel_ids"`
+		QuotaUSD     *float64 `json:"quota_usd,omitempty"`
+		UnitPriceCNY *float64 `json:"unit_price_cny,omitempty"`
+		Note         *string  `json:"note,omitempty"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.ProfileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	if len(body.ChannelIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "channel_ids is required"})
+		return
+	}
+	// Sanity cap so a runaway UI can't stall the process on a giant loop.
+	const maxIDs = 5000
+	if len(body.ChannelIDs) > maxIDs {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("too many channel_ids (max %d)", maxIDs)})
+		return
+	}
+	if body.QuotaUSD == nil && body.UnitPriceCNY == nil && body.Note == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
+		return
+	}
+
+	updated := 0
+	failed := make([]int64, 0)
+	for _, id := range body.ChannelIDs {
+		note := ""
+		if body.Note != nil {
+			note = strings.TrimSpace(*body.Note)
+		}
+		if err := upsertMeta(body.ProfileID, id, body.QuotaUSD, body.UnitPriceCNY, note); err != nil {
+			log.Printf("[meta-bulk] channel %d: %v", id, err)
+			failed = append(failed, id)
+			continue
+		}
+		updated++
+	}
+	c.JSON(http.StatusOK, gin.H{"updated": updated, "failed": failed})
+}
+
+// handleRemoteStatSummary returns aggregate rpm/tpm/last-hour-quota for
+// a whole profile in a single upstream call. Avoids the O(N) per-channel
+// fan-out the removed RPM/TPM columns needed. Cached briefly so the UI
+// can poll comfortably.
+type statSummaryEntry struct {
+	rpm     int64
+	tpm     int64
+	quota   int64
+	fetched time.Time
+}
+
+var (
+	statSummaryCache   = make(map[int64]statSummaryEntry)
+	statSummaryCacheMu sync.Mutex
+)
+
+const statSummaryTTL = 30 * time.Second
+
+func handleRemoteStatSummary(c *gin.Context) {
+	profileID, err := strconv.ParseInt(c.Query("profile_id"), 10, 64)
+	if err != nil || profileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	statSummaryCacheMu.Lock()
+	entry, ok := statSummaryCache[profileID]
+	statSummaryCacheMu.Unlock()
+	if ok && time.Since(entry.fetched) < statSummaryTTL {
+		c.JSON(http.StatusOK, gin.H{"rpm": entry.rpm, "tpm": entry.tpm, "quota_last_hour": entry.quota, "cached": true})
+		return
+	}
+	host, userID, token, err := loadRemoteProfileByID(profileID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	now := time.Now()
+	q := url.Values{}
+	q.Set("type", "2")
+	q.Set("start_timestamp", strconv.FormatInt(now.Add(-time.Hour).Unix(), 10))
+	q.Set("end_timestamp", strconv.FormatInt(now.Unix(), 10))
+	data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/stat", token, userID, q, nil)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	var stat struct {
+		Quota int64 `json:"quota"`
+		Rpm   int64 `json:"rpm"`
+		Tpm   int64 `json:"tpm"`
+	}
+	if err := json.Unmarshal(data, &stat); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "decode: " + err.Error()})
+		return
+	}
+	statSummaryCacheMu.Lock()
+	statSummaryCache[profileID] = statSummaryEntry{rpm: stat.Rpm, tpm: stat.Tpm, quota: stat.Quota, fetched: now}
+	statSummaryCacheMu.Unlock()
+	c.JSON(http.StatusOK, gin.H{"rpm": stat.Rpm, "tpm": stat.Tpm, "quota_last_hour": stat.Quota, "cached": false})
 }
 
 // ---- Handler: delete one channel on the remote + purge local meta ----
@@ -2140,7 +2289,11 @@ var (
 	lastHourCacheMu sync.Mutex
 )
 
-const lastHourTTL = 30 * time.Second
+// The RPM/TPM columns were removed, so the interactive last-hour lookup
+// no longer needs a 30s TTL for freshness. A 5-minute cache means
+// selecting "加载 last-hour" from the toolbar doesn't hammer the remote
+// even on repeated refreshes.
+const lastHourTTL = 5 * time.Minute
 
 // handleRemoteChannelLastHour returns quota (raw units) per channel for the
 // last hour, computed from the remote's GET /api/log/stat endpoint. Cached

@@ -109,10 +109,20 @@ export default function RemoteChannels() {
   // Last-hour cost per channel (channel_id -> USD). Loaded on demand.
   const [lastHour, setLastHour] = useState<Record<number, number>>({})
   const [lastHourLoading, setLastHourLoading] = useState(false)
-  // Realtime rpm/tpm per channel, computed from the remote's /api/log/stat
-  // 60s window (backend caches 30s). Populated on Fetch + polled every 30s.
-  const [rpmByChannel, setRpmByChannel] = useState<Record<number, number>>({})
-  const [tpmByChannel, setTpmByChannel] = useState<Record<number, number>>({})
+
+  // Row selection for the bulk-cost editor. Cleared whenever the visible
+  // channel list changes so a stale ID from a previous profile can't leak
+  // into an update batch.
+  const [selectedIDs, setSelectedIDs] = useState<Set<number>>(new Set())
+  const [bulkCostOpen, setBulkCostOpen] = useState(false)
+  const [bulkCostValue, setBulkCostValue] = useState('')
+  const [bulkCostBusy, setBulkCostBusy] = useState(false)
+  const [bulkCostErr, setBulkCostErr] = useState<string | null>(null)
+
+  // Profile-wide realtime stat (rpm / tpm / last-hour quota). One remote
+  // call per refresh regardless of channel count, so this stays cheap
+  // even for large deployments. Polled every 30s while the page is open.
+  const [statSummary, setStatSummary] = useState<{ rpm: number; tpm: number; quota_last_hour: number } | null>(null)
 
   // Baseline used_quota per channel from the previous background snapshot.
   // The Δ column subtracts this from live used_quota to show recent burn.
@@ -233,9 +243,8 @@ export default function RemoteChannels() {
         // Sparkline / test / last-hour data belongs to a specific live
         // fetch — reset when we're just showing the cached mirror.
         setLastHour({})
-        setRpmByChannel({})
-        setTpmByChannel({})
         setTestMsg({})
+        setSelectedIDs(new Set())
         setExpandedRow(null)
         // Pull the previous-snapshot baseline so the Δ column renders.
         void loadSnapshotBaseline(selectedID)
@@ -329,12 +338,11 @@ export default function RemoteChannels() {
       setChannels(res.channels)
       setMeta({ total: res.total, truncated: res.truncated, host: res.host })
       setRefreshedAt(new Date().toLocaleTimeString('zh-CN'))
-      // Any prior last-hour / rpm / tpm / test state is stale against the
-      // refreshed list.
+      // Any prior last-hour / test state is stale against the refreshed
+      // list.
       setLastHour({})
-      setRpmByChannel({})
-      setTpmByChannel({})
       setTestMsg({})
+      setSelectedIDs(new Set())
       // Cached sparkline data is per-channel time series; keep it, since
       // adding new points doesn't invalidate older ones. Just close any
       // currently-open sparkline so the layout resets cleanly.
@@ -389,18 +397,85 @@ export default function RemoteChannels() {
     }
   }
 
-  // Auto-load stat (last-hour + rpm + tpm) whenever the channel list
-  // changes, then keep it fresh every 30s. Backend caches at 30s TTL so
-  // this cadence lands roughly one remote call per channel per tick.
-  // Uses `channels.length` as the effect key so we don't create a fresh
-  // interval on every re-render.
+  // Profile-wide realtime stat for the summary cards. One remote call
+  // per tick regardless of channel count, so this stays cheap. Kept
+  // silent — a network blip just leaves the last value on screen.
+  const loadStatSummary = useCallback(async (pid: number) => {
+    try {
+      const res = await api.remoteStatSummary(pid)
+      setStatSummary({ rpm: res.rpm, tpm: res.tpm, quota_last_hour: res.quota_last_hour })
+    } catch (e) {
+      console.warn('stat summary failed', e)
+    }
+  }, [])
+
   useEffect(() => {
-    if (!selectedID || channels.length === 0) return
-    void loadLastHour({ silent: true })
-    const t = setInterval(() => { void loadLastHour({ silent: true }) }, 30000)
+    if (!selectedID) {
+      setStatSummary(null)
+      return
+    }
+    void loadStatSummary(selectedID)
+    const t = setInterval(() => { void loadStatSummary(selectedID) }, 30000)
     return () => clearInterval(t)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedID, channels.length])
+  }, [selectedID, loadStatSummary])
+
+  const toggleRowSelected = (id: number, checked: boolean) => {
+    setSelectedIDs(prev => {
+      const next = new Set(prev)
+      if (checked) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+
+  const toggleAllSelected = (visible: RemoteChannel[], checked: boolean) => {
+    setSelectedIDs(prev => {
+      const next = new Set(prev)
+      for (const c of visible) {
+        if (checked) next.add(c.id)
+        else next.delete(c.id)
+      }
+      return next
+    })
+  }
+
+  const openBulkCost = () => {
+    setBulkCostValue('')
+    setBulkCostErr(null)
+    setBulkCostOpen(true)
+  }
+
+  const submitBulkCost = async () => {
+    if (!selectedID) return
+    setBulkCostErr(null)
+    const v = parseFloat(bulkCostValue.trim())
+    if (isNaN(v) || v < 0) {
+      setBulkCostErr('单价必须是非负数字（CNY）')
+      return
+    }
+    if (selectedIDs.size === 0) {
+      setBulkCostErr('先勾选至少一行')
+      return
+    }
+    setBulkCostBusy(true)
+    try {
+      const res = await api.remoteChannelMetaBulk({
+        profile_id: selectedID,
+        channel_ids: Array.from(selectedIDs),
+        unit_price_cny: v,
+      })
+      // Optimistic patch: update the local channels array so the "单价 CNY"
+      // column reflects the new value immediately without a re-fetch.
+      setChannels(prev => prev.map(c => selectedIDs.has(c.id) ? { ...c, unit_price_cny: v } : c))
+      alert(`已更新 ${res.updated} 条${res.failed.length ? `，${res.failed.length} 条失败` : ''}`)
+      setBulkCostOpen(false)
+      setSelectedIDs(new Set())
+    } catch (e: any) {
+      setBulkCostErr(e?.message || String(e))
+    } finally {
+      setBulkCostBusy(false)
+    }
+  }
 
   const reloadPending = useCallback(async () => {
     if (!selectedID) {
@@ -447,22 +522,7 @@ export default function RemoteChannels() {
         next[parseInt(k, 10)] = usdFromQuota(v as number)
       }
       setLastHour(next)
-      // Same endpoint now also returns realtime rpm/tpm (60s window from
-      // the remote). Fold them into the parallel maps so the RPM / TPM
-      // columns render alongside Last 1h.
-      if (res.rpm) {
-        const rpmMap: Record<number, number> = {}
-        for (const [k, v] of Object.entries(res.rpm)) rpmMap[parseInt(k, 10)] = v as number
-        setRpmByChannel(rpmMap)
-      }
-      if (res.tpm) {
-        const tpmMap: Record<number, number> = {}
-        for (const [k, v] of Object.entries(res.tpm)) tpmMap[parseInt(k, 10)] = v as number
-        setTpmByChannel(tpmMap)
-      }
     } catch (e: any) {
-      // Silent polls should never bother the user with an alert — a
-      // transient network blip just leaves the last values in place.
       if (!opts?.silent) alert('load last-hour failed: ' + (e?.message || e))
     } finally {
       if (!opts?.silent) setLastHourLoading(false)
@@ -680,20 +740,31 @@ export default function RemoteChannels() {
     })
   }, [channels, filterStart, filterEnd])
 
+  // Derived selection state — computed after filteredChannels so the
+  // header checkbox reflects the currently visible slice.
+  const someVisibleSelected = filteredChannels.some(c => selectedIDs.has(c.id))
+  const allVisibleSelected = filteredChannels.length > 0 && filteredChannels.every(c => selectedIDs.has(c.id))
+
   const summary = useMemo(() => {
     const totalUsedUSD = filteredChannels.reduce((s, c) => s + usdFromQuota(c.used_quota), 0)
     const enabled = filteredChannels.filter(c => c.status === 1).length
     const disabled = filteredChannels.length - enabled
-    // System-wide realtime RPM / TPM: sum over currently visible rows so
-    // date-filter and studio-filter narrow the total naturally.
-    const totalRpm = filteredChannels.reduce((s, c) => s + (rpmByChannel[c.id] ?? 0), 0)
-    const totalTpm = filteredChannels.reduce((s, c) => s + (tpmByChannel[c.id] ?? 0), 0)
-    return { count: filteredChannels.length, totalUsedUSD, enabled, disabled, totalRpm, totalTpm }
-  }, [filteredChannels, rpmByChannel, tpmByChannel])
+    // Realtime RPM / TPM come from the profile-wide /stat/summary endpoint
+    // (one remote call regardless of channel count), NOT from a per-row
+    // fan-out. Falls back to 0 when the summary hasn't loaded yet.
+    return {
+      count: filteredChannels.length,
+      totalUsedUSD,
+      enabled,
+      disabled,
+      totalRpm: statSummary?.rpm ?? 0,
+      totalTpm: statSummary?.tpm ?? 0,
+    }
+  }, [filteredChannels, statSummary])
 
   const exportCSV = () => {
     if (filteredChannels.length === 0) return
-    const header = ['ID', 'Name', 'Type', 'Group', 'Tag', 'Priority', 'Used USD', 'Δ USD (since baseline)', '额度 USD', 'RPM', 'TPM', 'Last 1h USD', 'Status', 'Created', 'Note']
+    const header = ['ID', 'Name', 'Type', 'Group', 'Tag', 'Priority', 'Used USD', 'Δ USD (since baseline)', '额度 USD', '单价 CNY', 'Last 1h USD', 'Status', 'Created', 'Note']
     const escape = (v: unknown) => {
       const s = v == null ? '' : String(v)
       return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
@@ -703,15 +774,12 @@ export default function RemoteChannels() {
       const baseline = snapshotBaseline[c.id]
       const deltaUSD = baseline ? usdFromQuota(c.used_quota - baseline.used_quota) : null
       const lh = lastHour[c.id]
-      const rpm = rpmByChannel[c.id]
-      const tpm = tpmByChannel[c.id]
       return [
         c.id, c.name, c.type, c.group, c.tag, c.priority,
         usedUSD.toFixed(4),
         deltaUSD != null ? deltaUSD.toFixed(4) : '',
         c.quota_usd != null ? c.quota_usd.toFixed(2) : '',
-        rpm != null ? rpm : '',
-        tpm != null ? tpm : '',
+        c.unit_price_cny != null ? c.unit_price_cny.toFixed(4) : '',
         lh != null ? lh.toFixed(4) : '',
         STATUS_LABEL[c.status] ?? c.status,
         c.created_time ? new Date(c.created_time * 1000).toISOString() : '',
@@ -763,6 +831,15 @@ export default function RemoteChannels() {
         className="border border-gray-300 text-gray-700 rounded-md px-3 py-1.5 text-xs hover:bg-gray-50 disabled:opacity-40"
       >
         导出 CSV
+      </button>
+      <button
+        onClick={openBulkCost}
+        disabled={selectedIDs.size === 0}
+        className="border border-amber-500 text-amber-700 rounded-md px-3 py-1.5 text-xs hover:bg-amber-50 disabled:opacity-40"
+        title="将勾选行的单价 (CNY) 批量写到本地"
+      >
+        批量设成本
+        {selectedIDs.size > 0 && <span className="ml-1 text-amber-600 font-medium">({selectedIDs.size})</span>}
       </button>
       <button
         onClick={openCreate}
@@ -971,6 +1048,15 @@ export default function RemoteChannels() {
                 <table className="w-full text-xs">
                   <thead className="bg-gray-50 border-b border-gray-200 text-gray-500">
                     <tr>
+                      <th className="px-2 py-2 text-center font-medium">
+                        <input
+                          type="checkbox"
+                          checked={allVisibleSelected}
+                          ref={el => { if (el) el.indeterminate = someVisibleSelected && !allVisibleSelected }}
+                          onChange={e => toggleAllSelected(filteredChannels, e.target.checked)}
+                          title="全选当前视图"
+                        />
+                      </th>
                       <th className="px-3 py-2 text-left font-medium" title="点击 📈 展开 24h 曲线"></th>
                       <th className="px-3 py-2 text-left font-medium">ID</th>
                       <th className="px-3 py-2 text-left font-medium">名称</th>
@@ -981,8 +1067,7 @@ export default function RemoteChannels() {
                       <th className="px-3 py-2 text-right font-medium">已用 (USD)</th>
                       <th className="px-3 py-2 text-right font-medium" title="距上一次后台快照的用量增量">Δ</th>
                       <th className="px-3 py-2 text-right font-medium">额度 (USD)</th>
-                      <th className="px-3 py-2 text-right font-medium" title="requests / min, 60s 窗口">RPM</th>
-                      <th className="px-3 py-2 text-right font-medium" title="tokens / min, 60s 窗口">TPM</th>
+                      <th className="px-3 py-2 text-right font-medium" title="本地维护的上游成本, CNY / USD 额度">单价 CNY</th>
                       <th className="px-3 py-2 text-right font-medium">Last 1h</th>
                       <th className="px-3 py-2 text-left font-medium">状态</th>
                       <th className="px-3 py-2 text-left font-medium">Note</th>
@@ -1002,7 +1087,14 @@ export default function RemoteChannels() {
                       const series = seriesCache[c.id]
                       return (
                         <FragmentRow key={c.id}>
-                          <tr className="border-b border-gray-100 hover:bg-gray-50">
+                          <tr className={`border-b border-gray-100 hover:bg-gray-50 ${selectedIDs.has(c.id) ? 'bg-blue-50/40' : ''}`}>
+                            <td className="px-2 py-2 text-center">
+                              <input
+                                type="checkbox"
+                                checked={selectedIDs.has(c.id)}
+                                onChange={e => toggleRowSelected(c.id, e.target.checked)}
+                              />
+                            </td>
                             <td className="px-2 py-2 text-center">
                               <button
                                 onClick={() => void toggleSparkline(c.id)}
@@ -1049,13 +1141,8 @@ export default function RemoteChannels() {
                               )}
                             </td>
                             <td className="px-3 py-2 tabular-nums text-right">
-                              {rpmByChannel[c.id] != null && rpmByChannel[c.id] > 0 ? (
-                                <span className="text-emerald-600 font-medium">{rpmByChannel[c.id].toLocaleString()}</span>
-                              ) : <span className="text-gray-300">—</span>}
-                            </td>
-                            <td className="px-3 py-2 tabular-nums text-right">
-                              {tpmByChannel[c.id] != null && tpmByChannel[c.id] > 0 ? (
-                                <span className="text-emerald-600 font-medium">{tpmByChannel[c.id].toLocaleString()}</span>
+                              {c.unit_price_cny != null ? (
+                                <span className="text-gray-700">¥{c.unit_price_cny.toFixed(4)}</span>
                               ) : <span className="text-gray-300">—</span>}
                             </td>
                             <td className="px-3 py-2 tabular-nums text-right">
@@ -1097,7 +1184,7 @@ export default function RemoteChannels() {
                           </tr>
                           {isOpen && (
                             <tr className="bg-gray-50/60 border-b border-gray-100">
-                              <td colSpan={16} className="px-4 py-3">
+                              <td colSpan={17} className="px-4 py-3">
                                 {seriesLoading === c.id ? (
                                   <div className="text-[11px] text-gray-400">加载 24h 数据…</div>
                                 ) : series && series.length >= 2 ? (
@@ -1123,6 +1210,55 @@ export default function RemoteChannels() {
           </>
         )}
       </div>
+
+      {/* Modal: bulk set unit_price_cny across the selected rows.
+          Purely local — never touches the remote. */}
+      {bulkCostOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+          onClick={() => !bulkCostBusy && setBulkCostOpen(false)}
+        >
+          <div
+            className="bg-white rounded-lg shadow-xl w-full max-w-md p-5"
+            onClick={e => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-semibold text-gray-900 mb-1">批量设成本</h3>
+            <p className="text-xs text-gray-500 mb-4">
+              将 <span className="font-medium text-gray-900">{selectedIDs.size}</span> 个选中渠道的单价改为下面填写的值 (CNY / 每 USD 上游额度)。
+              仅本地存储，不写远端。
+            </p>
+            <Field label="单价 (CNY)">
+              <input
+                type="number"
+                step="0.001"
+                min="0"
+                value={bulkCostValue}
+                onChange={e => setBulkCostValue(e.target.value)}
+                placeholder="例如 4.3"
+                autoFocus
+                className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-gray-900"
+              />
+            </Field>
+            {bulkCostErr && <p className="mt-2 text-xs text-rose-600">{bulkCostErr}</p>}
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setBulkCostOpen(false)}
+                disabled={bulkCostBusy}
+                className="border border-gray-300 rounded-md px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={submitBulkCost}
+                disabled={bulkCostBusy}
+                className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85 disabled:opacity-50"
+              >
+                {bulkCostBusy ? '保存中…' : `保存 (${selectedIDs.size})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal: batch upload keys */}
       {batchOpen && (
@@ -1202,7 +1338,7 @@ export default function RemoteChannels() {
               {batchQueue && (
                 <div className="pl-6 space-y-1.5">
                   <label className="block text-[11px] text-gray-500">
-                    Pool size（<span className="text-gray-400">0 = 全部立即上；2 = 5 刀 key "两个用完再上下两个" 模式；N = 同时保持 N 个 active</span>）
+                    Pool size（<span className="text-gray-400">0 = 全部立即上；N = 一批 N 个，全部用完了再上下一批 N 个</span>）
                   </label>
                   <input
                     type="number"
@@ -1213,7 +1349,7 @@ export default function RemoteChannels() {
                     className="w-24 border border-gray-300 rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-gray-900"
                   />
                   <p className="text-[10px] text-gray-400">
-                    队列由后台 goroutine 每 60s 扫描一次；只有 remote 把 channel 自动禁用（status ≠ 1）才算"用完"。上传失败会重试 3 次。
+                    队列由后台 goroutine 每 20s 扫描一次；只有当整批 key 都被 remote 自动禁用（status ≠ 1），才会一起上下一批。上传失败会重试 3 次。
                   </p>
                 </div>
               )}

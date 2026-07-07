@@ -2781,6 +2781,11 @@ func main() {
 			updated_at         BIGINT NOT NULL,
 			PRIMARY KEY (profile_id, remote_channel_id)
 		)`,
+		// Local-only per-channel cost tracking (CNY per USD of upstream
+		// credit). NULL means "unset" so the UI can distinguish "no cost
+		// recorded" from "known to be free". Set in bulk via the
+		// PATCH .../channels/meta/bulk endpoint.
+		`ALTER TABLE remote_channel_meta ADD COLUMN IF NOT EXISTS unit_price_cny DOUBLE PRECISION`,
 		// Time series of channel state pulled from the remote. Written by
 		// the interactive Fetch button AND by startRemoteSnapshotSync. Old
 		// rows are pruned by pruneRemoteSnapshotsLoop after
@@ -2937,6 +2942,8 @@ func main() {
 	superAPI.GET("/remote-newapi/channels/:id", handleRemoteChannelGet)
 	superAPI.POST("/remote-newapi/channels/create", handleRemoteChannelCreate)
 	superAPI.PATCH("/remote-newapi/channels", handleRemoteChannelUpdate)
+	superAPI.PATCH("/remote-newapi/channels/meta/bulk", handleRemoteMetaBulkUpdate)
+	superAPI.GET("/remote-newapi/stat/summary", handleRemoteStatSummary)
 	superAPI.DELETE("/remote-newapi/channels/:id", handleRemoteChannelDelete)
 	superAPI.POST("/remote-newapi/channels/test", handleRemoteTestKey)
 	superAPI.POST("/remote-newapi/channels/last-hour", handleRemoteChannelLastHour)

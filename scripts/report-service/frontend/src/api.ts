@@ -363,6 +363,7 @@ export type RemoteChannel = {
   created_time: number
   // Merged in from the local remote_channel_meta table:
   quota_usd?: number | null
+  unit_price_cny?: number | null   // 本地维护的成本；null = 未录入
   note?: string
 }
 
@@ -416,6 +417,7 @@ export type RemoteChannelUpdateRequest = {
   group?: string
   models?: string
   quota_usd?: number | null
+  unit_price_cny?: number | null
   note?: string
 }
 
@@ -648,6 +650,29 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
+
+  // Local-only bulk write. Any missing pointer field is left untouched
+  // per row — so { unit_price_cny: 4.3 } only sets prices, doesn't touch
+  // quota_usd / note.
+  remoteChannelMetaBulk: (payload: {
+    profile_id: number
+    channel_ids: number[]
+    quota_usd?: number
+    unit_price_cny?: number
+    note?: string
+  }) =>
+    request<{ updated: number; failed: number[] }>('/api/remote-newapi/channels/meta/bulk', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  // Aggregate rpm/tpm/last-hour for the whole profile in one shot — used
+  // by the summary cards. Cached 30s on the server; no channel filter.
+  remoteStatSummary: (profileID: number) =>
+    request<{ rpm: number; tpm: number; quota_last_hour: number; cached: boolean }>(
+      `/api/remote-newapi/stat/summary?profile_id=${profileID}`,
+    ),
 
   remoteChannelDelete: (profileID: number, channelID: number) =>
     request<{ ok: boolean }>(
