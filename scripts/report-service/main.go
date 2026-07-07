@@ -2253,13 +2253,14 @@ func handleBatchUpdateChannelPriority(c *gin.Context) {
 // ---- Key tester ----
 
 var supportedTestModels = map[string]bool{
+	"claude-sonnet-5":            true,
+	"claude-opus-4-8":            true,
 	"claude-opus-4-7":            true,
 	"claude-sonnet-4-6":          true,
 	"claude-opus-4-6":            true,
 	"claude-haiku-4-5-20251001":  true,
 	"claude-sonnet-4-5-20250929": true,
 	"claude-opus-4-5-20251101":   true,
-	"claude-opus-4-8":            true,
 	"claude-fable-5":             true,
 }
 
