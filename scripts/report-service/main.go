@@ -2790,6 +2790,36 @@ func main() {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_remote_snapshot_by_time
 		   ON remote_channel_snapshot(profile_id, captured_at DESC)`,
+		// Scheduled upload queue: keys are staged here and either uploaded
+		// immediately (pool_size=0) or throttled (pool_size>0, at most that
+		// many active at a time — the "5-dollar drip" pattern). Keys are
+		// AES-GCM encrypted at rest; key_hash lets us dedup without ever
+		// hitting the DB with plaintext.
+		`CREATE TABLE IF NOT EXISTS remote_pending_key (
+			id                  BIGSERIAL PRIMARY KEY,
+			profile_id          BIGINT NOT NULL,
+			key_hash            TEXT   NOT NULL,
+			key_encrypted       TEXT   NOT NULL,
+			quota_usd           DOUBLE PRECISION NOT NULL DEFAULT 0,
+			note                TEXT   NOT NULL DEFAULT '',
+			name_prefix         TEXT   NOT NULL DEFAULT '',
+			group_name          TEXT   NOT NULL DEFAULT 'default',
+			tag                 TEXT   NOT NULL DEFAULT '',
+			models              TEXT   NOT NULL DEFAULT '',
+			priority            BIGINT NOT NULL DEFAULT 0,
+			pool_size           INT    NOT NULL DEFAULT 0,
+			status              TEXT   NOT NULL DEFAULT 'pending',
+			remote_channel_id   BIGINT NOT NULL DEFAULT 0,
+			attempts            INT    NOT NULL DEFAULT 0,
+			activated_at        BIGINT NOT NULL DEFAULT 0,
+			used_at             BIGINT NOT NULL DEFAULT 0,
+			failed_reason       TEXT   NOT NULL DEFAULT '',
+			created_at          BIGINT NOT NULL,
+			updated_at          BIGINT NOT NULL,
+			UNIQUE (profile_id, key_hash)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_pending_scheduler
+		   ON remote_pending_key(profile_id, status, pool_size, id)`,
 		// Current mirror of the remote's channel list — one row per channel,
 		// UPSERTed on every sync (both cron and interactive). Lets the page
 		// render immediately on refresh without hitting the remote, and
@@ -2824,6 +2854,7 @@ func main() {
 	startPruneLoginAttempts()
 	startRemoteSnapshotSync()
 	startRemoteSnapshotPrune()
+	startRemotePendingScheduler()
 	if profitEnabled {
 		startPipiSync()
 	}
@@ -2906,6 +2937,12 @@ func main() {
 	superAPI.POST("/remote-newapi/channels/last-hour", handleRemoteChannelLastHour)
 	superAPI.GET("/remote-newapi/snapshots", handleRemoteSnapshotHistory)
 	superAPI.GET("/remote-newapi/channels/cached", handleRemoteCachedChannels)
+	// Scheduled uploads / drip pool. Backed by remote_pending_key; the
+	// scheduler goroutine (startRemotePendingScheduler) walks the table
+	// every 60s to upload immediates and rebalance drip pools.
+	superAPI.POST("/remote-newapi/pending", handlePendingKeyEnqueue)
+	superAPI.GET("/remote-newapi/pending", handlePendingKeyList)
+	superAPI.DELETE("/remote-newapi/pending/:id", handlePendingKeyDelete)
 
 	// Provider Testing: super_admin or tester role.
 	testingAPI := api.Group("", requireRoleOrTester(minSuperAdminRole))

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import Layout from '../components/Layout'
 import {
   api,
+  type PendingKey,
   type RemoteChannel,
   type RemoteChannelCreateResult,
   type RemoteProfile,
@@ -152,6 +153,19 @@ export default function RemoteChannels() {
   //   desc → key[i] = batchPriority − i (higher priority up front)
   //   asc  → key[i] = batchPriority + i
   const [batchPrioMode, setBatchPrioMode] = useState<'same' | 'desc' | 'asc'>('same')
+
+  // Queue mode: when true, keys go into remote_pending_key instead of
+  // being uploaded synchronously. pool_size>0 turns on drip: at most N
+  // active at once, next one promotes when an active row's remote
+  // channel gets disabled (quota exhausted).
+  const [batchQueue, setBatchQueue] = useState(false)
+  const [batchPoolSize, setBatchPoolSize] = useState('0')
+
+  // Upload queue: rows from remote_pending_key for the selected profile.
+  // Auto-refreshed after enqueue and every 30s so status transitions
+  // (pending → active → used / failed) show up without a manual refresh.
+  const [pending, setPending] = useState<PendingKey[]>([])
+  const [pendingOpen, setPendingOpen] = useState(false)
   const [batchModels, setBatchModels] = useState(DEFAULT_ANTHROPIC_MODELS)
   const [batchInput, setBatchInput] = useState('')
   const [batchBusy, setBatchBusy] = useState(false)
@@ -375,6 +389,41 @@ export default function RemoteChannels() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedID, channels.length])
 
+  const reloadPending = useCallback(async () => {
+    if (!selectedID) {
+      setPending([])
+      return
+    }
+    try {
+      const res = await api.remotePendingList(selectedID)
+      setPending(res.items)
+    } catch (e) {
+      console.warn('pending list failed', e)
+    }
+  }, [selectedID])
+
+  // Auto-poll the queue every 30s while the panel is open — status
+  // transitions inside the scheduler tick (60s + retries) become visible
+  // without a manual refresh.
+  useEffect(() => {
+    if (!selectedID) return
+    void reloadPending()
+    if (!pendingOpen) return
+    const t = setInterval(() => { void reloadPending() }, 30000)
+    return () => clearInterval(t)
+  }, [selectedID, pendingOpen, reloadPending])
+
+  const cancelPending = async (row: PendingKey) => {
+    if (row.status !== 'pending' && row.status !== 'failed') return
+    if (!window.confirm(`删除队列条目 (${row.key_masked})？只能删 pending/failed 的。`)) return
+    try {
+      await api.remotePendingDelete(row.id)
+      await reloadPending()
+    } catch (e: any) {
+      alert('delete failed: ' + (e?.message || e))
+    }
+  }
+
   const loadLastHour = async (opts?: { silent?: boolean }) => {
     if (!selectedID || channels.length === 0) return
     if (!opts?.silent) setLastHourLoading(true)
@@ -458,6 +507,32 @@ export default function RemoteChannels() {
     }
     setBatchBusy(true)
     try {
+      if (batchQueue) {
+        // Queue path: stage the batch into remote_pending_key. The scheduler
+        // goroutine picks it up within 60s (or immediately via nudge) and
+        // uploads either all at once (pool_size=0) or drip-style (pool_size>0).
+        const poolSize = parseInt(batchPoolSize, 10)
+        if (isNaN(poolSize) || poolSize < 0) {
+          setBatchErr('pool size must be a non-negative integer')
+          return
+        }
+        const res = await api.remotePendingEnqueue({
+          profile_id: selectedID,
+          name_prefix: batchPrefix.trim(),
+          group: batchGroup.trim() || 'default',
+          tag: batchTag.trim() || undefined,
+          priority: batchLevelPriority,
+          models: batchModels.trim(),
+          pool_size: poolSize,
+          items,
+        })
+        setBatchResults([])
+        setBatchErr(null)
+        alert(`已入队 ${res.inserted} 条${res.skipped ? `（${res.skipped} 条跳过 / 已存在）` : ''}${poolSize > 0 ? `，池大小 ${poolSize}` : '，立即上传'}`)
+        void reloadPending()
+        setBatchOpen(false)
+        return
+      }
       const res = await api.remoteChannelCreate({
         profile_id: selectedID,
         name_prefix: batchPrefix.trim(),
@@ -749,6 +824,93 @@ export default function RemoteChannels() {
             {fetchErr}
           </div>
         )}
+
+        {/* Upload queue (drip pool). Collapsed by default; expands into a
+            table when the operator wants to see what's staged. */}
+        {selectedID && pending.length > 0 && (
+          <section className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setPendingOpen(v => !v)}
+              className="w-full flex items-center justify-between px-4 py-2.5 border-b border-gray-100 hover:bg-gray-50"
+            >
+              <div className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                上 Key 队列
+                <span className="text-[10px] text-gray-400 uppercase tracking-wider">
+                  {pending.filter(p => p.status === 'pending').length} pending ·{' '}
+                  {pending.filter(p => p.status === 'active').length} active ·{' '}
+                  {pending.filter(p => p.status === 'used').length} used ·{' '}
+                  <span className={pending.filter(p => p.status === 'failed').length > 0 ? 'text-rose-600' : ''}>
+                    {pending.filter(p => p.status === 'failed').length} failed
+                  </span>
+                </span>
+              </div>
+              <span className="text-gray-400">{pendingOpen ? '▾' : '▸'}</span>
+            </button>
+            {pendingOpen && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead className="bg-gray-50 border-b border-gray-100 text-gray-500">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium">ID</th>
+                      <th className="px-3 py-2 text-left font-medium">Key</th>
+                      <th className="px-3 py-2 text-left font-medium">Status</th>
+                      <th className="px-3 py-2 text-right font-medium">Pool</th>
+                      <th className="px-3 py-2 text-right font-medium">Quota</th>
+                      <th className="px-3 py-2 text-left font-medium">Prefix</th>
+                      <th className="px-3 py-2 text-right font-medium">Channel</th>
+                      <th className="px-3 py-2 text-right font-medium">Try</th>
+                      <th className="px-3 py-2 text-left font-medium">Error / 更新</th>
+                      <th className="px-3 py-2 text-left font-medium">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pending.map(row => (
+                      <tr key={row.id} className="border-b border-gray-100 hover:bg-gray-50">
+                        <td className="px-3 py-2 tabular-nums">{row.id}</td>
+                        <td className="px-3 py-2 font-mono text-[11px]">{row.key_masked}</td>
+                        <td className="px-3 py-2">
+                          <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] ${
+                            row.status === 'active' ? 'bg-emerald-100 text-emerald-800'
+                              : row.status === 'used' ? 'bg-gray-100 text-gray-500'
+                              : row.status === 'failed' ? 'bg-red-100 text-red-700'
+                              : 'bg-blue-100 text-blue-700'
+                          }`}>{row.status}</span>
+                        </td>
+                        <td className="px-3 py-2 tabular-nums text-right">
+                          {row.pool_size === 0 ? <span className="text-gray-400">立即</span> : row.pool_size}
+                        </td>
+                        <td className="px-3 py-2 tabular-nums text-right">
+                          {row.quota_usd > 0 ? '$' + row.quota_usd.toFixed(2) : '—'}
+                        </td>
+                        <td className="px-3 py-2 text-gray-500">{row.name_prefix || '—'}</td>
+                        <td className="px-3 py-2 tabular-nums text-right">
+                          {row.remote_channel_id > 0 ? row.remote_channel_id : '—'}
+                        </td>
+                        <td className="px-3 py-2 tabular-nums text-right">{row.attempts}</td>
+                        <td className="px-3 py-2 text-[10px] text-gray-500 max-w-[240px] truncate" title={row.failed_reason || fmtTime(row.updated_at)}>
+                          {row.failed_reason
+                            ? <span className="text-rose-600">{row.failed_reason}</span>
+                            : fmtTime(row.updated_at)}
+                        </td>
+                        <td className="px-3 py-2">
+                          {(row.status === 'pending' || row.status === 'failed') && (
+                            <button
+                              onClick={() => void cancelPending(row)}
+                              className="text-[10px] text-rose-500 hover:text-rose-700"
+                            >
+                              删除
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        )}
         {channels.length > 0 && meta && (
           <>
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
@@ -987,6 +1149,39 @@ export default function RemoteChannels() {
                   </select>
                 </div>
               </Field>
+            </div>
+
+            {/* Queue mode toggle. When on, keys stage into
+                remote_pending_key and the scheduler goroutine uploads
+                them. Immediate mode (default) is the original
+                synchronous path. */}
+            <div className="mb-3 rounded-md border border-gray-200 bg-gray-50 p-3 space-y-2">
+              <label className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={batchQueue}
+                  onChange={e => setBatchQueue(e.target.checked)}
+                />
+                使用队列（定时上传 / drip 池）
+              </label>
+              {batchQueue && (
+                <div className="pl-6 space-y-1.5">
+                  <label className="block text-[11px] text-gray-500">
+                    Pool size（<span className="text-gray-400">0 = 全部立即上；2 = 5 刀 key "两个用完再上下两个" 模式；N = 同时保持 N 个 active</span>）
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    value={batchPoolSize}
+                    onChange={e => setBatchPoolSize(e.target.value)}
+                    className="w-24 border border-gray-300 rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-gray-900"
+                  />
+                  <p className="text-[10px] text-gray-400">
+                    队列由后台 goroutine 每 60s 扫描一次；只有 remote 把 channel 自动禁用（status ≠ 1）才算"用完"。上传失败会重试 3 次。
+                  </p>
+                </div>
+              )}
             </div>
             <Field label="Models（逗号分隔）">
               <textarea

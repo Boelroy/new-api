@@ -1000,6 +1000,480 @@ func startRemoteSnapshotPrune() {
 	}()
 }
 
+// ---- Scheduled uploads (queue + drip pool) ----
+
+// pendingKeyRow mirrors one row of remote_pending_key. Kept private —
+// the encrypted `key_encrypted` column never crosses the API boundary.
+type pendingKeyRow struct {
+	id           int64
+	profileID    int64
+	quotaUSD     float64
+	note         string
+	namePrefix   string
+	group        string
+	tag          string
+	models       string
+	priority     int64
+	poolSize     int
+	status       string
+	remoteChID   int64
+	attempts     int
+	failedReason string
+	createdAt    int64
+	updatedAt    int64
+}
+
+// pendingKeyView is the JSON-safe projection returned to the frontend.
+// key is masked to "…" + last 8 alphanumeric chars so a screenshot of the
+// queue doesn't leak upstream credentials.
+type pendingKeyView struct {
+	ID           int64   `json:"id"`
+	ProfileID    int64   `json:"profile_id"`
+	KeyMasked    string  `json:"key_masked"`
+	QuotaUSD     float64 `json:"quota_usd"`
+	Note         string  `json:"note"`
+	NamePrefix   string  `json:"name_prefix"`
+	Group        string  `json:"group"`
+	Tag          string  `json:"tag"`
+	Models       string  `json:"models"`
+	Priority     int64   `json:"priority"`
+	PoolSize     int     `json:"pool_size"`
+	Status       string  `json:"status"`
+	RemoteChID   int64   `json:"remote_channel_id"`
+	Attempts     int     `json:"attempts"`
+	FailedReason string  `json:"failed_reason,omitempty"`
+	CreatedAt    int64   `json:"created_at"`
+	UpdatedAt    int64   `json:"updated_at"`
+}
+
+func pendingKeyHash(key string) string {
+	h := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(h[:])
+}
+
+// handlePendingKeyEnqueue accepts a batch of keys and stages them into
+// remote_pending_key. pool_size=0 uploads immediately on the next
+// scheduler tick, >0 respects that many concurrently active. Dedupes by
+// (profile_id, key_hash) — a resubmitted key is a no-op.
+func handlePendingKeyEnqueue(c *gin.Context) {
+	var body struct {
+		ProfileID  int64  `json:"profile_id"`
+		NamePrefix string `json:"name_prefix"`
+		Group      string `json:"group"`
+		Tag        string `json:"tag"`
+		Models     string `json:"models"`
+		Priority   int64  `json:"priority"`
+		PoolSize   int    `json:"pool_size"`
+		Items      []struct {
+			Key      string   `json:"key"`
+			QuotaUSD *float64 `json:"quota_usd,omitempty"`
+			Note     string   `json:"note,omitempty"`
+			Priority *int64   `json:"priority,omitempty"`
+		} `json:"items"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.ProfileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	if strings.TrimSpace(body.NamePrefix) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name_prefix is required"})
+		return
+	}
+	if strings.TrimSpace(body.Models) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "models is required"})
+		return
+	}
+	if body.PoolSize < 0 || body.PoolSize > 100 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "pool_size must be 0..100"})
+		return
+	}
+	if strings.TrimSpace(body.Group) == "" {
+		body.Group = "default"
+	}
+	if len(body.Items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no items provided"})
+		return
+	}
+	// Sanity check that the profile exists so the scheduler doesn't have
+	// to skip a whole batch later.
+	if _, _, _, err := loadRemoteProfileByID(body.ProfileID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile not found or unreadable: " + err.Error()})
+		return
+	}
+
+	now := time.Now().Unix()
+	inserted, skipped := 0, 0
+	for _, it := range body.Items {
+		key := strings.TrimSpace(it.Key)
+		if key == "" {
+			skipped++
+			continue
+		}
+		enc, err := encryptRemoteToken(key)
+		if err != nil {
+			skipped++
+			continue
+		}
+		hash := pendingKeyHash(key)
+		quota := 0.0
+		if it.QuotaUSD != nil {
+			quota = *it.QuotaUSD
+		}
+		prio := body.Priority
+		if it.Priority != nil && *it.Priority > 0 {
+			prio = *it.Priority
+		}
+		res, err := db.Exec(
+			`INSERT INTO remote_pending_key
+			 (profile_id, key_hash, key_encrypted, quota_usd, note, name_prefix,
+			  group_name, tag, models, priority, pool_size, status, created_at, updated_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12,$12)
+			 ON CONFLICT (profile_id, key_hash) DO NOTHING`,
+			body.ProfileID, hash, enc, quota, strings.TrimSpace(it.Note), strings.TrimSpace(body.NamePrefix),
+			body.Group, body.Tag, body.Models, prio, body.PoolSize, now,
+		)
+		if err != nil {
+			skipped++
+			continue
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			inserted++
+		} else {
+			skipped++
+		}
+	}
+	// Nudge the scheduler so pool_size=0 items start uploading now instead
+	// of waiting up to 60s for the next tick.
+	select {
+	case pendingSchedulerNudge <- struct{}{}:
+	default:
+	}
+	c.JSON(http.StatusOK, gin.H{"inserted": inserted, "skipped": skipped, "total": len(body.Items)})
+}
+
+func handlePendingKeyList(c *gin.Context) {
+	profileID, err := strconv.ParseInt(c.Query("profile_id"), 10, 64)
+	if err != nil || profileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	statusFilter := strings.TrimSpace(c.Query("status"))
+	q := `SELECT id, profile_id, key_encrypted, quota_usd, note, name_prefix,
+	             group_name, tag, models, priority, pool_size, status,
+	             remote_channel_id, attempts, failed_reason, created_at, updated_at
+	        FROM remote_pending_key WHERE profile_id=$1`
+	args := []any{profileID}
+	if statusFilter != "" {
+		q += " AND status=$2"
+		args = append(args, statusFilter)
+	}
+	q += " ORDER BY id DESC LIMIT 2000"
+
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	out := make([]pendingKeyView, 0)
+	for rows.Next() {
+		var (
+			r   pendingKeyRow
+			enc string
+		)
+		if err := rows.Scan(&r.id, &r.profileID, &enc, &r.quotaUSD, &r.note, &r.namePrefix,
+			&r.group, &r.tag, &r.models, &r.priority, &r.poolSize, &r.status,
+			&r.remoteChID, &r.attempts, &r.failedReason, &r.createdAt, &r.updatedAt); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		// Decrypt just so we can mask — never leaves the process.
+		masked := "***"
+		if k, err := decryptRemoteToken(enc); err == nil {
+			masked = maskKey(k)
+		}
+		out = append(out, pendingKeyView{
+			ID: r.id, ProfileID: r.profileID, KeyMasked: masked,
+			QuotaUSD: r.quotaUSD, Note: r.note, NamePrefix: r.namePrefix,
+			Group: r.group, Tag: r.tag, Models: r.models, Priority: r.priority,
+			PoolSize: r.poolSize, Status: r.status, RemoteChID: r.remoteChID,
+			Attempts: r.attempts, FailedReason: r.failedReason,
+			CreatedAt: r.createdAt, UpdatedAt: r.updatedAt,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+func handlePendingKeyDelete(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	// Never let a caller cancel a key that's currently attached to a
+	// live remote channel — that would leak the row without cleanup.
+	res, err := db.Exec(
+		`DELETE FROM remote_pending_key WHERE id=$1 AND status IN ('pending','failed')`,
+		id,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	n, _ := res.RowsAffected()
+	c.JSON(http.StatusOK, gin.H{"deleted": n})
+}
+
+// pendingSchedulerNudge lets the enqueue handler skip the 60s wait for
+// immediate (pool_size=0) uploads. Buffered=1 so overlapping enqueues
+// coalesce into one wake-up.
+var pendingSchedulerNudge = make(chan struct{}, 1)
+
+// startRemotePendingScheduler runs the drip logic. Every 60s (or on
+// nudge) it:
+//   • Marks active keys as `used` when their remote channel is disabled
+//     (status ≠ 1) or missing from the local mirror.
+//   • Uploads all pool_size=0 pending items.
+//   • For each pool_size > 0, ensures at most that many active items.
+//     Pending items are picked oldest-first.
+//   • On upload failure increments attempts; ≥ 3 → status='failed'.
+func startRemotePendingScheduler() {
+	log.Printf("[pending-scheduler] starting, tick=60s, retries=3")
+	go func() {
+		// Modest stagger so the process doesn't hammer the remote in the
+		// very second it boots.
+		time.Sleep(15 * time.Second)
+		runPendingTickAllProfiles()
+		t := time.NewTicker(60 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				runPendingTickAllProfiles()
+			case <-pendingSchedulerNudge:
+				runPendingTickAllProfiles()
+			}
+		}
+	}()
+}
+
+// pendingMaxAttempts caps retries. Kept low so a genuinely bad key
+// (revoked / rate-limited long-term) doesn't churn indefinitely; the
+// operator sees `failed` and decides.
+const pendingMaxAttempts = 3
+
+func runPendingTickAllProfiles() {
+	rows, err := db.Query(`SELECT DISTINCT profile_id FROM remote_pending_key WHERE status IN ('pending','active')`)
+	if err != nil {
+		log.Printf("[pending-scheduler] list profiles: %v", err)
+		return
+	}
+	defer rows.Close()
+	profiles := make([]int64, 0)
+	for rows.Next() {
+		var pid int64
+		if err := rows.Scan(&pid); err == nil {
+			profiles = append(profiles, pid)
+		}
+	}
+	for _, pid := range profiles {
+		runPendingTickForProfile(pid)
+	}
+}
+
+func runPendingTickForProfile(profileID int64) {
+	host, userID, token, err := loadRemoteProfileByID(profileID)
+	if err != nil {
+		log.Printf("[pending-scheduler] profile %d unreadable: %v", profileID, err)
+		return
+	}
+	now := time.Now().Unix()
+
+	// Step 1: reconcile currently-active rows against the local mirror
+	// (kept fresh by startRemoteSnapshotSync). A remote channel gone or
+	// disabled means the key has run out; mark it 'used' so the drip pool
+	// can advance.
+	activeRows, err := db.Query(
+		`SELECT p.id, p.remote_channel_id, COALESCE(c.status, 0)
+		   FROM remote_pending_key p
+		   LEFT JOIN remote_channel_current c
+		     ON c.profile_id = p.profile_id AND c.remote_channel_id = p.remote_channel_id
+		  WHERE p.profile_id = $1 AND p.status = 'active'`,
+		profileID,
+	)
+	if err != nil {
+		log.Printf("[pending-scheduler] scan active for profile %d: %v", profileID, err)
+	} else {
+		for activeRows.Next() {
+			var pID, chID int64
+			var chStatus int
+			if err := activeRows.Scan(&pID, &chID, &chStatus); err != nil {
+				continue
+			}
+			// chStatus == 0 means either the row is genuinely disabled OR the
+			// mirror hasn't captured it yet (snapshot sync runs every 15 min).
+			// Only mark 'used' when the mirror knows the channel and reports
+			// it non-enabled, to avoid false positives during warm-up.
+			if chID > 0 && chStatus != 0 && chStatus != 1 {
+				if _, err := db.Exec(
+					`UPDATE remote_pending_key SET status='used', used_at=$1, updated_at=$1 WHERE id=$2`,
+					now, pID,
+				); err != nil {
+					log.Printf("[pending-scheduler] mark used %d: %v", pID, err)
+				}
+			}
+		}
+		activeRows.Close()
+	}
+
+	// Step 2: upload all pool_size=0 pending items.
+	uploadEligiblePending(host, token, userID, profileID, 0, 0 /* no cap */)
+
+	// Step 3: drip pools. Grab distinct pool_size values > 0 that have
+	// either pending or active rows and rebalance each independently.
+	poolRows, err := db.Query(
+		`SELECT DISTINCT pool_size FROM remote_pending_key
+		  WHERE profile_id = $1 AND pool_size > 0 AND status IN ('pending','active')`,
+		profileID,
+	)
+	if err != nil {
+		log.Printf("[pending-scheduler] pool sizes for profile %d: %v", profileID, err)
+		return
+	}
+	sizes := make([]int, 0)
+	for poolRows.Next() {
+		var s int
+		if err := poolRows.Scan(&s); err == nil {
+			sizes = append(sizes, s)
+		}
+	}
+	poolRows.Close()
+
+	for _, size := range sizes {
+		var activeCount int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM remote_pending_key
+			  WHERE profile_id = $1 AND pool_size = $2 AND status = 'active'`,
+			profileID, size,
+		).Scan(&activeCount); err != nil {
+			log.Printf("[pending-scheduler] count active pool=%d: %v", size, err)
+			continue
+		}
+		need := size - activeCount
+		if need <= 0 {
+			continue
+		}
+		uploadEligiblePending(host, token, userID, profileID, size, need)
+	}
+}
+
+// uploadEligiblePending picks up to `limit` (0 = no cap for immediate) of
+// the oldest pending rows for a given profile+pool_size and tries to
+// upload each. On success the row transitions to 'active' with the new
+// remote_channel_id. On failure attempts++; ≥ pendingMaxAttempts → failed.
+func uploadEligiblePending(host, token string, userID, profileID int64, poolSize int, limit int) {
+	// Immediate uploads (limit=0) are still capped so a giant queue doesn't
+	// block the tick — 20/tick keeps us honest on remote rate limits.
+	take := limit
+	if poolSize == 0 && take == 0 {
+		take = 20
+	}
+	q := `SELECT id, key_encrypted, quota_usd, note, name_prefix, group_name,
+	             tag, models, priority
+	        FROM remote_pending_key
+	       WHERE profile_id = $1 AND pool_size = $2 AND status = 'pending'
+	       ORDER BY id ASC LIMIT $3`
+	rows, err := db.Query(q, profileID, poolSize, take)
+	if err != nil {
+		log.Printf("[pending-scheduler] pick pending: %v", err)
+		return
+	}
+	type job struct {
+		id       int64
+		enc      string
+		quota    float64
+		note     string
+		prefix   string
+		group    string
+		tag      string
+		models   string
+		priority int64
+	}
+	jobs := make([]job, 0, take)
+	for rows.Next() {
+		var j job
+		if err := rows.Scan(&j.id, &j.enc, &j.quota, &j.note, &j.prefix,
+			&j.group, &j.tag, &j.models, &j.priority); err != nil {
+			continue
+		}
+		jobs = append(jobs, j)
+	}
+	rows.Close()
+
+	for _, j := range jobs {
+		key, err := decryptRemoteToken(j.enc)
+		if err != nil {
+			pendingRecordFailure(j.id, "decrypt: "+err.Error())
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		var quotaPtr *float64
+		if j.quota > 0 {
+			q := j.quota
+			quotaPtr = &q
+		}
+		chID, err := uploadOneKeyToRemote(ctx, uploadOneKeyParams{
+			Host:       host,
+			Token:      token,
+			UserID:     userID,
+			ProfileID:  profileID,
+			Key:        key,
+			NamePrefix: j.prefix,
+			Models:     j.models,
+			Group:      j.group,
+			Tag:        j.tag,
+			Priority:   j.priority,
+			QuotaUSD:   quotaPtr,
+			Note:       j.note,
+		})
+		cancel()
+		if err != nil {
+			pendingRecordFailure(j.id, err.Error())
+			continue
+		}
+		now := time.Now().Unix()
+		if _, err := db.Exec(
+			`UPDATE remote_pending_key
+			    SET status='active', remote_channel_id=$1, activated_at=$2, updated_at=$2,
+			        failed_reason=''
+			  WHERE id=$3`,
+			chID, now, j.id,
+		); err != nil {
+			log.Printf("[pending-scheduler] mark active %d: %v", j.id, err)
+		}
+	}
+}
+
+func pendingRecordFailure(id int64, reason string) {
+	now := time.Now().Unix()
+	// Bump attempts; flip to 'failed' once we've hit the retry cap.
+	if _, err := db.Exec(
+		`UPDATE remote_pending_key
+		    SET attempts = attempts + 1,
+		        status = CASE WHEN attempts + 1 >= $1 THEN 'failed' ELSE 'pending' END,
+		        failed_reason = $2,
+		        updated_at = $3
+		  WHERE id = $4`,
+		pendingMaxAttempts, reason, now, id,
+	); err != nil {
+		log.Printf("[pending-scheduler] record failure %d: %v", id, err)
+	}
+}
+
 // ---- Handler: snapshot history query ----
 
 // handleRemoteSnapshotHistory returns the time series for either one
@@ -1286,107 +1760,33 @@ func handleRemoteChannelCreate(c *gin.Context) {
 			results = append(results, batchCreateResult{Key: masked, OK: false, Error: "empty key"})
 			continue
 		}
-		sha := keySha8(key)
-		// Name shape: <prefix>-<key-tail>-<sha8>
-		//   key-tail: last 8 alphanumeric chars of the key. Human-friendly so
-		//     an operator can eyeball or `grep` a specific key in the list.
-		//   sha:      guarantees uniqueness in case two different keys share
-		//     the same tail (unlikely but possible), and is what we still
-		//     search by in the reverse-lookup below.
-		name := body.NamePrefix + "-" + channelKeyTail(key, 8) + "-" + sha
-
 		// Per-item priority (from sequential-priority mode) overrides the
 		// batch-level default. Same 1-minimum clamp as BatchCreatePanel.
 		itemPriority := body.Priority
-		if it.Priority != nil {
-			if *it.Priority > 0 {
-				itemPriority = *it.Priority
-			}
+		if it.Priority != nil && *it.Priority > 0 {
+			itemPriority = *it.Priority
 		}
-		// Build the channel payload. Fields not sent stay as new-api defaults.
-		channelBody := gin.H{
-			"type":         body.Type,
-			"key":          key,
-			"name":         name,
-			"status":       1,
-			"models":       body.Models,
-			"group":        body.Group,
-			"priority":     itemPriority,
-			"weight":       0,
-			"created_time": time.Now().Unix(),
-			"channel_info": gin.H{
-				"is_multi_key":            false,
-				"multi_key_size":          0,
-				"multi_key_status_list":   nil,
-				"multi_key_polling_index": 0,
-				"multi_key_mode":          "",
-			},
-		}
-		if body.Tag != "" {
-			channelBody["tag"] = body.Tag
-		}
-		if body.BaseURL != "" {
-			channelBody["base_url"] = body.BaseURL
-		}
-		payload := gin.H{
-			"mode":    "single",
-			"channel": channelBody,
-		}
-		if _, err := remoteDoJSON(ctx, http.MethodPost, host, "/api/channel/", token, userID, nil, payload); err != nil {
+		matchedID, err := uploadOneKeyToRemote(ctx, uploadOneKeyParams{
+			Host:       host,
+			Token:      token,
+			UserID:     userID,
+			ProfileID:  body.ProfileID,
+			Key:        key,
+			NamePrefix: body.NamePrefix,
+			Type:       body.Type,
+			Models:     body.Models,
+			Group:      body.Group,
+			Tag:        body.Tag,
+			Priority:   itemPriority,
+			BaseURL:    body.BaseURL,
+			QuotaUSD:   it.QuotaUSD,
+			Note:       it.Note,
+		})
+		if err != nil {
 			results = append(results, batchCreateResult{Key: masked, OK: false, Error: err.Error()})
 			continue
 		}
-
-		// Reverse-lookup: search by the sha8 tag we embedded in the name.
-		// remoteDoJSON strips the envelope; on modern new-api the returned
-		// `data` is {items: [...], total, type_counts}, on older builds it
-		// was a bare array — accept either shape.
-		q := url.Values{}
-		q.Set("keyword", sha)
-		q.Set("group", body.Group)
-		data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/channel/search", token, userID, q, nil)
-		if err != nil {
-			// Channel was created but we lost the id. Report partial success so
-			// the operator can retry / manual-fix.
-			results = append(results, batchCreateResult{Key: masked, OK: false, Name: name, Error: "created but search failed: " + err.Error()})
-			continue
-		}
-		type hit struct {
-			ID   int64  `json:"id"`
-			Name string `json:"name"`
-		}
-		var hits []hit
-		var paged struct {
-			Items []hit `json:"items"`
-		}
-		if err := json.Unmarshal(data, &paged); err == nil && paged.Items != nil {
-			hits = paged.Items
-		} else if err := json.Unmarshal(data, &hits); err != nil {
-			snippet := string(data)
-			if len(snippet) > 160 {
-				snippet = snippet[:160] + "…"
-			}
-			results = append(results, batchCreateResult{Key: masked, OK: false, Name: name, Error: "created but decode search failed: " + snippet})
-			continue
-		}
-		var matchedID int64
-		for _, h := range hits {
-			if strings.Contains(h.Name, sha) {
-				if h.ID > matchedID {
-					matchedID = h.ID // newest wins if the sha collides across old rows
-				}
-			}
-		}
-		if matchedID == 0 {
-			results = append(results, batchCreateResult{Key: masked, OK: false, Name: name, Error: "created but reverse-lookup returned no match"})
-			continue
-		}
-
-		// Persist operator meta locally. Best-effort — a DB hiccup here doesn't
-		// invalidate the remote create.
-		if it.QuotaUSD != nil || strings.TrimSpace(it.Note) != "" {
-			_ = upsertMeta(body.ProfileID, matchedID, it.QuotaUSD, strings.TrimSpace(it.Note))
-		}
+		name := body.NamePrefix + "-" + channelKeyTail(key, 8) + "-" + keySha8(key)
 		results = append(results, batchCreateResult{Key: masked, OK: true, ChannelID: matchedID, Name: name})
 	}
 
@@ -1397,6 +1797,130 @@ func handleRemoteChannelCreate(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"results": results, "ok": ok, "total": len(results)})
+}
+
+// uploadOneKeyParams captures everything one upload attempt needs. Shared
+// between the interactive batch handler and the queue scheduler so a
+// keyed retry from the queue behaves exactly like a manual create.
+type uploadOneKeyParams struct {
+	Host       string
+	Token      string
+	UserID     int64
+	ProfileID  int64
+	Key        string
+	NamePrefix string
+	Type       int    // new-api channel type; 0 → default 14 (Anthropic)
+	Models     string
+	Group      string // upstream group; empty → "default"
+	Tag        string
+	Priority   int64
+	BaseURL    string
+	QuotaUSD   *float64 // local meta persisted with the returned channel id
+	Note       string
+}
+
+// uploadOneKeyToRemote creates one channel on the remote and returns the
+// remote channel id. Returns a descriptive error on any failure — the
+// caller decides whether to retry or record as failed. Also upserts the
+// operator meta (quota_usd / note) locally on success, best-effort.
+func uploadOneKeyToRemote(ctx context.Context, p uploadOneKeyParams) (int64, error) {
+	key := strings.TrimSpace(p.Key)
+	if key == "" {
+		return 0, errors.New("empty key")
+	}
+	if p.Type == 0 {
+		p.Type = 14
+	}
+	if strings.TrimSpace(p.Group) == "" {
+		p.Group = "default"
+	}
+	if strings.TrimSpace(p.Models) == "" {
+		return 0, errors.New("models is required")
+	}
+	sha := keySha8(key)
+	name := p.NamePrefix + "-" + channelKeyTail(key, 8) + "-" + sha
+
+	channelBody := gin.H{
+		"type":         p.Type,
+		"key":          key,
+		"name":         name,
+		"status":       1,
+		"models":       p.Models,
+		"group":        p.Group,
+		"priority":     p.Priority,
+		"weight":       0,
+		"created_time": time.Now().Unix(),
+		"channel_info": gin.H{
+			"is_multi_key":            false,
+			"multi_key_size":          0,
+			"multi_key_status_list":   nil,
+			"multi_key_polling_index": 0,
+			"multi_key_mode":          "",
+		},
+	}
+	if p.Tag != "" {
+		channelBody["tag"] = p.Tag
+	}
+	if p.BaseURL != "" {
+		channelBody["base_url"] = p.BaseURL
+	}
+	payload := gin.H{"mode": "single", "channel": channelBody}
+	if _, err := remoteDoJSON(ctx, http.MethodPost, p.Host, "/api/channel/", p.Token, p.UserID, nil, payload); err != nil {
+		return 0, err
+	}
+
+	// Reverse-lookup — see the inline comment in handleRemoteChannelCreate
+	// for the two shape branches. Kept in sync via the same helper below.
+	channelID, err := lookupRemoteChannelBySha(ctx, p.Host, p.Token, p.UserID, sha, p.Group)
+	if err != nil {
+		return 0, fmt.Errorf("created but %v", err)
+	}
+	if p.QuotaUSD != nil || strings.TrimSpace(p.Note) != "" {
+		_ = upsertMeta(p.ProfileID, channelID, p.QuotaUSD, strings.TrimSpace(p.Note))
+	}
+	return channelID, nil
+}
+
+// lookupRemoteChannelBySha runs the sha8-keyword search and picks the
+// newest matching row. Shared between the interactive create and the
+// scheduler so both survive when new-api's response shape drifts.
+func lookupRemoteChannelBySha(ctx context.Context, host, token string, userID int64, sha, group string) (int64, error) {
+	q := url.Values{}
+	q.Set("keyword", sha)
+	if group != "" {
+		q.Set("group", group)
+	}
+	data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/channel/search", token, userID, q, nil)
+	if err != nil {
+		return 0, fmt.Errorf("search failed: %v", err)
+	}
+	type hit struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+	var hits []hit
+	var paged struct {
+		Items []hit `json:"items"`
+	}
+	if err := json.Unmarshal(data, &paged); err == nil && paged.Items != nil {
+		hits = paged.Items
+	} else if err := json.Unmarshal(data, &hits); err != nil {
+		snippet := string(data)
+		if len(snippet) > 160 {
+			snippet = snippet[:160] + "…"
+		}
+		return 0, fmt.Errorf("decode search failed: %s", snippet)
+	}
+	var matched int64
+	for _, h := range hits {
+		if strings.Contains(h.Name, sha) && h.ID > matched {
+			matched = h.ID
+		}
+	}
+	if matched == 0 {
+		return 0, errors.New("reverse-lookup returned no match")
+	}
+	return matched, nil
 }
 
 // maskKey returns "…" + last 8 chars, matching the report page convention.

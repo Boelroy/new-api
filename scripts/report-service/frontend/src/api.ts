@@ -423,6 +423,28 @@ export type RemoteChannelLastHourResponse = {
   tpm?: Record<string, number> // channel_id -> tokens / min, 60s window
 }
 
+// Row in the scheduled-upload queue. `key_masked` is "…" + last 8 chars;
+// the plaintext key never leaves the server.
+export type PendingKey = {
+  id: number
+  profile_id: number
+  key_masked: string
+  quota_usd: number
+  note: string
+  name_prefix: string
+  group: string
+  tag: string
+  models: string
+  priority: number
+  pool_size: number            // 0 = upload immediately, >0 = drip pool of this size
+  status: 'pending' | 'active' | 'used' | 'failed'
+  remote_channel_id: number    // filled once uploaded
+  attempts: number
+  failed_reason?: string
+  created_at: number
+  updated_at: number
+}
+
 export const api = {
   login: (username: string, password: string) =>
     fetch('/api/login', {
@@ -628,6 +650,35 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key, model }),
     }),
+
+  // Scheduled upload queue (drip pool). pool_size=0 uploads immediately
+  // on the next scheduler tick; >0 keeps at most that many `active` at a
+  // time, waiting for each active row to hit its quota (remote status ≠ 1)
+  // before promoting the next pending item.
+  remotePendingEnqueue: (payload: {
+    profile_id: number
+    name_prefix: string
+    models: string
+    group?: string
+    tag?: string
+    priority?: number
+    pool_size: number
+    items: { key: string; quota_usd?: number; note?: string; priority?: number }[]
+  }) =>
+    request<{ inserted: number; skipped: number; total: number }>('/api/remote-newapi/pending', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  remotePendingList: (profileID: number, statusFilter?: string) => {
+    const qs = new URLSearchParams({ profile_id: String(profileID) })
+    if (statusFilter) qs.set('status', statusFilter)
+    return request<{ items: PendingKey[] }>(`/api/remote-newapi/pending?${qs}`)
+  },
+
+  remotePendingDelete: (id: number) =>
+    request<{ deleted: number }>(`/api/remote-newapi/pending/${id}`, { method: 'DELETE' }),
 
   remoteChannelLastHour: (profileID: number, channelIDs: number[]) =>
     request<RemoteChannelLastHourResponse>('/api/remote-newapi/channels/last-hour', {
