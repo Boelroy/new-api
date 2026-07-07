@@ -1568,11 +1568,17 @@ func handleRemoteTestKey(c *gin.Context) {
 	c.JSON(http.StatusOK, res)
 }
 
-// ---- Handler: last-hour cost per channel (with 5-min in-memory cache) ----
+// ---- Handler: last-hour cost per channel + realtime rpm/tpm ----
 
+// lastHourEntry caches everything /api/log/stat returns in one shot: the
+// requested-window quota AND the remote's hardcoded-60s rpm/tpm. TTL is
+// short (30s) since rpm/tpm are the "realtime" bit and a 5-min stale
+// value defeats the point.
 type lastHourEntry struct {
-	quota    int64
-	fetched  time.Time
+	quota   int64
+	rpm     int64
+	tpm     int64
+	fetched time.Time
 }
 
 var (
@@ -1580,7 +1586,7 @@ var (
 	lastHourCacheMu sync.Mutex
 )
 
-const lastHourTTL = 5 * time.Minute
+const lastHourTTL = 30 * time.Second
 
 // handleRemoteChannelLastHour returns quota (raw units) per channel for the
 // last hour, computed from the remote's GET /api/log/stat endpoint. Cached
@@ -1619,38 +1625,58 @@ func handleRemoteChannelLastHour(c *gin.Context) {
 	now := time.Now()
 	oneHourAgo := now.Add(-time.Hour)
 
-	out := make(map[string]int64, len(body.ChannelIDs))
+	// Three parallel maps keyed by channel_id-as-string so JSON serialises
+	// cleanly to {channel_id: value} on the frontend. `data` preserves the
+	// existing key (last-hour quota, raw units) so old clients keep working;
+	// new clients also read `rpm` and `tpm`.
+	dataOut := make(map[string]int64, len(body.ChannelIDs))
+	rpmOut := make(map[string]int64, len(body.ChannelIDs))
+	tpmOut := make(map[string]int64, len(body.ChannelIDs))
 	for _, chID := range body.ChannelIDs {
 		cacheKey := strconv.FormatInt(body.ProfileID, 10) + ":" + strconv.FormatInt(chID, 10)
 		lastHourCacheMu.Lock()
 		entry, ok := lastHourCache[cacheKey]
 		lastHourCacheMu.Unlock()
+		idStr := strconv.FormatInt(chID, 10)
 		if ok && now.Sub(entry.fetched) < lastHourTTL {
-			out[strconv.FormatInt(chID, 10)] = entry.quota
+			dataOut[idStr] = entry.quota
+			rpmOut[idStr] = entry.rpm
+			tpmOut[idStr] = entry.tpm
 			continue
 		}
 		q := url.Values{}
 		q.Set("type", "2") // consume logs only
-		q.Set("channel", strconv.FormatInt(chID, 10))
+		q.Set("channel", idStr)
 		q.Set("start_timestamp", strconv.FormatInt(oneHourAgo.Unix(), 10))
 		q.Set("end_timestamp", strconv.FormatInt(now.Unix(), 10))
 		data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/stat", token, userID, q, nil)
 		if err != nil {
 			// One channel failing shouldn't block the rest — record 0 and press on.
-			out[strconv.FormatInt(chID, 10)] = 0
+			dataOut[idStr] = 0
+			rpmOut[idStr] = 0
+			tpmOut[idStr] = 0
 			continue
 		}
+		// Remote returns {quota, rpm, tpm}; rpm/tpm are always over the last 60s
+		// regardless of start/end_timestamp (hardcoded upstream), so we can trust
+		// them as a realtime snapshot.
 		var stat struct {
 			Quota int64 `json:"quota"`
+			Rpm   int64 `json:"rpm"`
+			Tpm   int64 `json:"tpm"`
 		}
 		if err := json.Unmarshal(data, &stat); err != nil {
-			out[strconv.FormatInt(chID, 10)] = 0
+			dataOut[idStr] = 0
+			rpmOut[idStr] = 0
+			tpmOut[idStr] = 0
 			continue
 		}
-		out[strconv.FormatInt(chID, 10)] = stat.Quota
+		dataOut[idStr] = stat.Quota
+		rpmOut[idStr] = stat.Rpm
+		tpmOut[idStr] = stat.Tpm
 		lastHourCacheMu.Lock()
-		lastHourCache[cacheKey] = lastHourEntry{quota: stat.Quota, fetched: now}
+		lastHourCache[cacheKey] = lastHourEntry{quota: stat.Quota, rpm: stat.Rpm, tpm: stat.Tpm, fetched: now}
 		lastHourCacheMu.Unlock()
 	}
-	c.JSON(http.StatusOK, gin.H{"data": out})
+	c.JSON(http.StatusOK, gin.H{"data": dataOut, "rpm": rpmOut, "tpm": tpmOut})
 }

@@ -418,7 +418,9 @@ export type RemoteChannelUpdateRequest = {
 }
 
 export type RemoteChannelLastHourResponse = {
-  data: Record<string, number> // channel_id -> quota (raw units)
+  data: Record<string, number> // channel_id -> quota (raw units), 1h window
+  rpm?: Record<string, number> // channel_id -> requests / min, 60s window
+  tpm?: Record<string, number> // channel_id -> tokens / min, 60s window
 }
 
 export const api = {

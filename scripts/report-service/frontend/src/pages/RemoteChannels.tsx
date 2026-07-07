@@ -108,6 +108,10 @@ export default function RemoteChannels() {
   // Last-hour cost per channel (channel_id -> USD). Loaded on demand.
   const [lastHour, setLastHour] = useState<Record<number, number>>({})
   const [lastHourLoading, setLastHourLoading] = useState(false)
+  // Realtime rpm/tpm per channel, computed from the remote's /api/log/stat
+  // 60s window (backend caches 30s). Populated on Fetch + polled every 30s.
+  const [rpmByChannel, setRpmByChannel] = useState<Record<number, number>>({})
+  const [tpmByChannel, setTpmByChannel] = useState<Record<number, number>>({})
 
   // Baseline used_quota per channel from the previous background snapshot.
   // The Δ column subtracts this from live used_quota to show recent burn.
@@ -210,6 +214,8 @@ export default function RemoteChannels() {
         // Sparkline / test / last-hour data belongs to a specific live
         // fetch — reset when we're just showing the cached mirror.
         setLastHour({})
+        setRpmByChannel({})
+        setTpmByChannel({})
         setTestMsg({})
         setExpandedRow(null)
         // Pull the previous-snapshot baseline so the Δ column renders.
@@ -296,8 +302,11 @@ export default function RemoteChannels() {
       setChannels(res.channels)
       setMeta({ total: res.total, truncated: res.truncated, host: res.host })
       setRefreshedAt(new Date().toLocaleTimeString('zh-CN'))
-      // Any prior last-hour / test state is stale against the refreshed list.
+      // Any prior last-hour / rpm / tpm / test state is stale against the
+      // refreshed list.
       setLastHour({})
+      setRpmByChannel({})
+      setTpmByChannel({})
       setTestMsg({})
       // Cached sparkline data is per-channel time series; keep it, since
       // adding new points doesn't invalidate older ones. Just close any
@@ -353,9 +362,22 @@ export default function RemoteChannels() {
     }
   }
 
-  const loadLastHour = async () => {
+  // Auto-load stat (last-hour + rpm + tpm) whenever the channel list
+  // changes, then keep it fresh every 30s. Backend caches at 30s TTL so
+  // this cadence lands roughly one remote call per channel per tick.
+  // Uses `channels.length` as the effect key so we don't create a fresh
+  // interval on every re-render.
+  useEffect(() => {
     if (!selectedID || channels.length === 0) return
-    setLastHourLoading(true)
+    void loadLastHour({ silent: true })
+    const t = setInterval(() => { void loadLastHour({ silent: true }) }, 30000)
+    return () => clearInterval(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedID, channels.length])
+
+  const loadLastHour = async (opts?: { silent?: boolean }) => {
+    if (!selectedID || channels.length === 0) return
+    if (!opts?.silent) setLastHourLoading(true)
     try {
       const res = await api.remoteChannelLastHour(selectedID, channels.map(c => c.id))
       const next: Record<number, number> = {}
@@ -363,10 +385,25 @@ export default function RemoteChannels() {
         next[parseInt(k, 10)] = usdFromQuota(v as number)
       }
       setLastHour(next)
+      // Same endpoint now also returns realtime rpm/tpm (60s window from
+      // the remote). Fold them into the parallel maps so the RPM / TPM
+      // columns render alongside Last 1h.
+      if (res.rpm) {
+        const rpmMap: Record<number, number> = {}
+        for (const [k, v] of Object.entries(res.rpm)) rpmMap[parseInt(k, 10)] = v as number
+        setRpmByChannel(rpmMap)
+      }
+      if (res.tpm) {
+        const tpmMap: Record<number, number> = {}
+        for (const [k, v] of Object.entries(res.tpm)) tpmMap[parseInt(k, 10)] = v as number
+        setTpmByChannel(tpmMap)
+      }
     } catch (e: any) {
-      alert('load last-hour failed: ' + (e?.message || e))
+      // Silent polls should never bother the user with an alert — a
+      // transient network blip just leaves the last values in place.
+      if (!opts?.silent) alert('load last-hour failed: ' + (e?.message || e))
     } finally {
-      setLastHourLoading(false)
+      if (!opts?.silent) setLastHourLoading(false)
     }
   }
 
@@ -540,12 +577,16 @@ export default function RemoteChannels() {
     const totalUsedUSD = filteredChannels.reduce((s, c) => s + usdFromQuota(c.used_quota), 0)
     const enabled = filteredChannels.filter(c => c.status === 1).length
     const disabled = filteredChannels.length - enabled
-    return { count: filteredChannels.length, totalUsedUSD, enabled, disabled }
-  }, [filteredChannels])
+    // System-wide realtime RPM / TPM: sum over currently visible rows so
+    // date-filter and studio-filter narrow the total naturally.
+    const totalRpm = filteredChannels.reduce((s, c) => s + (rpmByChannel[c.id] ?? 0), 0)
+    const totalTpm = filteredChannels.reduce((s, c) => s + (tpmByChannel[c.id] ?? 0), 0)
+    return { count: filteredChannels.length, totalUsedUSD, enabled, disabled, totalRpm, totalTpm }
+  }, [filteredChannels, rpmByChannel, tpmByChannel])
 
   const exportCSV = () => {
     if (filteredChannels.length === 0) return
-    const header = ['ID', 'Name', 'Type', 'Group', 'Tag', 'Priority', 'Used USD', 'Δ USD (since baseline)', '额度 USD', 'Last 1h USD', 'Status', 'Created', 'Note']
+    const header = ['ID', 'Name', 'Type', 'Group', 'Tag', 'Priority', 'Used USD', 'Δ USD (since baseline)', '额度 USD', 'RPM', 'TPM', 'Last 1h USD', 'Status', 'Created', 'Note']
     const escape = (v: unknown) => {
       const s = v == null ? '' : String(v)
       return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
@@ -555,11 +596,15 @@ export default function RemoteChannels() {
       const baseline = snapshotBaseline[c.id]
       const deltaUSD = baseline ? usdFromQuota(c.used_quota - baseline.used_quota) : null
       const lh = lastHour[c.id]
+      const rpm = rpmByChannel[c.id]
+      const tpm = tpmByChannel[c.id]
       return [
         c.id, c.name, c.type, c.group, c.tag, c.priority,
         usedUSD.toFixed(4),
         deltaUSD != null ? deltaUSD.toFixed(4) : '',
         c.quota_usd != null ? c.quota_usd.toFixed(2) : '',
+        rpm != null ? rpm : '',
+        tpm != null ? tpm : '',
         lh != null ? lh.toFixed(4) : '',
         STATUS_LABEL[c.status] ?? c.status,
         c.created_time ? new Date(c.created_time * 1000).toISOString() : '',
@@ -626,7 +671,7 @@ export default function RemoteChannels() {
         + 批量上 key
       </button>
       <button
-        onClick={loadLastHour}
+        onClick={() => void loadLastHour()}
         disabled={!selectedID || channels.length === 0 || lastHourLoading}
         className="border border-gray-300 text-gray-700 rounded-md px-3 py-1.5 text-xs hover:bg-gray-50 disabled:opacity-40"
       >
@@ -706,11 +751,21 @@ export default function RemoteChannels() {
         )}
         {channels.length > 0 && meta && (
           <>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
               <MetricCard label="渠道总数" value={String(summary.count)} />
               <MetricCard label="启用" value={String(summary.enabled)} color="text-emerald-600" />
               <MetricCard label="禁用" value={String(summary.disabled)} color="text-rose-600" />
               <MetricCard label="累计已用" value={'$' + summary.totalUsedUSD.toFixed(2)} color="text-blue-600" />
+              <MetricCard
+                label="实时 RPM"
+                value={summary.totalRpm.toLocaleString()}
+                color={summary.totalRpm > 0 ? 'text-emerald-600' : 'text-gray-400'}
+              />
+              <MetricCard
+                label="实时 TPM"
+                value={summary.totalTpm.toLocaleString()}
+                color={summary.totalTpm > 0 ? 'text-emerald-600' : 'text-gray-400'}
+              />
             </div>
             {meta.truncated && (
               <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
@@ -732,6 +787,8 @@ export default function RemoteChannels() {
                       <th className="px-3 py-2 text-right font-medium">已用 (USD)</th>
                       <th className="px-3 py-2 text-right font-medium" title="距上一次后台快照的用量增量">Δ</th>
                       <th className="px-3 py-2 text-right font-medium">额度 (USD)</th>
+                      <th className="px-3 py-2 text-right font-medium" title="requests / min, 60s 窗口">RPM</th>
+                      <th className="px-3 py-2 text-right font-medium" title="tokens / min, 60s 窗口">TPM</th>
                       <th className="px-3 py-2 text-right font-medium">Last 1h</th>
                       <th className="px-3 py-2 text-left font-medium">状态</th>
                       <th className="px-3 py-2 text-left font-medium">Note</th>
@@ -798,6 +855,16 @@ export default function RemoteChannels() {
                               )}
                             </td>
                             <td className="px-3 py-2 tabular-nums text-right">
+                              {rpmByChannel[c.id] != null && rpmByChannel[c.id] > 0 ? (
+                                <span className="text-emerald-600 font-medium">{rpmByChannel[c.id].toLocaleString()}</span>
+                              ) : <span className="text-gray-300">—</span>}
+                            </td>
+                            <td className="px-3 py-2 tabular-nums text-right">
+                              {tpmByChannel[c.id] != null && tpmByChannel[c.id] > 0 ? (
+                                <span className="text-emerald-600 font-medium">{tpmByChannel[c.id].toLocaleString()}</span>
+                              ) : <span className="text-gray-300">—</span>}
+                            </td>
+                            <td className="px-3 py-2 tabular-nums text-right">
                               {lastHour[c.id] != null ? '$' + lastHour[c.id].toFixed(4) : <span className="text-gray-300">—</span>}
                             </td>
                             <td className="px-3 py-2">
@@ -836,7 +903,7 @@ export default function RemoteChannels() {
                           </tr>
                           {isOpen && (
                             <tr className="bg-gray-50/60 border-b border-gray-100">
-                              <td colSpan={14} className="px-4 py-3">
+                              <td colSpan={16} className="px-4 py-3">
                                 {seriesLoading === c.id ? (
                                   <div className="text-[11px] text-gray-400">加载 24h 数据…</div>
                                 ) : series && series.length >= 2 ? (
