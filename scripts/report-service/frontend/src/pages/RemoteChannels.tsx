@@ -139,6 +139,11 @@ export default function RemoteChannels() {
   const [formHost, setFormHost] = useState('')
   const [formUserID, setFormUserID] = useState('')
   const [formToken, setFormToken] = useState('')
+  // Batch-upload defaults preloaded into the create modal from the
+  // selected profile. Editable per-batch but sticky at the profile
+  // level so operators don't retype 8 model names every day.
+  const [formDefaultModels, setFormDefaultModels] = useState('')
+  const [formDefaultGroup, setFormDefaultGroup] = useState('')
   const [formBusy, setFormBusy] = useState(false)
   const [formErr, setFormErr] = useState<string | null>(null)
 
@@ -246,6 +251,8 @@ export default function RemoteChannels() {
     setFormHost('')
     setFormUserID('')
     setFormToken('')
+    setFormDefaultModels(DEFAULT_ANTHROPIC_MODELS)
+    setFormDefaultGroup('default')
     setFormErr(null)
     setFormOpen(true)
   }
@@ -256,6 +263,8 @@ export default function RemoteChannels() {
     setFormHost(p.host)
     setFormUserID(String(p.user_id))
     setFormToken('')
+    setFormDefaultModels(p.default_models || '')
+    setFormDefaultGroup(p.default_group || '')
     setFormErr(null)
     setFormOpen(true)
   }
@@ -275,6 +284,8 @@ export default function RemoteChannels() {
           host: formHost.trim(),
           user_id: uid,
           access_token: formToken.trim(),
+          default_models: formDefaultModels.trim(),
+          default_group: formDefaultGroup.trim(),
         })
         await reloadProfiles()
         setSelectedID(created.id)
@@ -283,6 +294,8 @@ export default function RemoteChannels() {
           name: formName.trim(),
           host: formHost.trim(),
           user_id: uid,
+          default_models: formDefaultModels.trim(),
+          default_group: formDefaultGroup.trim(),
         }
         if (formToken.trim()) patch.access_token = formToken.trim()
         await api.remoteProfileUpdate(editingID, patch)
@@ -457,15 +470,29 @@ export default function RemoteChannels() {
   }
 
   const openBatch = () => {
-    setBatchPrefix('')
-    setBatchGroup('default')
+    // Preload from the selected profile's saved defaults. The user just
+    // types the "middle" segment of the name — the final channel name
+    // becomes  YYYYMMDD-<middle>-<key-tail>-<hash>.
+    const p = profiles.find(x => x.id === selectedID)
+    setBatchPrefix('')  // "middle" segment only; date auto-prepended before submit
+    setBatchGroup((p?.default_group || '').trim() || 'default')
     setBatchTag('')
     setBatchPriority('')
-    setBatchModels(DEFAULT_ANTHROPIC_MODELS)
+    setBatchModels((p?.default_models || '').trim() || DEFAULT_ANTHROPIC_MODELS)
     setBatchInput('')
     setBatchErr(null)
     setBatchResults(null)
     setBatchOpen(true)
+  }
+
+  // todayYYYYMMDD returns the local-time date as a compact string, used
+  // as the auto-prepended prefix of new channel names.
+  const todayYYYYMMDD = () => {
+    const d = new Date()
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const dd = String(d.getDate()).padStart(2, '0')
+    return `${y}${m}${dd}`
   }
 
   const submitBatch = async () => {
@@ -505,6 +532,11 @@ export default function RemoteChannels() {
         items.forEach((it, i) => { it.priority = Math.max(1, basePriority + i * step) })
       }
     }
+    // Final name_prefix = <YYYYMMDD>-<user middle>. Backend then appends
+    // -<key末8>-<sha8> per key, so the full channel name is
+    // 20260707-mid-abcd1234-3f5c9e2a.
+    const fullNamePrefix = todayYYYYMMDD() + '-' + batchPrefix.trim()
+
     setBatchBusy(true)
     try {
       if (batchQueue) {
@@ -518,7 +550,7 @@ export default function RemoteChannels() {
         }
         const res = await api.remotePendingEnqueue({
           profile_id: selectedID,
-          name_prefix: batchPrefix.trim(),
+          name_prefix: fullNamePrefix,
           group: batchGroup.trim() || 'default',
           tag: batchTag.trim() || undefined,
           priority: batchLevelPriority,
@@ -535,7 +567,7 @@ export default function RemoteChannels() {
       }
       const res = await api.remoteChannelCreate({
         profile_id: selectedID,
-        name_prefix: batchPrefix.trim(),
+        name_prefix: fullNamePrefix,
         group: batchGroup.trim() || 'default',
         tag: batchTag.trim() || undefined,
         priority: batchLevelPriority,
@@ -1104,13 +1136,16 @@ export default function RemoteChannels() {
           >
             <h3 className="text-sm font-semibold text-gray-900 mb-3">批量上 key 到远端 new-api</h3>
             <div className="grid grid-cols-2 gap-3 mb-3">
-              <Field label="Name prefix (最终名 = prefix-sha8key)">
-                <input
-                  value={batchPrefix}
-                  onChange={e => setBatchPrefix(e.target.value)}
-                  placeholder="例如 0706-pipi-a"
-                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
-                />
+              <Field label={`名字中间段（最终 = ${todayYYYYMMDD()}-<你填>-<key末8>-<hash8>）`}>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] text-gray-400 font-mono whitespace-nowrap">{todayYYYYMMDD()}-</span>
+                  <input
+                    value={batchPrefix}
+                    onChange={e => setBatchPrefix(e.target.value)}
+                    placeholder="例如 pipi-a"
+                    className="flex-1 border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
+                  />
+                </div>
               </Field>
               <Field label="Group">
                 <input
@@ -1401,6 +1436,32 @@ export default function RemoteChannels() {
                   className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900"
                 />
               </Field>
+
+              {/* Defaults preloaded into the batch-upload modal so the
+                  operator only has to type the "middle" segment of the
+                  channel name and pick keys. */}
+              <div className="pt-2 border-t border-gray-100">
+                <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-2">
+                  批量上传默认值
+                </div>
+                <Field label="默认 Group">
+                  <input
+                    value={formDefaultGroup}
+                    onChange={e => setFormDefaultGroup(e.target.value)}
+                    placeholder="例如 default"
+                    className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
+                  />
+                </Field>
+                <Field label="默认 Models (逗号分隔)">
+                  <textarea
+                    value={formDefaultModels}
+                    onChange={e => setFormDefaultModels(e.target.value)}
+                    rows={3}
+                    placeholder="claude-opus-4-7,claude-sonnet-4-6,..."
+                    className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
+                  />
+                </Field>
+              </div>
               {formErr && <p className="text-xs text-rose-600">{formErr}</p>}
             </div>
             <div className="mt-5 flex justify-end gap-2">

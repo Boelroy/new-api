@@ -2765,6 +2765,11 @@ func main() {
 			created_at      BIGINT NOT NULL,
 			updated_at      BIGINT NOT NULL
 		)`,
+		// Batch-upload defaults per profile. Preloaded into the create modal
+		// so the operator only has to type the "middle" segment of the name
+		// (YYYYMMDD-<mid>-<key-tail>-<hash>). Empty string = no default.
+		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS default_models TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS default_group  TEXT NOT NULL DEFAULT ''`,
 		// Per-channel operator metadata that does not live on the remote new-api
 		// (额度上限 / 备注). Keyed by (profile_id, remote_channel_id). We keep it
 		// local so remote `tag` retains its original grouping semantics.

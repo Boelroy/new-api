@@ -91,13 +91,15 @@ func decryptRemoteToken(enc string) (string, error) {
 // ---- Data model ----
 
 type remoteProfile struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	Host      string `json:"host"`
-	UserID    int64  `json:"user_id"`
-	HasToken  bool   `json:"has_token"` // token never returned; UI shows only whether set
-	CreatedAt int64  `json:"created_at"`
-	UpdatedAt int64  `json:"updated_at"`
+	ID             int64  `json:"id"`
+	Name           string `json:"name"`
+	Host           string `json:"host"`
+	UserID         int64  `json:"user_id"`
+	HasToken       bool   `json:"has_token"` // token never returned; UI shows only whether set
+	DefaultModels  string `json:"default_models"`
+	DefaultGroup   string `json:"default_group"`
+	CreatedAt      int64  `json:"created_at"`
+	UpdatedAt      int64  `json:"updated_at"`
 }
 
 // normalizeHost trims trailing slash and rejects empty / non-http hosts.
@@ -123,7 +125,8 @@ func normalizeHost(raw string) (string, error) {
 
 func handleRemoteProfileList(c *gin.Context) {
 	rows, err := db.Query(
-		`SELECT id, name, host, user_id, access_token_enc, created_at, updated_at
+		`SELECT id, name, host, user_id, access_token_enc,
+		        default_models, default_group, created_at, updated_at
 		 FROM remote_newapi_profile ORDER BY name ASC`,
 	)
 	if err != nil {
@@ -135,7 +138,8 @@ func handleRemoteProfileList(c *gin.Context) {
 	for rows.Next() {
 		var p remoteProfile
 		var enc string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Host, &p.UserID, &enc, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Host, &p.UserID, &enc,
+			&p.DefaultModels, &p.DefaultGroup, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -147,10 +151,12 @@ func handleRemoteProfileList(c *gin.Context) {
 
 func handleRemoteProfileCreate(c *gin.Context) {
 	var body struct {
-		Name        string `json:"name"`
-		Host        string `json:"host"`
-		UserID      int64  `json:"user_id"`
-		AccessToken string `json:"access_token"`
+		Name          string `json:"name"`
+		Host          string `json:"host"`
+		UserID        int64  `json:"user_id"`
+		AccessToken   string `json:"access_token"`
+		DefaultModels string `json:"default_models"`
+		DefaultGroup  string `json:"default_group"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -158,6 +164,8 @@ func handleRemoteProfileCreate(c *gin.Context) {
 	}
 	body.Name = strings.TrimSpace(body.Name)
 	body.AccessToken = strings.TrimSpace(body.AccessToken)
+	body.DefaultModels = strings.TrimSpace(body.DefaultModels)
+	body.DefaultGroup = strings.TrimSpace(body.DefaultGroup)
 	if body.Name == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
 		return
@@ -183,9 +191,10 @@ func handleRemoteProfileCreate(c *gin.Context) {
 	now := time.Now().Unix()
 	var id int64
 	err = db.QueryRow(
-		`INSERT INTO remote_newapi_profile (name, host, user_id, access_token_enc, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $5) RETURNING id`,
-		body.Name, host, body.UserID, enc, now,
+		`INSERT INTO remote_newapi_profile
+		 (name, host, user_id, access_token_enc, default_models, default_group, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $7) RETURNING id`,
+		body.Name, host, body.UserID, enc, body.DefaultModels, body.DefaultGroup, now,
 	).Scan(&id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -193,7 +202,8 @@ func handleRemoteProfileCreate(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, remoteProfile{
 		ID: id, Name: body.Name, Host: host, UserID: body.UserID,
-		HasToken: true, CreatedAt: now, UpdatedAt: now,
+		HasToken: true, DefaultModels: body.DefaultModels, DefaultGroup: body.DefaultGroup,
+		CreatedAt: now, UpdatedAt: now,
 	})
 }
 
@@ -205,16 +215,36 @@ func handleRemoteProfileUpdate(c *gin.Context) {
 		return
 	}
 	var body struct {
-		Name        *string `json:"name,omitempty"`
-		Host        *string `json:"host,omitempty"`
-		UserID      *int64  `json:"user_id,omitempty"`
-		AccessToken *string `json:"access_token,omitempty"` // empty string = leave unchanged
+		Name          *string `json:"name,omitempty"`
+		Host          *string `json:"host,omitempty"`
+		UserID        *int64  `json:"user_id,omitempty"`
+		AccessToken   *string `json:"access_token,omitempty"` // empty string = leave unchanged
+		DefaultModels *string `json:"default_models,omitempty"`
+		DefaultGroup  *string `json:"default_group,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	now := time.Now().Unix()
+	if body.DefaultModels != nil {
+		if _, err := db.Exec(
+			`UPDATE remote_newapi_profile SET default_models=$1, updated_at=$2 WHERE id=$3`,
+			strings.TrimSpace(*body.DefaultModels), now, id,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.DefaultGroup != nil {
+		if _, err := db.Exec(
+			`UPDATE remote_newapi_profile SET default_group=$1, updated_at=$2 WHERE id=$3`,
+			strings.TrimSpace(*body.DefaultGroup), now, id,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
 	if body.Name != nil {
 		n := strings.TrimSpace(*body.Name)
 		if n == "" {

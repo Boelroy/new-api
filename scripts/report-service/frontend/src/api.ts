@@ -343,6 +343,8 @@ export type RemoteProfile = {
   host: string
   user_id: number
   has_token: boolean
+  default_models: string   // preloaded into the batch-upload models field
+  default_group: string    // preloaded into the batch-upload group field
   created_at: number
   updated_at: number
 }
@@ -582,6 +584,8 @@ export const api = {
     host: string
     user_id: number
     access_token: string
+    default_models?: string
+    default_group?: string
   }) =>
     request<RemoteProfile>('/api/remote-newapi/profiles', {
       method: 'POST',
@@ -591,7 +595,14 @@ export const api = {
 
   remoteProfileUpdate: (
     id: number,
-    payload: { name?: string; host?: string; user_id?: number; access_token?: string },
+    payload: {
+      name?: string
+      host?: string
+      user_id?: number
+      access_token?: string
+      default_models?: string
+      default_group?: string
+    },
   ) =>
     request<{ ok: boolean }>(`/api/remote-newapi/profiles/${id}`, {
       method: 'PATCH',
