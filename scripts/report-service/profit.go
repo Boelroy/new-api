@@ -390,8 +390,8 @@ type ProfitByRemoteChannel struct {
 	ProfitUSD    float64 `json:"profit_usd"`
 	ProfitRate   float64 `json:"profit_rate"`
 	// Fields carried through for display / debugging. All optional.
-	UnitPriceCNY  *float64 `json:"unit_price_cny,omitempty"`
-	DownstreamCNY *float64 `json:"downstream_cny,omitempty"`
+	UnitPriceCNY       *float64 `json:"unit_price_cny,omitempty"`
+	DownstreamDiscount *float64 `json:"downstream_discount,omitempty"` // USD → USD multiplier
 }
 
 type ProfitSummary struct {
@@ -853,41 +853,39 @@ func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]P
 		}
 	}
 
-	// Load ALL downstream rows in the window plus 1 day of prior context so
-	// day D can find a value effective on or before it. Grouped per key,
-	// sorted by date ascending — the "≤ day" lookup then walks backwards.
+	// Per-profile per-day downstream discount. One multiplier applies to
+	// the whole profile on a given day; missing days fall back to the
+	// latest configured date ≤ that day (so setting a rate on 2026-07-01
+	// carries all the way to today until a new row overrides).
 	dsRows, err := db.Query(
-		`SELECT profile_id, remote_channel_id, date, downstream_cny
-		   FROM remote_channel_downstream
+		`SELECT profile_id, date, discount
+		   FROM remote_downstream_daily
 		  WHERE date <= $1
-		  ORDER BY profile_id, remote_channel_id, date`,
+		  ORDER BY profile_id, date`,
 		endDate,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("query downstream: %v", err)
+		return nil, fmt.Errorf("query downstream_daily: %v", err)
 	}
 	defer dsRows.Close()
 	type dsRow struct {
 		date  string
 		value float64
 	}
-	dsSeries := make(map[[2]int64][]dsRow)
+	// profile_id → ascending list of (date, discount)
+	dsByProfile := make(map[int64][]dsRow)
 	for dsRows.Next() {
-		var pid, chID int64
+		var pid int64
 		var date string
 		var value float64
-		if err := dsRows.Scan(&pid, &chID, &date, &value); err != nil {
+		if err := dsRows.Scan(&pid, &date, &value); err != nil {
 			return nil, err
 		}
-		k := [2]int64{pid, chID}
-		dsSeries[k] = append(dsSeries[k], dsRow{date: date, value: value})
+		dsByProfile[pid] = append(dsByProfile[pid], dsRow{date: date, value: value})
 	}
-	// getDownstream: latest downstream_cny for (key, day). Rows are
-	// sorted ascending, so linear scan is fine for the ≤ 1k rows per key
-	// this table is expected to hold.
-	getDownstream := func(k [2]int64, day string) (float64, bool) {
+	getProfileDiscount := func(pid int64, day string) (float64, bool) {
 		best, ok := 0.0, false
-		for _, r := range dsSeries[k] {
+		for _, r := range dsByProfile[pid] {
 			if r.date > day {
 				break
 			}
@@ -930,9 +928,9 @@ func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]P
 	for k, dates := range deltas {
 		var usedUSD, costUSD, revenueUSD float64
 		hasPrice := false
-		hasDownstream := false
+		hasDiscount := false
 		var priceValue float64
-		var downstreamMax float64 // just for display
+		var discountMax float64 // largest multiplier seen in window (for display)
 		if p, ok := metaPrice[k]; ok {
 			hasPrice = true
 			priceValue = p
@@ -950,12 +948,15 @@ func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]P
 			if hasPrice {
 				costUSD += day * priceValue / fx
 			}
-			if ds, ok := getDownstream(k, date); ok {
-				hasDownstream = true
-				if ds > downstreamMax {
-					downstreamMax = ds
+			// Per-profile per-day downstream discount is a USD-to-USD
+			// multiplier — matches the existing report_downstream_pricing
+			// convention on the main side.
+			if d, ok := getProfileDiscount(k[0], date); ok {
+				hasDiscount = true
+				if d > discountMax {
+					discountMax = d
 				}
-				revenueUSD += day * ds / fx
+				revenueUSD += day * d
 			}
 		}
 		if usedUSD == 0 && costUSD == 0 && revenueUSD == 0 {
@@ -974,9 +975,9 @@ func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]P
 			v := priceValue
 			row.UnitPriceCNY = &v
 		}
-		if hasDownstream {
-			v := downstreamMax
-			row.DownstreamCNY = &v
+		if hasDiscount {
+			v := discountMax
+			row.DownstreamDiscount = &v
 		}
 		row.ProfitUSD = roundTo(row.RevenueUSD-row.CostUSD, 4)
 		if row.UsedUSD > 0 {

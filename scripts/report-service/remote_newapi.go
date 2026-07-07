@@ -2304,6 +2304,137 @@ func handleRemoteDownstreamBulk(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"updated": updated, "date": date})
 }
 
+// ---- Per-profile per-day downstream discount ----
+
+// remoteDownstreamRow mirrors one row of remote_downstream_daily; used by
+// both the list handler and internal callers (profit report loader).
+type remoteDownstreamRow struct {
+	ProfileID int64   `json:"profile_id"`
+	Date      string  `json:"date"`
+	Discount  float64 `json:"discount"`
+	Note      string  `json:"note,omitempty"`
+	UpdatedAt int64   `json:"updated_at"`
+}
+
+// handleRemoteDownstreamDailyList returns every configured (profile,date)
+// discount row within an optional date range. Frontend uses it to render
+// the editor grid on the Profit page.
+func handleRemoteDownstreamDailyList(c *gin.Context) {
+	profileIDStr := c.Query("profile_id")
+	start := strings.TrimSpace(c.Query("start"))
+	end := strings.TrimSpace(c.Query("end"))
+	q := `SELECT profile_id, date, discount, note, updated_at
+	        FROM remote_downstream_daily`
+	args := []any{}
+	conds := []string{}
+	if profileIDStr != "" {
+		pid, err := strconv.ParseInt(profileIDStr, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid profile_id"})
+			return
+		}
+		args = append(args, pid)
+		conds = append(conds, fmt.Sprintf("profile_id = $%d", len(args)))
+	}
+	if start != "" {
+		args = append(args, start)
+		conds = append(conds, fmt.Sprintf("date >= $%d", len(args)))
+	}
+	if end != "" {
+		args = append(args, end)
+		conds = append(conds, fmt.Sprintf("date <= $%d", len(args)))
+	}
+	if len(conds) > 0 {
+		q += " WHERE " + strings.Join(conds, " AND ")
+	}
+	q += " ORDER BY profile_id, date DESC"
+
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	out := make([]remoteDownstreamRow, 0)
+	for rows.Next() {
+		var r remoteDownstreamRow
+		if err := rows.Scan(&r.ProfileID, &r.Date, &r.Discount, &r.Note, &r.UpdatedAt); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		out = append(out, r)
+	}
+	c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+// handleRemoteDownstreamDailyUpsert upserts one (profile,date) row. Same
+// endpoint handles create and update — PK conflict swaps the values in.
+func handleRemoteDownstreamDailyUpsert(c *gin.Context) {
+	var body struct {
+		ProfileID int64   `json:"profile_id"`
+		Date      string  `json:"date"`
+		Discount  float64 `json:"discount"`
+		Note      string  `json:"note"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.ProfileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	date := strings.TrimSpace(body.Date)
+	if date == "" {
+		date = time.Now().UTC().Format("2006-01-02")
+	}
+	if _, err := time.Parse("2006-01-02", date); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "date must be YYYY-MM-DD"})
+		return
+	}
+	if body.Discount < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "discount must be ≥ 0"})
+		return
+	}
+	now := time.Now().Unix()
+	if _, err := db.Exec(
+		`INSERT INTO remote_downstream_daily (profile_id, date, discount, note, updated_at)
+		 VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (profile_id, date)
+		 DO UPDATE SET discount   = EXCLUDED.discount,
+		               note       = EXCLUDED.note,
+		               updated_at = EXCLUDED.updated_at`,
+		body.ProfileID, date, body.Discount, strings.TrimSpace(body.Note), now,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func handleRemoteDownstreamDailyDelete(c *gin.Context) {
+	profileID, err := strconv.ParseInt(c.Query("profile_id"), 10, 64)
+	if err != nil || profileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	date := strings.TrimSpace(c.Query("date"))
+	if date == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "date is required"})
+		return
+	}
+	res, err := db.Exec(
+		`DELETE FROM remote_downstream_daily WHERE profile_id=$1 AND date=$2`,
+		profileID, date,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	n, _ := res.RowsAffected()
+	c.JSON(http.StatusOK, gin.H{"deleted": n})
+}
+
 func handleRemoteStatSummary(c *gin.Context) {
 	profileID, err := strconv.ParseInt(c.Query("profile_id"), 10, 64)
 	if err != nil || profileID <= 0 {

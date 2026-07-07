@@ -42,6 +42,68 @@ export default function Profit() {
   const [fxNewDate, setFxNewDate] = useState(today())
   const [fxNewRate, setFxNewRate] = useState('')
 
+  // Remote per-profile per-day downstream discounts.
+  const [rdsRows, setRdsRows] = useState<{ profile_id: number; date: string; discount: number; note: string }[]>([])
+  const [rdsProfiles, setRdsProfiles] = useState<{ id: number; name: string }[]>([])
+  const [rdsProfileID, setRdsProfileID] = useState<number | null>(null)
+  const [rdsNewDate, setRdsNewDate] = useState(today())
+  const [rdsNewDiscount, setRdsNewDiscount] = useState('')
+  const [rdsNewNote, setRdsNewNote] = useState('')
+  const [rdsSaving, setRdsSaving] = useState(false)
+
+  const reloadRds = async () => {
+    try {
+      const [profRes, itemsRes] = await Promise.all([
+        api.remoteProfiles(),
+        api.remoteDownstreamDailyList(),
+      ])
+      setRdsProfiles(profRes.profiles.map(p => ({ id: p.id, name: p.name })))
+      setRdsRows(itemsRes.items)
+      if (rdsProfileID == null && profRes.profiles.length > 0) {
+        setRdsProfileID(profRes.profiles[0].id)
+      }
+    } catch (e) {
+      console.warn('rds reload', e)
+    }
+  }
+
+  useEffect(() => { if (featureEnabled) void reloadRds() /* eslint-disable-line react-hooks/exhaustive-deps */ }, [featureEnabled])
+
+  const submitRds = async () => {
+    if (!rdsProfileID) return
+    const v = parseFloat(rdsNewDiscount.trim())
+    if (isNaN(v) || v < 0) {
+      alert('discount 必须是非负数字')
+      return
+    }
+    setRdsSaving(true)
+    try {
+      await api.remoteDownstreamDailyUpsert({
+        profile_id: rdsProfileID,
+        date: rdsNewDate,
+        discount: v,
+        note: rdsNewNote.trim(),
+      })
+      setRdsNewDiscount('')
+      setRdsNewNote('')
+      await reloadRds()
+    } catch (e: any) {
+      alert('保存失败: ' + (e?.message || e))
+    } finally {
+      setRdsSaving(false)
+    }
+  }
+
+  const deleteRds = async (pid: number, date: string) => {
+    if (!confirm(`删除 profile ${pid} 在 ${date} 的下游折扣？`)) return
+    try {
+      await api.remoteDownstreamDailyDelete(pid, date)
+      await reloadRds()
+    } catch (e: any) {
+      alert('删除失败: ' + (e?.message || e))
+    }
+  }
+
   const load = async () => {
     setLoading(true)
     try {
@@ -468,7 +530,7 @@ export default function Profit() {
                   <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Channel</th>
                   <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">用量 USD</th>
                   <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">上游 CNY</th>
-                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">下游 CNY</th>
+                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400" title="profile 当日下游折扣 (最大值)">下游 ×</th>
                   <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">上游成本 USD</th>
                   <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">下游收入 USD</th>
                   <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">毛利 USD</th>
@@ -482,7 +544,7 @@ export default function Profit() {
                     <td className="px-3 py-1.5 font-mono max-w-[280px] truncate" title={r.channel_name}>{r.channel_name || `#${r.channel_id}`}</td>
                     <td className="px-3 py-1.5 text-right tabular-nums">{r.used_usd.toFixed(2)}</td>
                     <td className="px-3 py-1.5 text-right tabular-nums text-gray-500">{r.unit_price_cny != null ? '¥' + r.unit_price_cny.toFixed(4) : '—'}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums text-blue-600">{r.downstream_cny != null ? '¥' + r.downstream_cny.toFixed(4) : '—'}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-blue-600">{r.downstream_discount != null ? '×' + r.downstream_discount.toFixed(4) : '—'}</td>
                     <td className="px-3 py-1.5 text-right tabular-nums text-rose-600">{r.cost_usd.toFixed(4)}</td>
                     <td className="px-3 py-1.5 text-right tabular-nums text-blue-600">{r.revenue_usd.toFixed(4)}</td>
                     <td className={`px-3 py-1.5 text-right tabular-nums font-medium ${r.profit_usd >= 0 ? 'text-emerald-600' : 'text-rose-700'}`}>{r.profit_usd.toFixed(4)}</td>
@@ -741,6 +803,104 @@ export default function Profit() {
                 </td>
                 <td></td>
               </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Remote per-profile per-day downstream discount. Rows are looked
+          up as "latest date ≤ report day" — set once, next day inherits. */}
+      <div className="bg-white border border-gray-200 rounded-xl mt-4">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+          <div>
+            <div className="text-sm font-semibold">Remote 每日下游折扣</div>
+            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">
+              Per-profile per-day multiplier · revenue_usd = used_usd × discount · 未配置日期沿用上一次
+            </div>
+          </div>
+        </div>
+        <div className="p-4 border-b border-gray-100 flex flex-wrap items-end gap-3">
+          <div>
+            <label className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">Profile</label>
+            <select
+              value={rdsProfileID ?? ''}
+              onChange={e => setRdsProfileID(e.target.value ? Number(e.target.value) : null)}
+              className="border border-gray-300 rounded px-2 py-1 text-xs bg-white"
+            >
+              {rdsProfiles.length === 0 && <option value="">（无 profile）</option>}
+              {rdsProfiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">生效日期</label>
+            <input
+              type="date"
+              value={rdsNewDate}
+              onChange={e => setRdsNewDate(e.target.value)}
+              className="border border-gray-300 rounded px-2 py-1 text-xs bg-white"
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">折扣 (×)</label>
+            <input
+              type="number"
+              step="0.001"
+              min="0"
+              value={rdsNewDiscount}
+              onChange={e => setRdsNewDiscount(e.target.value)}
+              placeholder="例如 1.5"
+              className="w-24 border border-gray-300 rounded px-2 py-1 text-xs tabular-nums"
+            />
+          </div>
+          <div className="flex-1 min-w-[120px]">
+            <label className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">备注</label>
+            <input
+              type="text"
+              value={rdsNewNote}
+              onChange={e => setRdsNewNote(e.target.value)}
+              placeholder="可选"
+              className="w-full border border-gray-300 rounded px-2 py-1 text-xs"
+            />
+          </div>
+          <button
+            onClick={submitRds}
+            disabled={rdsSaving || rdsProfileID == null}
+            className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-40"
+          >
+            {rdsSaving ? '保存中…' : '保存 / 覆盖'}
+          </button>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs whitespace-nowrap">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Profile</th>
+                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">生效日期</th>
+                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">折扣</th>
+                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">备注</th>
+                <th className="px-3 py-2 w-12"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rdsRows.length === 0 && (
+                <tr><td colSpan={5} className="px-3 py-3 text-center text-gray-400 text-[11px]">
+                  暂无配置。填上面表单保存即可，未配置的天沿用最近一次。
+                </td></tr>
+              )}
+              {rdsRows.map(row => {
+                const pname = rdsProfiles.find(p => p.id === row.profile_id)?.name ?? row.profile_id
+                return (
+                  <tr key={`${row.profile_id}-${row.date}`} className="border-t border-gray-100 hover:bg-gray-50">
+                    <td className="px-3 py-1.5">{pname}</td>
+                    <td className="px-3 py-1.5 font-mono">{row.date}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-blue-600">×{row.discount.toFixed(4)}</td>
+                    <td className="px-3 py-1.5 text-gray-500">{row.note || <span className="text-gray-300">—</span>}</td>
+                    <td className="px-3 py-1.5 text-right">
+                      <button onClick={() => void deleteRds(row.profile_id, row.date)} className="text-[10px] text-rose-500 hover:text-rose-700">删除</button>
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>

@@ -108,19 +108,17 @@ export default function RemoteChannels() {
   const [refreshedAt, setRefreshedAt] = useState('')
 
   // Last-hour cost per channel (channel_id -> USD). Loaded on demand.
-  const [lastHour, setLastHour] = useState<Record<number, number>>({})
-  const [lastHourLoading, setLastHourLoading] = useState(false)
+  // Last-hour column + per-channel /api/log/stat fan-out were removed —
+  // realtime numbers live in the profile-wide summary card only.
 
   // Row selection for the bulk-cost editor. Cleared whenever the visible
   // channel list changes so a stale ID from a previous profile can't leak
   // into an update batch.
   const [selectedIDs, setSelectedIDs] = useState<Set<number>>(new Set())
   const [bulkCostOpen, setBulkCostOpen] = useState(false)
-  // Both fields are optional in the modal — empty = don't touch that
-  // side. downstream_cny needs a date; defaults to today UTC.
+  // Only upstream unit_price_cny is bulk-editable here now; downstream
+  // pricing moved to the per-profile per-day discount editor on Profit.
   const [bulkCostValue, setBulkCostValue] = useState('')
-  const [bulkDownstreamValue, setBulkDownstreamValue] = useState('')
-  const [bulkDownstreamDate, setBulkDownstreamDate] = useState(todayUTC)
   const [bulkCostBusy, setBulkCostBusy] = useState(false)
   const [bulkCostErr, setBulkCostErr] = useState<string | null>(null)
 
@@ -245,9 +243,8 @@ export default function RemoteChannels() {
         } else {
           setRefreshedAt('')
         }
-        // Sparkline / test / last-hour data belongs to a specific live
-        // fetch — reset when we're just showing the cached mirror.
-        setLastHour({})
+        // Sparkline / test state belongs to a specific live fetch —
+        // reset when we're just showing the cached mirror.
         setTestMsg({})
         setSelectedIDs(new Set())
         setExpandedRow(null)
@@ -343,9 +340,7 @@ export default function RemoteChannels() {
       setChannels(res.channels)
       setMeta({ total: res.total, truncated: res.truncated, host: res.host })
       setRefreshedAt(new Date().toLocaleTimeString('zh-CN'))
-      // Any prior last-hour / test state is stale against the refreshed
-      // list.
-      setLastHour({})
+      // Any prior test state is stale against the refreshed list.
       setTestMsg({})
       setSelectedIDs(new Set())
       // Cached sparkline data is per-channel time series; keep it, since
@@ -446,8 +441,6 @@ export default function RemoteChannels() {
 
   const openBulkCost = () => {
     setBulkCostValue('')
-    setBulkDownstreamValue('')
-    setBulkDownstreamDate(todayUTC)
     setBulkCostErr(null)
     setBulkCostOpen(true)
   }
@@ -459,59 +452,20 @@ export default function RemoteChannels() {
       setBulkCostErr('先勾选至少一行')
       return
     }
-    // Both fields optional; at least one must be filled.
-    const costRaw = bulkCostValue.trim()
-    const dsRaw = bulkDownstreamValue.trim()
-    if (!costRaw && !dsRaw) {
-      setBulkCostErr('至少填一个（单价 CNY 或 下游 CNY）')
+    const v = parseFloat(bulkCostValue.trim())
+    if (isNaN(v) || v < 0) {
+      setBulkCostErr('单价必须是非负数字（CNY）')
       return
     }
-    let cost: number | null = null
-    let downstream: number | null = null
-    if (costRaw) {
-      const v = parseFloat(costRaw)
-      if (isNaN(v) || v < 0) {
-        setBulkCostErr('单价 CNY 必须是非负数字')
-        return
-      }
-      cost = v
-    }
-    if (dsRaw) {
-      const v = parseFloat(dsRaw)
-      if (isNaN(v) || v < 0) {
-        setBulkCostErr('下游 CNY 必须是非负数字')
-        return
-      }
-      downstream = v
-    }
-
     setBulkCostBusy(true)
     try {
-      const ids = Array.from(selectedIDs)
-      const messages: string[] = []
-      if (cost !== null) {
-        const res = await api.remoteChannelMetaBulk({
-          profile_id: selectedID,
-          channel_ids: ids,
-          unit_price_cny: cost,
-        })
-        messages.push(`成本: 更新 ${res.updated} 条${res.failed.length ? `, ${res.failed.length} 失败` : ''}`)
-        // Optimistic patch — reflect immediately.
-        setChannels(prev => prev.map(c => selectedIDs.has(c.id) ? { ...c, unit_price_cny: cost! } : c))
-      }
-      if (downstream !== null) {
-        const res = await api.remoteChannelDownstreamBulk({
-          profile_id: selectedID,
-          channel_ids: ids,
-          downstream_cny: downstream,
-          date: bulkDownstreamDate,
-        })
-        messages.push(`下游: ${res.date} 更新 ${res.updated} 条`)
-        setChannels(prev => prev.map(c => selectedIDs.has(c.id)
-          ? { ...c, downstream_cny: downstream!, downstream_cny_date: bulkDownstreamDate }
-          : c))
-      }
-      alert(messages.join(' · '))
+      const res = await api.remoteChannelMetaBulk({
+        profile_id: selectedID,
+        channel_ids: Array.from(selectedIDs),
+        unit_price_cny: v,
+      })
+      setChannels(prev => prev.map(c => selectedIDs.has(c.id) ? { ...c, unit_price_cny: v } : c))
+      alert(`已更新 ${res.updated} 条${res.failed.length ? `，${res.failed.length} 失败` : ''}`)
       setBulkCostOpen(false)
       setSelectedIDs(new Set())
     } catch (e: any) {
@@ -553,23 +507,6 @@ export default function RemoteChannels() {
       await reloadPending()
     } catch (e: any) {
       alert('delete failed: ' + (e?.message || e))
-    }
-  }
-
-  const loadLastHour = async (opts?: { silent?: boolean }) => {
-    if (!selectedID || channels.length === 0) return
-    if (!opts?.silent) setLastHourLoading(true)
-    try {
-      const res = await api.remoteChannelLastHour(selectedID, channels.map(c => c.id))
-      const next: Record<number, number> = {}
-      for (const [k, v] of Object.entries(res.data)) {
-        next[parseInt(k, 10)] = usdFromQuota(v as number)
-      }
-      setLastHour(next)
-    } catch (e: any) {
-      if (!opts?.silent) alert('load last-hour failed: ' + (e?.message || e))
-    } finally {
-      if (!opts?.silent) setLastHourLoading(false)
     }
   }
 
@@ -808,7 +745,7 @@ export default function RemoteChannels() {
 
   const exportCSV = () => {
     if (filteredChannels.length === 0) return
-    const header = ['ID', 'Name', 'Type', 'Group', 'Tag', 'Priority', 'Used USD', 'Δ USD (since baseline)', '额度 USD', '单价 CNY', 'Last 1h USD', 'Status', 'Created', 'Note']
+    const header = ['ID', 'Name', 'Type', 'Group', 'Tag', 'Priority', 'Used USD', 'Δ USD (since baseline)', '额度 USD', '单价 CNY', 'Status', 'Created', 'Note']
     const escape = (v: unknown) => {
       const s = v == null ? '' : String(v)
       return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
@@ -817,14 +754,12 @@ export default function RemoteChannels() {
       const usedUSD = usdFromQuota(c.used_quota)
       const baseline = snapshotBaseline[c.id]
       const deltaUSD = baseline ? usdFromQuota(c.used_quota - baseline.used_quota) : null
-      const lh = lastHour[c.id]
       return [
         c.id, c.name, c.type, c.group, c.tag, c.priority,
         usedUSD.toFixed(4),
         deltaUSD != null ? deltaUSD.toFixed(4) : '',
         c.quota_usd != null ? c.quota_usd.toFixed(2) : '',
         c.unit_price_cny != null ? c.unit_price_cny.toFixed(4) : '',
-        lh != null ? lh.toFixed(4) : '',
         STATUS_LABEL[c.status] ?? c.status,
         c.created_time ? new Date(c.created_time * 1000).toISOString() : '',
         c.note || '',
@@ -897,13 +832,6 @@ export default function RemoteChannels() {
         className="border border-emerald-600 text-emerald-700 rounded-md px-3 py-1.5 text-xs hover:bg-emerald-50 disabled:opacity-40"
       >
         + 批量上 key
-      </button>
-      <button
-        onClick={() => void loadLastHour()}
-        disabled={!selectedID || channels.length === 0 || lastHourLoading}
-        className="border border-gray-300 text-gray-700 rounded-md px-3 py-1.5 text-xs hover:bg-gray-50 disabled:opacity-40"
-      >
-        {lastHourLoading ? '加载中…' : '加载 last-hour'}
       </button>
       <button
         onClick={fetchChannels}
@@ -1112,8 +1040,6 @@ export default function RemoteChannels() {
                       <th className="px-3 py-2 text-right font-medium" title="距上一次后台快照的用量增量">Δ</th>
                       <th className="px-3 py-2 text-right font-medium">额度 (USD)</th>
                       <th className="px-3 py-2 text-right font-medium" title="本地维护的上游成本, CNY / USD 额度">单价 CNY</th>
-                      <th className="px-3 py-2 text-right font-medium" title="Profit 报告用的下游售价, CNY / USD 额度; 未配置的日期沿用最近一次">下游 CNY</th>
-                      <th className="px-3 py-2 text-right font-medium">Last 1h</th>
                       <th className="px-3 py-2 text-left font-medium">状态</th>
                       <th className="px-3 py-2 text-left font-medium">Note</th>
                       <th className="px-3 py-2 text-left font-medium">操作</th>
@@ -1190,17 +1116,6 @@ export default function RemoteChannels() {
                                 <span className="text-gray-700">¥{c.unit_price_cny.toFixed(4)}</span>
                               ) : <span className="text-gray-300">—</span>}
                             </td>
-                            <td
-                              className="px-3 py-2 tabular-nums text-right"
-                              title={c.downstream_cny_date ? `since ${c.downstream_cny_date}` : undefined}
-                            >
-                              {c.downstream_cny != null ? (
-                                <span className="text-blue-600">¥{c.downstream_cny.toFixed(4)}</span>
-                              ) : <span className="text-gray-300">—</span>}
-                            </td>
-                            <td className="px-3 py-2 tabular-nums text-right">
-                              {lastHour[c.id] != null ? '$' + lastHour[c.id].toFixed(4) : <span className="text-gray-300">—</span>}
-                            </td>
                             <td className="px-3 py-2">
                               <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] ${STATUS_CLS[c.status] ?? 'bg-gray-100 text-gray-600'}`}>
                                 {STATUS_LABEL[c.status] ?? c.status}
@@ -1237,7 +1152,7 @@ export default function RemoteChannels() {
                           </tr>
                           {isOpen && (
                             <tr className="bg-gray-50/60 border-b border-gray-100">
-                              <td colSpan={18} className="px-4 py-3">
+                              <td colSpan={16} className="px-4 py-3">
                                 {seriesLoading === c.id ? (
                                   <div className="text-[11px] text-gray-400">加载 24h 数据…</div>
                                 ) : series && series.length >= 2 ? (
@@ -1275,51 +1190,24 @@ export default function RemoteChannels() {
             className="bg-white rounded-lg shadow-xl w-full max-w-md p-5"
             onClick={e => e.stopPropagation()}
           >
-            <h3 className="text-sm font-semibold text-gray-900 mb-1">批量设成本 / 下游</h3>
+            <h3 className="text-sm font-semibold text-gray-900 mb-1">批量设成本</h3>
             <p className="text-xs text-gray-500 mb-4">
-              选中 <span className="font-medium text-gray-900">{selectedIDs.size}</span> 个渠道。
-              两个字段都可以为空，只更新想改的那一项；均仅本地存储，不写远端。
+              将 <span className="font-medium text-gray-900">{selectedIDs.size}</span> 个选中渠道的单价改为下面填写的值 (CNY / 每 USD 上游额度)。仅本地存储，不写远端。
               <br />
-              <span className="text-gray-400">Profit 报告用：单价 = 上游成本；下游 = 售卖单价</span>
+              <span className="text-gray-400">下游折扣按 profile 每日单独在 Profit 页面配置。</span>
             </p>
-            <div className="space-y-3">
-              <Field label="上游单价 (CNY / 每 USD 上游额度) · 留空不改">
-                <input
-                  type="number"
-                  step="0.001"
-                  min="0"
-                  value={bulkCostValue}
-                  onChange={e => setBulkCostValue(e.target.value)}
-                  placeholder="例如 4.3"
-                  autoFocus
-                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-gray-900"
-                />
-              </Field>
-              <Field label="下游单价 (CNY / 每 USD 售卖) · 留空不改">
-                <input
-                  type="number"
-                  step="0.001"
-                  min="0"
-                  value={bulkDownstreamValue}
-                  onChange={e => setBulkDownstreamValue(e.target.value)}
-                  placeholder="例如 6.0"
-                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-gray-900"
-                />
-              </Field>
-              {bulkDownstreamValue.trim() && (
-                <Field label="下游生效日期 (UTC)">
-                  <input
-                    type="date"
-                    value={bulkDownstreamDate}
-                    onChange={e => setBulkDownstreamDate(e.target.value)}
-                    className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
-                  />
-                  <p className="mt-1 text-[10px] text-gray-400">
-                    该日期起用这个下游单价；后续日期沿用直到再次设置。默认今天 (UTC)。
-                  </p>
-                </Field>
-              )}
-            </div>
+            <Field label="单价 (CNY)">
+              <input
+                type="number"
+                step="0.001"
+                min="0"
+                value={bulkCostValue}
+                onChange={e => setBulkCostValue(e.target.value)}
+                placeholder="例如 4.3"
+                autoFocus
+                className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-gray-900"
+              />
+            </Field>
             {bulkCostErr && <p className="mt-2 text-xs text-rose-600">{bulkCostErr}</p>}
             <div className="mt-5 flex justify-end gap-2">
               <button

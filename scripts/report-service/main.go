@@ -2801,6 +2801,20 @@ func main() {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_remote_downstream_lookup
 		   ON remote_channel_downstream(profile_id, remote_channel_id, date DESC)`,
+		// Per-profile per-day downstream discount (multiplier applied to
+		// daily used_usd to compute revenue). Simpler than the per-channel
+		// remote_channel_downstream above — one number for a whole profile
+		// on a given day. Missing days fall back to the latest date ≤ day.
+		`CREATE TABLE IF NOT EXISTS remote_downstream_daily (
+			profile_id  BIGINT NOT NULL,
+			date        TEXT   NOT NULL,
+			discount    DOUBLE PRECISION NOT NULL,
+			note        TEXT   NOT NULL DEFAULT '',
+			updated_at  BIGINT NOT NULL,
+			PRIMARY KEY (profile_id, date)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_remote_daily_lookup
+		   ON remote_downstream_daily(profile_id, date DESC)`,
 		// Time series of channel state pulled from the remote. Written by
 		// the interactive Fetch button AND by startRemoteSnapshotSync. Old
 		// rows are pruned by pruneRemoteSnapshotsLoop after
@@ -2959,6 +2973,9 @@ func main() {
 	superAPI.PATCH("/remote-newapi/channels", handleRemoteChannelUpdate)
 	superAPI.PATCH("/remote-newapi/channels/meta/bulk", handleRemoteMetaBulkUpdate)
 	superAPI.POST("/remote-newapi/channels/downstream/bulk", handleRemoteDownstreamBulk)
+	superAPI.GET("/remote-newapi/downstream-daily", handleRemoteDownstreamDailyList)
+	superAPI.POST("/remote-newapi/downstream-daily", handleRemoteDownstreamDailyUpsert)
+	superAPI.DELETE("/remote-newapi/downstream-daily", handleRemoteDownstreamDailyDelete)
 	superAPI.GET("/remote-newapi/stat/summary", handleRemoteStatSummary)
 	superAPI.DELETE("/remote-newapi/channels/:id", handleRemoteChannelDelete)
 	superAPI.POST("/remote-newapi/channels/test", handleRemoteTestKey)

@@ -106,7 +106,7 @@ export type ProfitByRemoteChannel = {
   profit_usd: number
   profit_rate: number
   unit_price_cny?: number | null
-  downstream_cny?: number | null
+  downstream_discount?: number | null   // USD → USD multiplier used for revenue
 }
 
 export type ProfitSummary = {
@@ -688,9 +688,33 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  // Per-date downstream (sell-side) price. Setting a value on day D
-  // applies from D onwards until a later date overrides. Purely local —
-  // never touches the remote.
+  // Per-profile per-day downstream discount (multiplier from used_usd
+  // to revenue_usd). Missing days fall back to the latest date ≤ day.
+  remoteDownstreamDailyList: (profileID?: number, start?: string, end?: string) => {
+    const qs = new URLSearchParams()
+    if (profileID != null) qs.set('profile_id', String(profileID))
+    if (start) qs.set('start', start)
+    if (end) qs.set('end', end)
+    const suf = qs.toString()
+    return request<{ items: { profile_id: number; date: string; discount: number; note: string; updated_at: number }[] }>(
+      `/api/remote-newapi/downstream-daily${suf ? '?' + suf : ''}`,
+    )
+  },
+
+  remoteDownstreamDailyUpsert: (payload: { profile_id: number; date: string; discount: number; note?: string }) =>
+    request<{ ok: boolean }>('/api/remote-newapi/downstream-daily', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  remoteDownstreamDailyDelete: (profileID: number, date: string) =>
+    request<{ deleted: number }>(`/api/remote-newapi/downstream-daily?profile_id=${profileID}&date=${date}`, {
+      method: 'DELETE',
+    }),
+
+  // Deprecated per-channel per-date downstream; kept for schema/api
+  // compat only. Frontend no longer calls this.
   remoteChannelDownstreamBulk: (payload: {
     profile_id: number
     channel_ids: number[]
