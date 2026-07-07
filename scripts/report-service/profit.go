@@ -816,20 +816,53 @@ func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]P
 		series[k] = append(series[k], lastSnap{date: date, quota: quota})
 	}
 
-	// Deltas per (profile, channel, date). Cumulative counters mean we
-	// only trust the diff between consecutive snapshots — a missing day
-	// means "used everything since the prior snapshot", not 0.
+	// Pre-window baseline: the last snapshot strictly before startDate,
+	// per (profile, channel). If a channel first appeared inside the
+	// window, no baseline row exists and the first day's delta will be
+	// (first-snapshot-in-window − 0). This keeps day 1 from silently
+	// dropping the entire "starting used_quota" onto the floor.
+	baselines := make(map[[2]int64]int64)
+	{
+		bRows, err := db.Query(
+			`SELECT DISTINCT ON (profile_id, remote_channel_id)
+			        profile_id, remote_channel_id, used_quota
+			   FROM remote_channel_snapshot
+			  WHERE captured_at < $1
+			  ORDER BY profile_id, remote_channel_id, captured_at DESC`,
+			start.Unix(),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("query baseline: %v", err)
+		}
+		for bRows.Next() {
+			var pid, chID, q int64
+			if err := bRows.Scan(&pid, &chID, &q); err != nil {
+				bRows.Close()
+				return nil, err
+			}
+			baselines[[2]int64{pid, chID}] = q
+		}
+		bRows.Close()
+	}
+
+	// Deltas per (profile, channel, date). Each day's delta is the last
+	// snapshot of that day minus the previous "known" value (last of the
+	// day before, or the pre-window baseline for day 1). Cumulative
+	// counters can only decrease across a wipe — negative diffs are
+	// dropped so the row isn't credited with fake negative revenue.
 	deltas := make(map[[2]int64]map[string]int64) // key → date → raw quota units
 	for k, snaps := range series {
-		for i := 1; i < len(snaps); i++ {
-			d := snaps[i].quota - snaps[i-1].quota
+		prev := baselines[k] // zero when the channel is new inside the window
+		for _, s := range snaps {
+			d := s.quota - prev
+			prev = s.quota
 			if d < 0 {
-				continue // counter reset: skip rather than emit negative
+				continue
 			}
 			if deltas[k] == nil {
 				deltas[k] = make(map[string]int64)
 			}
-			deltas[k][snaps[i].date] += d
+			deltas[k][s.date] += d
 		}
 	}
 
