@@ -2787,6 +2787,20 @@ func main() {
 		// recorded" from "known to be free". Set in bulk via the
 		// PATCH .../channels/meta/bulk endpoint.
 		`ALTER TABLE remote_channel_meta ADD COLUMN IF NOT EXISTS unit_price_cny DOUBLE PRECISION`,
+		// Per-day per-channel downstream sell price. Look up rule for the
+		// profit report: for a given (channel, day) take the row with the
+		// max date ≤ that day — i.e. yesterday's rate carries over until
+		// explicitly overridden. Purely local — never leaves the server.
+		`CREATE TABLE IF NOT EXISTS remote_channel_downstream (
+			profile_id         BIGINT NOT NULL,
+			remote_channel_id  BIGINT NOT NULL,
+			date               TEXT   NOT NULL,
+			downstream_cny     DOUBLE PRECISION NOT NULL,
+			updated_at         BIGINT NOT NULL,
+			PRIMARY KEY (profile_id, remote_channel_id, date)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_remote_downstream_lookup
+		   ON remote_channel_downstream(profile_id, remote_channel_id, date DESC)`,
 		// Time series of channel state pulled from the remote. Written by
 		// the interactive Fetch button AND by startRemoteSnapshotSync. Old
 		// rows are pruned by pruneRemoteSnapshotsLoop after
@@ -2944,6 +2958,7 @@ func main() {
 	superAPI.POST("/remote-newapi/channels/create", handleRemoteChannelCreate)
 	superAPI.PATCH("/remote-newapi/channels", handleRemoteChannelUpdate)
 	superAPI.PATCH("/remote-newapi/channels/meta/bulk", handleRemoteMetaBulkUpdate)
+	superAPI.POST("/remote-newapi/channels/downstream/bulk", handleRemoteDownstreamBulk)
 	superAPI.GET("/remote-newapi/stat/summary", handleRemoteStatSummary)
 	superAPI.DELETE("/remote-newapi/channels/:id", handleRemoteChannelDelete)
 	superAPI.POST("/remote-newapi/channels/test", handleRemoteTestKey)

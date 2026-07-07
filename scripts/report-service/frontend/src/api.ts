@@ -95,6 +95,20 @@ export type ProfitByTag = {
   key_count: number
 }
 
+export type ProfitByRemoteChannel = {
+  profile_id: number
+  profile_name: string
+  channel_id: number
+  channel_name: string
+  used_usd: number
+  cost_usd: number
+  revenue_usd: number
+  profit_usd: number
+  profit_rate: number
+  unit_price_cny?: number | null
+  downstream_cny?: number | null
+}
+
 export type ProfitSummary = {
   start: string
   end: string
@@ -107,6 +121,11 @@ export type ProfitSummary = {
   by_key: ProfitByKey[]
   by_tag: ProfitByTag[]
   by_group: ProfitByGroup[]
+  by_remote_channel?: ProfitByRemoteChannel[]
+  remote_used_usd?: number
+  remote_cost_usd?: number
+  remote_revenue_usd?: number
+  remote_profit_usd?: number
   missing_pricing: { channel_ids: number[] | null; groups: string[] | null }
 }
 
@@ -363,7 +382,9 @@ export type RemoteChannel = {
   created_time: number
   // Merged in from the local remote_channel_meta table:
   quota_usd?: number | null
-  unit_price_cny?: number | null   // 本地维护的成本；null = 未录入
+  unit_price_cny?: number | null       // 本地维护的成本；null = 未录入
+  downstream_cny?: number | null       // 最新配置的下游单价；null = 未配置
+  downstream_cny_date?: string         // 上一次配置的日期 YYYY-MM-DD
   note?: string
 }
 
@@ -663,6 +684,21 @@ export const api = {
   }) =>
     request<{ updated: number; failed: number[] }>('/api/remote-newapi/channels/meta/bulk', {
       method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  // Per-date downstream (sell-side) price. Setting a value on day D
+  // applies from D onwards until a later date overrides. Purely local —
+  // never touches the remote.
+  remoteChannelDownstreamBulk: (payload: {
+    profile_id: number
+    channel_ids: number[]
+    downstream_cny: number
+    date?: string   // YYYY-MM-DD, default today UTC
+  }) =>
+    request<{ updated: number; date: string }>('/api/remote-newapi/channels/downstream/bulk', {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),

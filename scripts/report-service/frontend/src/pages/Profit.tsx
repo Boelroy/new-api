@@ -447,6 +447,57 @@ export default function Profit() {
         </div>
       </div>
 
+      {/* Remote Channels — one row per (profile, channel) with local
+          upstream (unit_price_cny) vs configured downstream (downstream_cny)
+          applied to daily deltas from remote_channel_snapshot. */}
+      {profit && profit.by_remote_channel && profit.by_remote_channel.length > 0 && (
+        <div className="bg-white border border-gray-200 rounded-xl mb-4">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+            <div>
+              <div className="text-sm font-semibold">Remote Channels 毛利</div>
+              <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">
+                Remote Channels · used = ${(profit.remote_used_usd ?? 0).toFixed(2)} · cost = ${(profit.remote_cost_usd ?? 0).toFixed(2)} · revenue = ${(profit.remote_revenue_usd ?? 0).toFixed(2)} · profit = <span className={(profit.remote_profit_usd ?? 0) >= 0 ? 'text-emerald-600' : 'text-rose-700'}>${(profit.remote_profit_usd ?? 0).toFixed(2)}</span>
+              </div>
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Profile</th>
+                  <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Channel</th>
+                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">用量 USD</th>
+                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">上游 CNY</th>
+                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">下游 CNY</th>
+                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">上游成本 USD</th>
+                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">下游收入 USD</th>
+                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">毛利 USD</th>
+                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">毛利率</th>
+                </tr>
+              </thead>
+              <tbody>
+                {profit.by_remote_channel.map(r => (
+                  <tr key={`${r.profile_id}-${r.channel_id}`} className="hover:bg-gray-50 border-t border-gray-100">
+                    <td className="px-3 py-1.5 text-gray-500">{r.profile_name || r.profile_id}</td>
+                    <td className="px-3 py-1.5 font-mono max-w-[280px] truncate" title={r.channel_name}>{r.channel_name || `#${r.channel_id}`}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{r.used_usd.toFixed(2)}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-gray-500">{r.unit_price_cny != null ? '¥' + r.unit_price_cny.toFixed(4) : '—'}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-blue-600">{r.downstream_cny != null ? '¥' + r.downstream_cny.toFixed(4) : '—'}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-rose-600">{r.cost_usd.toFixed(4)}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-blue-600">{r.revenue_usd.toFixed(4)}</td>
+                    <td className={`px-3 py-1.5 text-right tabular-nums font-medium ${r.profit_usd >= 0 ? 'text-emerald-600' : 'text-rose-700'}`}>{r.profit_usd.toFixed(4)}</td>
+                    <td className={`px-3 py-1.5 text-right tabular-nums ${r.profit_rate >= 0 ? '' : 'text-rose-700'}`}>{fmtPct(r.profit_rate)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="px-4 py-2 text-[10px] text-gray-400 border-t border-gray-100">
+            用量 = last snapshot(day D) − last snapshot(day D−1)（15min cron 采样）· 上游/下游未配置时该项按 0 处理
+          </div>
+        </div>
+      )}
+
       <div className="bg-white border border-gray-200 rounded-xl mb-4">
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
           <div>

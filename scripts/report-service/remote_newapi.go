@@ -316,20 +316,22 @@ func handleRemoteProfileDelete(c *gin.Context) {
 // is what we mostly care about here. QuotaUSD/Note come from the local
 // remote_channel_meta table and are merged in on read.
 type remoteChannel struct {
-	ID           int64    `json:"id"`
-	Name         string   `json:"name"`
-	Type         int      `json:"type"`
-	Status       int      `json:"status"`
-	Group        string   `json:"group"`
-	Tag          string   `json:"tag"`
-	Priority     int64    `json:"priority"`
-	Weight       int64    `json:"weight"`
-	Models       string   `json:"models"`
-	UsedQuota    int64    `json:"used_quota"`
-	CreatedTime  int64    `json:"created_time"`
-	QuotaUSD     *float64 `json:"quota_usd,omitempty"`
-	UnitPriceCNY *float64 `json:"unit_price_cny,omitempty"`
-	Note         string   `json:"note,omitempty"`
+	ID                 int64    `json:"id"`
+	Name               string   `json:"name"`
+	Type               int      `json:"type"`
+	Status             int      `json:"status"`
+	Group              string   `json:"group"`
+	Tag                string   `json:"tag"`
+	Priority           int64    `json:"priority"`
+	Weight             int64    `json:"weight"`
+	Models             string   `json:"models"`
+	UsedQuota          int64    `json:"used_quota"`
+	CreatedTime        int64    `json:"created_time"`
+	QuotaUSD           *float64 `json:"quota_usd,omitempty"`
+	UnitPriceCNY       *float64 `json:"unit_price_cny,omitempty"`
+	DownstreamCNY      *float64 `json:"downstream_cny,omitempty"`      // latest configured
+	DownstreamCNYDate  string   `json:"downstream_cny_date,omitempty"` // date the latest was set for
+	Note               string   `json:"note,omitempty"`
 }
 
 // remoteChannelMeta is the local operator-only overlay for a remote channel.
@@ -381,6 +383,54 @@ func loadMetaMap(profileID int64, channelIDs []int64) (map[int64]remoteChannelMe
 			m.UnitPriceCNY = &v
 		}
 		out[chID] = m
+	}
+	return out, nil
+}
+
+// loadLatestDownstream picks the most recent downstream_cny row per
+// (profile, channel) — i.e. yesterday's price still counts if today
+// hasn't been set. Empty input → empty output.
+func loadLatestDownstream(profileID int64, channelIDs []int64) (map[int64]struct {
+	value float64
+	date  string
+}, error) {
+	out := make(map[int64]struct {
+		value float64
+		date  string
+	})
+	if len(channelIDs) == 0 {
+		return out, nil
+	}
+	placeholders := make([]string, 0, len(channelIDs))
+	args := make([]any, 0, len(channelIDs)+1)
+	args = append(args, profileID)
+	for i, id := range channelIDs {
+		placeholders = append(placeholders, "$"+strconv.Itoa(i+2))
+		args = append(args, id)
+	}
+	// DISTINCT ON grabs the max date per channel in one pass; Postgres-only
+	// but this service is Postgres-only anyway.
+	q := `SELECT DISTINCT ON (remote_channel_id) remote_channel_id, downstream_cny, date
+	        FROM remote_channel_downstream
+	       WHERE profile_id = $1
+	         AND remote_channel_id IN (` + strings.Join(placeholders, ",") + `)
+	       ORDER BY remote_channel_id, date DESC`
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var chID int64
+		var val float64
+		var date string
+		if err := rows.Scan(&chID, &val, &date); err != nil {
+			return nil, err
+		}
+		out[chID] = struct {
+			value float64
+			date  string
+		}{val, date}
 	}
 	return out, nil
 }
@@ -721,6 +771,15 @@ func handleRemoteFetchChannels(c *gin.Context) {
 					all[i].QuotaUSD = m.QuotaUSD
 					all[i].UnitPriceCNY = m.UnitPriceCNY
 					all[i].Note = m.Note
+				}
+			}
+		}
+		if dsMap, err := loadLatestDownstream(body.ProfileID, ids); err == nil {
+			for i := range all {
+				if d, ok := dsMap[all[i].ID]; ok {
+					v := d.value
+					all[i].DownstreamCNY = &v
+					all[i].DownstreamCNYDate = d.date
 				}
 			}
 		}
@@ -1614,6 +1673,15 @@ func handleRemoteCachedChannels(c *gin.Context) {
 				}
 			}
 		}
+		if dsMap, err := loadLatestDownstream(profileID, ids); err == nil {
+			for i := range all {
+				if d, ok := dsMap[all[i].ID]; ok {
+					v := d.value
+					all[i].DownstreamCNY = &v
+					all[i].DownstreamCNYDate = d.date
+				}
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1739,6 +1807,13 @@ func handleRemoteChannelGet(c *gin.Context) {
 			ch.QuotaUSD = m.QuotaUSD
 			ch.UnitPriceCNY = m.UnitPriceCNY
 			ch.Note = m.Note
+		}
+	}
+	if dsMap, err := loadLatestDownstream(profileID, []int64{ch.ID}); err == nil {
+		if d, ok := dsMap[ch.ID]; ok {
+			v := d.value
+			ch.DownstreamCNY = &v
+			ch.DownstreamCNYDate = d.date
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"channel": ch})
@@ -2166,6 +2241,68 @@ var (
 )
 
 const statSummaryTTL = 30 * time.Second
+
+// handleRemoteDownstreamBulk sets the downstream (sell-side) price for a
+// batch of channels on a specific date. The profit report looks up
+// (channel, day) by picking the latest row where date ≤ day, so setting
+// the price once at the start of a rate change is enough — subsequent
+// days inherit the value until a new row overrides.
+func handleRemoteDownstreamBulk(c *gin.Context) {
+	var body struct {
+		ProfileID     int64    `json:"profile_id"`
+		ChannelIDs    []int64  `json:"channel_ids"`
+		DownstreamCNY float64  `json:"downstream_cny"`
+		Date          string   `json:"date"` // YYYY-MM-DD; empty = today UTC
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.ProfileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	if len(body.ChannelIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "channel_ids is required"})
+		return
+	}
+	if body.DownstreamCNY < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "downstream_cny must be ≥ 0"})
+		return
+	}
+	date := strings.TrimSpace(body.Date)
+	if date == "" {
+		date = time.Now().UTC().Format("2006-01-02")
+	}
+	if _, err := time.Parse("2006-01-02", date); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "date must be YYYY-MM-DD"})
+		return
+	}
+	const maxIDs = 5000
+	if len(body.ChannelIDs) > maxIDs {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("too many channel_ids (max %d)", maxIDs)})
+		return
+	}
+
+	now := time.Now().Unix()
+	updated := 0
+	for _, chID := range body.ChannelIDs {
+		if _, err := db.Exec(
+			`INSERT INTO remote_channel_downstream
+			   (profile_id, remote_channel_id, date, downstream_cny, updated_at)
+			 VALUES ($1, $2, $3, $4, $5)
+			 ON CONFLICT (profile_id, remote_channel_id, date)
+			 DO UPDATE SET downstream_cny = EXCLUDED.downstream_cny,
+			               updated_at    = EXCLUDED.updated_at`,
+			body.ProfileID, chID, date, body.DownstreamCNY, now,
+		); err != nil {
+			log.Printf("[downstream-bulk] channel %d: %v", chID, err)
+			continue
+		}
+		updated++
+	}
+	c.JSON(http.StatusOK, gin.H{"updated": updated, "date": date})
+}
 
 func handleRemoteStatSummary(c *gin.Context) {
 	profileID, err := strconv.ParseInt(c.Query("profile_id"), 10, 64)
