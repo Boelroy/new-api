@@ -2771,6 +2771,15 @@ func main() {
 		// (YYYYMMDD-<mid>-<key-tail>-<hash>). Empty string = no default.
 		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS default_models TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS default_group  TEXT NOT NULL DEFAULT ''`,
+		// Global-FIFO pool throttle knobs. `pool_interval_sec` is the tick
+		// interval for uploading queued pending_key rows; `pool_batch_size`
+		// is how many keys the tick uploads at once. The tick skips if any
+		// active pool row still exists (the previous batch hasn't died
+		// yet). Applies only to pool-mode rows (pool_size > 0). Old defaults
+		// (60s / 2) mirror the pre-refactor "every 20s, 2 at a time" pace
+		// but per-profile-configurable now.
+		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS pool_interval_sec INT NOT NULL DEFAULT 60`,
+		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS pool_batch_size   INT NOT NULL DEFAULT 2`,
 		// Per-channel operator metadata that does not live on the remote new-api
 		// (额度上限 / 备注). Keyed by (profile_id, remote_channel_id). We keep it
 		// local so remote `tag` retains its original grouping semantics.
@@ -2963,7 +2972,18 @@ func main() {
 	// Remote New-API inspector: lets super admin save credentials for
 	// external new-api deployments and pull channel + used_quota data.
 	// Token is AES-GCM encrypted at rest.
-	superAPI.GET("/remote-newapi/profiles", handleRemoteProfileList)
+	//
+	// A narrow subset (profile list + pending-queue CRUD) is also opened
+	// to studio operators via requireRoleOrStudioOperator below, so an
+	// operator can batch-upload keys without seeing profile host/user_id
+	// or touching other studios' rows. Each handler re-checks the caller
+	// role and enforces the studio scope internally.
+	remoteBatchAPI := api.Group("", requireRoleOrStudioOperator(minSuperAdminRole))
+	remoteBatchAPI.GET("/remote-newapi/profiles", handleRemoteProfileList)
+	remoteBatchAPI.POST("/remote-newapi/pending", handlePendingKeyEnqueue)
+	remoteBatchAPI.GET("/remote-newapi/pending", handlePendingKeyList)
+	remoteBatchAPI.DELETE("/remote-newapi/pending/:id", handlePendingKeyDelete)
+
 	superAPI.POST("/remote-newapi/profiles", handleRemoteProfileCreate)
 	superAPI.PATCH("/remote-newapi/profiles/:id", handleRemoteProfileUpdate)
 	superAPI.DELETE("/remote-newapi/profiles/:id", handleRemoteProfileDelete)
@@ -2982,12 +3002,6 @@ func main() {
 	superAPI.POST("/remote-newapi/channels/last-hour", handleRemoteChannelLastHour)
 	superAPI.GET("/remote-newapi/snapshots", handleRemoteSnapshotHistory)
 	superAPI.GET("/remote-newapi/channels/cached", handleRemoteCachedChannels)
-	// Scheduled uploads / drip pool. Backed by remote_pending_key; the
-	// scheduler goroutine (startRemotePendingScheduler) walks the table
-	// every 60s to upload immediates and rebalance drip pools.
-	superAPI.POST("/remote-newapi/pending", handlePendingKeyEnqueue)
-	superAPI.GET("/remote-newapi/pending", handlePendingKeyList)
-	superAPI.DELETE("/remote-newapi/pending/:id", handlePendingKeyDelete)
 
 	// Provider Testing: super_admin or tester role.
 	testingAPI := api.Group("", requireRoleOrTester(minSuperAdminRole))

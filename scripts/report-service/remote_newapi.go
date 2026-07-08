@@ -91,15 +91,92 @@ func decryptRemoteToken(enc string) (string, error) {
 // ---- Data model ----
 
 type remoteProfile struct {
-	ID             int64  `json:"id"`
-	Name           string `json:"name"`
-	Host           string `json:"host"`
-	UserID         int64  `json:"user_id"`
-	HasToken       bool   `json:"has_token"` // token never returned; UI shows only whether set
-	DefaultModels  string `json:"default_models"`
-	DefaultGroup   string `json:"default_group"`
-	CreatedAt      int64  `json:"created_at"`
-	UpdatedAt      int64  `json:"updated_at"`
+	ID              int64  `json:"id"`
+	Name            string `json:"name"`
+	Host            string `json:"host"`
+	UserID          int64  `json:"user_id"`
+	HasToken        bool   `json:"has_token"` // token never returned; UI shows only whether set
+	DefaultModels   string `json:"default_models"`
+	DefaultGroup    string `json:"default_group"`
+	PoolIntervalSec int    `json:"pool_interval_sec"`
+	PoolBatchSize   int    `json:"pool_batch_size"`
+	CreatedAt       int64  `json:"created_at"`
+	UpdatedAt       int64  `json:"updated_at"`
+}
+
+// remoteProfilePublic is the studio-operator view of a profile: name and
+// batch-upload defaults only. Fields the operator must not see (host,
+// user_id, has_token, pool tuning knobs) are omitted from the JSON. Used
+// by handleRemoteProfileList when the caller is not super_admin.
+type remoteProfilePublic struct {
+	ID            int64  `json:"id"`
+	Name          string `json:"name"`
+	DefaultModels string `json:"default_models"`
+	DefaultGroup  string `json:"default_group"`
+	CreatedAt     int64  `json:"created_at"`
+	UpdatedAt     int64  `json:"updated_at"`
+}
+
+// Pool tuning safety bounds. Interval too small hammers the remote;
+// batch too big undoes the "serial drip" invariant of the pool. Applied
+// on create/update.
+const (
+	poolIntervalSecMin = 5
+	poolIntervalSecMax = 3600
+	poolBatchSizeMin   = 1
+	poolBatchSizeMax   = 50
+	poolIntervalSecDef = 60
+	poolBatchSizeDef   = 2
+)
+
+func clampPoolInterval(v int) int {
+	if v <= 0 {
+		return poolIntervalSecDef
+	}
+	if v < poolIntervalSecMin {
+		return poolIntervalSecMin
+	}
+	if v > poolIntervalSecMax {
+		return poolIntervalSecMax
+	}
+	return v
+}
+
+func clampPoolBatchSize(v int) int {
+	if v <= 0 {
+		return poolBatchSizeDef
+	}
+	if v < poolBatchSizeMin {
+		return poolBatchSizeMin
+	}
+	if v > poolBatchSizeMax {
+		return poolBatchSizeMax
+	}
+	return v
+}
+
+// callerIsStudioOperator reports whether the JWT claim role for the
+// current request equals the studio-operator tier. Kept alongside route
+// helpers in main.go (requireRoleOrStudioOperator) so both sides read the
+// same claim shape.
+func callerIsStudioOperator(c *gin.Context) bool {
+	if v, ok := c.Get("role"); ok {
+		if r, ok := v.(int); ok {
+			return r == minStudioOperatorRole
+		}
+	}
+	return false
+}
+
+// callerStudio returns the studio JWT claim, trimmed. Empty means the
+// account isn't bound to any studio yet.
+func callerStudio(c *gin.Context) string {
+	if v, ok := c.Get("studio"); ok {
+		if s, ok := v.(string); ok {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
 }
 
 // normalizeHost trims trailing slash and rejects empty / non-http hosts.
@@ -126,7 +203,9 @@ func normalizeHost(raw string) (string, error) {
 func handleRemoteProfileList(c *gin.Context) {
 	rows, err := db.Query(
 		`SELECT id, name, host, user_id, access_token_enc,
-		        default_models, default_group, created_at, updated_at
+		        default_models, default_group,
+		        pool_interval_sec, pool_batch_size,
+		        created_at, updated_at
 		 FROM remote_newapi_profile ORDER BY name ASC`,
 	)
 	if err != nil {
@@ -134,29 +213,54 @@ func handleRemoteProfileList(c *gin.Context) {
 		return
 	}
 	defer rows.Close()
-	out := make([]remoteProfile, 0)
+	// Studio operators never learn the host / user_id / has_token / pool
+	// tuning — they only need a name to pick a profile in the batch-upload
+	// modal. Emit the stripped shape so those fields aren't even present
+	// as empty strings in the JSON.
+	stripped := callerIsStudioOperator(c)
+	full := make([]remoteProfile, 0)
+	slim := make([]remoteProfilePublic, 0)
 	for rows.Next() {
 		var p remoteProfile
 		var enc string
 		if err := rows.Scan(&p.ID, &p.Name, &p.Host, &p.UserID, &enc,
-			&p.DefaultModels, &p.DefaultGroup, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			&p.DefaultModels, &p.DefaultGroup,
+			&p.PoolIntervalSec, &p.PoolBatchSize,
+			&p.CreatedAt, &p.UpdatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 		p.HasToken = enc != ""
-		out = append(out, p)
+		if stripped {
+			slim = append(slim, remoteProfilePublic{
+				ID:            p.ID,
+				Name:          p.Name,
+				DefaultModels: p.DefaultModels,
+				DefaultGroup:  p.DefaultGroup,
+				CreatedAt:     p.CreatedAt,
+				UpdatedAt:     p.UpdatedAt,
+			})
+			continue
+		}
+		full = append(full, p)
 	}
-	c.JSON(http.StatusOK, gin.H{"profiles": out})
+	if stripped {
+		c.JSON(http.StatusOK, gin.H{"profiles": slim})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"profiles": full})
 }
 
 func handleRemoteProfileCreate(c *gin.Context) {
 	var body struct {
-		Name          string `json:"name"`
-		Host          string `json:"host"`
-		UserID        int64  `json:"user_id"`
-		AccessToken   string `json:"access_token"`
-		DefaultModels string `json:"default_models"`
-		DefaultGroup  string `json:"default_group"`
+		Name            string `json:"name"`
+		Host            string `json:"host"`
+		UserID          int64  `json:"user_id"`
+		AccessToken     string `json:"access_token"`
+		DefaultModels   string `json:"default_models"`
+		DefaultGroup    string `json:"default_group"`
+		PoolIntervalSec int    `json:"pool_interval_sec"`
+		PoolBatchSize   int    `json:"pool_batch_size"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -183,6 +287,11 @@ func handleRemoteProfileCreate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	// Missing pool tuning values fall back to the schema default via the
+	// same clamp — keeps create + update paths converging on the same
+	// safety bounds without duplicating the constants.
+	poolInterval := clampPoolInterval(body.PoolIntervalSec)
+	poolBatch := clampPoolBatchSize(body.PoolBatchSize)
 	enc, err := encryptRemoteToken(body.AccessToken)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "encrypt: " + err.Error()})
@@ -192,9 +301,11 @@ func handleRemoteProfileCreate(c *gin.Context) {
 	var id int64
 	err = db.QueryRow(
 		`INSERT INTO remote_newapi_profile
-		 (name, host, user_id, access_token_enc, default_models, default_group, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $7) RETURNING id`,
-		body.Name, host, body.UserID, enc, body.DefaultModels, body.DefaultGroup, now,
+		 (name, host, user_id, access_token_enc, default_models, default_group,
+		  pool_interval_sec, pool_batch_size, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9) RETURNING id`,
+		body.Name, host, body.UserID, enc, body.DefaultModels, body.DefaultGroup,
+		poolInterval, poolBatch, now,
 	).Scan(&id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -203,6 +314,7 @@ func handleRemoteProfileCreate(c *gin.Context) {
 	c.JSON(http.StatusOK, remoteProfile{
 		ID: id, Name: body.Name, Host: host, UserID: body.UserID,
 		HasToken: true, DefaultModels: body.DefaultModels, DefaultGroup: body.DefaultGroup,
+		PoolIntervalSec: poolInterval, PoolBatchSize: poolBatch,
 		CreatedAt: now, UpdatedAt: now,
 	})
 }
@@ -215,12 +327,14 @@ func handleRemoteProfileUpdate(c *gin.Context) {
 		return
 	}
 	var body struct {
-		Name          *string `json:"name,omitempty"`
-		Host          *string `json:"host,omitempty"`
-		UserID        *int64  `json:"user_id,omitempty"`
-		AccessToken   *string `json:"access_token,omitempty"` // empty string = leave unchanged
-		DefaultModels *string `json:"default_models,omitempty"`
-		DefaultGroup  *string `json:"default_group,omitempty"`
+		Name            *string `json:"name,omitempty"`
+		Host            *string `json:"host,omitempty"`
+		UserID          *int64  `json:"user_id,omitempty"`
+		AccessToken     *string `json:"access_token,omitempty"` // empty string = leave unchanged
+		DefaultModels   *string `json:"default_models,omitempty"`
+		DefaultGroup    *string `json:"default_group,omitempty"`
+		PoolIntervalSec *int    `json:"pool_interval_sec,omitempty"`
+		PoolBatchSize   *int    `json:"pool_batch_size,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -289,6 +403,20 @@ func handleRemoteProfileUpdate(c *gin.Context) {
 			return
 		}
 		if _, err := db.Exec(`UPDATE remote_newapi_profile SET access_token_enc=$1, updated_at=$2 WHERE id=$3`, enc, now, id); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.PoolIntervalSec != nil {
+		v := clampPoolInterval(*body.PoolIntervalSec)
+		if _, err := db.Exec(`UPDATE remote_newapi_profile SET pool_interval_sec=$1, updated_at=$2 WHERE id=$3`, v, now, id); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.PoolBatchSize != nil {
+		v := clampPoolBatchSize(*body.PoolBatchSize)
+		if _, err := db.Exec(`UPDATE remote_newapi_profile SET pool_batch_size=$1, updated_at=$2 WHERE id=$3`, v, now, id); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -1196,6 +1324,26 @@ func handlePendingKeyEnqueue(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
 		return
 	}
+	// Studio operator scope: force tag = user.studio, wipe any priority the
+	// client tried to hand-set (both batch-level and per-item), and pin
+	// pool_size to a positive sentinel so the row goes into the new pool
+	// FIFO instead of the "immediate upload" path — operators never bypass
+	// the throttle. Super admin keeps free control over all these fields.
+	if callerIsStudioOperator(c) {
+		studio := callerStudio(c)
+		if studio == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "your account has no studio binding; ask an admin to bind one before uploading keys"})
+			return
+		}
+		body.Tag = studio
+		body.Priority = 0
+		if body.PoolSize <= 0 {
+			body.PoolSize = 1
+		}
+		for i := range body.Items {
+			body.Items[i].Priority = nil
+		}
+	}
 	if strings.TrimSpace(body.NamePrefix) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name_prefix is required"})
 		return
@@ -1285,8 +1433,20 @@ func handlePendingKeyList(c *gin.Context) {
 	        FROM remote_pending_key WHERE profile_id=$1`
 	args := []any{profileID}
 	if statusFilter != "" {
-		q += " AND status=$2"
+		q += " AND status=$" + strconv.Itoa(len(args)+1)
 		args = append(args, statusFilter)
+	}
+	// Studio operator only ever sees their own studio's rows. Empty studio
+	// on their JWT is a config error — surface it instead of silently
+	// returning an empty list, so admin can fix the binding.
+	if callerIsStudioOperator(c) {
+		studio := callerStudio(c)
+		if studio == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "your account has no studio binding; ask an admin to bind one before viewing the queue"})
+			return
+		}
+		q += " AND tag=$" + strconv.Itoa(len(args)+1)
+		args = append(args, studio)
 	}
 	q += " ORDER BY id DESC LIMIT 2000"
 
@@ -1333,6 +1493,28 @@ func handlePendingKeyDelete(c *gin.Context) {
 	}
 	// Never let a caller cancel a key that's currently attached to a
 	// live remote channel — that would leak the row without cleanup.
+	// Studio operator additionally may only cancel rows tagged with their
+	// own studio; a stray attempt at someone else's row yields deleted:0
+	// (idempotent no-op, no info leak).
+	if callerIsStudioOperator(c) {
+		studio := callerStudio(c)
+		if studio == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "your account has no studio binding; ask an admin to bind one before canceling queue entries"})
+			return
+		}
+		res, err := db.Exec(
+			`DELETE FROM remote_pending_key
+			  WHERE id=$1 AND tag=$2 AND status IN ('pending','failed')`,
+			id, studio,
+		)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		n, _ := res.RowsAffected()
+		c.JSON(http.StatusOK, gin.H{"deleted": n})
+		return
+	}
 	res, err := db.Exec(
 		`DELETE FROM remote_pending_key WHERE id=$1 AND status IN ('pending','failed')`,
 		id,
@@ -1350,20 +1532,44 @@ func handlePendingKeyDelete(c *gin.Context) {
 // coalesce into one wake-up.
 var pendingSchedulerNudge = make(chan struct{}, 1)
 
+// profilePoolNext tracks when each profile is next eligible to run its
+// pool refill. The global ticker calls into each profile every 20s to
+// reconcile active→used and drain pool_size=0 rows, but the pool refill
+// itself honours the profile's own pool_interval_sec knob. In-memory
+// only — a restart just runs the first refill immediately, which is the
+// safe default.
+var (
+	profilePoolNextMu sync.Mutex
+	profilePoolNext   = map[int64]time.Time{}
+)
+
+func poolTickDue(profileID int64, now time.Time) bool {
+	profilePoolNextMu.Lock()
+	defer profilePoolNextMu.Unlock()
+	next, ok := profilePoolNext[profileID]
+	return !ok || !now.Before(next)
+}
+
+func poolTickMark(profileID int64, next time.Time) {
+	profilePoolNextMu.Lock()
+	defer profilePoolNextMu.Unlock()
+	profilePoolNext[profileID] = next
+}
+
 // startRemotePendingScheduler runs the drip logic. Every 20s (or on
-// nudge) it:
+// nudge) it, for each profile with any pending/active row:
 //   • Marks active keys as `used` when their remote channel is disabled
 //     (status ≠ 1) or missing from the local mirror.
-// startRemotePendingScheduler runs the drip logic. Every 20s (or on
-// nudge) it:
-//   • Marks active keys as `used` when their remote channel is disabled
-//     (status ≠ 1) or missing from the local mirror.
-//   • Uploads all pool_size=0 pending items.
-//   • For each pool_size > 0, only refills when the entire pool has
-//     drained — the "2 个用完再一起上下 2 个" batch drip pattern.
-//   • On upload failure increments attempts; ≥ 3 → status='failed'.
+//   • Uploads all pool_size=0 pending items (immediate lane, unchanged).
+//   • Runs the pool refill (pool_size > 0) at most once per profile
+//     pool_interval_sec, and only when zero active pool rows remain —
+//     the "batch drip" invariant: no new keys go up until the last
+//     batch has fully died on the remote.
+//   • On upload failure attempts++; ≥ 3 → status='failed' (treated as
+//     "done" for pool-refill purposes so a poisoned key can't lock the
+//     queue forever).
 func startRemotePendingScheduler() {
-	log.Printf("[pending-scheduler] starting, tick=20s, retries=3, batch drip")
+	log.Printf("[pending-scheduler] starting, tick=20s, retries=3, per-profile pool")
 	go func() {
 		// Modest stagger so the process doesn't hammer the remote in the
 		// very second it boots.
@@ -1416,7 +1622,7 @@ func runPendingTickForProfile(profileID int64) {
 
 	// Step 1: reconcile currently-active rows against the local mirror
 	// (kept fresh by startRemoteSnapshotSync). A remote channel gone or
-	// disabled means the key has run out; mark it 'used' so the drip pool
+	// disabled means the key has run out; mark it 'used' so the pool
 	// can advance.
 	activeRows, err := db.Query(
 		`SELECT p.id, p.remote_channel_id, COALESCE(c.status, 0)
@@ -1451,141 +1657,190 @@ func runPendingTickForProfile(profileID int64) {
 		activeRows.Close()
 	}
 
-	// Step 2: upload all pool_size=0 pending items.
-	uploadEligiblePending(host, token, userID, profileID, 0, 0 /* no cap */)
+	// Step 2: upload all pool_size=0 pending items (immediate lane).
+	uploadImmediatePending(host, token, userID, profileID)
 
-	// Step 3: drip pools. Grab distinct pool_size values > 0 that have
-	// either pending or active rows and rebalance each independently.
-	poolRows, err := db.Query(
-		`SELECT DISTINCT pool_size FROM remote_pending_key
-		  WHERE profile_id = $1 AND pool_size > 0 AND status IN ('pending','active')`,
+	// Step 3: pool refill. Runs at most once per profile.pool_interval_sec,
+	// and only when the previous batch has fully drained. Fails soft on
+	// missing profile / bad pool config — we already have the profile
+	// creds from loadRemoteProfileByID.
+	var interval, batchSize int
+	if err := db.QueryRow(
+		`SELECT pool_interval_sec, pool_batch_size FROM remote_newapi_profile WHERE id=$1`,
 		profileID,
-	)
-	if err != nil {
-		log.Printf("[pending-scheduler] pool sizes for profile %d: %v", profileID, err)
+	).Scan(&interval, &batchSize); err != nil {
+		log.Printf("[pending-scheduler] profile config %d: %v", profileID, err)
 		return
 	}
-	sizes := make([]int, 0)
-	for poolRows.Next() {
-		var s int
-		if err := poolRows.Scan(&s); err == nil {
-			sizes = append(sizes, s)
-		}
+	interval = clampPoolInterval(interval)
+	batchSize = clampPoolBatchSize(batchSize)
+	nowT := time.Now()
+	if !poolTickDue(profileID, nowT) {
+		return
 	}
-	poolRows.Close()
+	// Mark the next tick before doing any work so an overrun doesn't cause
+	// back-to-back refills. Uses the profile's configured interval every
+	// time — cheap to look up again next tick if the admin changes it.
+	poolTickMark(profileID, nowT.Add(time.Duration(interval)*time.Second))
 
-	for _, size := range sizes {
-		var activeCount int
-		if err := db.QueryRow(
-			`SELECT COUNT(*) FROM remote_pending_key
-			  WHERE profile_id = $1 AND pool_size = $2 AND status = 'active'`,
-			profileID, size,
-		).Scan(&activeCount); err != nil {
-			log.Printf("[pending-scheduler] count active pool=%d: %v", size, err)
-			continue
-		}
-		// Batch drip: only start the next batch when the current one has
-		// completely drained. Matches the "2 个用完再一起上下 2 个" mental
-		// model — clean cutover rather than a rolling shuffle. Set
-		// REMOTE_PENDING_ROLLING_DRIP=1 in env to fall back to the old
-		// keep-N-active behaviour if it ever proves useful.
-		if activeCount > 0 {
-			if os.Getenv("REMOTE_PENDING_ROLLING_DRIP") == "1" {
-				need := size - activeCount
-				if need > 0 {
-					uploadEligiblePending(host, token, userID, profileID, size, need)
-				}
-			}
-			continue
-		}
-		uploadEligiblePending(host, token, userID, profileID, size, size)
+	var activeCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM remote_pending_key
+		  WHERE profile_id = $1 AND pool_size > 0 AND status = 'active'`,
+		profileID,
+	).Scan(&activeCount); err != nil {
+		log.Printf("[pending-scheduler] count active pool for profile %d: %v", profileID, err)
+		return
+	}
+	if activeCount > 0 {
+		// Previous batch still alive. failed rows are excluded from this
+		// count on purpose — a poisoned key must not lock the pool.
+		return
+	}
+	uploadPoolBatch(host, token, userID, profileID, batchSize)
+}
+
+// uploadImmediatePending drains pool_size=0 rows (the "upload right away"
+// lane). Priority is respected as stored — super admin explicitly picked
+// it. Capped per-tick so a giant backlog can't monopolise the tick.
+func uploadImmediatePending(host, token string, userID, profileID int64) {
+	const immediatePerTick = 20
+	rows, err := db.Query(
+		`SELECT id, key_encrypted, quota_usd, note, name_prefix, group_name,
+		        tag, models, priority
+		   FROM remote_pending_key
+		  WHERE profile_id = $1 AND pool_size = 0 AND status = 'pending'
+		  ORDER BY id ASC LIMIT $2`,
+		profileID, immediatePerTick,
+	)
+	if err != nil {
+		log.Printf("[pending-scheduler] pick immediate: %v", err)
+		return
+	}
+	jobs := scanUploadJobs(rows)
+	for _, j := range jobs {
+		runSingleUpload(host, token, userID, profileID, j, j.priority)
 	}
 }
 
-// uploadEligiblePending picks up to `limit` (0 = no cap for immediate) of
-// the oldest pending rows for a given profile+pool_size and tries to
-// upload each. On success the row transitions to 'active' with the new
-// remote_channel_id. On failure attempts++; ≥ pendingMaxAttempts → failed.
-func uploadEligiblePending(host, token string, userID, profileID int64, poolSize int, limit int) {
-	// Immediate uploads (limit=0) are still capped so a giant queue doesn't
-	// block the tick — 20/tick keeps us honest on remote rate limits.
-	take := limit
-	if poolSize == 0 && take == 0 {
-		take = 20
-	}
-	q := `SELECT id, key_encrypted, quota_usd, note, name_prefix, group_name,
-	             tag, models, priority
-	        FROM remote_pending_key
-	       WHERE profile_id = $1 AND pool_size = $2 AND status = 'pending'
-	       ORDER BY id ASC LIMIT $3`
-	rows, err := db.Query(q, profileID, poolSize, take)
-	if err != nil {
-		log.Printf("[pending-scheduler] pick pending: %v", err)
+// uploadPoolBatch picks up to `n` oldest pending pool rows (FIFO by
+// created_at, id) and uploads each with a freshly-computed priority.
+// P starts at the current max(priority) of live remote channels for the
+// profile — this is what "累加" means: the newest uploaded key always
+// beats every currently-alive key by one. Within a single tick the
+// counter accumulates in-memory so we don't need remote_channel_current
+// to be synced between uploads.
+func uploadPoolBatch(host, token string, userID, profileID int64, n int) {
+	if n <= 0 {
 		return
 	}
-	type job struct {
-		id       int64
-		enc      string
-		quota    float64
-		note     string
-		prefix   string
-		group    string
-		tag      string
-		models   string
-		priority int64
+	rows, err := db.Query(
+		`SELECT id, key_encrypted, quota_usd, note, name_prefix, group_name,
+		        tag, models, priority
+		   FROM remote_pending_key
+		  WHERE profile_id = $1 AND pool_size > 0 AND status = 'pending'
+		  ORDER BY created_at ASC, id ASC
+		  LIMIT $2`,
+		profileID, n,
+	)
+	if err != nil {
+		log.Printf("[pending-scheduler] pick pool batch: %v", err)
+		return
 	}
-	jobs := make([]job, 0, take)
+	jobs := scanUploadJobs(rows)
+	if len(jobs) == 0 {
+		return
+	}
+	// Compute starting P from the profile's remote_channel_current mirror.
+	// status=1 = enabled. No enabled rows → start from 0, so the first
+	// key ever uploaded gets priority 1.
+	var pMax int64
+	if err := db.QueryRow(
+		`SELECT COALESCE(MAX(priority), 0) FROM remote_channel_current
+		  WHERE profile_id = $1 AND status = 1`,
+		profileID,
+	).Scan(&pMax); err != nil {
+		log.Printf("[pending-scheduler] scan pMax profile %d: %v", profileID, err)
+		return
+	}
+	for _, j := range jobs {
+		pMax++
+		runSingleUpload(host, token, userID, profileID, j, pMax)
+	}
+}
+
+// pendingUploadJob mirrors the columns needed to upload one pending row.
+// Kept private to the scheduler.
+type pendingUploadJob struct {
+	id       int64
+	enc      string
+	quota    float64
+	note     string
+	prefix   string
+	group    string
+	tag      string
+	models   string
+	priority int64
+}
+
+func scanUploadJobs(rows *sql.Rows) []pendingUploadJob {
+	defer rows.Close()
+	out := make([]pendingUploadJob, 0)
 	for rows.Next() {
-		var j job
+		var j pendingUploadJob
 		if err := rows.Scan(&j.id, &j.enc, &j.quota, &j.note, &j.prefix,
 			&j.group, &j.tag, &j.models, &j.priority); err != nil {
 			continue
 		}
-		jobs = append(jobs, j)
+		out = append(out, j)
 	}
-	rows.Close()
+	return out
+}
 
-	for _, j := range jobs {
-		key, err := decryptRemoteToken(j.enc)
-		if err != nil {
-			pendingRecordFailure(j.id, "decrypt: "+err.Error())
-			continue
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-		var quotaPtr *float64
-		if j.quota > 0 {
-			q := j.quota
-			quotaPtr = &q
-		}
-		chID, err := uploadOneKeyToRemote(ctx, uploadOneKeyParams{
-			Host:       host,
-			Token:      token,
-			UserID:     userID,
-			ProfileID:  profileID,
-			Key:        key,
-			NamePrefix: j.prefix,
-			Models:     j.models,
-			Group:      j.group,
-			Tag:        j.tag,
-			Priority:   j.priority,
-			QuotaUSD:   quotaPtr,
-			Note:       j.note,
-		})
-		cancel()
-		if err != nil {
-			pendingRecordFailure(j.id, err.Error())
-			continue
-		}
-		now := time.Now().Unix()
-		if _, err := db.Exec(
-			`UPDATE remote_pending_key
-			    SET status='active', remote_channel_id=$1, activated_at=$2, updated_at=$2,
-			        failed_reason=''
-			  WHERE id=$3`,
-			chID, now, j.id,
-		); err != nil {
-			log.Printf("[pending-scheduler] mark active %d: %v", j.id, err)
-		}
+// runSingleUpload does the actual remote POST + status transition for one
+// pending row. `priority` is the value to hand to the remote and to
+// persist on the row — the caller decides whether it's the row's stored
+// priority (immediate lane) or a freshly computed accumulator (pool lane).
+func runSingleUpload(host, token string, userID, profileID int64, j pendingUploadJob, priority int64) {
+	key, err := decryptRemoteToken(j.enc)
+	if err != nil {
+		pendingRecordFailure(j.id, "decrypt: "+err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	var quotaPtr *float64
+	if j.quota > 0 {
+		q := j.quota
+		quotaPtr = &q
+	}
+	chID, err := uploadOneKeyToRemote(ctx, uploadOneKeyParams{
+		Host:       host,
+		Token:      token,
+		UserID:     userID,
+		ProfileID:  profileID,
+		Key:        key,
+		NamePrefix: j.prefix,
+		Models:     j.models,
+		Group:      j.group,
+		Tag:        j.tag,
+		Priority:   priority,
+		QuotaUSD:   quotaPtr,
+		Note:       j.note,
+	})
+	if err != nil {
+		pendingRecordFailure(j.id, err.Error())
+		return
+	}
+	now := time.Now().Unix()
+	if _, err := db.Exec(
+		`UPDATE remote_pending_key
+		    SET status='active', remote_channel_id=$1, activated_at=$2, updated_at=$2,
+		        priority=$3, failed_reason=''
+		  WHERE id=$4`,
+		chID, now, priority, j.id,
+	); err != nil {
+		log.Printf("[pending-scheduler] mark active %d: %v", j.id, err)
 	}
 }
 

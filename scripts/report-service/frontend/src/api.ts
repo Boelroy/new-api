@@ -359,11 +359,17 @@ export type AuthUser = {
 export type RemoteProfile = {
   id: number
   name: string
-  host: string
-  user_id: number
-  has_token: boolean
+  // host / user_id / has_token / pool tuning knobs are only returned to
+  // super_admin; studio_operator gets a slimmed profile (name + defaults
+  // only) so the upstream URL and credentials never leak into their UI.
+  // Treat these as optional at the type level to reflect the wire shape.
+  host?: string
+  user_id?: number
+  has_token?: boolean
   default_models: string   // preloaded into the batch-upload models field
   default_group: string    // preloaded into the batch-upload group field
+  pool_interval_sec?: number  // pool refill cadence (seconds)
+  pool_batch_size?: number    // how many keys the pool refill uploads per tick
   created_at: number
   updated_at: number
 }
@@ -609,6 +615,8 @@ export const api = {
     access_token: string
     default_models?: string
     default_group?: string
+    pool_interval_sec?: number
+    pool_batch_size?: number
   }) =>
     request<RemoteProfile>('/api/remote-newapi/profiles', {
       method: 'POST',
@@ -625,6 +633,8 @@ export const api = {
       access_token?: string
       default_models?: string
       default_group?: string
+      pool_interval_sec?: number
+      pool_batch_size?: number
     },
   ) =>
     request<{ ok: boolean }>(`/api/remote-newapi/profiles/${id}`, {

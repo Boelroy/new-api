@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { api, ROLE_ADMIN, ROLE_SUPER_ADMIN, ROLE_TESTER } from '../api'
+import { api, ROLE_ADMIN, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_TESTER } from '../api'
 
 type Item = {
   to: string
@@ -204,6 +204,12 @@ export default function Sidebar({ open, onClose }: Props) {
   } else if (role === ROLE_TESTER) {
     // Tester is scoped to Provider Testing only (shown when R2 is wired up).
     items = showTesting ? [TESTING_ITEM] : []
+  } else if (role === ROLE_STUDIO_OPERATOR) {
+    // Studio operator can batch-upload keys to a remote new-api profile
+    // (scoped to their studio) — Remote Channels renders a slim view for
+    // this role. All Keys stays because they use it to inspect the local
+    // channels their batches created.
+    items = [ALL_KEYS_ITEM, REMOTE_CHANNELS_ITEM]
   } else {
     // Regular users only see All Keys.
     items = [ALL_KEYS_ITEM]
