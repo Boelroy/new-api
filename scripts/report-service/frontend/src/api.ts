@@ -1009,4 +1009,65 @@ export const api = {
     request<{ configured: boolean; start?: string; end?: string; status?: string; last_sync_at?: number }>(
       '/api/profit/pipi/status'
     ),
+
+  // ---- Local pool (KeyCapacity → Pool 上 Key tab) ----
+
+  localPoolGetConfig: () =>
+    request<LocalPoolConfig>('/api/local-pool/config'),
+
+  localPoolSetConfig: (payload: Partial<LocalPoolConfig>) =>
+    request<LocalPoolConfig>('/api/local-pool/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  localPoolGetRPM: () => request<{ rpm: number }>('/api/local-pool/rpm'),
+
+  localPoolEnqueue: (payload: {
+    studio: string
+    suffix: string
+    unit_price_cny?: number
+    channels: { key: string; quota_usd: number; unit_price_cny?: number }[]
+  }) =>
+    request<{ inserted: number; skipped: number; total: number }>('/api/local-pool/enqueue', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  localPoolList: (studio?: string, status?: string) => {
+    const qs = new URLSearchParams()
+    if (studio) qs.set('studio', studio)
+    if (status) qs.set('status', status)
+    const suffix = qs.toString()
+    return request<{ items: LocalPendingKey[] }>(`/api/local-pool/queue${suffix ? '?' + suffix : ''}`)
+  },
+
+  localPoolDelete: (id: number) =>
+    request<{ deleted: number }>(`/api/local-pool/pending/${id}`, { method: 'DELETE' }),
+}
+
+export type LocalPoolConfig = {
+  pool_interval_sec: number
+  pool_batch_size: number
+  auto_mode: boolean
+  rpm_base: number
+  rpm_min: number
+}
+
+export type LocalPendingKey = {
+  id: number
+  studio: string
+  suffix: string
+  key_masked: string
+  quota_usd: number
+  unit_price_cny?: number | null
+  status: 'pending' | 'active' | 'used' | 'failed'
+  priority: number
+  channel_id: number
+  attempts: number
+  failed_reason?: string
+  created_at: number
+  updated_at: number
 }

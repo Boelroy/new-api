@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
 import BatchCreatePanel from '../components/BatchCreatePanel'
+import LocalPoolPanel from '../components/LocalPoolPanel'
 import { api, ChannelRow } from '../api'
 
 function fmtETA(hours: number | null): { text: string; cls: string } {
@@ -32,6 +33,10 @@ export default function KeyCapacity() {
   const [quotaInput, setQuotaInput] = useState('')
   const [refreshedAt, setRefreshedAt] = useState('')
   const [saving, setSaving] = useState(false)
+  // Tab switcher between the classic capacity/batch-create view and
+  // the new "Pool 上 Key" panel. Storing in state (not URL) is fine —
+  // both views are cheap to unmount / remount.
+  const [tab, setTab] = useState<'capacity' | 'pool'>('capacity')
 
   // 批量改优先级状态：勾选的 channel.id 集合 + 目标优先级值
   const [selected, setSelected] = useState<Set<number>>(new Set())
@@ -121,12 +126,36 @@ export default function KeyCapacity() {
     </button>
   )
 
+  const tabBar = (
+    <div className="flex items-center gap-1 border-b border-gray-200 mb-4">
+      {[
+        { id: 'capacity' as const, label: '额度与批量创建' },
+        { id: 'pool' as const, label: 'Pool 上 Key（本地）' },
+      ].map(t => (
+        <button
+          key={t.id}
+          onClick={() => setTab(t.id)}
+          className={`px-3 py-2 text-sm border-b-2 -mb-px transition-colors ${
+            tab === t.id
+              ? 'border-gray-900 text-gray-900 font-medium'
+              : 'border-transparent text-gray-500 hover:text-gray-800'
+          }`}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  )
+
   return (
     <Layout
       title="Key Capacity"
       subtitle={`每个 Key 的用量与剩余寿命估算${refreshedAt ? ` · 最后更新：${refreshedAt}` : ''}`}
-      actions={actions}
+      actions={tab === 'capacity' ? actions : undefined}
     >
+      {tabBar}
+      {tab === 'pool' && <LocalPoolPanel />}
+      {tab === 'capacity' && (<>
       <SummaryCards cards={[
         { label: '启用 Key 数', value: String(channels.length), color: 'text-blue-600' },
         { label: '总额度', value: totalQuota ? '$' + totalQuota.toFixed(2) : '未配置' },
@@ -243,6 +272,7 @@ export default function KeyCapacity() {
           </div>
         </div>
       </div>
+      </>)}
     </Layout>
   )
 }

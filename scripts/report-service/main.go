@@ -2905,6 +2905,34 @@ func main() {
 			updated_at         BIGINT NOT NULL,
 			PRIMARY KEY (profile_id, remote_channel_id)
 		)`,
+		// Local pool pending queue. Same shape as remote_pending_key but
+		// the "upload target" is the local channels table (via the same
+		// insert path as handleBatchCreateChannels). channel_id points to
+		// the local channels.id once activated, so the scheduler can
+		// watch channels.status to promote 'active' → 'used'. tag column
+		// carries the studio identifier — mirrors channels.tag semantics
+		// so operator scoping is symmetric with the remote pool.
+		`CREATE TABLE IF NOT EXISTS local_pending_key (
+			id             BIGSERIAL PRIMARY KEY,
+			studio         TEXT   NOT NULL DEFAULT '',
+			suffix         TEXT   NOT NULL DEFAULT '',
+			key_hash       TEXT   NOT NULL,
+			key_encrypted  TEXT   NOT NULL,
+			quota_usd      DOUBLE PRECISION NOT NULL DEFAULT 0,
+			unit_price_cny DOUBLE PRECISION,
+			status         TEXT   NOT NULL DEFAULT 'pending',
+			priority       BIGINT NOT NULL DEFAULT 0,
+			channel_id     BIGINT NOT NULL DEFAULT 0,
+			attempts       INT    NOT NULL DEFAULT 0,
+			failed_reason  TEXT   NOT NULL DEFAULT '',
+			activated_at   BIGINT NOT NULL DEFAULT 0,
+			used_at        BIGINT NOT NULL DEFAULT 0,
+			created_at     BIGINT NOT NULL,
+			updated_at     BIGINT NOT NULL,
+			UNIQUE (studio, key_hash)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_local_pending_scheduler
+		   ON local_pending_key(status, created_at, id)`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
@@ -2920,6 +2948,7 @@ func main() {
 	startRemoteSnapshotSync()
 	startRemoteSnapshotPrune()
 	startRemotePendingScheduler()
+	startLocalPendingScheduler()
 	if profitEnabled {
 		startPipiSync()
 	}
@@ -3000,6 +3029,16 @@ func main() {
 	remoteBatchAPI.POST("/remote-newapi/pending", handlePendingKeyEnqueue)
 	remoteBatchAPI.GET("/remote-newapi/pending", handlePendingKeyList)
 	remoteBatchAPI.DELETE("/remote-newapi/pending/:id", handlePendingKeyDelete)
+
+	// Local pool: same drip mechanism but the target is the local
+	// channels table. enqueue/list/delete accessible to studio operator
+	// (server enforces studio scope). Config + RPM live under adminAPI.
+	remoteBatchAPI.POST("/local-pool/enqueue", handleLocalPoolEnqueue)
+	remoteBatchAPI.GET("/local-pool/queue", handleLocalPoolList)
+	remoteBatchAPI.DELETE("/local-pool/pending/:id", handleLocalPoolDelete)
+	adminAPI.GET("/local-pool/config", handleLocalPoolConfigGet)
+	adminAPI.POST("/local-pool/config", handleLocalPoolConfigSet)
+	adminAPI.GET("/local-pool/rpm", handleLocalRPM)
 
 	superAPI.POST("/remote-newapi/profiles", handleRemoteProfileCreate)
 	superAPI.PATCH("/remote-newapi/profiles/:id", handleRemoteProfileUpdate)
