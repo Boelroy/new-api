@@ -369,8 +369,18 @@ export type RemoteProfile = {
   default_models: string   // preloaded into the batch-upload models field
   default_group: string    // preloaded into the batch-upload group field
   pool_interval_sec?: number  // pool refill cadence (seconds)
-  pool_batch_size?: number    // how many keys the pool refill uploads per tick
+  pool_batch_size?: number    // ceiling for how many keys the pool refill uploads per tick
+  auto_mode?: boolean         // when true scheduler sizes batch against live RPM
+  rpm_base?: number           // 1 key handles this many RPM (n = ceil(rpm / rpm_base))
+  rpm_min?: number            // below this RPM the pool tick uploads 0
   created_at: number
+  updated_at: number
+}
+
+export type StudioPolicy = {
+  studio: string
+  accepting_keys: boolean
+  has_row: boolean       // false = implicit default (no policy row), true = explicit
   updated_at: number
 }
 
@@ -617,6 +627,9 @@ export const api = {
     default_group?: string
     pool_interval_sec?: number
     pool_batch_size?: number
+    auto_mode?: boolean
+    rpm_base?: number
+    rpm_min?: number
   }) =>
     request<RemoteProfile>('/api/remote-newapi/profiles', {
       method: 'POST',
@@ -635,10 +648,25 @@ export const api = {
       default_group?: string
       pool_interval_sec?: number
       pool_batch_size?: number
+      auto_mode?: boolean
+      rpm_base?: number
+      rpm_min?: number
     },
   ) =>
     request<{ ok: boolean }>(`/api/remote-newapi/profiles/${id}`, {
       method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  remoteStudioPolicyList: (profileID: number) =>
+    request<{ items: StudioPolicy[] }>(
+      `/api/remote-newapi/studio-policy?profile_id=${profileID}`,
+    ),
+
+  remoteStudioPolicyUpsert: (payload: { profile_id: number; studio: string; accepting_keys: boolean }) =>
+    request<{ ok: boolean }>('/api/remote-newapi/studio-policy', {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),

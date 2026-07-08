@@ -60,6 +60,10 @@ export default function RemoteChannelsStudio() {
   const [selectedID, setSelectedID] = useState<number | null>(null)
   const [loadingProfiles, setLoadingProfiles] = useState(true)
   const [pending, setPending] = useState<PendingKey[]>([])
+  // Studio bound to this JWT — used as the default "middle segment" of
+  // new channel names. Fetched once on mount; empty string until it
+  // arrives (openBatch guards against opening the modal before that).
+  const [userStudio, setUserStudio] = useState('')
 
   const [batchOpen, setBatchOpen] = useState(false)
   const [batchPrefix, setBatchPrefix] = useState('')
@@ -68,6 +72,17 @@ export default function RemoteChannelsStudio() {
   const [batchInput, setBatchInput] = useState('')
   const [batchBusy, setBatchBusy] = useState(false)
   const [batchErr, setBatchErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const me = await api.getAuthMe()
+        setUserStudio((me?.studio || '').trim())
+      } catch (e) {
+        console.warn('getAuthMe failed', e)
+      }
+    })()
+  }, [])
 
   const reloadProfiles = useCallback(async () => {
     setLoadingProfiles(true)
@@ -107,7 +122,11 @@ export default function RemoteChannelsStudio() {
 
   const openBatch = () => {
     const p = profiles.find(x => x.id === selectedID)
-    setBatchPrefix('')
+    // Middle segment defaults to the operator's bound studio — that's
+    // the identifier they use to distinguish batches downstream. They
+    // can still edit it (e.g. append -alpha / -beta) but the studio
+    // stays visible.
+    setBatchPrefix(userStudio)
     setBatchGroup((p?.default_group || '').trim() || 'default')
     setBatchModels((p?.default_models || '').trim() || DEFAULT_ANTHROPIC_MODELS)
     setBatchInput('')

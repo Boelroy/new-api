@@ -2780,6 +2780,23 @@ func main() {
 		// but per-profile-configurable now.
 		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS pool_interval_sec INT NOT NULL DEFAULT 60`,
 		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS pool_batch_size   INT NOT NULL DEFAULT 2`,
+		// Auto mode: when enabled the scheduler sizes each tick's batch
+		// against current remote RPM. n = min(pool_batch_size,
+		// ceil(rpm / rpm_base)); if rpm < rpm_min the tick uploads 0.
+		// pool_batch_size becomes the ceiling rather than the fixed count.
+		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS auto_mode BOOL NOT NULL DEFAULT false`,
+		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS rpm_base  INT  NOT NULL DEFAULT 150`,
+		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS rpm_min   INT  NOT NULL DEFAULT 50`,
+		// Per-(profile, studio) accept/reject flag for studio operator key
+		// uploads. Missing row = accepting; accepting=false rejects the
+		// enqueue with 403. Super admin toggles this from the queue panel.
+		`CREATE TABLE IF NOT EXISTS remote_studio_policy (
+			profile_id       BIGINT NOT NULL,
+			studio           TEXT   NOT NULL,
+			accepting_keys   BOOL   NOT NULL DEFAULT true,
+			updated_at       BIGINT NOT NULL,
+			PRIMARY KEY (profile_id, studio)
+		)`,
 		// Per-channel operator metadata that does not live on the remote new-api
 		// (额度上限 / 备注). Keyed by (profile_id, remote_channel_id). We keep it
 		// local so remote `tag` retains its original grouping semantics.
@@ -3002,6 +3019,11 @@ func main() {
 	superAPI.POST("/remote-newapi/channels/last-hour", handleRemoteChannelLastHour)
 	superAPI.GET("/remote-newapi/snapshots", handleRemoteSnapshotHistory)
 	superAPI.GET("/remote-newapi/channels/cached", handleRemoteCachedChannels)
+	// Per-(profile, studio) accept/reject flag for studio-operator key
+	// uploads. Super admin only — operator hits an enqueue that gets 403
+	// if their studio is closed on the profile.
+	superAPI.GET("/remote-newapi/studio-policy", handleStudioPolicyList)
+	superAPI.POST("/remote-newapi/studio-policy", handleStudioPolicyUpsert)
 
 	// Provider Testing: super_admin or tester role.
 	testingAPI := api.Group("", requireRoleOrTester(minSuperAdminRole))

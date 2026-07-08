@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -100,6 +101,9 @@ type remoteProfile struct {
 	DefaultGroup    string `json:"default_group"`
 	PoolIntervalSec int    `json:"pool_interval_sec"`
 	PoolBatchSize   int    `json:"pool_batch_size"`
+	AutoMode        bool   `json:"auto_mode"`
+	RPMBase         int    `json:"rpm_base"`
+	RPMMin          int    `json:"rpm_min"`
 	CreatedAt       int64  `json:"created_at"`
 	UpdatedAt       int64  `json:"updated_at"`
 }
@@ -127,6 +131,11 @@ const (
 	poolBatchSizeMax   = 50
 	poolIntervalSecDef = 60
 	poolBatchSizeDef   = 2
+	rpmBaseMin         = 1
+	rpmBaseMax         = 100000
+	rpmBaseDef         = 150
+	rpmMinDef          = 50
+	rpmMinMax          = 100000
 )
 
 func clampPoolInterval(v int) int {
@@ -151,6 +160,31 @@ func clampPoolBatchSize(v int) int {
 	}
 	if v > poolBatchSizeMax {
 		return poolBatchSizeMax
+	}
+	return v
+}
+
+func clampRPMBase(v int) int {
+	if v <= 0 {
+		return rpmBaseDef
+	}
+	if v < rpmBaseMin {
+		return rpmBaseMin
+	}
+	if v > rpmBaseMax {
+		return rpmBaseMax
+	}
+	return v
+}
+
+// rpm_min = 0 is legal (upload as soon as anything moves). Only clamp
+// negatives and absurdly large values.
+func clampRPMMin(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > rpmMinMax {
+		return rpmMinMax
 	}
 	return v
 }
@@ -205,6 +239,7 @@ func handleRemoteProfileList(c *gin.Context) {
 		`SELECT id, name, host, user_id, access_token_enc,
 		        default_models, default_group,
 		        pool_interval_sec, pool_batch_size,
+		        auto_mode, rpm_base, rpm_min,
 		        created_at, updated_at
 		 FROM remote_newapi_profile ORDER BY name ASC`,
 	)
@@ -226,6 +261,7 @@ func handleRemoteProfileList(c *gin.Context) {
 		if err := rows.Scan(&p.ID, &p.Name, &p.Host, &p.UserID, &enc,
 			&p.DefaultModels, &p.DefaultGroup,
 			&p.PoolIntervalSec, &p.PoolBatchSize,
+			&p.AutoMode, &p.RPMBase, &p.RPMMin,
 			&p.CreatedAt, &p.UpdatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -261,6 +297,9 @@ func handleRemoteProfileCreate(c *gin.Context) {
 		DefaultGroup    string `json:"default_group"`
 		PoolIntervalSec int    `json:"pool_interval_sec"`
 		PoolBatchSize   int    `json:"pool_batch_size"`
+		AutoMode        *bool  `json:"auto_mode,omitempty"`
+		RPMBase         int    `json:"rpm_base"`
+		RPMMin          int    `json:"rpm_min"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -292,6 +331,12 @@ func handleRemoteProfileCreate(c *gin.Context) {
 	// safety bounds without duplicating the constants.
 	poolInterval := clampPoolInterval(body.PoolIntervalSec)
 	poolBatch := clampPoolBatchSize(body.PoolBatchSize)
+	rpmBase := clampRPMBase(body.RPMBase)
+	rpmMin := clampRPMMin(body.RPMMin)
+	autoMode := false
+	if body.AutoMode != nil {
+		autoMode = *body.AutoMode
+	}
 	enc, err := encryptRemoteToken(body.AccessToken)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "encrypt: " + err.Error()})
@@ -302,10 +347,13 @@ func handleRemoteProfileCreate(c *gin.Context) {
 	err = db.QueryRow(
 		`INSERT INTO remote_newapi_profile
 		 (name, host, user_id, access_token_enc, default_models, default_group,
-		  pool_interval_sec, pool_batch_size, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9) RETURNING id`,
+		  pool_interval_sec, pool_batch_size,
+		  auto_mode, rpm_base, rpm_min,
+		  created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12) RETURNING id`,
 		body.Name, host, body.UserID, enc, body.DefaultModels, body.DefaultGroup,
-		poolInterval, poolBatch, now,
+		poolInterval, poolBatch,
+		autoMode, rpmBase, rpmMin, now,
 	).Scan(&id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -315,6 +363,7 @@ func handleRemoteProfileCreate(c *gin.Context) {
 		ID: id, Name: body.Name, Host: host, UserID: body.UserID,
 		HasToken: true, DefaultModels: body.DefaultModels, DefaultGroup: body.DefaultGroup,
 		PoolIntervalSec: poolInterval, PoolBatchSize: poolBatch,
+		AutoMode: autoMode, RPMBase: rpmBase, RPMMin: rpmMin,
 		CreatedAt: now, UpdatedAt: now,
 	})
 }
@@ -335,6 +384,9 @@ func handleRemoteProfileUpdate(c *gin.Context) {
 		DefaultGroup    *string `json:"default_group,omitempty"`
 		PoolIntervalSec *int    `json:"pool_interval_sec,omitempty"`
 		PoolBatchSize   *int    `json:"pool_batch_size,omitempty"`
+		AutoMode        *bool   `json:"auto_mode,omitempty"`
+		RPMBase         *int    `json:"rpm_base,omitempty"`
+		RPMMin          *int    `json:"rpm_min,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -417,6 +469,26 @@ func handleRemoteProfileUpdate(c *gin.Context) {
 	if body.PoolBatchSize != nil {
 		v := clampPoolBatchSize(*body.PoolBatchSize)
 		if _, err := db.Exec(`UPDATE remote_newapi_profile SET pool_batch_size=$1, updated_at=$2 WHERE id=$3`, v, now, id); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.AutoMode != nil {
+		if _, err := db.Exec(`UPDATE remote_newapi_profile SET auto_mode=$1, updated_at=$2 WHERE id=$3`, *body.AutoMode, now, id); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.RPMBase != nil {
+		v := clampRPMBase(*body.RPMBase)
+		if _, err := db.Exec(`UPDATE remote_newapi_profile SET rpm_base=$1, updated_at=$2 WHERE id=$3`, v, now, id); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.RPMMin != nil {
+		v := clampRPMMin(*body.RPMMin)
+		if _, err := db.Exec(`UPDATE remote_newapi_profile SET rpm_min=$1, updated_at=$2 WHERE id=$3`, v, now, id); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -1335,6 +1407,18 @@ func handlePendingKeyEnqueue(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "your account has no studio binding; ask an admin to bind one before uploading keys"})
 			return
 		}
+		// (profile, studio) rejection: admin has flipped this studio to
+		// "not accepting" for the target profile. 403, not 400 — the
+		// request is well-formed, it's an authorization decision.
+		accepting, err := studioAccepting(body.ProfileID, studio)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "policy check: " + err.Error()})
+			return
+		}
+		if !accepting {
+			c.JSON(http.StatusForbidden, gin.H{"error": "该 profile 暂不接收本工作室 key，请联系管理员"})
+			return
+		}
 		body.Tag = studio
 		body.Priority = 0
 		if body.PoolSize <= 0 {
@@ -1483,6 +1567,141 @@ func handlePendingKeyList(c *gin.Context) {
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+// ---- Handler: per-(profile, studio) accept/reject policy ----
+
+// studioPolicyView is what the queue panel renders — one row per known
+// studio + whether it may enqueue new keys. `has_row` distinguishes
+// "explicitly configured" (there's a row in remote_studio_policy) from
+// "implicit default" (accepting because no row exists yet). Frontend
+// uses that to show "Accepting (default)" vs "Accepting" / "Rejected".
+type studioPolicyView struct {
+	Studio        string `json:"studio"`
+	AcceptingKeys bool   `json:"accepting_keys"`
+	HasRow        bool   `json:"has_row"`
+	UpdatedAt     int64  `json:"updated_at"`
+}
+
+// handleStudioPolicyList unions the studios seen on this profile
+// (distinct tag of remote_pending_key) with any explicit policy rows,
+// so the admin can flip a studio that has never uploaded a key too. The
+// missing-row shape maps to accepting=true so operators default to open.
+func handleStudioPolicyList(c *gin.Context) {
+	profileID, err := strconv.ParseInt(c.Query("profile_id"), 10, 64)
+	if err != nil || profileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	// Collect all known studios: policy rows first (so admin can list a
+	// studio they explicitly rejected before it ever tried to enqueue),
+	// then any pending_key.tag we've seen. Empty tags are skipped.
+	knownStudios := make(map[string]bool)
+	policyMap := make(map[string]studioPolicyView)
+	if rows, err := db.Query(
+		`SELECT studio, accepting_keys, updated_at
+		   FROM remote_studio_policy WHERE profile_id=$1`,
+		profileID,
+	); err == nil {
+		for rows.Next() {
+			var s string
+			var acc bool
+			var upd int64
+			if err := rows.Scan(&s, &acc, &upd); err != nil {
+				continue
+			}
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			knownStudios[s] = true
+			policyMap[s] = studioPolicyView{Studio: s, AcceptingKeys: acc, HasRow: true, UpdatedAt: upd}
+		}
+		rows.Close()
+	}
+	if rows, err := db.Query(
+		`SELECT DISTINCT tag FROM remote_pending_key
+		  WHERE profile_id=$1 AND tag<>''`,
+		profileID,
+	); err == nil {
+		for rows.Next() {
+			var s string
+			if err := rows.Scan(&s); err != nil {
+				continue
+			}
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			knownStudios[s] = true
+		}
+		rows.Close()
+	}
+	out := make([]studioPolicyView, 0, len(knownStudios))
+	for s := range knownStudios {
+		if v, ok := policyMap[s]; ok {
+			out = append(out, v)
+			continue
+		}
+		out = append(out, studioPolicyView{Studio: s, AcceptingKeys: true, HasRow: false})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Studio < out[j].Studio })
+	c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+// handleStudioPolicyUpsert flips the accepting flag. Passing accepting=true
+// with an already-missing row is still an upsert (a no-op effectively —
+// the row now exists but says "accepting"), which is fine and simpler
+// than a special path.
+func handleStudioPolicyUpsert(c *gin.Context) {
+	var body struct {
+		ProfileID     int64  `json:"profile_id"`
+		Studio        string `json:"studio"`
+		AcceptingKeys bool   `json:"accepting_keys"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	body.Studio = strings.TrimSpace(body.Studio)
+	if body.ProfileID <= 0 || body.Studio == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id and studio are required"})
+		return
+	}
+	now := time.Now().Unix()
+	if _, err := db.Exec(
+		`INSERT INTO remote_studio_policy (profile_id, studio, accepting_keys, updated_at)
+		 VALUES ($1,$2,$3,$4)
+		 ON CONFLICT (profile_id, studio) DO UPDATE
+		   SET accepting_keys=EXCLUDED.accepting_keys, updated_at=EXCLUDED.updated_at`,
+		body.ProfileID, body.Studio, body.AcceptingKeys, now,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// studioAccepting returns whether the (profile, studio) pair may
+// enqueue new keys. Missing row = true (open by default).
+func studioAccepting(profileID int64, studio string) (bool, error) {
+	studio = strings.TrimSpace(studio)
+	if studio == "" {
+		return true, nil
+	}
+	var acc bool
+	err := db.QueryRow(
+		`SELECT accepting_keys FROM remote_studio_policy
+		  WHERE profile_id=$1 AND studio=$2`,
+		profileID, studio,
+	).Scan(&acc)
+	if err == sql.ErrNoRows {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return acc, nil
 }
 
 func handlePendingKeyDelete(c *gin.Context) {
@@ -1664,16 +1883,22 @@ func runPendingTickForProfile(profileID int64) {
 	// and only when the previous batch has fully drained. Fails soft on
 	// missing profile / bad pool config — we already have the profile
 	// creds from loadRemoteProfileByID.
-	var interval, batchSize int
+	var (
+		interval, batchSize, rpmBase, rpmMin int
+		autoMode                             bool
+	)
 	if err := db.QueryRow(
-		`SELECT pool_interval_sec, pool_batch_size FROM remote_newapi_profile WHERE id=$1`,
+		`SELECT pool_interval_sec, pool_batch_size, auto_mode, rpm_base, rpm_min
+		   FROM remote_newapi_profile WHERE id=$1`,
 		profileID,
-	).Scan(&interval, &batchSize); err != nil {
+	).Scan(&interval, &batchSize, &autoMode, &rpmBase, &rpmMin); err != nil {
 		log.Printf("[pending-scheduler] profile config %d: %v", profileID, err)
 		return
 	}
 	interval = clampPoolInterval(interval)
 	batchSize = clampPoolBatchSize(batchSize)
+	rpmBase = clampRPMBase(rpmBase)
+	rpmMin = clampRPMMin(rpmMin)
 	nowT := time.Now()
 	if !poolTickDue(profileID, nowT) {
 		return
@@ -1697,7 +1922,72 @@ func runPendingTickForProfile(profileID int64) {
 		// count on purpose — a poisoned key must not lock the pool.
 		return
 	}
-	uploadPoolBatch(host, token, userID, profileID, batchSize)
+	effective := batchSize
+	if autoMode {
+		// Fresh RPM read — no cache. On failure we skip this tick rather
+		// than fall back to the manual batch, since a wrong sizing under
+		// unknown load is worse than waiting one interval.
+		rpm, err := fetchRemoteRPM(host, token, userID)
+		if err != nil {
+			log.Printf("[pending-scheduler] auto profile %d rpm fetch: %v — skipping tick", profileID, err)
+			return
+		}
+		effective = autoBatchSize(int(rpm), rpmBase, rpmMin, batchSize)
+		log.Printf("[pending-scheduler] auto profile %d rpm=%d base=%d min=%d cap=%d → n=%d",
+			profileID, rpm, rpmBase, rpmMin, batchSize, effective)
+		if effective == 0 {
+			return
+		}
+	}
+	uploadPoolBatch(host, token, userID, profileID, effective)
+}
+
+// autoBatchSize maps live RPM to a tick batch. Rules:
+//   • rpm < rpm_min → 0 (queue idles until traffic returns)
+//   • else n = ceil(rpm / rpm_base), capped at cap (= pool_batch_size)
+// Ceiling matches the operator model ("one key handles rpm_base RPM, so
+// once we're past that base we already need a second key online"). cap
+// is the admin's hard ceiling for how many keys they're willing to burn
+// per tick regardless of load.
+func autoBatchSize(rpm, base, min, cap int) int {
+	if rpm < min {
+		return 0
+	}
+	if base <= 0 {
+		return cap
+	}
+	n := (rpm + base - 1) / base
+	if n < 1 {
+		n = 1
+	}
+	if n > cap {
+		n = cap
+	}
+	return n
+}
+
+// fetchRemoteRPM does an uncached /api/log/stat call for the given
+// profile creds and returns the last-hour rpm. Kept separate from
+// handleRemoteStatSummary so the scheduler always sees fresh data.
+func fetchRemoteRPM(host, token string, userID int64) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	now := time.Now()
+	q := url.Values{}
+	q.Set("type", "2")
+	q.Set("start_timestamp", strconv.FormatInt(now.Add(-time.Hour).Unix(), 10))
+	q.Set("end_timestamp", strconv.FormatInt(now.Unix(), 10))
+	data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/stat", token, userID, q, nil)
+	if err != nil {
+		return 0, err
+	}
+	var stat struct {
+		Rpm int64 `json:"rpm"`
+	}
+	if err := json.Unmarshal(data, &stat); err != nil {
+		return 0, fmt.Errorf("decode: %v", err)
+	}
+	return stat.Rpm, nil
 }
 
 // uploadImmediatePending drains pool_size=0 rows (the "upload right away"

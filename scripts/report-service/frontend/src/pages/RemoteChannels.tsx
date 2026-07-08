@@ -7,6 +7,7 @@ import {
   type RemoteChannel,
   type RemoteChannelCreateResult,
   type RemoteProfile,
+  type StudioPolicy,
 } from '../api'
 import { getCachedRole, loadRole } from '../App'
 import RemoteChannelsStudio from './RemoteChannelsStudio'
@@ -191,9 +192,20 @@ function RemoteChannelsAdmin() {
   // profile list refetches mid-typing.
   const [poolIntervalSec, setPoolIntervalSec] = useState('60')
   const [poolBatchSize, setPoolBatchSize] = useState('2')
+  // Auto mode: when on, the scheduler sizes each tick's batch against
+  // live remote RPM. pool_batch_size becomes the ceiling; a fresh RPM
+  // read below rpm_min pauses uploads entirely.
+  const [poolAutoMode, setPoolAutoMode] = useState(false)
+  const [poolRPMBase, setPoolRPMBase] = useState('150')
+  const [poolRPMMin, setPoolRPMMin] = useState('50')
   const [poolDirty, setPoolDirty] = useState(false)
   const [poolSaving, setPoolSaving] = useState(false)
   const [poolMsg, setPoolMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  // Per-(profile, studio) accept/reject policy. Loaded when the queue
+  // panel opens and after every enqueue so a new studio shows up.
+  const [studioPolicies, setStudioPolicies] = useState<StudioPolicy[]>([])
+  const [policyBusy, setPolicyBusy] = useState<string | null>(null)
+  const [policyErr, setPolicyErr] = useState<string | null>(null)
   const [formBusy, setFormBusy] = useState(false)
   const [formErr, setFormErr] = useState<string | null>(null)
 
@@ -616,6 +628,9 @@ function RemoteChannelsAdmin() {
     if (poolDirty) return
     setPoolIntervalSec(String(p.pool_interval_sec ?? 60))
     setPoolBatchSize(String(p.pool_batch_size ?? 2))
+    setPoolAutoMode(!!p.auto_mode)
+    setPoolRPMBase(String(p.rpm_base ?? 150))
+    setPoolRPMMin(String(p.rpm_min ?? 50))
     setPoolMsg(null)
   }, [selectedID, profiles, poolDirty])
 
@@ -636,19 +651,19 @@ function RemoteChannelsAdmin() {
     }
     const interval = parsePool(poolIntervalSec)
     const batch = parsePool(poolBatchSize)
-    if (interval == null && batch == null) {
-      setPoolMsg({ ok: false, text: '填个数字再保存' })
-      return
-    }
+    const rpmBase = parsePool(poolRPMBase)
+    const rpmMin = parsePool(poolRPMMin)
     setPoolSaving(true)
     setPoolMsg(null)
     try {
-      const patch: Parameters<typeof api.remoteProfileUpdate>[1] = {}
+      const patch: Parameters<typeof api.remoteProfileUpdate>[1] = {
+        auto_mode: poolAutoMode,
+      }
       if (interval != null) patch.pool_interval_sec = interval
       if (batch != null) patch.pool_batch_size = batch
+      if (rpmBase != null) patch.rpm_base = rpmBase
+      if (rpmMin != null) patch.rpm_min = rpmMin
       await api.remoteProfileUpdate(selectedID, patch)
-      // Refresh profile list so the next auto-sync sees the new values;
-      // clear dirty first so the sync effect above accepts them.
       setPoolDirty(false)
       await reloadProfiles()
       setPoolMsg({ ok: true, text: '已保存' })
@@ -656,6 +671,43 @@ function RemoteChannelsAdmin() {
       setPoolMsg({ ok: false, text: e?.message || String(e) })
     } finally {
       setPoolSaving(false)
+    }
+  }
+
+  // Studio policy: load + toggle. Loaded whenever a profile is picked
+  // and after each enqueue so a newly-seen studio appears without a
+  // manual refresh.
+  const reloadStudioPolicies = useCallback(async () => {
+    if (!selectedID) {
+      setStudioPolicies([])
+      return
+    }
+    try {
+      const res = await api.remoteStudioPolicyList(selectedID)
+      setStudioPolicies(res.items)
+      setPolicyErr(null)
+    } catch (e: any) {
+      setPolicyErr(e?.message || String(e))
+    }
+  }, [selectedID])
+
+  useEffect(() => { void reloadStudioPolicies() }, [reloadStudioPolicies, pending])
+
+  const toggleStudioPolicy = async (studio: string, next: boolean) => {
+    if (!selectedID) return
+    setPolicyBusy(studio)
+    setPolicyErr(null)
+    try {
+      await api.remoteStudioPolicyUpsert({
+        profile_id: selectedID,
+        studio,
+        accepting_keys: next,
+      })
+      await reloadStudioPolicies()
+    } catch (e: any) {
+      setPolicyErr(e?.message || String(e))
+    } finally {
+      setPolicyBusy(null)
     }
   }
 
@@ -1111,7 +1163,9 @@ function RemoteChannelsAdmin() {
             </button>
             {/* Pool 节流 — 前一批 key 死光后，下一 tick 从 pending 里
                 按 FIFO 取 N 个上传，priority 自动累加。仅对 pool 模式
-                (pool_size > 0) 的行生效；pool_size=0 的立即上传不受影响。 */}
+                (pool_size > 0) 的行生效；pool_size=0 的立即上传不受影响。
+                自动模式打开时"每次上"变成上限，实际值 =
+                min(cap, ceil(rpm / rpm_base))，rpm < rpm_min 时暂停上传。 */}
             <div
               className="flex flex-wrap items-center gap-3 px-4 py-2.5 border-b border-gray-100 bg-gray-50/50"
               onClick={e => e.stopPropagation()}
@@ -1130,7 +1184,7 @@ function RemoteChannelsAdmin() {
                 <span className="text-[10px] text-gray-400">秒</span>
               </label>
               <label className="flex items-center gap-1.5 text-xs text-gray-700">
-                每次上
+                {poolAutoMode ? '上限' : '每次上'}
                 <input
                   value={poolBatchSize}
                   onChange={e => { setPoolBatchSize(e.target.value); setPoolDirty(true) }}
@@ -1139,6 +1193,37 @@ function RemoteChannelsAdmin() {
                 />
                 <span className="text-[10px] text-gray-400">个 key</span>
               </label>
+              <label className="flex items-center gap-1.5 text-xs text-gray-700 border-l border-gray-200 pl-3 ml-1">
+                <input
+                  type="checkbox"
+                  checked={poolAutoMode}
+                  onChange={e => { setPoolAutoMode(e.target.checked); setPoolDirty(true) }}
+                />
+                自动模式
+              </label>
+              {poolAutoMode && (
+                <>
+                  <label className="flex items-center gap-1.5 text-xs text-gray-700">
+                    RPM/key
+                    <input
+                      value={poolRPMBase}
+                      onChange={e => { setPoolRPMBase(e.target.value); setPoolDirty(true) }}
+                      inputMode="numeric"
+                      className="w-16 border border-gray-300 rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none focus:border-gray-900"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1.5 text-xs text-gray-700">
+                    低于
+                    <input
+                      value={poolRPMMin}
+                      onChange={e => { setPoolRPMMin(e.target.value); setPoolDirty(true) }}
+                      inputMode="numeric"
+                      className="w-14 border border-gray-300 rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none focus:border-gray-900"
+                    />
+                    <span className="text-[10px] text-gray-400">RPM 停</span>
+                  </label>
+                </>
+              )}
               <button
                 type="button"
                 onClick={savePoolTuning}
@@ -1221,6 +1306,70 @@ function RemoteChannelsAdmin() {
                 </table>
               </div>
             )}
+          </section>
+        )}
+
+        {/* Studio policy — flip whether each studio may enqueue new keys
+            on this profile. Rows come from any explicit policy row + any
+            studio that has ever appeared as remote_pending_key.tag. */}
+        {selectedID && studioPolicies.length > 0 && (
+          <section className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+            <div className="px-4 py-2.5 border-b border-gray-100 flex items-center justify-between">
+              <div>
+                <div className="text-sm font-semibold text-gray-900">工作室上 Key 策略</div>
+                <div className="text-[11px] text-gray-400 mt-0.5">
+                  关掉后，对应工作室提交批量 Key 时会被拒绝。默认接收。
+                </div>
+              </div>
+              {policyErr && <span className="text-[11px] text-rose-600">{policyErr}</span>}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-gray-50 border-b border-gray-100 text-gray-500">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-medium">Studio</th>
+                    <th className="px-3 py-2 text-left font-medium">状态</th>
+                    <th className="px-3 py-2 text-left font-medium">最后调整</th>
+                    <th className="px-3 py-2 text-right font-medium">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {studioPolicies.map(p => (
+                    <tr key={p.studio} className="border-b border-gray-100 hover:bg-gray-50">
+                      <td className="px-3 py-2 font-mono">{p.studio}</td>
+                      <td className="px-3 py-2">
+                        {p.accepting_keys ? (
+                          <span className="inline-block px-2 py-0.5 rounded-full text-[10px] bg-emerald-100 text-emerald-800">
+                            接收{p.has_row ? '' : '（默认）'}
+                          </span>
+                        ) : (
+                          <span className="inline-block px-2 py-0.5 rounded-full text-[10px] bg-rose-100 text-rose-700">
+                            拒绝
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-[10px] text-gray-500">
+                        {p.has_row ? fmtTime(p.updated_at) : '—'}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <button
+                          type="button"
+                          onClick={() => void toggleStudioPolicy(p.studio, !p.accepting_keys)}
+                          disabled={policyBusy === p.studio}
+                          className={`text-[11px] px-2 py-0.5 rounded border disabled:opacity-40 ${
+                            p.accepting_keys
+                              ? 'border-rose-300 text-rose-600 hover:bg-rose-50'
+                              : 'border-emerald-300 text-emerald-700 hover:bg-emerald-50'
+                          }`}
+                        >
+                          {policyBusy === p.studio ? '…' : p.accepting_keys ? '关闭上 Key' : '开放上 Key'}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </section>
         )}
         {selectedID != null && tableToolbar}
