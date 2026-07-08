@@ -185,13 +185,15 @@ function RemoteChannelsAdmin() {
   // level so operators don't retype 8 model names every day.
   const [formDefaultModels, setFormDefaultModels] = useState('')
   const [formDefaultGroup, setFormDefaultGroup] = useState('')
-  // Pool throttle knobs — applied only to pool-mode pending rows
-  // (pool_size > 0). Live on the profile so the two tenants of one
-  // remote can have independent cadence. The backend clamps interval to
-  // [5, 3600] seconds and batch_size to [1, 50] so blank/zero here
-  // simply falls back to schema defaults (60 / 2).
-  const [formPoolIntervalSec, setFormPoolIntervalSec] = useState('60')
-  const [formPoolBatchSize, setFormPoolBatchSize] = useState('2')
+  // Pool throttle lives on the profile but is edited from the upload
+  // queue panel (right where the operator watches keys stream through).
+  // `pool_dirty` guards against clobbering an unsaved edit if the
+  // profile list refetches mid-typing.
+  const [poolIntervalSec, setPoolIntervalSec] = useState('60')
+  const [poolBatchSize, setPoolBatchSize] = useState('2')
+  const [poolDirty, setPoolDirty] = useState(false)
+  const [poolSaving, setPoolSaving] = useState(false)
+  const [poolMsg, setPoolMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [formBusy, setFormBusy] = useState(false)
   const [formErr, setFormErr] = useState<string | null>(null)
 
@@ -299,8 +301,6 @@ function RemoteChannelsAdmin() {
     setFormToken('')
     setFormDefaultModels(DEFAULT_ANTHROPIC_MODELS)
     setFormDefaultGroup('default')
-    setFormPoolIntervalSec('60')
-    setFormPoolBatchSize('2')
     setFormErr(null)
     setFormOpen(true)
   }
@@ -313,8 +313,6 @@ function RemoteChannelsAdmin() {
     setFormToken('')
     setFormDefaultModels(p.default_models || '')
     setFormDefaultGroup(p.default_group || '')
-    setFormPoolIntervalSec(String(p.pool_interval_sec ?? 60))
-    setFormPoolBatchSize(String(p.pool_batch_size ?? 2))
     setFormErr(null)
     setFormOpen(true)
   }
@@ -326,20 +324,11 @@ function RemoteChannelsAdmin() {
     if (!formHost.trim()) return setFormErr('host is required')
     if (isNaN(uid) || uid <= 0) return setFormErr('user_id must be positive integer')
     if (editingID === 0 && !formToken.trim()) return setFormErr('access_token is required for new profile')
-    // Pool knobs: blank → let the backend keep the current value (schema
-    // default on create). Anything parseable is passed through; the
-    // backend clamps out-of-range values so we don't reject them here.
-    const parsePool = (raw: string): number | undefined => {
-      const t = raw.trim()
-      if (t === '') return undefined
-      const n = parseInt(t, 10)
-      return isNaN(n) ? undefined : n
-    }
-    const poolInterval = parsePool(formPoolIntervalSec)
-    const poolBatch = parsePool(formPoolBatchSize)
     setFormBusy(true)
     try {
       if (editingID === 0) {
+        // New profile — pool tuning takes the schema defaults (60s / 2)
+        // and is edited later from the upload queue panel.
         const created = await api.remoteProfileCreate({
           name: formName.trim(),
           host: formHost.trim(),
@@ -347,8 +336,6 @@ function RemoteChannelsAdmin() {
           access_token: formToken.trim(),
           default_models: formDefaultModels.trim(),
           default_group: formDefaultGroup.trim(),
-          ...(poolInterval != null ? { pool_interval_sec: poolInterval } : {}),
-          ...(poolBatch != null ? { pool_batch_size: poolBatch } : {}),
         })
         await reloadProfiles()
         setSelectedID(created.id)
@@ -361,8 +348,6 @@ function RemoteChannelsAdmin() {
           default_group: formDefaultGroup.trim(),
         }
         if (formToken.trim()) patch.access_token = formToken.trim()
-        if (poolInterval != null) patch.pool_interval_sec = poolInterval
-        if (poolBatch != null) patch.pool_batch_size = poolBatch
         await api.remoteProfileUpdate(editingID, patch)
         await reloadProfiles()
       }
@@ -620,6 +605,59 @@ function RemoteChannelsAdmin() {
     const t = setInterval(() => { void reloadPending() }, 30000)
     return () => clearInterval(t)
   }, [selectedID, pendingOpen, reloadPending])
+
+  // Sync pool-throttle inputs from the selected profile whenever the
+  // pick changes (or profiles reload). Skip if the operator has an
+  // in-flight edit — poolDirty is our "don't clobber" flag, cleared on
+  // save or profile switch.
+  useEffect(() => {
+    const p = profiles.find(x => x.id === selectedID)
+    if (!p) return
+    if (poolDirty) return
+    setPoolIntervalSec(String(p.pool_interval_sec ?? 60))
+    setPoolBatchSize(String(p.pool_batch_size ?? 2))
+    setPoolMsg(null)
+  }, [selectedID, profiles, poolDirty])
+
+  // Reset dirty flag when switching profiles — otherwise a stale edit
+  // from profile A would prevent profile B's values from loading.
+  useEffect(() => {
+    setPoolDirty(false)
+    setPoolMsg(null)
+  }, [selectedID])
+
+  const savePoolTuning = async () => {
+    if (!selectedID) return
+    const parsePool = (raw: string): number | undefined => {
+      const t = raw.trim()
+      if (t === '') return undefined
+      const n = parseInt(t, 10)
+      return isNaN(n) ? undefined : n
+    }
+    const interval = parsePool(poolIntervalSec)
+    const batch = parsePool(poolBatchSize)
+    if (interval == null && batch == null) {
+      setPoolMsg({ ok: false, text: '填个数字再保存' })
+      return
+    }
+    setPoolSaving(true)
+    setPoolMsg(null)
+    try {
+      const patch: Parameters<typeof api.remoteProfileUpdate>[1] = {}
+      if (interval != null) patch.pool_interval_sec = interval
+      if (batch != null) patch.pool_batch_size = batch
+      await api.remoteProfileUpdate(selectedID, patch)
+      // Refresh profile list so the next auto-sync sees the new values;
+      // clear dirty first so the sync effect above accepts them.
+      setPoolDirty(false)
+      await reloadProfiles()
+      setPoolMsg({ ok: true, text: '已保存' })
+    } catch (e: any) {
+      setPoolMsg({ ok: false, text: e?.message || String(e) })
+    } finally {
+      setPoolSaving(false)
+    }
+  }
 
   const cancelPending = async (row: PendingKey) => {
     if (row.status !== 'pending' && row.status !== 'failed') return
@@ -1048,8 +1086,10 @@ function RemoteChannelsAdmin() {
         )}
 
         {/* Upload queue (drip pool). Collapsed by default; expands into a
-            table when the operator wants to see what's staged. */}
-        {selectedID && pending.length > 0 && (
+            table when the operator wants to see what's staged. Pool
+            throttle knobs live in the header so they're right next to
+            the queue they control. */}
+        {selectedID && (
           <section className="bg-white border border-gray-200 rounded-xl overflow-hidden">
             <button
               type="button"
@@ -1069,7 +1109,57 @@ function RemoteChannelsAdmin() {
               </div>
               <span className="text-gray-400">{pendingOpen ? '▾' : '▸'}</span>
             </button>
-            {pendingOpen && (
+            {/* Pool 节流 — 前一批 key 死光后，下一 tick 从 pending 里
+                按 FIFO 取 N 个上传，priority 自动累加。仅对 pool 模式
+                (pool_size > 0) 的行生效；pool_size=0 的立即上传不受影响。 */}
+            <div
+              className="flex flex-wrap items-center gap-3 px-4 py-2.5 border-b border-gray-100 bg-gray-50/50"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 font-medium">
+                Pool 节流
+              </div>
+              <label className="flex items-center gap-1.5 text-xs text-gray-700">
+                检查间隔
+                <input
+                  value={poolIntervalSec}
+                  onChange={e => { setPoolIntervalSec(e.target.value); setPoolDirty(true) }}
+                  inputMode="numeric"
+                  className="w-16 border border-gray-300 rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none focus:border-gray-900"
+                />
+                <span className="text-[10px] text-gray-400">秒</span>
+              </label>
+              <label className="flex items-center gap-1.5 text-xs text-gray-700">
+                每次上
+                <input
+                  value={poolBatchSize}
+                  onChange={e => { setPoolBatchSize(e.target.value); setPoolDirty(true) }}
+                  inputMode="numeric"
+                  className="w-14 border border-gray-300 rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none focus:border-gray-900"
+                />
+                <span className="text-[10px] text-gray-400">个 key</span>
+              </label>
+              <button
+                type="button"
+                onClick={savePoolTuning}
+                disabled={poolSaving || !poolDirty}
+                className="bg-gray-900 text-white rounded px-2 py-0.5 text-xs hover:opacity-85 disabled:opacity-40"
+              >
+                {poolSaving ? '保存中…' : '保存'}
+              </button>
+              {poolMsg && (
+                <span className={`text-[11px] ${poolMsg.ok ? 'text-emerald-600' : 'text-rose-600'}`}>
+                  {poolMsg.text}
+                </span>
+              )}
+              <span className="text-[10px] text-gray-400 ml-auto">
+                Priority = 存活最高 + 1，逐条累加
+              </span>
+            </div>
+            {pendingOpen && pending.length === 0 && (
+              <div className="px-4 py-4 text-xs text-gray-400">队列为空</div>
+            )}
+            {pendingOpen && pending.length > 0 && (
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead className="bg-gray-50 border-b border-gray-100 text-gray-500">
@@ -1785,40 +1875,6 @@ function RemoteChannelsAdmin() {
                     className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
                   />
                 </Field>
-              </div>
-              {/* Pool throttle — applies only to pool-mode uploads (pool_size
-                  > 0). Immediate uploads (pool_size=0) still fire on every
-                  20s scheduler tick regardless. Backend clamps to safe
-                  bounds; a blank value keeps the existing setting. */}
-              <div className="pt-2 border-t border-gray-100">
-                <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-2">
-                  Pool 节流
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <Field label="检查间隔 (秒)">
-                    <input
-                      value={formPoolIntervalSec}
-                      onChange={e => setFormPoolIntervalSec(e.target.value)}
-                      inputMode="numeric"
-                      placeholder="60"
-                      className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
-                    />
-                  </Field>
-                  <Field label="每次上 key 数">
-                    <input
-                      value={formPoolBatchSize}
-                      onChange={e => setFormPoolBatchSize(e.target.value)}
-                      inputMode="numeric"
-                      placeholder="2"
-                      className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
-                    />
-                  </Field>
-                </div>
-                <p className="text-[10px] text-gray-400 mt-1">
-                  前一批 key 全部死掉后，下一 tick 才会上新的 N 个。上传的
-                  key priority 自动 = 当前存活 key 的最高优先级 + 1，逐条
-                  累加。
-                </p>
               </div>
               {formErr && <p className="text-xs text-rose-600">{formErr}</p>}
             </div>
