@@ -320,7 +320,11 @@ function RemoteChannelsAdmin() {
   const openEdit = (p: RemoteProfile) => {
     setEditingID(p.id)
     setFormName(p.name)
-    setFormHost(p.host ?? '')
+    // Blank host on edit — same pattern as access_token. The current
+    // value isn't shown; leave blank to keep, or type to replace. That
+    // way the upstream URL isn't visible to anyone glancing at the
+    // modal, and screenshots of the edit form don't leak it either.
+    setFormHost('')
     setFormUserID(p.user_id != null ? String(p.user_id) : '')
     setFormToken('')
     setFormDefaultModels(p.default_models || '')
@@ -333,7 +337,7 @@ function RemoteChannelsAdmin() {
     setFormErr(null)
     const uid = parseInt(formUserID, 10)
     if (!formName.trim()) return setFormErr('name is required')
-    if (!formHost.trim()) return setFormErr('host is required')
+    if (editingID === 0 && !formHost.trim()) return setFormErr('host is required')
     if (isNaN(uid) || uid <= 0) return setFormErr('user_id must be positive integer')
     if (editingID === 0 && !formToken.trim()) return setFormErr('access_token is required for new profile')
     setFormBusy(true)
@@ -354,11 +358,11 @@ function RemoteChannelsAdmin() {
       } else if (editingID) {
         const patch: Parameters<typeof api.remoteProfileUpdate>[1] = {
           name: formName.trim(),
-          host: formHost.trim(),
           user_id: uid,
           default_models: formDefaultModels.trim(),
           default_group: formDefaultGroup.trim(),
         }
+        if (formHost.trim()) patch.host = formHost.trim()
         if (formToken.trim()) patch.access_token = formToken.trim()
         await api.remoteProfileUpdate(editingID, patch)
         await reloadProfiles()
@@ -1976,7 +1980,7 @@ function RemoteChannelsAdmin() {
                 <input
                   value={formHost}
                   onChange={e => setFormHost(e.target.value)}
-                  placeholder="http://example.com"
+                  placeholder={editingID === 0 ? 'http://example.com' : '留空 = 保持原 host 不变'}
                   className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900"
                 />
               </Field>
