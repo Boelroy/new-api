@@ -205,14 +205,12 @@ export default function Sidebar({ open, onClose }: Props) {
     // Tester is scoped to Provider Testing only (shown when R2 is wired up).
     items = showTesting ? [TESTING_ITEM] : []
   } else if (role === ROLE_STUDIO_OPERATOR) {
-    // Studio operator can batch-upload keys to a remote new-api profile
-    // (scoped to their studio) — Remote Channels renders a slim view for
-    // this role. Label reads "Other Newapi Key" from the operator's
-    // perspective (they upload keys someone else will run against),
-    // while super admin still sees "Remote Channels" (the inspector).
-    // All Keys stays because they use it to inspect the local channels
-    // their batches created.
-    items = [ALL_KEYS_ITEM, { ...REMOTE_CHANNELS_ITEM, label: 'Other Newapi Key' }]
+    // Studio operator is scoped to All Keys — Remote Channels used to
+    // render a slim view for this role but the entry point has been
+    // rolled back to super_admin only. Route + backend both enforce
+    // super_admin now; leaving the studio slim page component in the
+    // tree is harmless (unreachable via routing).
+    items = [ALL_KEYS_ITEM]
   } else {
     // Regular users only see All Keys.
     items = [ALL_KEYS_ITEM]

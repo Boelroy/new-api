@@ -3021,27 +3021,24 @@ func main() {
 	superAPI := api.Group("", requireRole(minSuperAdminRole))
 	superAPI.PATCH("/users/:id", handleUserUpdate)
 
-	// Remote New-API inspector: lets super admin save credentials for
-	// external new-api deployments and pull channel + used_quota data.
-	// Token is AES-GCM encrypted at rest.
-	//
-	// A narrow subset (profile list + pending-queue CRUD) is also opened
-	// to studio operators via requireRoleOrStudioOperator below, so an
-	// operator can batch-upload keys without seeing profile host/user_id
-	// or touching other studios' rows. Each handler re-checks the caller
-	// role and enforces the studio scope internally.
-	remoteBatchAPI := api.Group("", requireRoleOrStudioOperator(minSuperAdminRole))
-	remoteBatchAPI.GET("/remote-newapi/profiles", handleRemoteProfileList)
-	remoteBatchAPI.POST("/remote-newapi/pending", handlePendingKeyEnqueue)
-	remoteBatchAPI.GET("/remote-newapi/pending", handlePendingKeyList)
-	remoteBatchAPI.DELETE("/remote-newapi/pending/:id", handlePendingKeyDelete)
+	// Remote New-API inspector: super admin only. Token is AES-GCM
+	// encrypted at rest. Studio operator entry point was rolled back —
+	// all remote-newapi/* routes are now super_admin only again. The
+	// handler-side studio_operator branches are kept as defensive dead
+	// code so re-enabling later is a one-line route change.
+	superAPI.GET("/remote-newapi/profiles", handleRemoteProfileList)
+	superAPI.POST("/remote-newapi/pending", handlePendingKeyEnqueue)
+	superAPI.GET("/remote-newapi/pending", handlePendingKeyList)
+	superAPI.DELETE("/remote-newapi/pending/:id", handlePendingKeyDelete)
 
-	// Local pool: same drip mechanism but the target is the local
-	// channels table. enqueue/list/delete accessible to studio operator
-	// (server enforces studio scope). Config + RPM live under adminAPI.
-	remoteBatchAPI.POST("/local-pool/enqueue", handleLocalPoolEnqueue)
-	remoteBatchAPI.GET("/local-pool/queue", handleLocalPoolList)
-	remoteBatchAPI.DELETE("/local-pool/pending/:id", handleLocalPoolDelete)
+	// Local pool: KeyCapacity 'Pool 上 Key' tab. Same shape as the
+	// remote pool but writes to the local channels table. Kept open to
+	// studio_operator via requireRoleOrStudioOperator — that's a
+	// separate feature and not affected by the /remote-channels rollback.
+	localPoolAPI := api.Group("", requireRoleOrStudioOperator(minSuperAdminRole))
+	localPoolAPI.POST("/local-pool/enqueue", handleLocalPoolEnqueue)
+	localPoolAPI.GET("/local-pool/queue", handleLocalPoolList)
+	localPoolAPI.DELETE("/local-pool/pending/:id", handleLocalPoolDelete)
 	adminAPI.GET("/local-pool/config", handleLocalPoolConfigGet)
 	adminAPI.POST("/local-pool/config", handleLocalPoolConfigSet)
 	adminAPI.GET("/local-pool/rpm", handleLocalRPM)
