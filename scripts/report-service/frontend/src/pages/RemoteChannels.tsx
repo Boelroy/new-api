@@ -2,11 +2,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import Layout from '../components/Layout'
 import {
   api,
+  ROLE_STUDIO_OPERATOR,
   type PendingKey,
   type RemoteChannel,
   type RemoteChannelCreateResult,
   type RemoteProfile,
 } from '../api'
+import { getCachedRole, loadRole } from '../App'
+import RemoteChannelsStudio from './RemoteChannelsStudio'
 
 const STATUS_LABEL: Record<number, string> = {
   1: '启用',
@@ -97,6 +100,21 @@ function usdFromQuota(q: number) {
 }
 
 export default function RemoteChannels() {
+  // Studio-operator gets the slim page — profile picker, batch-upload
+  // modal, own-studio pending queue. Everything else on the admin view
+  // (channel table, profile CRUD, priority editor, snapshot chart) is
+  // gated to super_admin server-side and doesn't render for them.
+  const [role, setRole] = useState<number | null>(getCachedRole())
+  useEffect(() => {
+    if (role !== null) return
+    void loadRole().then(setRole)
+  }, [role])
+  if (role === null) return null
+  if (role === ROLE_STUDIO_OPERATOR) return <RemoteChannelsStudio />
+  return <RemoteChannelsAdmin />
+}
+
+function RemoteChannelsAdmin() {
   const [profiles, setProfiles] = useState<RemoteProfile[]>([])
   const [selectedID, setSelectedID] = useState<number | null>(null)
   const [loadingProfiles, setLoadingProfiles] = useState(true)
@@ -119,6 +137,16 @@ export default function RemoteChannels() {
   // Only upstream unit_price_cny is bulk-editable here now; downstream
   // pricing moved to the per-profile per-day discount editor on Profit.
   const [bulkCostValue, setBulkCostValue] = useState('')
+
+  // Bulk priority editor. `same` = one value across everyone; `desc`/`asc`
+  // walks per-channel by ±1 from the base, mirroring the batch-upload
+  // priority modes. Order = channel_id ascending so the result is stable.
+  const [bulkPrioOpen, setBulkPrioOpen] = useState(false)
+  const [bulkPrioValue, setBulkPrioValue] = useState('')
+  const [bulkPrioMode, setBulkPrioMode] = useState<'same' | 'desc' | 'asc'>('same')
+  const [bulkPrioBusy, setBulkPrioBusy] = useState(false)
+  const [bulkPrioErr, setBulkPrioErr] = useState<string | null>(null)
+  const [bulkPrioProgress, setBulkPrioProgress] = useState<{ done: number; total: number } | null>(null)
   const [bulkCostBusy, setBulkCostBusy] = useState(false)
   const [bulkCostErr, setBulkCostErr] = useState<string | null>(null)
 
@@ -157,6 +185,13 @@ export default function RemoteChannels() {
   // level so operators don't retype 8 model names every day.
   const [formDefaultModels, setFormDefaultModels] = useState('')
   const [formDefaultGroup, setFormDefaultGroup] = useState('')
+  // Pool throttle knobs — applied only to pool-mode pending rows
+  // (pool_size > 0). Live on the profile so the two tenants of one
+  // remote can have independent cadence. The backend clamps interval to
+  // [5, 3600] seconds and batch_size to [1, 50] so blank/zero here
+  // simply falls back to schema defaults (60 / 2).
+  const [formPoolIntervalSec, setFormPoolIntervalSec] = useState('60')
+  const [formPoolBatchSize, setFormPoolBatchSize] = useState('2')
   const [formBusy, setFormBusy] = useState(false)
   const [formErr, setFormErr] = useState<string | null>(null)
 
@@ -264,6 +299,8 @@ export default function RemoteChannels() {
     setFormToken('')
     setFormDefaultModels(DEFAULT_ANTHROPIC_MODELS)
     setFormDefaultGroup('default')
+    setFormPoolIntervalSec('60')
+    setFormPoolBatchSize('2')
     setFormErr(null)
     setFormOpen(true)
   }
@@ -271,11 +308,13 @@ export default function RemoteChannels() {
   const openEdit = (p: RemoteProfile) => {
     setEditingID(p.id)
     setFormName(p.name)
-    setFormHost(p.host)
-    setFormUserID(String(p.user_id))
+    setFormHost(p.host ?? '')
+    setFormUserID(p.user_id != null ? String(p.user_id) : '')
     setFormToken('')
     setFormDefaultModels(p.default_models || '')
     setFormDefaultGroup(p.default_group || '')
+    setFormPoolIntervalSec(String(p.pool_interval_sec ?? 60))
+    setFormPoolBatchSize(String(p.pool_batch_size ?? 2))
     setFormErr(null)
     setFormOpen(true)
   }
@@ -287,6 +326,17 @@ export default function RemoteChannels() {
     if (!formHost.trim()) return setFormErr('host is required')
     if (isNaN(uid) || uid <= 0) return setFormErr('user_id must be positive integer')
     if (editingID === 0 && !formToken.trim()) return setFormErr('access_token is required for new profile')
+    // Pool knobs: blank → let the backend keep the current value (schema
+    // default on create). Anything parseable is passed through; the
+    // backend clamps out-of-range values so we don't reject them here.
+    const parsePool = (raw: string): number | undefined => {
+      const t = raw.trim()
+      if (t === '') return undefined
+      const n = parseInt(t, 10)
+      return isNaN(n) ? undefined : n
+    }
+    const poolInterval = parsePool(formPoolIntervalSec)
+    const poolBatch = parsePool(formPoolBatchSize)
     setFormBusy(true)
     try {
       if (editingID === 0) {
@@ -297,6 +347,8 @@ export default function RemoteChannels() {
           access_token: formToken.trim(),
           default_models: formDefaultModels.trim(),
           default_group: formDefaultGroup.trim(),
+          ...(poolInterval != null ? { pool_interval_sec: poolInterval } : {}),
+          ...(poolBatch != null ? { pool_batch_size: poolBatch } : {}),
         })
         await reloadProfiles()
         setSelectedID(created.id)
@@ -309,6 +361,8 @@ export default function RemoteChannels() {
           default_group: formDefaultGroup.trim(),
         }
         if (formToken.trim()) patch.access_token = formToken.trim()
+        if (poolInterval != null) patch.pool_interval_sec = poolInterval
+        if (poolBatch != null) patch.pool_batch_size = poolBatch
         await api.remoteProfileUpdate(editingID, patch)
         await reloadProfiles()
       }
@@ -443,6 +497,74 @@ export default function RemoteChannels() {
     setBulkCostValue('')
     setBulkCostErr(null)
     setBulkCostOpen(true)
+  }
+
+  const openBulkPrio = () => {
+    setBulkPrioValue('')
+    setBulkPrioMode('same')
+    setBulkPrioErr(null)
+    setBulkPrioProgress(null)
+    setBulkPrioOpen(true)
+  }
+
+  const submitBulkPrio = async () => {
+    if (!selectedID) return
+    setBulkPrioErr(null)
+    if (selectedIDs.size === 0) {
+      setBulkPrioErr('先勾选至少一行')
+      return
+    }
+    const base = parseInt(bulkPrioValue.trim(), 10)
+    if (isNaN(base) || base < 1) {
+      setBulkPrioErr('优先级必须是 ≥1 的整数')
+      return
+    }
+    // Stable ordering: iterate by channel_id ascending so 'desc' assigns
+    // the highest priority to the smallest ID (which is usually the
+    // oldest / most-trusted channel in new-api).
+    const ordered = channels
+      .filter(c => selectedIDs.has(c.id))
+      .map(c => c.id)
+      .sort((a, b) => a - b)
+    const step = bulkPrioMode === 'desc' ? -1 : bulkPrioMode === 'asc' ? 1 : 0
+    const priorities = new Map<number, number>()
+    for (let i = 0; i < ordered.length; i++) {
+      const p = bulkPrioMode === 'same' ? base : Math.max(1, base + i * step)
+      priorities.set(ordered[i], p)
+    }
+
+    setBulkPrioBusy(true)
+    setBulkPrioProgress({ done: 0, total: ordered.length })
+    let ok = 0
+    const failed: number[] = []
+    // Sequential to keep the remote's rate limit happy; ~50ms/channel is
+    // fine for a couple hundred rows.
+    for (let i = 0; i < ordered.length; i++) {
+      const chID = ordered[i]
+      const prio = priorities.get(chID)!
+      try {
+        await api.remoteChannelUpdate({
+          profile_id: selectedID,
+          channel_id: chID,
+          priority: prio,
+        })
+        ok++
+      } catch (e) {
+        console.warn('bulk priority', chID, e)
+        failed.push(chID)
+      }
+      setBulkPrioProgress({ done: i + 1, total: ordered.length })
+    }
+    // Optimistic patch so the "Priority" column reflects the new value
+    // without waiting for a Fetch.
+    setChannels(prev => prev.map(c => {
+      const p = priorities.get(c.id)
+      return p != null ? { ...c, priority: p } : c
+    }))
+    setBulkPrioBusy(false)
+    alert(`已更新 ${ok} 条${failed.length ? `，${failed.length} 条失败 (id: ${failed.slice(0, 8).join(', ')}${failed.length > 8 ? '…' : ''})` : ''}`)
+    setBulkPrioOpen(false)
+    setSelectedIDs(new Set())
   }
 
   const submitBulkCost = async () => {
@@ -778,8 +900,24 @@ export default function RemoteChannels() {
     URL.revokeObjectURL(url)
   }
 
+  // Top-of-page actions: profile-level ops only. Everything else moved
+  // into the channels-table toolbar so it lives next to the data it
+  // affects.
   const actions = (
     <div className="flex items-center gap-2 flex-wrap">
+      <button
+        onClick={openCreate}
+        className="border border-gray-300 text-gray-700 rounded-md px-3 py-1.5 text-xs hover:bg-gray-50"
+      >
+        + New profile
+      </button>
+    </div>
+  )
+
+  // Channel-table toolbar. Rendered above the table, right-aligned so
+  // the numbers stay dominant. Filters + row-selection actions + fetch.
+  const tableToolbar = (
+    <div className="flex items-center gap-2 flex-wrap justify-end">
       <div className="flex items-center gap-1">
         <input
           type="date"
@@ -821,10 +959,13 @@ export default function RemoteChannels() {
         {selectedIDs.size > 0 && <span className="ml-1 text-amber-600 font-medium">({selectedIDs.size})</span>}
       </button>
       <button
-        onClick={openCreate}
-        className="border border-gray-300 text-gray-700 rounded-md px-3 py-1.5 text-xs hover:bg-gray-50"
+        onClick={openBulkPrio}
+        disabled={selectedIDs.size === 0}
+        className="border border-indigo-500 text-indigo-700 rounded-md px-3 py-1.5 text-xs hover:bg-indigo-50 disabled:opacity-40"
+        title="将勾选行的优先级批量改到远端"
       >
-        + New profile
+        批量改优先级
+        {selectedIDs.size > 0 && <span className="ml-1 text-indigo-600 font-medium">({selectedIDs.size})</span>}
       </button>
       <button
         onClick={openBatch}
@@ -992,6 +1133,7 @@ export default function RemoteChannels() {
             )}
           </section>
         )}
+        {selectedID != null && tableToolbar}
         {channels.length > 0 && meta && (
           <>
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
@@ -1223,6 +1365,83 @@ export default function RemoteChannels() {
                 className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85 disabled:opacity-50"
               >
                 {bulkCostBusy ? '保存中…' : `保存 (${selectedIDs.size})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: bulk update priority. Same three modes as the
+          batch-upload priority selector. Sequential (desc/asc) walks
+          selected channels by ±1 from the base, ordered by channel_id
+          ascending so the result is stable across sessions. */}
+      {bulkPrioOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+          onClick={() => !bulkPrioBusy && setBulkPrioOpen(false)}
+        >
+          <div
+            className="bg-white rounded-lg shadow-xl w-full max-w-md p-5"
+            onClick={e => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-semibold text-gray-900 mb-1">批量改优先级</h3>
+            <p className="text-xs text-gray-500 mb-4">
+              选中 <span className="font-medium text-gray-900">{selectedIDs.size}</span> 个渠道，改到远端。
+              <br />
+              <span className="text-gray-400">顺序模式下按 channel_id 升序依次分配，priority 最小 1（负值会被夹到 1）。</span>
+            </p>
+            <div className="space-y-3">
+              <Field label={`起始优先级${bulkPrioMode === 'desc' ? '（base − i）' : bulkPrioMode === 'asc' ? '（base + i）' : ''}`}>
+                <div className="flex gap-1">
+                  <input
+                    type="number"
+                    step="1"
+                    min="1"
+                    value={bulkPrioValue}
+                    onChange={e => setBulkPrioValue(e.target.value)}
+                    placeholder={bulkPrioMode === 'same' ? '例如 1001' : '起始 base'}
+                    autoFocus
+                    className="flex-1 border border-gray-300 rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-gray-900"
+                  />
+                  <select
+                    value={bulkPrioMode}
+                    onChange={e => setBulkPrioMode(e.target.value as 'same' | 'desc' | 'asc')}
+                    className="border border-gray-300 rounded-md px-2 py-1.5 text-sm bg-white focus:outline-none focus:border-gray-900"
+                    title="统一 = 所有 key 同一值；顺序 = 每个 key 依次递减/递增"
+                  >
+                    <option value="same">统一</option>
+                    <option value="desc">顺序 ↓</option>
+                    <option value="asc">顺序 ↑</option>
+                  </select>
+                </div>
+              </Field>
+              {bulkPrioProgress && (
+                <div className="text-xs text-gray-500">
+                  进度: {bulkPrioProgress.done} / {bulkPrioProgress.total}
+                  <div className="mt-1 h-1 bg-gray-100 rounded overflow-hidden">
+                    <div
+                      className="h-full bg-indigo-500"
+                      style={{ width: `${(bulkPrioProgress.done / Math.max(1, bulkPrioProgress.total)) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+              {bulkPrioErr && <p className="text-xs text-rose-600">{bulkPrioErr}</p>}
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setBulkPrioOpen(false)}
+                disabled={bulkPrioBusy}
+                className="border border-gray-300 rounded-md px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={submitBulkPrio}
+                disabled={bulkPrioBusy}
+                className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85 disabled:opacity-50"
+              >
+                {bulkPrioBusy ? `保存中… ${bulkPrioProgress?.done ?? 0}/${bulkPrioProgress?.total ?? 0}` : `保存 (${selectedIDs.size})`}
               </button>
             </div>
           </div>
@@ -1566,6 +1785,40 @@ export default function RemoteChannels() {
                     className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
                   />
                 </Field>
+              </div>
+              {/* Pool throttle — applies only to pool-mode uploads (pool_size
+                  > 0). Immediate uploads (pool_size=0) still fire on every
+                  20s scheduler tick regardless. Backend clamps to safe
+                  bounds; a blank value keeps the existing setting. */}
+              <div className="pt-2 border-t border-gray-100">
+                <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-2">
+                  Pool 节流
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <Field label="检查间隔 (秒)">
+                    <input
+                      value={formPoolIntervalSec}
+                      onChange={e => setFormPoolIntervalSec(e.target.value)}
+                      inputMode="numeric"
+                      placeholder="60"
+                      className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
+                    />
+                  </Field>
+                  <Field label="每次上 key 数">
+                    <input
+                      value={formPoolBatchSize}
+                      onChange={e => setFormPoolBatchSize(e.target.value)}
+                      inputMode="numeric"
+                      placeholder="2"
+                      className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
+                    />
+                  </Field>
+                </div>
+                <p className="text-[10px] text-gray-400 mt-1">
+                  前一批 key 全部死掉后，下一 tick 才会上新的 N 个。上传的
+                  key priority 自动 = 当前存活 key 的最高优先级 + 1，逐条
+                  累加。
+                </p>
               </div>
               {formErr && <p className="text-xs text-rose-600">{formErr}</p>}
             </div>
