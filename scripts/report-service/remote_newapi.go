@@ -1381,7 +1381,12 @@ func handlePendingKeyEnqueue(c *gin.Context) {
 		Models     string `json:"models"`
 		Priority   int64  `json:"priority"`
 		PoolSize   int    `json:"pool_size"`
-		Items      []struct {
+		// Studio operator switch: when true the row goes into the
+		// pool_size=0 "immediate" lane instead of the FIFO pool. Only
+		// meaningful for studio operator callers — super admin picks
+		// pool_size directly.
+		Immediate bool `json:"immediate"`
+		Items     []struct {
 			Key      string   `json:"key"`
 			QuotaUSD *float64 `json:"quota_usd,omitempty"`
 			Note     string   `json:"note,omitempty"`
@@ -1421,7 +1426,16 @@ func handlePendingKeyEnqueue(c *gin.Context) {
 		}
 		body.Tag = studio
 		body.Priority = 0
-		if body.PoolSize <= 0 {
+		// immediate=true switches the row to pool_size=0 (the "上普通
+		// Key" path — direct upload, no throttle). Otherwise pin to the
+		// pool sentinel (1) so operators can't bypass the drip via a
+		// large pool_size number. Priority stays 0 in both cases; the
+		// scheduler will assign a real priority for pool rows.
+		if body.Immediate {
+			body.PoolSize = 0
+		} else if body.PoolSize <= 0 {
+			body.PoolSize = 1
+		} else {
 			body.PoolSize = 1
 		}
 		for i := range body.Items {

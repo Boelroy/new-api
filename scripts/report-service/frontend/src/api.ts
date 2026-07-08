@@ -797,6 +797,10 @@ export const api = {
     tag?: string
     priority?: number
     pool_size: number
+    // Studio-operator only: when true the row skips the FIFO pool and
+    // goes into the immediate-upload lane (pool_size=0 on the DB row).
+    // Ignored for super admin.
+    immediate?: boolean
     items: { key: string; quota_usd?: number; note?: string; priority?: number }[]
   }) =>
     request<{ inserted: number; skipped: number; total: number }>('/api/remote-newapi/pending', {
@@ -1028,6 +1032,7 @@ export const api = {
     studio: string
     suffix: string
     unit_price_cny?: number
+    models?: string
     channels: { key: string; quota_usd: number; unit_price_cny?: number }[]
   }) =>
     request<{ inserted: number; skipped: number; total: number }>('/api/local-pool/enqueue', {
@@ -1054,6 +1059,10 @@ export type LocalPoolConfig = {
   auto_mode: boolean
   rpm_base: number
   rpm_min: number
+  // Kept separate from batch_create_default_models so the Pool 上 Key
+  // tab has its own model rotation independent of the classic
+  // batch-create default.
+  default_models: string
 }
 
 export type LocalPendingKey = {
@@ -1063,6 +1072,7 @@ export type LocalPendingKey = {
   key_masked: string
   quota_usd: number
   unit_price_cny?: number | null
+  models: string
   status: 'pending' | 'active' | 'used' | 'failed'
   priority: number
   channel_id: number

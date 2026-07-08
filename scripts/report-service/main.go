@@ -2933,6 +2933,12 @@ func main() {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_local_pending_scheduler
 		   ON local_pending_key(status, created_at, id)`,
+		// Per-batch models list, populated at enqueue time from the local
+		// pool default_models (or the operator's explicit override). Empty
+		// string falls back to the batch-create default at upload time —
+		// kept nullable-string rather than TEXT NOT NULL DEFAULT '' so
+		// existing rows migrate cleanly on rolling deploys.
+		`ALTER TABLE local_pending_key ADD COLUMN IF NOT EXISTS models TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)

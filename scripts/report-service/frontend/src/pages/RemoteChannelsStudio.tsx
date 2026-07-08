@@ -73,6 +73,18 @@ export default function RemoteChannelsStudio() {
   const [batchBusy, setBatchBusy] = useState(false)
   const [batchErr, setBatchErr] = useState<string | null>(null)
 
+  // "上普通 Key" — separate immediate-upload lane (pool_size=0 on the
+  // backend). Same fields as the pool modal, but the intent is
+  // different enough that a shared modal-with-toggle would blur the
+  // mental model. Keep them side by side and let the operator pick.
+  const [immOpen, setImmOpen] = useState(false)
+  const [immPrefix, setImmPrefix] = useState('')
+  const [immGroup, setImmGroup] = useState('default')
+  const [immModels, setImmModels] = useState(DEFAULT_ANTHROPIC_MODELS)
+  const [immInput, setImmInput] = useState('')
+  const [immBusy, setImmBusy] = useState(false)
+  const [immErr, setImmErr] = useState<string | null>(null)
+
   useEffect(() => {
     void (async () => {
       try {
@@ -183,6 +195,62 @@ export default function RemoteChannelsStudio() {
     }
   }
 
+  const openImmediate = () => {
+    const p = profiles.find(x => x.id === selectedID)
+    setImmPrefix(userStudio)
+    setImmGroup((p?.default_group || '').trim() || 'default')
+    setImmModels((p?.default_models || '').trim() || DEFAULT_ANTHROPIC_MODELS)
+    setImmInput('')
+    setImmErr(null)
+    setImmOpen(true)
+  }
+
+  const submitImmediate = async () => {
+    if (!selectedID) return
+    setImmErr(null)
+    if (!immPrefix.trim()) return setImmErr('中间段不能为空')
+    if (!immModels.trim()) return setImmErr('models 不能为空')
+    const items: { key: string; quota_usd?: number; note?: string }[] = []
+    for (const raw of immInput.split('\n')) {
+      const t = raw.trim()
+      if (!t || t.startsWith('#')) continue
+      const parts = t.split(/[\s,]+/)
+      const key = parts[0]
+      if (!key) continue
+      const item: { key: string; quota_usd?: number; note?: string } = { key }
+      if (parts[1]) {
+        const q = parseFloat(parts[1])
+        if (!isNaN(q) && q > 0) item.quota_usd = q
+      }
+      if (parts.length > 2) item.note = parts.slice(2).join(' ')
+      items.push(item)
+    }
+    if (items.length === 0) return setImmErr('未解析到有效行')
+    const fullNamePrefix = todayYYYYMMDD() + '-' + immPrefix.trim()
+    setImmBusy(true)
+    try {
+      // immediate=true → server flips pool_size to 0 so the row goes
+      // through the immediate lane on the next scheduler tick (no drip,
+      // no wait). priority stays server-forced at 0 for operator.
+      const res = await api.remotePendingEnqueue({
+        profile_id: selectedID,
+        name_prefix: fullNamePrefix,
+        group: immGroup.trim() || 'default',
+        models: immModels.trim(),
+        pool_size: 0,
+        immediate: true,
+        items,
+      })
+      alert(`已入队 ${res.inserted} 条${res.skipped ? `（${res.skipped} 条跳过 / 已存在）` : ''}`)
+      setImmOpen(false)
+      void reloadPending()
+    } catch (e: any) {
+      setImmErr(e?.message || String(e))
+    } finally {
+      setImmBusy(false)
+    }
+  }
+
   const cancelPending = async (row: PendingKey) => {
     if (row.status !== 'pending' && row.status !== 'failed') return
     if (!window.confirm(`删除队列条目 (${row.key_masked})？只能删 pending/failed 的。`)) return
@@ -201,13 +269,22 @@ export default function RemoteChannelsStudio() {
       title="Remote Channels"
       subtitle="批量上传 Key 到远端 New-Api"
       actions={
-        <button
-          onClick={openBatch}
-          disabled={!selectedID}
-          className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85 disabled:opacity-50"
-        >
-          批量上 Key
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={openImmediate}
+            disabled={!selectedID}
+            className="border border-gray-300 text-gray-800 rounded-md px-3 py-1.5 text-sm hover:bg-gray-50 disabled:opacity-50"
+          >
+            上普通 Key
+          </button>
+          <button
+            onClick={openBatch}
+            disabled={!selectedID}
+            className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85 disabled:opacity-50"
+          >
+            批量上 5刀key (Pool)
+          </button>
+        </div>
       }
     >
       <div className="space-y-4">
@@ -375,6 +452,79 @@ export default function RemoteChannelsStudio() {
                 className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85 disabled:opacity-50"
               >
                 {batchBusy ? '入队中…' : '入队上传'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {immOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl shadow-lg w-full max-w-lg p-5">
+            <div className="text-base font-semibold mb-1">上普通 Key</div>
+            <div className="text-[11px] text-gray-500 mb-3">
+              立即上传（不进 Pool 队列），默认 priority = 0。
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">
+                  名字中间段（最终 = {todayYYYYMMDD()}-&lt;你填&gt;-&lt;key末8&gt;-&lt;hash8&gt;）
+                </label>
+                <div className="flex items-center gap-1">
+                  <span className="text-[11px] text-gray-400 font-mono whitespace-nowrap">{todayYYYYMMDD()}-</span>
+                  <input
+                    value={immPrefix}
+                    onChange={e => setImmPrefix(e.target.value)}
+                    placeholder="例如 studio-A"
+                    className="flex-1 border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">Group</label>
+                <input
+                  value={immGroup}
+                  onChange={e => setImmGroup(e.target.value)}
+                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">Models（逗号分隔）</label>
+                <textarea
+                  value={immModels}
+                  onChange={e => setImmModels(e.target.value)}
+                  rows={2}
+                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">
+                  Keys（每行一个，可选 <code>quota_usd</code> / 备注：<code>key 10 备注</code>）
+                </label>
+                <textarea
+                  value={immInput}
+                  onChange={e => setImmInput(e.target.value)}
+                  rows={8}
+                  placeholder="sk-... 10&#10;sk-... 20 备注"
+                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
+                />
+              </div>
+              {immErr && <p className="text-xs text-rose-600">{immErr}</p>}
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setImmOpen(false)}
+                disabled={immBusy}
+                className="border border-gray-300 rounded-md px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={submitImmediate}
+                disabled={immBusy}
+                className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85 disabled:opacity-50"
+              >
+                {immBusy ? '上传中…' : '立即上传'}
               </button>
             </div>
           </div>

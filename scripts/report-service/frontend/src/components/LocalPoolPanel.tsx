@@ -41,9 +41,19 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
   const [studios, setStudios] = useState<string[]>([])
   const [suffix, setSuffix] = useState('')
   const [unitPrice, setUnitPrice] = useState('')
+  const [models, setModels] = useState('')
   const [input, setInput] = useState('')
   const [enqueueBusy, setEnqueueBusy] = useState(false)
   const [enqueueMsg, setEnqueueMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  // Whenever the config default_models loads/changes, prefill the
+  // enqueue form (only if the operator hasn't started typing their own
+  // list). Prevents "loaded panel, form empty, submit fails silently".
+  const [modelsDirty, setModelsDirty] = useState(false)
+  useEffect(() => {
+    if (modelsDirty) return
+    if (cfg?.default_models) setModels(cfg.default_models)
+  }, [cfg?.default_models, modelsDirty])
 
   const [pending, setPending] = useState<LocalPendingKey[]>([])
   const studioLocked = !!lockedStudio
@@ -159,6 +169,7 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
         studio: studioLocked ? '' : studio.trim(),  // server overrides when operator
         suffix: suffix.trim(),
         unit_price_cny: !isNaN(globalUnit) && globalUnit > 0 ? globalUnit : undefined,
+        models: models.trim() || undefined,
         channels,
       })
       setEnqueueMsg({
@@ -267,6 +278,22 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
             </span>
           )}
         </div>
+        {/* Default models — separate row because it's a long textarea.
+            Shared "保存" button up top writes both this and the interval
+            knobs. Independent from batch_create_default_models on
+            purpose so the two upload paths keep separate rotations. */}
+        <div className="px-4 pb-2.5">
+          <label className="block text-[10px] uppercase tracking-wider text-gray-500 font-medium mb-1">
+            默认模型（本地 Pool 专用，与批量创建渠道独立）
+          </label>
+          <textarea
+            value={cfg?.default_models ?? ''}
+            onChange={e => { setCfg(c => c && { ...c, default_models: e.target.value }); setCfgDirty(true) }}
+            rows={2}
+            placeholder="claude-opus-4-7,claude-sonnet-4-6,..."
+            className="w-full border border-gray-300 rounded px-2 py-1 text-[11px] font-mono focus:outline-none focus:border-gray-900"
+          />
+        </div>
         <div className="px-4 pb-2 text-[10px] text-gray-400 flex flex-wrap gap-4">
           <span>当前 RPM: <span className="tabular-nums text-gray-600">{rpmNow ?? '—'}</span></span>
           <span>下一 tick 上 key 数: <span className="tabular-nums text-gray-600">{effectiveN ?? '—'}</span></span>
@@ -336,6 +363,29 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
             onChange={e => setUnitPrice(e.target.value)}
             placeholder="例如 3.5"
             className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
+          />
+        </div>
+        <div>
+          <label className="block text-[11px] text-gray-500 mb-1 flex items-center justify-between">
+            <span>
+              Models（逗号分隔；留空用上面的"默认模型"）
+            </span>
+            {modelsDirty && (
+              <button
+                type="button"
+                onClick={() => { setModels(cfg?.default_models ?? ''); setModelsDirty(false) }}
+                className="text-[10px] text-gray-400 hover:text-gray-700"
+              >
+                恢复默认
+              </button>
+            )}
+          </label>
+          <textarea
+            value={models}
+            onChange={e => { setModels(e.target.value); setModelsDirty(true) }}
+            rows={2}
+            placeholder="留空则使用默认；例：claude-opus-4-7,claude-sonnet-4-6"
+            className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
           />
         </div>
         <div>

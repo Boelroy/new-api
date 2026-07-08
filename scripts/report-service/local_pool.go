@@ -36,11 +36,16 @@ import (
 // ---- Config: stored as report_config key/value ----
 
 const (
-	cfgLocalPoolIntervalSec = "local_pool_interval_sec"
-	cfgLocalPoolBatchSize   = "local_pool_batch_size"
-	cfgLocalPoolAutoMode    = "local_pool_auto_mode"
-	cfgLocalPoolRPMBase     = "local_pool_rpm_base"
-	cfgLocalPoolRPMMin      = "local_pool_rpm_min"
+	cfgLocalPoolIntervalSec   = "local_pool_interval_sec"
+	cfgLocalPoolBatchSize     = "local_pool_batch_size"
+	cfgLocalPoolAutoMode      = "local_pool_auto_mode"
+	cfgLocalPoolRPMBase       = "local_pool_rpm_base"
+	cfgLocalPoolRPMMin        = "local_pool_rpm_min"
+	// Local pool has its own default models list, deliberately independent
+	// from batch_create_default_models. Two upload paths, two histories,
+	// two model rotations — operators tune the pool without disturbing
+	// the synchronous batch-create default and vice versa.
+	cfgLocalPoolDefaultModels = "local_pool_default_models"
 
 	localPoolIntervalDef  = 60
 	localPoolBatchDef     = 2
@@ -59,11 +64,12 @@ const (
 )
 
 type localPoolConfig struct {
-	IntervalSec int  `json:"pool_interval_sec"`
-	BatchSize   int  `json:"pool_batch_size"`
-	AutoMode    bool `json:"auto_mode"`
-	RPMBase     int  `json:"rpm_base"`
-	RPMMin      int  `json:"rpm_min"`
+	IntervalSec   int    `json:"pool_interval_sec"`
+	BatchSize     int    `json:"pool_batch_size"`
+	AutoMode      bool   `json:"auto_mode"`
+	RPMBase       int    `json:"rpm_base"`
+	RPMMin        int    `json:"rpm_min"`
+	DefaultModels string `json:"default_models"`
 }
 
 func loadLocalPoolConfig() localPoolConfig {
@@ -90,11 +96,19 @@ func loadLocalPoolConfig() localPoolConfig {
 		}
 		*dst = strings.TrimSpace(v) == "true" || strings.TrimSpace(v) == "1"
 	}
+	readStr := func(key string, dst *string) {
+		var v string
+		if err := db.QueryRow(`SELECT value FROM report_config WHERE key=$1`, key).Scan(&v); err != nil {
+			return
+		}
+		*dst = v
+	}
 	readInt(cfgLocalPoolIntervalSec, &out.IntervalSec)
 	readInt(cfgLocalPoolBatchSize, &out.BatchSize)
 	readBool(cfgLocalPoolAutoMode, &out.AutoMode)
 	readInt(cfgLocalPoolRPMBase, &out.RPMBase)
 	readInt(cfgLocalPoolRPMMin, &out.RPMMin)
+	readStr(cfgLocalPoolDefaultModels, &out.DefaultModels)
 	// Reuse remote-pool clamps for the local values — same [min, max]
 	// safety bounds apply to both since they feed the same scheduler
 	// shape. Cheaper than duplicating five constants.
@@ -128,11 +142,12 @@ func handleLocalPoolConfigGet(c *gin.Context) {
 
 func handleLocalPoolConfigSet(c *gin.Context) {
 	var body struct {
-		IntervalSec *int  `json:"pool_interval_sec,omitempty"`
-		BatchSize   *int  `json:"pool_batch_size,omitempty"`
-		AutoMode    *bool `json:"auto_mode,omitempty"`
-		RPMBase     *int  `json:"rpm_base,omitempty"`
-		RPMMin      *int  `json:"rpm_min,omitempty"`
+		IntervalSec   *int    `json:"pool_interval_sec,omitempty"`
+		BatchSize     *int    `json:"pool_batch_size,omitempty"`
+		AutoMode      *bool   `json:"auto_mode,omitempty"`
+		RPMBase       *int    `json:"rpm_base,omitempty"`
+		RPMMin        *int    `json:"rpm_min,omitempty"`
+		DefaultModels *string `json:"default_models,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -172,6 +187,12 @@ func handleLocalPoolConfigSet(c *gin.Context) {
 			v = 0
 		}
 		if err := writeLocalPoolConfig(cfgLocalPoolRPMMin, strconv.Itoa(v)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.DefaultModels != nil {
+		if err := writeLocalPoolConfig(cfgLocalPoolDefaultModels, strings.TrimSpace(*body.DefaultModels)); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -216,6 +237,7 @@ func handleLocalPoolEnqueue(c *gin.Context) {
 		Studio       string  `json:"studio"`
 		Suffix       string  `json:"suffix"`
 		UnitPriceCNY float64 `json:"unit_price_cny"`
+		Models       string  `json:"models"`
 		Channels     []struct {
 			Key          string   `json:"key"`
 			QuotaUSD     float64  `json:"quota_usd"`
@@ -251,6 +273,14 @@ func handleLocalPoolEnqueue(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no channels provided"})
 		return
 	}
+	// Per-batch models; fall back to the local-pool default. Empty on
+	// both ends is OK — the scheduler will substitute the batch-create
+	// default when it uploads (and the operator will see 0 rows in
+	// abilities, which is a visible-enough error).
+	models := strings.TrimSpace(body.Models)
+	if models == "" {
+		models = strings.TrimSpace(loadLocalPoolConfig().DefaultModels)
+	}
 	now := time.Now().Unix()
 	inserted, skipped := 0, 0
 	for _, ch := range body.Channels {
@@ -277,10 +307,10 @@ func handleLocalPoolEnqueue(c *gin.Context) {
 		res, err := db.Exec(
 			`INSERT INTO local_pending_key
 			 (studio, suffix, key_hash, key_encrypted, quota_usd, unit_price_cny,
-			  status, created_at, updated_at)
-			 VALUES ($1,$2,$3,$4,$5,$6,'pending',$7,$7)
+			  models, status, created_at, updated_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,$8)
 			 ON CONFLICT (studio, key_hash) DO NOTHING`,
-			studio, suffix, hash, enc, ch.QuotaUSD, unitPtr, now,
+			studio, suffix, hash, enc, ch.QuotaUSD, unitPtr, models, now,
 		)
 		if err != nil {
 			skipped++
@@ -308,6 +338,7 @@ type localPendingView struct {
 	KeyMasked    string   `json:"key_masked"`
 	QuotaUSD     float64  `json:"quota_usd"`
 	UnitPriceCNY *float64 `json:"unit_price_cny,omitempty"`
+	Models       string   `json:"models"`
 	Status       string   `json:"status"`
 	Priority     int64    `json:"priority"`
 	ChannelID    int64    `json:"channel_id"`
@@ -321,7 +352,7 @@ func handleLocalPoolList(c *gin.Context) {
 	studioFilter := strings.TrimSpace(c.Query("studio"))
 	statusFilter := strings.TrimSpace(c.Query("status"))
 	q := `SELECT id, studio, suffix, key_encrypted, quota_usd, unit_price_cny,
-	             status, priority, channel_id, attempts, failed_reason,
+	             models, status, priority, channel_id, attempts, failed_reason,
 	             created_at, updated_at
 	        FROM local_pending_key WHERE 1=1`
 	args := []any{}
@@ -355,7 +386,7 @@ func handleLocalPoolList(c *gin.Context) {
 			enc  string
 			unit sql.NullFloat64
 		)
-		if err := rows.Scan(&r.ID, &r.Studio, &r.Suffix, &enc, &r.QuotaUSD, &unit,
+		if err := rows.Scan(&r.ID, &r.Studio, &r.Suffix, &enc, &r.QuotaUSD, &unit, &r.Models,
 			&r.Status, &r.Priority, &r.ChannelID, &r.Attempts, &r.FailedReason,
 			&r.CreatedAt, &r.UpdatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -536,7 +567,7 @@ func uploadLocalPoolBatch(n int) {
 		return
 	}
 	rows, err := db.Query(
-		`SELECT id, studio, suffix, key_encrypted, quota_usd, unit_price_cny
+		`SELECT id, studio, suffix, key_encrypted, quota_usd, unit_price_cny, models
 		   FROM local_pending_key WHERE status='pending'
 		  ORDER BY created_at ASC, id ASC
 		  LIMIT $1`,
@@ -553,12 +584,13 @@ func uploadLocalPoolBatch(n int) {
 		enc      string
 		quota    float64
 		unitPtr  *float64
+		models   string
 	}
 	jobs := make([]job, 0, n)
 	for rows.Next() {
 		var j job
 		var unit sql.NullFloat64
-		if err := rows.Scan(&j.id, &j.studio, &j.suffix, &j.enc, &j.quota, &unit); err != nil {
+		if err := rows.Scan(&j.id, &j.studio, &j.suffix, &j.enc, &j.quota, &unit, &j.models); err != nil {
 			continue
 		}
 		if unit.Valid {
@@ -583,8 +615,14 @@ func uploadLocalPoolBatch(n int) {
 		pMax = localPoolFallbackPriority
 	}
 
-	activeModels := getBatchCreateModels()
-	models := strings.Split(activeModels, ",")
+	// Fallback for legacy rows that were enqueued before we added a
+	// per-row `models` column (models='' in DB). Read the local-pool
+	// default; if that's also empty, cascade to the batch-create default
+	// so we never insert a channel with an empty models list.
+	fallbackModels := strings.TrimSpace(loadLocalPoolConfig().DefaultModels)
+	if fallbackModels == "" {
+		fallbackModels = getBatchCreateModels()
+	}
 	dateStr := time.Now().UTC().Format("0102")
 
 	for _, j := range jobs {
@@ -593,9 +631,14 @@ func uploadLocalPoolBatch(n int) {
 			recordLocalFailure(j.id, "decrypt: "+err.Error())
 			continue
 		}
+		modelsStr := strings.TrimSpace(j.models)
+		if modelsStr == "" {
+			modelsStr = fallbackModels
+		}
+		modelsList := strings.Split(modelsStr, ",")
 		pMax++
 		if err := insertLocalChannelForPending(j.id, j.studio, j.suffix, key, j.quota, j.unitPtr,
-			pMax, dateStr, activeModels, models); err != nil {
+			pMax, dateStr, modelsStr, modelsList); err != nil {
 			recordLocalFailure(j.id, err.Error())
 			continue
 		}
