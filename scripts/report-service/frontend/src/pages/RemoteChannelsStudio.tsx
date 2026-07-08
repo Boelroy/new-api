@@ -266,7 +266,7 @@ export default function RemoteChannelsStudio() {
 
   return (
     <Layout
-      title="Remote Channels"
+      title="Other Newapi Key"
       subtitle="批量上传 Key 到远端 New-Api"
       actions={
         <div className="flex items-center gap-2">

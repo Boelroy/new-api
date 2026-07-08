@@ -1968,7 +1968,7 @@ function RemoteChannelsAdmin() {
                 <input
                   value={formName}
                   onChange={e => setFormName(e.target.value)}
-                  placeholder="例如 anispark-prod"
+                  placeholder="例如 newapi-remote"
                   className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
                 />
               </Field>
@@ -1976,7 +1976,7 @@ function RemoteChannelsAdmin() {
                 <input
                   value={formHost}
                   onChange={e => setFormHost(e.target.value)}
-                  placeholder="https://ai-router-hk.anispark.ai"
+                  placeholder="http://example.com"
                   className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900"
                 />
               </Field>

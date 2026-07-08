@@ -207,9 +207,12 @@ export default function Sidebar({ open, onClose }: Props) {
   } else if (role === ROLE_STUDIO_OPERATOR) {
     // Studio operator can batch-upload keys to a remote new-api profile
     // (scoped to their studio) — Remote Channels renders a slim view for
-    // this role. All Keys stays because they use it to inspect the local
-    // channels their batches created.
-    items = [ALL_KEYS_ITEM, REMOTE_CHANNELS_ITEM]
+    // this role. Label reads "Other Newapi Key" from the operator's
+    // perspective (they upload keys someone else will run against),
+    // while super admin still sees "Remote Channels" (the inspector).
+    // All Keys stays because they use it to inspect the local channels
+    // their batches created.
+    items = [ALL_KEYS_ITEM, { ...REMOTE_CHANNELS_ITEM, label: 'Other Newapi Key' }]
   } else {
     // Regular users only see All Keys.
     items = [ALL_KEYS_ITEM]
