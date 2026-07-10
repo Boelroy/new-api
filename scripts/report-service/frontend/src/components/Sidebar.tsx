@@ -206,12 +206,12 @@ export default function Sidebar({ open, onClose }: Props) {
     // (only when R2 is wired up, since Provider Testing needs it).
     items = showTesting ? [KEY_TESTER_ITEM, TESTING_ITEM] : [KEY_TESTER_ITEM]
   } else if (role === ROLE_STUDIO_OPERATOR) {
-    // Studio operator is scoped to All Keys — Remote Channels used to
-    // render a slim view for this role but the entry point has been
-    // rolled back to super_admin only. Route + backend both enforce
+    // Studio operator is scoped to All Keys + Key Tester. Remote Channels
+    // used to render a slim view for this role but the entry point has
+    // been rolled back to super_admin only. Route + backend both enforce
     // super_admin now; leaving the studio slim page component in the
     // tree is harmless (unreachable via routing).
-    items = [ALL_KEYS_ITEM]
+    items = [ALL_KEYS_ITEM, KEY_TESTER_ITEM]
   } else {
     // Regular users only see All Keys.
     items = [ALL_KEYS_ITEM]

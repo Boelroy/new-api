@@ -3002,11 +3002,20 @@ func main() {
 	adminAPI.POST("/keys/pricing/bulk", handleBulkSaveKeyPricing)
 	adminAPI.GET("/studios", handleStudiosList)
 	adminAPI.GET("/detect/models", handleDetectModels)
-	// Key Tester: admin+ and tester role. Tester (role=5) is a horizontal
-	// specialization scoped to Key Tester + Provider Testing (see
-	// requireRoleOrTester); the Provider Testing routes below use the same
-	// pattern.
-	api.POST("/keys/test", requireRoleOrTester(minAdminRole), handleTestKeys)
+	// Key Tester: admin+, tester (role=5), and studio_operator (role=2).
+	// Tester is scoped to Key Tester + Provider Testing (see the testingAPI
+	// group below); studio_operator additionally gets Key Tester as a
+	// horizontal utility for the batch-upload flow they own.
+	api.POST("/keys/test", func(c *gin.Context) {
+		roleAny, _ := c.Get("role")
+		role, _ := roleAny.(int)
+		if role >= minAdminRole || role == minTesterRole || role == minStudioOperatorRole {
+			c.Next()
+			return
+		}
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		c.Abort()
+	}, handleTestKeys)
 	// Admin (role >= 10) gets the full user-list + create + delete +
 	// disable/enable + password-reset surface. Each handler enforces the
 	// anti-escalation guard (callerCanManage / callerRole > body.Role) so
