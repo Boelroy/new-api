@@ -44,6 +44,9 @@ export default function AllKeys() {
   const [end, setEnd] = useState(today())
   const [loading, setLoading] = useState(false)
   const [refreshedAt, setRefreshedAt] = useState('')
+  // System-wide realtime RPM from /api/allkeys/rpm. Not derived from `rows`
+  // so studio_operator sees the global count instead of a studio-scoped sum.
+  const [globalRpm, setGlobalRpm] = useState<number | null>(null)
 
   // role gates the pricing-edit UI. /api/keys/pricing is admin-only on the
   // backend, so non-admins would just hit 403 — surface that by hiding the
@@ -86,6 +89,10 @@ export default function AllKeys() {
       setPriceEdits({})
     } catch (err) { console.error(err) }
     finally { setLoading(false) }
+    try {
+      const r = await api.getAllKeysRpm()
+      setGlobalRpm(r.rpm)
+    } catch (err) { console.warn('global rpm failed', err) }
   }
 
   useEffect(() => { load(start, end) }, [])
@@ -107,12 +114,12 @@ export default function AllKeys() {
     const totalQuota = rows.reduce((s, r) => s + (r.quota_usd ?? 0), 0)
     const totalRemaining = rows.reduce((s, r) => r.quota_usd != null ? s + Math.max(0, r.quota_usd - r.used_usd) : s, 0)
     const unpriced = rows.filter(r => r.unit_price_cny == null).length
-    // System-wide real-time RPM: sum of per-channel RPMs the backend
-    // computed over the last 60s window. Studio-scoped naturally: the
-    // response already only contains channels visible to the caller.
-    const totalRpm = rows.reduce((s, r) => s + (r.rpm ?? 0), 0)
+    // Prefer /api/allkeys/rpm (global, un-scoped) so studio_operator sees
+    // the system-wide realtime RPM. Fall back to summing per-row rpm on
+    // the first paint before the aggregate lands.
+    const totalRpm = globalRpm ?? rows.reduce((s, r) => s + (r.rpm ?? 0), 0)
     return { count: rows.length, totalUsed, totalQuota, totalRemaining, unpriced, totalRpm }
-  }, [rows])
+  }, [rows, globalRpm])
 
   const filteredRows = useMemo(() => {
     if (!onlyUnpriced) return rows

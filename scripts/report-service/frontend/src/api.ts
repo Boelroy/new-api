@@ -601,6 +601,10 @@ export const api = {
     return request<ChannelRow[]>(`/api/allkeys/data${qs ? '?' + qs : ''}`)
   },
 
+  // System-wide realtime RPM (count of type=2 log rows in the last 60s),
+  // deliberately not studio-scoped so studio_operator sees global load.
+  getAllKeysRpm: () => request<{ rpm: number }>('/api/allkeys/rpm'),
+
   exportCSV: (start: string, end: string) => {
     window.location.href = `/api/export/csv?start=${start}&end=${end}`
   },

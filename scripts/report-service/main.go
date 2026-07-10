@@ -2428,6 +2428,21 @@ func handleAllKeysData(c *gin.Context) {
 	c.JSON(http.StatusOK, channels)
 }
 
+// handleAllKeysRPM returns the system-wide realtime RPM as a single number:
+// count of type=2 log rows in the last 60s across every channel, ignoring
+// the caller's studio scope. AllKeys.tsx's 实时 RPM summary card uses this
+// so studio_operator sees the global load instead of a studio-scoped sum
+// derived from per-row rpm on /api/allkeys/data.
+func handleAllKeysRPM(c *gin.Context) {
+	since := time.Now().Add(-60 * time.Second).Unix()
+	var rpm int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM logs WHERE type=2 AND created_at >= $1`, since).Scan(&rpm); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"rpm": rpm})
+}
+
 // ---- SPA static file serving ----
 
 func spaHandler() gin.HandlerFunc {
@@ -2990,6 +3005,7 @@ func main() {
 	api := r.Group("/api", authMiddleware)
 	api.GET("/auth/me", handleAuthMe)
 	api.GET("/allkeys/data", handleAllKeysData)
+	api.GET("/allkeys/rpm", handleAllKeysRPM)
 	// Studio Operator (role=2) can batch-create channels scoped to their
 	// bound studio. The handler enforces the studio lock; admin+ retain
 	// full freedom. GET /config/batch-models is opened at the same tier
