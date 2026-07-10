@@ -5,12 +5,22 @@ RUN npm ci
 COPY frontend/ .
 RUN npm run build
 
+# V2 frontend uses bun (matches V2_PRODUCT_SPEC.md §6.1). Separate image so
+# V1 build stays untouched.
+FROM oven/bun:1 AS frontend-v2-builder
+WORKDIR /app/frontend-v2
+COPY frontend-v2/package.json frontend-v2/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY frontend-v2/ .
+RUN bun run build
+
 FROM golang:1.24-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+COPY --from=frontend-v2-builder /app/frontend-v2/dist ./frontend-v2/dist
 RUN CGO_ENABLED=0 go build -o report-service .
 
 FROM alpine:3.19

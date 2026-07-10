@@ -2957,6 +2957,11 @@ func main() {
 	}
 	seedAdminUser()
 
+	// V2 schema + RBAC seed. Idempotent; safe to run on every startup.
+	initV2Schema()
+	seedV2RBAC()
+	startAwaitingAssignmentTTL()
+
 	resetRunningTestRuns()
 	startDailyRefresh()
 	startNotifyLoop()
@@ -3120,6 +3125,11 @@ func main() {
 		superAPI.POST("/profit/pipi/sync", handleSyncPipi)
 		superAPI.GET("/profit/pipi/status", handlePipiStatus)
 	}
+
+	// V2: /api/v2/* and /v2/* live alongside V1. V1 routes and pages
+	// remain untouched — V2 is opt-in per client.
+	registerV2Routes(r)
+	registerV2Frontend(r)
 
 	// SPA — serve for all non-API routes
 	r.NoRoute(spaHandler())
