@@ -202,8 +202,9 @@ export default function Sidebar({ open, onClose }: Props) {
       items = [...items.filter(i => i !== USERS_ITEM), REMOTE_CHANNELS_ITEM, USERS_ITEM]
     }
   } else if (role === ROLE_TESTER) {
-    // Tester is scoped to Provider Testing only (shown when R2 is wired up).
-    items = showTesting ? [TESTING_ITEM] : []
+    // Tester is scoped to Key Tester (always) and Provider Testing
+    // (only when R2 is wired up, since Provider Testing needs it).
+    items = showTesting ? [KEY_TESTER_ITEM, TESTING_ITEM] : [KEY_TESTER_ITEM]
   } else if (role === ROLE_STUDIO_OPERATOR) {
     // Studio operator is scoped to All Keys — Remote Channels used to
     // render a slim view for this role but the entry point has been

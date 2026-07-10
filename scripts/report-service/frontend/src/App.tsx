@@ -43,7 +43,9 @@ export function getCachedRole(): number | null {
 
 function landingFor(role: number): string {
   if (role >= ROLE_ADMIN) return '/'
-  if (role === ROLE_TESTER) return '/testing'
+  // Tester lands on Key Tester because it's always available (Provider
+  // Testing only shows when R2 is wired up).
+  if (role === ROLE_TESTER) return '/tester'
   return '/allkeys'
 }
 
@@ -79,7 +81,7 @@ export default function App() {
         <Route path="/profit" element={<RoleGate min={ROLE_SUPER_ADMIN}><Profit /></RoleGate>} />
         <Route path="/keys" element={<RoleGate min={ROLE_ADMIN}><KeyCapacity /></RoleGate>} />
         <Route path="/allkeys" element={<AllKeys />} />
-        <Route path="/tester" element={<RoleGate min={ROLE_ADMIN}><KeyTester /></RoleGate>} />
+        <Route path="/tester" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_TESTER}><KeyTester /></RoleGate>} />
         <Route path="/cache" element={<RoleGate min={ROLE_ADMIN}><CacheReport /></RoleGate>} />
         <Route path="/testing" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
         <Route path="/testing/:projectId" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />

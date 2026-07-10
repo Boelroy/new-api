@@ -3001,8 +3001,12 @@ func main() {
 	adminAPI.POST("/keys/pricing", handleSaveKeyPricing)
 	adminAPI.POST("/keys/pricing/bulk", handleBulkSaveKeyPricing)
 	adminAPI.GET("/studios", handleStudiosList)
-	adminAPI.POST("/keys/test", handleTestKeys)
 	adminAPI.GET("/detect/models", handleDetectModels)
+	// Key Tester: admin+ and tester role. Tester (role=5) is a horizontal
+	// specialization scoped to Key Tester + Provider Testing (see
+	// requireRoleOrTester); the Provider Testing routes below use the same
+	// pattern.
+	api.POST("/keys/test", requireRoleOrTester(minAdminRole), handleTestKeys)
 	// Admin (role >= 10) gets the full user-list + create + delete +
 	// disable/enable + password-reset surface. Each handler enforces the
 	// anti-escalation guard (callerCanManage / callerRole > body.Role) so
