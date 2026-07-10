@@ -25,6 +25,10 @@ export type ChannelRow = {
   id: number
   name: string
   key: string
+  // Unmasked key. Populated by /api/allkeys/data ONLY when status === 3
+  // (auto-disabled) so the CSV export can surface dead keys for rotation.
+  // Never populated for enabled or manually-disabled channels.
+  full_key?: string
   status: number
   type: number
   tag: string

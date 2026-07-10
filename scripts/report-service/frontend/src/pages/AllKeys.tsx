@@ -14,12 +14,16 @@ const STATUS_CLS: Record<number, string> = {
 function today() { return new Date().toISOString().slice(0, 10) }
 
 function exportCSV(rows: ChannelRow[], start: string, end: string) {
-  const header = ['ID','名称','Key末尾','状态','单价 CNY','总已用($)','额度($)','总剩余($)']
+  const header = ['ID','名称','Key','状态','单价 CNY','总已用($)','额度($)','总剩余($)']
   const csvRows = rows.map(r => {
     const quota = r.quota_usd
     const remaining = quota != null ? (quota - r.used_usd).toFixed(4) : ''
+    // Full key is exported only for auto-disabled (status=3); enabled and
+    // manually-disabled rows fall through to the masked r.key. Backend
+    // enforces this by only setting full_key for status=3.
+    const keyCell = r.status === 3 && r.full_key ? r.full_key : r.key
     return [
-      r.id, r.name, r.key,
+      r.id, r.name, keyCell,
       STATUS_LABEL[r.status] ?? r.status,
       r.unit_price_cny != null ? r.unit_price_cny.toFixed(4) : '',
       r.used_usd.toFixed(4),

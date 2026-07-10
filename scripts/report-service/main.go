@@ -869,15 +869,20 @@ func startDailyRefresh() {
 // ---- Key data ----
 
 type ChannelRow struct {
-	ID           int      `json:"id"`
-	Name         string   `json:"name"`
-	Key          string   `json:"key"`
-	Status       int      `json:"status"`
-	Type         int      `json:"type"`
-	Tag          string   `json:"tag"`
-	Priority     int      `json:"priority"`
-	UsedUSD      float64  `json:"used_usd"`
-	LastHourUSD  float64  `json:"last_hour_usd"`
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+	Key  string `json:"key"`
+	// FullKey is the un-masked key. Populated ONLY when Status == 3
+	// (auto-disabled), so the AllKeys export can surface dead keys for
+	// rotation/inspection. Enabled (status=1) and manually-disabled
+	// (status=2) keys must stay masked — never populate FullKey for them.
+	FullKey     string `json:"full_key,omitempty"`
+	Status      int    `json:"status"`
+	Type        int    `json:"type"`
+	Tag         string `json:"tag"`
+	Priority    int    `json:"priority"`
+	UsedUSD     float64 `json:"used_usd"`
+	LastHourUSD float64 `json:"last_hour_usd"`
 	// Rpm mirrors newapi's usage-log RPM (count of type=2 rows in the last
 	// 60s). Populated per-channel by queryAllKeys so the client can sum
 	// them into a system-wide real-time total. queryKeyData leaves it 0.
@@ -1010,6 +1015,12 @@ func queryAllKeys(startTS, endTS int64, studio string) ([]ChannelRow, error) {
 		if unitPrice.Valid {
 			v := roundTo(unitPrice.Float64, 4)
 			r.UnitPriceCNY = &v
+		}
+		// Only auto-disabled channels expose the full key — they're the
+		// rotation target for the export flow. Enabled and manually-disabled
+		// channels must never leak the raw key here.
+		if r.Status == 3 {
+			r.FullKey = r.Key
 		}
 		if len(r.Key) > 8 {
 			r.Key = "…" + r.Key[len(r.Key)-8:]
