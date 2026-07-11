@@ -2,7 +2,8 @@
 // is keyed off these. Group by page/section for scan-ability.
 const en: Record<string, string> = {
   // Common
-  'app.title': 'Report V2',
+  'app.title': 'Argus',
+  'app.tagline': 'The many-eyed watch',
   'common.save': 'Save',
   'common.saving': 'Saving…',
   'common.cancel': 'Cancel',
@@ -21,7 +22,7 @@ const en: Record<string, string> = {
   'common.all': 'all',
 
   // Login
-  'login.title': 'Report V2· Sign in',
+  'login.title': 'Argus · Sign in',
   'login.username': 'Username',
   'login.password': 'Password',
   'login.submit': 'Sign in',

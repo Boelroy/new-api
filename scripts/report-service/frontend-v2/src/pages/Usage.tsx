@@ -40,7 +40,7 @@ export default function Usage({ kind }: { kind: 'my' | 'studio' | 'all' }) {
   return (
     <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl text-slate-100 font-semibold">{title}</h1>
+        <h1 className="text-xl text-slate-900 font-semibold">{title}</h1>
         <div className="flex gap-2 text-sm">
           <select className="input" value={keyType} onChange={(e) => setKeyType(e.target.value)}>
             <option value="">{t('usage.filter.allTypes')}</option>
@@ -54,7 +54,7 @@ export default function Usage({ kind }: { kind: 'my' | 'studio' | 'all' }) {
           </select>
         </div>
       </div>
-      {err && <div className="text-red-400 text-sm">{err}</div>}
+      {err && <div className="text-red-600 text-sm">{err}</div>}
       <div className="grid grid-cols-3 gap-3">
         <Stat label={t('usage.stat.keys')} value={totals.count.toString()} />
         <Stat label={t('usage.stat.usedUsd')} value={`$${totals.usedUSD.toFixed(2)}`} />
@@ -81,8 +81,8 @@ export default function Usage({ kind }: { kind: 'my' | 'studio' | 'all' }) {
                 <td className="td">{r.studio}</td>
                 <td className="td font-mono text-xs">{r.key_type}</td>
                 <td className="td font-mono text-xs">
-                  {r.key ? <span className="text-yellow-300">{r.key}</span> : r.key_masked}
-                  {r.is_dead && <span className="ml-2 text-xs text-red-400">{t('keys.pool.dead')}</span>}
+                  {r.key ? <span className="text-amber-700">{r.key}</span> : r.key_masked}
+                  {r.is_dead && <span className="ml-2 text-xs text-red-600">{t('keys.pool.dead')}</span>}
                 </td>
                 <td className="td"><StatusBadge s={r.status} /></td>
                 <td className="td text-right">${r.used_usd.toFixed(4)}</td>
@@ -105,7 +105,7 @@ function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="card">
       <div className="text-xs text-slate-400">{label}</div>
-      <div className="text-xl text-slate-100 font-semibold">{value}</div>
+      <div className="text-xl text-slate-900 font-semibold">{value}</div>
     </div>
   );
 }

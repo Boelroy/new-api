@@ -37,10 +37,10 @@ export default function Users() {
   return (
     <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl text-slate-100 font-semibold">{t('users.title')}</h1>
+        <h1 className="text-xl text-slate-900 font-semibold">{t('users.title')}</h1>
         {canCreate && <button className="btn btn-primary" onClick={() => setCreating(true)}>{t('users.new')}</button>}
       </div>
-      {err && <div className="text-red-400 text-sm">{err}</div>}
+      {err && <div className="text-red-600 text-sm">{err}</div>}
       <div className="card overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -59,16 +59,16 @@ export default function Users() {
               <tr key={u.id}>
                 <td className="td">{u.id}</td>
                 <td className="td">{u.username}</td>
-                <td className="td">{u.studio || <span className="text-slate-500">—</span>}</td>
+                <td className="td">{u.studio || <span className="text-slate-400">—</span>}</td>
                 <td className="td">
                   <div className="flex flex-wrap gap-1">
                     {u.role_names.map((n) => (
-                      <span key={n} className="px-1.5 py-0.5 text-xs rounded bg-slate-700">{n}</span>
+                      <span key={n} className="px-1.5 py-0.5 text-xs rounded bg-slate-200">{n}</span>
                     ))}
                   </div>
                 </td>
                 <td className="td">{u.max_level}</td>
-                <td className="td">{u.status === 1 ? <span className="text-green-400">{t('users.status.enabled')}</span> : <span className="text-red-400">{t('users.status.disabled')}</span>}</td>
+                <td className="td">{u.status === 1 ? <span className="text-green-700">{t('users.status.enabled')}</span> : <span className="text-red-600">{t('users.status.disabled')}</span>}</td>
                 <td className="td text-right space-x-2">
                   {canTouch(u) && canAssign && (
                     <button className="btn" onClick={() => setAssign(u)}>{t('users.action.roles')}</button>
@@ -158,12 +158,12 @@ function CreateUserDrawer({ roles, onClose, onSaved }: { roles: Role[]; onClose:
                   const n = new Set(selected); n.has(r.id) ? n.delete(r.id) : n.add(r.id); setSel(n);
                 }} />
                 <span>{r.name}</span>
-                <span className="text-xs text-slate-500">(level {r.level})</span>
+                <span className="text-xs text-slate-400">(level {r.level})</span>
               </label>
             ))}
           </div>
         </Field>
-        {err && <div className="text-red-400 text-sm">{err}</div>}
+        {err && <div className="text-red-600 text-sm">{err}</div>}
         <div className="flex justify-end gap-2">
           <button className="btn" onClick={onClose}>{t('common.cancel')}</button>
           <button className="btn btn-primary" onClick={submit} disabled={saving}>{saving ? t('common.saving') : t('common.new')}</button>
@@ -195,10 +195,10 @@ function AssignRolesDrawer({ user, roles, onClose, onSaved }: { user: UserRow; r
               const n = new Set(selected); n.has(r.id) ? n.delete(r.id) : n.add(r.id); setSel(n);
             }} />
             <span>{r.name}</span>
-            <span className="text-xs text-slate-500">(level {r.level})</span>
+            <span className="text-xs text-slate-400">(level {r.level})</span>
           </label>
         ))}
-        {err && <div className="text-red-400 text-sm">{err}</div>}
+        {err && <div className="text-red-600 text-sm">{err}</div>}
         <div className="flex justify-end gap-2">
           <button className="btn" onClick={onClose}>{t('common.cancel')}</button>
           <button className="btn btn-primary" onClick={submit}>{t('common.save')}</button>
@@ -210,10 +210,10 @@ function AssignRolesDrawer({ user, roles, onClose, onSaved }: { user: UserRow; r
 
 function Drawer({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
   return (
-    <div className="fixed inset-0 bg-black/60 flex justify-end" onClick={onClose}>
-      <div className="w-[520px] bg-slate-900 border-l border-slate-700 h-full overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 bg-slate-900/30 flex justify-end" onClick={onClose}>
+      <div className="w-[520px] bg-white border-l border-slate-200 h-full overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg text-slate-100 font-semibold">{title}</h2>
+          <h2 className="text-lg text-slate-900 font-semibold">{title}</h2>
           <button className="btn" onClick={onClose}>×</button>
         </div>
         {children}

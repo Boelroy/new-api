@@ -1,7 +1,8 @@
 // 中文翻译。key 与 en.ts 一致，缺失时会 fallback 到英文源串。
 const zh: Record<string, string> = {
   // 通用
-  'app.title': '报表 V2',
+  'app.title': 'Argus',
+  'app.tagline': '百眼观世',
   'common.save': '保存',
   'common.saving': '保存中…',
   'common.cancel': '取消',
@@ -20,7 +21,7 @@ const zh: Record<string, string> = {
   'common.all': '全部',
 
   // 登录
-  'login.title': '报表 V2 · 登录',
+  'login.title': 'Argus · 登录',
   'login.username': '用户名',
   'login.password': '密码',
   'login.submit': '登录',

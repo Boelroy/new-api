@@ -26,10 +26,10 @@ export default function KeysActive() {
   return (
     <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl text-slate-100 font-semibold">{t('keys.active.title')}</h1>
+        <h1 className="text-xl text-slate-900 font-semibold">{t('keys.active.title')}</h1>
         <a className="btn" href="/api/v2/keys/export.csv?status=active,used" target="_blank" rel="noreferrer">{t('common.exportCsv')}</a>
       </div>
-      {err && <div className="text-red-400 text-sm">{err}</div>}
+      {err && <div className="text-red-600 text-sm">{err}</div>}
 
       <div className="card overflow-x-auto">
         <table className="w-full text-sm">
@@ -52,8 +52,8 @@ export default function KeysActive() {
                 <td className="td">{r.studio}</td>
                 <td className="td font-mono text-xs">{r.key_type}</td>
                 <td className="td font-mono text-xs">
-                  {r.key ? <span className="text-yellow-300">{r.key}</span> : r.key_masked}
-                  {r.is_dead && <span className="ml-2 text-xs text-red-400">{t('keys.pool.dead')}</span>}
+                  {r.key ? <span className="text-amber-700">{r.key}</span> : r.key_masked}
+                  {r.is_dead && <span className="ml-2 text-xs text-red-600">{t('keys.pool.dead')}</span>}
                 </td>
                 <td className="td"><StatusBadge s={r.status} /></td>
                 <td className="td">{r.assigned_profile_id || '—'}</td>

@@ -35,14 +35,14 @@ export default function Roles() {
   return (
     <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl text-slate-100 font-semibold">{t('roles.title')}</h1>
+        <h1 className="text-xl text-slate-900 font-semibold">{t('roles.title')}</h1>
         {canManage && (
           <button className="btn btn-primary" onClick={() => setCreating(true)}>
             {t('roles.new')}
           </button>
         )}
       </div>
-      {err && <div className="text-red-400 text-sm">{err}</div>}
+      {err && <div className="text-red-600 text-sm">{err}</div>}
       <div className="card overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -175,10 +175,10 @@ function RoleEditor({
   }, [catalog]);
 
   return (
-    <div className="fixed inset-0 bg-black/60 flex justify-end" onClick={onClose}>
-      <div className="w-[720px] bg-slate-900 border-l border-slate-700 h-full overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 bg-slate-900/30 flex justify-end" onClick={onClose}>
+      <div className="w-[720px] bg-white border-l border-slate-200 h-full overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg text-slate-100 font-semibold">
+          <h2 className="text-lg text-slate-900 font-semibold">
             {role ? t('roles.editor.editTitle', { name: role.name }) : t('roles.editor.newTitle')}
           </h2>
           <button className="btn" onClick={onClose}>{t('common.close')}</button>
@@ -199,13 +199,13 @@ function RoleEditor({
             <input className="input" type="number" value={level} onChange={(e) => setLevel(parseInt(e.target.value, 10) || 0)} />
           </div>
         </div>
-        <h3 className="text-sm text-slate-300 mb-2">{t('roles.editor.permissions')}</h3>
+        <h3 className="text-sm text-slate-600 mb-2">{t('roles.editor.permissions')}</h3>
         {Object.entries(grouped).map(([group, actions]) => (
-          <div key={group} className="mb-3 border border-slate-700 rounded p-3">
+          <div key={group} className="mb-3 border border-slate-200 rounded p-3">
             <div className="text-xs text-slate-400 uppercase tracking-wider mb-2">{group}</div>
             {actions.map((a) => (
               <div key={a.action} className="mb-2">
-                <div className="text-sm text-slate-100 mb-1">{a.label}</div>
+                <div className="text-sm text-slate-900 mb-1">{a.label}</div>
                 <div className="flex gap-3 flex-wrap">
                   {catalog.scopes.map((s) => {
                     const key = `${a.action}@${s.scope}`;
@@ -227,7 +227,7 @@ function RoleEditor({
             ))}
           </div>
         ))}
-        {err && <div className="text-red-400 text-sm mb-2">{err}</div>}
+        {err && <div className="text-red-600 text-sm mb-2">{err}</div>}
         <div className="flex justify-end gap-2">
           <button className="btn" onClick={onClose}>{t('common.cancel')}</button>
           <button className="btn btn-primary" onClick={save} disabled={saving}>

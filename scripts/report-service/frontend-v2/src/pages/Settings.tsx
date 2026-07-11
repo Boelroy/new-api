@@ -6,23 +6,23 @@ export default function Settings() {
   const { t } = useI18n();
   return (
     <div className="p-6 space-y-4">
-      <h1 className="text-xl text-slate-100 font-semibold">{t('settings.title')}</h1>
+      <h1 className="text-xl text-slate-900 font-semibold">{t('settings.title')}</h1>
       <div className="card space-y-3">
         <div>
           <div className="text-slate-400 text-sm">{t('settings.poolThrottle')}</div>
-          <div className="text-slate-300 text-sm mt-1">
+          <div className="text-slate-600 text-sm mt-1">
             {t('settings.poolThrottle.desc')}
           </div>
         </div>
         <div>
           <div className="text-slate-400 text-sm">{t('settings.ttl')}</div>
-          <div className="text-slate-300 text-sm mt-1">
+          <div className="text-slate-600 text-sm mt-1">
             {t('settings.ttl.desc')}
           </div>
         </div>
         <div>
           <div className="text-slate-400 text-sm">{t('settings.notify')}</div>
-          <div className="text-slate-300 text-sm mt-1">
+          <div className="text-slate-600 text-sm mt-1">
             {t('settings.notify.desc')}
           </div>
         </div>

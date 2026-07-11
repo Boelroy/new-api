@@ -68,11 +68,11 @@ export default function KeysUpload() {
 
   return (
     <div className="p-6 space-y-4">
-      <h1 className="text-xl text-slate-100 font-semibold">{t('keys.upload.title')}</h1>
+      <h1 className="text-xl text-slate-900 font-semibold">{t('keys.upload.title')}</h1>
       {me?.studio ? (
         <p className="text-sm text-slate-400">{t('keys.upload.studioLocked', { studio: me.studio })}</p>
       ) : (
-        <p className="text-sm text-yellow-400">{t('keys.upload.noStudio')}</p>
+        <p className="text-sm text-amber-600">{t('keys.upload.noStudio')}</p>
       )}
 
       <div className="card space-y-4">
@@ -135,7 +135,7 @@ export default function KeysUpload() {
 
       {results.length > 0 && (
         <div className="card">
-          <h2 className="text-slate-100 font-semibold mb-2">{t('keys.upload.results')}</h2>
+          <h2 className="text-slate-900 font-semibold mb-2">{t('keys.upload.results')}</h2>
           <table className="w-full text-sm">
             <thead>
               <tr><th className="th">{t('keys.upload.col.row')}</th><th className="th">{t('keys.upload.col.status')}</th><th className="th">{t('keys.upload.col.error')}</th></tr>
@@ -145,7 +145,7 @@ export default function KeysUpload() {
                 <tr key={i}>
                   <td className="td">{r.row}</td>
                   <td className="td">
-                    <span className={r.status === 'error' || r.status === 'duplicate' ? 'text-red-400' : 'text-green-400'}>{r.status}</span>
+                    <span className={r.status === 'error' || r.status === 'duplicate' ? 'text-red-600' : 'text-green-700'}>{r.status}</span>
                   </td>
                   <td className="td text-xs text-slate-400">{r.error ?? ''}</td>
                 </tr>

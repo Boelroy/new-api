@@ -20,10 +20,10 @@ export default function Profiles() {
   return (
     <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl text-slate-100 font-semibold">{t('profiles.title')}</h1>
+        <h1 className="text-xl text-slate-900 font-semibold">{t('profiles.title')}</h1>
         <button className="btn btn-primary" onClick={() => setCreating(true)}>{t('profiles.new')}</button>
       </div>
-      {err && <div className="text-red-400 text-sm">{err}</div>}
+      {err && <div className="text-red-600 text-sm">{err}</div>}
       <div className="card overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -43,7 +43,7 @@ export default function Profiles() {
                 <td className="td">{p.name}</td>
                 <td className="td font-mono text-xs">{p.host}</td>
                 <td className="td">
-                  {p.has_access_token ? <span className="text-green-400">{t('profiles.token.set')}</span> : <span className="text-red-400">{t('profiles.token.missing')}</span>}
+                  {p.has_access_token ? <span className="text-green-700">{t('profiles.token.set')}</span> : <span className="text-red-600">{t('profiles.token.missing')}</span>}
                 </td>
                 <td className="td text-xs text-slate-400">
                   {p.auto_mode ? t('profiles.pool.auto', { base: p.rpm_base, min: p.rpm_min }) : `${p.pool_interval_sec}s / ${p.pool_batch_size}`}
@@ -107,10 +107,10 @@ function ProfileEditor({ profile, onClose, onSaved }: { profile: ProfileFull | n
   };
 
   return (
-    <div className="fixed inset-0 bg-black/60 flex justify-end" onClick={onClose}>
-      <div className="w-[560px] bg-slate-900 border-l border-slate-700 h-full overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 bg-slate-900/30 flex justify-end" onClick={onClose}>
+      <div className="w-[560px] bg-white border-l border-slate-200 h-full overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg text-slate-100 font-semibold">
+          <h2 className="text-lg text-slate-900 font-semibold">
             {profile ? t('profiles.editor.edit', { name: profile.name }) : t('profiles.editor.new')}
           </h2>
           <button className="btn" onClick={onClose}>×</button>
@@ -168,7 +168,7 @@ function ProfileEditor({ profile, onClose, onSaved }: { profile: ProfileFull | n
             <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
             {t('profiles.editor.autoMode')}
           </label>
-          {err && <div className="text-red-400 text-sm">{err}</div>}
+          {err && <div className="text-red-600 text-sm">{err}</div>}
           <div className="flex justify-end gap-2">
             <button className="btn" onClick={onClose}>{t('common.cancel')}</button>
             <button className="btn btn-primary" onClick={submit} disabled={saving}>{saving ? t('common.saving') : t('common.save')}</button>

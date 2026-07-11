@@ -49,7 +49,7 @@ export default function KeysPool() {
   return (
     <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl text-slate-100 font-semibold">{t('keys.pool.title')}</h1>
+        <h1 className="text-xl text-slate-900 font-semibold">{t('keys.pool.title')}</h1>
         <div className="flex items-center gap-2">
           <select className="input w-56" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
             <option value="awaiting_assignment,failed">{t('keys.pool.filter.awaitingFailed')}</option>
@@ -60,7 +60,7 @@ export default function KeysPool() {
           <a className="btn" href={`/api/v2/keys/export.csv?status=${encodeURIComponent(statusFilter)}`} target="_blank" rel="noreferrer">{t('common.exportCsv')}</a>
         </div>
       </div>
-      {err && <div className="text-red-400 text-sm">{err}</div>}
+      {err && <div className="text-red-600 text-sm">{err}</div>}
 
       {canAssign && (
         <div className="card flex items-center gap-3">
@@ -104,13 +104,13 @@ export default function KeysPool() {
                 <td className="td">{r.studio}</td>
                 <td className="td font-mono text-xs">{r.key_type}</td>
                 <td className="td font-mono text-xs">
-                  {r.key ? <span className="text-yellow-300">{r.key}</span> : r.key_masked}
-                  {r.is_dead && <span className="ml-2 text-xs text-red-400">{t('keys.pool.dead')}</span>}
+                  {r.key ? <span className="text-amber-700">{r.key}</span> : r.key_masked}
+                  {r.is_dead && <span className="ml-2 text-xs text-red-600">{t('keys.pool.dead')}</span>}
                 </td>
                 <td className="td">
                   <StatusBadge s={r.status} />
                 </td>
-                <td className="td">{r.assigned_profile_id || <span className="text-slate-500">—</span>}</td>
+                <td className="td">{r.assigned_profile_id || <span className="text-slate-400">—</span>}</td>
                 <td className="td text-xs text-slate-400 max-w-md truncate" title={r.failed_reason}>{r.failed_reason}</td>
                 <td className="td text-right">
                   {canDelete && (r.status === 'awaiting_assignment' || r.status === 'failed') && (
@@ -134,11 +134,11 @@ export default function KeysPool() {
 
 export function StatusBadge({ s }: { s: string }) {
   const cls = ({
-    awaiting_assignment: 'bg-yellow-800 text-yellow-200',
-    pending: 'bg-blue-800 text-blue-200',
-    active: 'bg-green-800 text-green-200',
-    used: 'bg-slate-700 text-slate-300',
-    failed: 'bg-red-900 text-red-200',
-  } as Record<string, string>)[s] ?? 'bg-slate-700 text-slate-200';
+    awaiting_assignment: 'bg-amber-100 text-amber-800 border border-amber-200',
+    pending: 'bg-blue-100 text-blue-800 border border-blue-200',
+    active: 'bg-green-100 text-green-800 border border-green-200',
+    used: 'bg-slate-100 text-slate-600 border border-slate-200',
+    failed: 'bg-red-100 text-red-800 border border-red-200',
+  } as Record<string, string>)[s] ?? 'bg-slate-100 text-slate-700 border border-slate-200';
   return <span className={`px-1.5 py-0.5 rounded text-xs ${cls}`}>{s}</span>;
 }
