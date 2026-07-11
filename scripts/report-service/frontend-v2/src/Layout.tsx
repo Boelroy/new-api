@@ -33,7 +33,6 @@ export default function Layout() {
         <div className="px-4 py-4 border-b border-slate-200 flex items-start justify-between gap-2">
           <div className="min-w-0 flex-1">
             <div className="text-slate-900 font-semibold tracking-wide">{t('app.title')}</div>
-            <div className="text-[10px] text-slate-400 uppercase tracking-widest">{t('app.tagline')}</div>
             <div className="text-xs text-slate-600 mt-2 truncate">{me?.username}</div>
             {me?.studio ? (
               <div className="text-xs text-slate-400 truncate">

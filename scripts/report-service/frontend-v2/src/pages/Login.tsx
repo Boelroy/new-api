@@ -39,7 +39,6 @@ export default function Login() {
       <form onSubmit={submit} className="card w-80 space-y-4">
         <div className="text-center">
           <div className="text-2xl text-slate-900 font-semibold tracking-wide">{t('app.title')}</div>
-          <div className="text-[11px] text-slate-400 uppercase tracking-widest mt-1">{t('app.tagline')}</div>
         </div>
         <div>
           <label className="text-xs text-slate-500 block mb-1">{t('login.username')}</label>
