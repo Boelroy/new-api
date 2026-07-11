@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
 import { api, KeyPoolRow, ProfileSlim } from '../api';
 import { useAuth } from '../auth';
+import { useI18n } from '../i18n';
 import { StatusBadge } from './KeysPool';
 
 export default function KeysActive() {
   const { hasPerm } = useAuth();
+  const { t } = useI18n();
   const canRebind = hasPerm('keys.newapi.rebind');
   const canDisable = hasPerm('keys.newapi.disable');
   const [rows, setRows] = useState<KeyPoolRow[]>([]);
@@ -24,8 +26,8 @@ export default function KeysActive() {
   return (
     <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl text-slate-100 font-semibold">Active Keys</h1>
-        <a className="btn" href="/api/v2/keys/export.csv?status=active,used" target="_blank" rel="noreferrer">Export CSV</a>
+        <h1 className="text-xl text-slate-100 font-semibold">{t('keys.active.title')}</h1>
+        <a className="btn" href="/api/v2/keys/export.csv?status=active,used" target="_blank" rel="noreferrer">{t('common.exportCsv')}</a>
       </div>
       {err && <div className="text-red-400 text-sm">{err}</div>}
 
@@ -33,13 +35,13 @@ export default function KeysActive() {
         <table className="w-full text-sm">
           <thead>
             <tr>
-              <th className="th">ID</th>
-              <th className="th">Studio</th>
-              <th className="th">Type</th>
-              <th className="th">Key</th>
-              <th className="th">Status</th>
-              <th className="th">Profile</th>
-              <th className="th">Channel</th>
+              <th className="th">{t('users.col.id')}</th>
+              <th className="th">{t('keys.pool.col.studio')}</th>
+              <th className="th">{t('keys.pool.col.type')}</th>
+              <th className="th">{t('keys.pool.col.key')}</th>
+              <th className="th">{t('keys.pool.col.status')}</th>
+              <th className="th">{t('keys.pool.col.profile')}</th>
+              <th className="th">{t('keys.active.col.channel')}</th>
               <th className="th"></th>
             </tr>
           </thead>
@@ -51,7 +53,7 @@ export default function KeysActive() {
                 <td className="td font-mono text-xs">{r.key_type}</td>
                 <td className="td font-mono text-xs">
                   {r.key ? <span className="text-yellow-300">{r.key}</span> : r.key_masked}
-                  {r.is_dead && <span className="ml-2 text-xs text-red-400">dead</span>}
+                  {r.is_dead && <span className="ml-2 text-xs text-red-400">{t('keys.pool.dead')}</span>}
                 </td>
                 <td className="td"><StatusBadge s={r.status} /></td>
                 <td className="td">{r.assigned_profile_id || '—'}</td>
@@ -61,20 +63,20 @@ export default function KeysActive() {
                     <button
                       className="btn"
                       onClick={async () => {
-                        const to = prompt(`Rebind to which profile id? Options: ${profiles.map((p) => `${p.id}=${p.name}`).join(', ')}`);
+                        const to = prompt(t('keys.active.rebindPrompt', { opts: profiles.map((p) => `${p.id}=${p.name}`).join(', ') }));
                         if (!to) return;
                         try { await api.rebindKey(r.id, parseInt(to, 10)); reload(); } catch (e: any) { alert(e?.message); }
                       }}
-                    >Rebind</button>
+                    >{t('keys.active.rebind')}</button>
                   )}
                   {canDisable && r.status !== 'used' && (
                     <button
                       className="btn btn-danger"
                       onClick={async () => {
-                        if (!confirm(`Disable key #${r.id}?`)) return;
+                        if (!confirm(t('keys.active.disableConfirm', { id: r.id }))) return;
                         try { await api.disableKey(r.id); reload(); } catch (e: any) { alert(e?.message); }
                       }}
-                    >Disable</button>
+                    >{t('users.action.disable')}</button>
                   )}
                 </td>
               </tr>

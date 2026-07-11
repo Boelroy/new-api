@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
 import { api, Role, UserRow } from '../api';
 import { useAuth } from '../auth';
+import { useI18n } from '../i18n';
 
 export default function Users() {
   const { me, hasPerm } = useAuth();
+  const { t } = useI18n();
   const canCreate = hasPerm('users.create');
   const canDelete = hasPerm('users.delete');
   const canDisable = hasPerm('users.disable');
@@ -35,20 +37,20 @@ export default function Users() {
   return (
     <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl text-slate-100 font-semibold">Users</h1>
-        {canCreate && <button className="btn btn-primary" onClick={() => setCreating(true)}>+ New user</button>}
+        <h1 className="text-xl text-slate-100 font-semibold">{t('users.title')}</h1>
+        {canCreate && <button className="btn btn-primary" onClick={() => setCreating(true)}>{t('users.new')}</button>}
       </div>
       {err && <div className="text-red-400 text-sm">{err}</div>}
       <div className="card overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr>
-              <th className="th">ID</th>
-              <th className="th">Username</th>
-              <th className="th">Studio</th>
-              <th className="th">Roles</th>
-              <th className="th">Level</th>
-              <th className="th">Status</th>
+              <th className="th">{t('users.col.id')}</th>
+              <th className="th">{t('users.col.username')}</th>
+              <th className="th">{t('users.col.studio')}</th>
+              <th className="th">{t('users.col.roles')}</th>
+              <th className="th">{t('users.col.level')}</th>
+              <th className="th">{t('users.col.status')}</th>
               <th className="th"></th>
             </tr>
           </thead>
@@ -66,37 +68,37 @@ export default function Users() {
                   </div>
                 </td>
                 <td className="td">{u.max_level}</td>
-                <td className="td">{u.status === 1 ? <span className="text-green-400">enabled</span> : <span className="text-red-400">disabled</span>}</td>
+                <td className="td">{u.status === 1 ? <span className="text-green-400">{t('users.status.enabled')}</span> : <span className="text-red-400">{t('users.status.disabled')}</span>}</td>
                 <td className="td text-right space-x-2">
                   {canTouch(u) && canAssign && (
-                    <button className="btn" onClick={() => setAssign(u)}>Roles</button>
+                    <button className="btn" onClick={() => setAssign(u)}>{t('users.action.roles')}</button>
                   )}
                   {canTouch(u) && canReset && (
                     <button
                       className="btn"
                       onClick={async () => {
-                        const p = prompt(`New password for ${u.username}? (min 6 chars)`);
+                        const p = prompt(t('users.pwPrompt', { name: u.username }));
                         if (!p) return;
-                        try { await api.resetPassword(u.id, p); alert('Password reset'); } catch (e: any) { alert(e?.message); }
+                        try { await api.resetPassword(u.id, p); alert(t('users.pwReset')); } catch (e: any) { alert(e?.message); }
                       }}
                     >
-                      Reset PW
+                      {t('users.action.resetPw')}
                     </button>
                   )}
                   {canTouch(u) && canDisable && (u.status === 1 ? (
-                    <button className="btn" onClick={async () => { await api.disableUser(u.id); reload(); }}>Disable</button>
+                    <button className="btn" onClick={async () => { await api.disableUser(u.id); reload(); }}>{t('users.action.disable')}</button>
                   ) : (
-                    <button className="btn" onClick={async () => { await api.enableUser(u.id); reload(); }}>Enable</button>
+                    <button className="btn" onClick={async () => { await api.enableUser(u.id); reload(); }}>{t('users.action.enable')}</button>
                   ))}
                   {canTouch(u) && canDelete && u.id !== me?.user_id && (
                     <button
                       className="btn btn-danger"
                       onClick={async () => {
-                        if (!confirm(`Delete user ${u.username}?`)) return;
+                        if (!confirm(t('users.deleteConfirm', { name: u.username }))) return;
                         try { await api.deleteUser(u.id); reload(); } catch (e: any) { alert(e?.message); }
                       }}
                     >
-                      Delete
+                      {t('common.delete')}
                     </button>
                   )}
                 </td>
@@ -127,6 +129,7 @@ export default function Users() {
 
 function CreateUserDrawer({ roles, onClose, onSaved }: { roles: Role[]; onClose: () => void; onSaved: () => void }) {
   const { me } = useAuth();
+  const { t } = useI18n();
   const [username, setU] = useState('');
   const [password, setP] = useState('');
   const [studio, setS] = useState('');
@@ -142,12 +145,12 @@ function CreateUserDrawer({ roles, onClose, onSaved }: { roles: Role[]; onClose:
     } catch (e: any) { setErr(e?.message ?? String(e)); } finally { setSav(false); }
   };
   return (
-    <Drawer title="New user" onClose={onClose}>
+    <Drawer title={t('users.create.title')} onClose={onClose}>
       <div className="space-y-3">
-        <Field label="Username"><input className="input" value={username} onChange={(e)=>setU(e.target.value)} /></Field>
-        <Field label="Password (min 6)"><input className="input" type="password" value={password} onChange={(e)=>setP(e.target.value)} /></Field>
-        <Field label="Studio"><input className="input" value={studio} onChange={(e)=>setS(e.target.value)} placeholder="(optional)" /></Field>
-        <Field label="Roles">
+        <Field label={t('users.create.username')}><input className="input" value={username} onChange={(e)=>setU(e.target.value)} /></Field>
+        <Field label={t('users.create.password')}><input className="input" type="password" value={password} onChange={(e)=>setP(e.target.value)} /></Field>
+        <Field label={t('users.create.studio')}><input className="input" value={studio} onChange={(e)=>setS(e.target.value)} placeholder={t('common.optional')} /></Field>
+        <Field label={t('users.create.rolesLabel')}>
           <div className="space-y-1">
             {roles.map((r) => (
               <label key={r.id} className={`flex items-center gap-2 text-sm ${canGrantRole(r) ? '' : 'opacity-40'}`}>
@@ -162,8 +165,8 @@ function CreateUserDrawer({ roles, onClose, onSaved }: { roles: Role[]; onClose:
         </Field>
         {err && <div className="text-red-400 text-sm">{err}</div>}
         <div className="flex justify-end gap-2">
-          <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" onClick={submit} disabled={saving}>{saving ? 'Saving…' : 'Create'}</button>
+          <button className="btn" onClick={onClose}>{t('common.cancel')}</button>
+          <button className="btn btn-primary" onClick={submit} disabled={saving}>{saving ? t('common.saving') : t('common.new')}</button>
         </div>
       </div>
     </Drawer>
@@ -172,6 +175,7 @@ function CreateUserDrawer({ roles, onClose, onSaved }: { roles: Role[]; onClose:
 
 function AssignRolesDrawer({ user, roles, onClose, onSaved }: { user: UserRow; roles: Role[]; onClose: () => void; onSaved: () => void }) {
   const { me } = useAuth();
+  const { t } = useI18n();
   const [selected, setSel] = useState<Set<number>>(new Set(user.roles));
   const [err, setErr] = useState('');
   const canGrantRole = (r: Role) => me?.is_super || r.level < (me?.max_role_level ?? 0);
@@ -183,7 +187,7 @@ function AssignRolesDrawer({ user, roles, onClose, onSaved }: { user: UserRow; r
     } catch (e: any) { setErr(e?.message ?? String(e)); }
   };
   return (
-    <Drawer title={`Roles for ${user.username}`} onClose={onClose}>
+    <Drawer title={t('users.rolesDrawer.title', { name: user.username })} onClose={onClose}>
       <div className="space-y-3">
         {roles.map((r) => (
           <label key={r.id} className={`flex items-center gap-2 text-sm ${canGrantRole(r) ? '' : 'opacity-40'}`}>
@@ -196,8 +200,8 @@ function AssignRolesDrawer({ user, roles, onClose, onSaved }: { user: UserRow; r
         ))}
         {err && <div className="text-red-400 text-sm">{err}</div>}
         <div className="flex justify-end gap-2">
-          <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" onClick={submit}>Save</button>
+          <button className="btn" onClick={onClose}>{t('common.cancel')}</button>
+          <button className="btn btn-primary" onClick={submit}>{t('common.save')}</button>
         </div>
       </div>
     </Drawer>

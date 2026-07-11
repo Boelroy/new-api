@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, Permission, Role } from '../api';
 import { useAuth } from '../auth';
+import { useI18n } from '../i18n';
 
 interface Catalog {
   actions: { group: string; action: string; label: string }[];
@@ -9,6 +10,7 @@ interface Catalog {
 
 export default function Roles() {
   const { me, hasPerm } = useAuth();
+  const { t } = useI18n();
   const canManage = hasPerm('roles.manage');
   const [roles, setRoles] = useState<Role[]>([]);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
@@ -33,10 +35,10 @@ export default function Roles() {
   return (
     <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl text-slate-100 font-semibold">Roles</h1>
+        <h1 className="text-xl text-slate-100 font-semibold">{t('roles.title')}</h1>
         {canManage && (
           <button className="btn btn-primary" onClick={() => setCreating(true)}>
-            + New role
+            {t('roles.new')}
           </button>
         )}
       </div>
@@ -45,12 +47,12 @@ export default function Roles() {
         <table className="w-full text-sm">
           <thead>
             <tr>
-              <th className="th">Name</th>
-              <th className="th">Display</th>
-              <th className="th">Level</th>
-              <th className="th">Built-in</th>
-              <th className="th">Permissions</th>
-              <th className="th">Users</th>
+              <th className="th">{t('roles.col.name')}</th>
+              <th className="th">{t('roles.col.display')}</th>
+              <th className="th">{t('roles.col.level')}</th>
+              <th className="th">{t('roles.col.builtin')}</th>
+              <th className="th">{t('roles.col.permissions')}</th>
+              <th className="th">{t('roles.col.users')}</th>
               <th className="th"></th>
             </tr>
           </thead>
@@ -60,25 +62,25 @@ export default function Roles() {
                 <td className="td font-mono text-xs">{r.name}</td>
                 <td className="td">{r.display_name}</td>
                 <td className="td">{r.level}</td>
-                <td className="td">{r.is_builtin ? 'yes' : ''}</td>
+                <td className="td">{r.is_builtin ? t('common.yes') : ''}</td>
                 <td className="td">{r.permissions?.length ?? 0}</td>
                 <td className="td">{r.user_count ?? 0}</td>
                 <td className="td text-right space-x-2">
                   {canManage && (r.is_builtin ? me?.is_super : true) && (
                     <button className="btn" onClick={() => setEditing(r)}>
-                      Edit
+                      {t('common.edit')}
                     </button>
                   )}
                   {canManage && !r.is_builtin && (r.user_count ?? 0) === 0 && (
                     <button
                       className="btn btn-danger"
                       onClick={async () => {
-                        if (!confirm(`Delete role ${r.name}?`)) return;
+                        if (!confirm(t('roles.deleteConfirm', { name: r.name }))) return;
                         await api.deleteRole(r.id);
                         reload();
                       }}
                     >
-                      Delete
+                      {t('common.delete')}
                     </button>
                   )}
                 </td>
@@ -118,6 +120,7 @@ function RoleEditor({
   onSaved: () => void;
 }) {
   const { me } = useAuth();
+  const { t } = useI18n();
   const [name, setName] = useState(role?.name ?? '');
   const [display, setDisplay] = useState(role?.display_name ?? '');
   const [level, setLevel] = useState(role?.level ?? 10);
@@ -175,26 +178,28 @@ function RoleEditor({
     <div className="fixed inset-0 bg-black/60 flex justify-end" onClick={onClose}>
       <div className="w-[720px] bg-slate-900 border-l border-slate-700 h-full overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg text-slate-100 font-semibold">{role ? `Edit ${role.name}` : 'New role'}</h2>
-          <button className="btn" onClick={onClose}>×</button>
+          <h2 className="text-lg text-slate-100 font-semibold">
+            {role ? t('roles.editor.editTitle', { name: role.name }) : t('roles.editor.newTitle')}
+          </h2>
+          <button className="btn" onClick={onClose}>{t('common.close')}</button>
         </div>
         <div className="space-y-3 mb-6">
           {!role && (
             <div>
-              <label className="text-xs text-slate-400 block mb-1">Name (slug, no spaces)</label>
+              <label className="text-xs text-slate-400 block mb-1">{t('roles.editor.name')}</label>
               <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
             </div>
           )}
           <div>
-            <label className="text-xs text-slate-400 block mb-1">Display name</label>
+            <label className="text-xs text-slate-400 block mb-1">{t('roles.editor.display')}</label>
             <input className="input" value={display} onChange={(e) => setDisplay(e.target.value)} />
           </div>
           <div>
-            <label className="text-xs text-slate-400 block mb-1">Level (must be below your level)</label>
+            <label className="text-xs text-slate-400 block mb-1">{t('roles.editor.level')}</label>
             <input className="input" type="number" value={level} onChange={(e) => setLevel(parseInt(e.target.value, 10) || 0)} />
           </div>
         </div>
-        <h3 className="text-sm text-slate-300 mb-2">Permissions</h3>
+        <h3 className="text-sm text-slate-300 mb-2">{t('roles.editor.permissions')}</h3>
         {Object.entries(grouped).map(([group, actions]) => (
           <div key={group} className="mb-3 border border-slate-700 rounded p-3">
             <div className="text-xs text-slate-400 uppercase tracking-wider mb-2">{group}</div>
@@ -224,9 +229,9 @@ function RoleEditor({
         ))}
         {err && <div className="text-red-400 text-sm mb-2">{err}</div>}
         <div className="flex justify-end gap-2">
-          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn" onClick={onClose}>{t('common.cancel')}</button>
           <button className="btn btn-primary" onClick={save} disabled={saving}>
-            {saving ? 'Saving…' : 'Save'}
+            {saving ? t('common.saving') : t('common.save')}
           </button>
         </div>
       </div>

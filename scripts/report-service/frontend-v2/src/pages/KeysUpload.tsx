@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, ProfileSlim } from '../api';
 import { useAuth } from '../auth';
+import { useI18n } from '../i18n';
 
 // Dual-mode: pool_only (default) OR direct_newapi. Studio is locked to the
 // caller's JWT-bound studio for own_studio-scoped roles; admin with
@@ -8,6 +9,7 @@ import { useAuth } from '../auth';
 // admin uploads typically happen via V1).
 export default function KeysUpload() {
   const { me } = useAuth();
+  const { t } = useI18n();
   const [keyType, setKeyType] = useState<'regular' | 'trial_5usd'>('regular');
   const [mode, setMode] = useState<'pool_only' | 'direct_newapi'>('pool_only');
   const [profileID, setProfileID] = useState<number | null>(null);
@@ -66,36 +68,36 @@ export default function KeysUpload() {
 
   return (
     <div className="p-6 space-y-4">
-      <h1 className="text-xl text-slate-100 font-semibold">Upload Keys</h1>
+      <h1 className="text-xl text-slate-100 font-semibold">{t('keys.upload.title')}</h1>
       {me?.studio ? (
-        <p className="text-sm text-slate-400">Studio locked to <span className="font-mono">{me.studio}</span></p>
+        <p className="text-sm text-slate-400">{t('keys.upload.studioLocked', { studio: me.studio })}</p>
       ) : (
-        <p className="text-sm text-yellow-400">No studio bound to your account — an admin must set one before uploading.</p>
+        <p className="text-sm text-yellow-400">{t('keys.upload.noStudio')}</p>
       )}
 
       <div className="card space-y-4">
         <div>
-          <div className="text-xs text-slate-400 mb-1">Key type</div>
+          <div className="text-xs text-slate-400 mb-1">{t('keys.upload.keyType')}</div>
           <div className="flex gap-4 text-sm">
             <label><input type="radio" name="kt" checked={keyType === 'regular'} onChange={() => setKeyType('regular')} /> regular</label>
             <label><input type="radio" name="kt" checked={keyType === 'trial_5usd'} onChange={() => setKeyType('trial_5usd')} /> trial_5usd (5 USD)</label>
           </div>
         </div>
         <div>
-          <div className="text-xs text-slate-400 mb-1">Target</div>
+          <div className="text-xs text-slate-400 mb-1">{t('keys.upload.target')}</div>
           <div className="flex gap-4 text-sm">
-            <label><input type="radio" name="tm" checked={mode === 'pool_only'} onChange={() => setMode('pool_only')} /> pool only (admin will assign)</label>
-            <label><input type="radio" name="tm" checked={mode === 'direct_newapi'} onChange={() => setMode('direct_newapi')} /> direct to remote newapi</label>
+            <label><input type="radio" name="tm" checked={mode === 'pool_only'} onChange={() => setMode('pool_only')} /> {t('keys.upload.target.pool')}</label>
+            <label><input type="radio" name="tm" checked={mode === 'direct_newapi'} onChange={() => setMode('direct_newapi')} /> {t('keys.upload.target.direct')}</label>
           </div>
         </div>
         {mode === 'direct_newapi' && (
           <div>
-            <div className="text-xs text-slate-400 mb-1">Remote newapi profile</div>
+            <div className="text-xs text-slate-400 mb-1">{t('keys.upload.profile')}</div>
             <select className="input" value={profileID ?? ''} onChange={(e) => setProfileID(parseInt(e.target.value, 10) || null)}>
-              <option value="">— pick a profile —</option>
+              <option value="">{t('keys.upload.pickProfile')}</option>
               {profiles.map((p) => (
                 <option key={p.id} value={p.id} disabled={p.accepts_studio === false}>
-                  {p.name}{p.accepts_studio === false ? ' (not accepting your studio)' : ''}
+                  {p.name}{p.accepts_studio === false ? ' ' + t('keys.upload.notAccepting') : ''}
                 </option>
               ))}
             </select>
@@ -103,20 +105,20 @@ export default function KeysUpload() {
         )}
         <div className="grid grid-cols-3 gap-3">
           <div>
-            <div className="text-xs text-slate-400 mb-1">Models</div>
+            <div className="text-xs text-slate-400 mb-1">{t('keys.upload.models')}</div>
             <input className="input" value={models} onChange={(e) => setModels(e.target.value)} placeholder="claude-sonnet-4-6,claude-opus-4-7" />
           </div>
           <div>
-            <div className="text-xs text-slate-400 mb-1">Group</div>
+            <div className="text-xs text-slate-400 mb-1">{t('keys.upload.group')}</div>
             <input className="input" value={group} onChange={(e) => setGroup(e.target.value)} placeholder="default" />
           </div>
           <div>
-            <div className="text-xs text-slate-400 mb-1">Name prefix</div>
+            <div className="text-xs text-slate-400 mb-1">{t('keys.upload.namePrefix')}</div>
             <input className="input" value={prefix} onChange={(e) => setPrefix(e.target.value)} placeholder="alpha" />
           </div>
         </div>
         <div>
-          <div className="text-xs text-slate-400 mb-1">Keys (one per line, {keys.length} loaded)</div>
+          <div className="text-xs text-slate-400 mb-1">{t('keys.upload.keys', { count: keys.length })}</div>
           <textarea
             className="input h-48 font-mono text-xs"
             value={raw}
@@ -126,17 +128,17 @@ export default function KeysUpload() {
         </div>
         <div className="flex justify-end">
           <button className="btn btn-primary" onClick={submit} disabled={busy || keys.length === 0 || (mode === 'direct_newapi' && !profileID)}>
-            {busy ? 'Uploading…' : `Upload ${keys.length} key${keys.length === 1 ? '' : 's'}`}
+            {busy ? t('keys.upload.submitting') : t('keys.upload.submit', { count: keys.length, plural: keys.length === 1 ? '' : 's' })}
           </button>
         </div>
       </div>
 
       {results.length > 0 && (
         <div className="card">
-          <h2 className="text-slate-100 font-semibold mb-2">Results</h2>
+          <h2 className="text-slate-100 font-semibold mb-2">{t('keys.upload.results')}</h2>
           <table className="w-full text-sm">
             <thead>
-              <tr><th className="th">Row</th><th className="th">Status</th><th className="th">Error</th></tr>
+              <tr><th className="th">{t('keys.upload.col.row')}</th><th className="th">{t('keys.upload.col.status')}</th><th className="th">{t('keys.upload.col.error')}</th></tr>
             </thead>
             <tbody>
               {results.map((r, i) => (

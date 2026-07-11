@@ -1,5 +1,6 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth';
+import { I18nProvider } from './i18n';
 import Layout from './Layout';
 import Login from './pages/Login';
 import Roles from './pages/Roles';
@@ -13,13 +14,14 @@ import Settings from './pages/Settings';
 
 function Protected({ children }: { children: JSX.Element }) {
   const { me, loading } = useAuth();
-  if (loading) return <div className="p-6 text-slate-400">Loading…</div>;
+  if (loading) return <div className="p-6 text-slate-400">…</div>;
   if (!me) return <Navigate to="/login" replace />;
   return children;
 }
 
 export default function App() {
   return (
+    <I18nProvider>
     <AuthProvider>
       <Routes>
         <Route path="/login" element={<Login />} />
@@ -45,5 +47,6 @@ export default function App() {
         </Route>
       </Routes>
     </AuthProvider>
+    </I18nProvider>
   );
 }
