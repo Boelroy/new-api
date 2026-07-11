@@ -10,6 +10,8 @@ import KeysPool from './pages/KeysPool';
 import KeysActive from './pages/KeysActive';
 import Usage from './pages/Usage';
 import Profiles from './pages/Profiles';
+// (three legacy /v2/usage/{my,studio,all} routes were merged into one
+// /v2/usage page with an in-page scope switcher.)
 import Settings from './pages/Settings';
 
 function Protected({ children }: { children: JSX.Element }) {
@@ -39,9 +41,10 @@ export default function App() {
           <Route path="keys/upload" element={<KeysUpload />} />
           <Route path="keys/pool" element={<KeysPool />} />
           <Route path="keys/active" element={<KeysActive />} />
-          <Route path="usage/my" element={<Usage kind="my" />} />
-          <Route path="usage/studio" element={<Usage kind="studio" />} />
-          <Route path="usage/all" element={<Usage kind="all" />} />
+          <Route path="usage" element={<Usage />} />
+          <Route path="usage/my" element={<Navigate to="/usage" replace />} />
+          <Route path="usage/studio" element={<Navigate to="/usage" replace />} />
+          <Route path="usage/all" element={<Navigate to="/usage" replace />} />
           <Route path="profiles" element={<Profiles />} />
           <Route path="settings" element={<Settings />} />
         </Route>

@@ -15,9 +15,10 @@ const NAV: NavItem[] = [
   { to: '/keys/upload', labelKey: 'nav.keys.upload', perm: 'keys.pool.upload', scope: 'own_studio' },
   { to: '/keys/pool', labelKey: 'nav.keys.pool', perm: 'keys.pool.view', scope: 'own_studio' },
   { to: '/keys/active', labelKey: 'nav.keys.active', perm: 'keys.newapi.view', scope: 'own_studio' },
-  { to: '/usage/my', labelKey: 'nav.usage.my', perm: 'usage.view', scope: 'self' },
-  { to: '/usage/studio', labelKey: 'nav.usage.studio', perm: 'usage.view', scope: 'own_studio' },
-  { to: '/usage/all', labelKey: 'nav.usage.all', perm: 'usage.view', scope: 'any_studio' },
+  // One usage entry — the page has an in-page scope switcher (mine / studio / all)
+  // gated by each user's own usage.view scope. Visible to anyone with any level of
+  // usage.view.
+  { to: '/usage', labelKey: 'nav.usage', perm: 'usage.view', scope: 'self' },
   { to: '/roles', labelKey: 'nav.roles', perm: 'roles.view' },
   { to: '/users', labelKey: 'nav.users', perm: 'users.view' },
   { to: '/profiles', labelKey: 'nav.profiles', perm: 'remote_newapi.profile.manage' },
