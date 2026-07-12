@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { api, ROLE_ADMIN, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_TESTER } from '../api'
+import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_TESTER } from '../api'
 
 type Item = {
   to: string
@@ -205,6 +205,9 @@ export default function Sidebar({ open, onClose }: Props) {
     // Tester is scoped to Key Tester (always) and Provider Testing
     // (only when R2 is wired up, since Provider Testing needs it).
     items = showTesting ? [KEY_TESTER_ITEM, TESTING_ITEM] : [KEY_TESTER_ITEM]
+  } else if (role === ROLE_PROJECT_ADMIN) {
+    // Project admin sees Key Capacity + Key Tester only.
+    items = [KEY_CAPACITY_ITEM, KEY_TESTER_ITEM]
   } else if (role === ROLE_STUDIO_OPERATOR) {
     // Studio operator is scoped to All Keys + Key Tester. Remote Channels
     // used to render a slim view for this role but the entry point has

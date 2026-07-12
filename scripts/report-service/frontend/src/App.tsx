@@ -10,7 +10,7 @@ import Profit from './pages/Profit'
 import Users from './pages/Users'
 import CacheReport from './pages/CacheReport'
 import RemoteChannels from './pages/RemoteChannels'
-import { api, ROLE_ADMIN, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_TESTER } from './api'
+import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_TESTER } from './api'
 
 // RoleGate guards a page against unauthorized roles. While the role is being
 // fetched it renders null so we don't flash protected content; on denial it
@@ -43,6 +43,8 @@ export function getCachedRole(): number | null {
 
 function landingFor(role: number): string {
   if (role >= ROLE_ADMIN) return '/'
+  // Project admin lands on Key Capacity — it's their primary surface.
+  if (role === ROLE_PROJECT_ADMIN) return '/keys'
   // Tester lands on Key Tester because it's always available (Provider
   // Testing only shows when R2 is wired up).
   if (role === ROLE_TESTER) return '/tester'
@@ -79,9 +81,9 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<RoleGate min={ROLE_ADMIN}><Report /></RoleGate>} />
         <Route path="/profit" element={<RoleGate min={ROLE_SUPER_ADMIN}><Profit /></RoleGate>} />
-        <Route path="/keys" element={<RoleGate min={ROLE_ADMIN}><KeyCapacity /></RoleGate>} />
+        <Route path="/keys" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_PROJECT_ADMIN}><KeyCapacity /></RoleGate>} />
         <Route path="/allkeys" element={<AllKeys />} />
-        <Route path="/tester" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_TESTER || r === ROLE_STUDIO_OPERATOR}><KeyTester /></RoleGate>} />
+        <Route path="/tester" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_TESTER || r === ROLE_STUDIO_OPERATOR || r === ROLE_PROJECT_ADMIN}><KeyTester /></RoleGate>} />
         <Route path="/cache" element={<RoleGate min={ROLE_ADMIN}><CacheReport /></RoleGate>} />
         <Route path="/testing" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
         <Route path="/testing/:projectId" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />

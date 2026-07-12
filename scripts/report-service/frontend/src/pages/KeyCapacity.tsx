@@ -3,7 +3,8 @@ import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
 import BatchCreatePanel from '../components/BatchCreatePanel'
 import LocalPoolPanel from '../components/LocalPoolPanel'
-import { api, ChannelRow } from '../api'
+import { api, ChannelRow, ROLE_PROJECT_ADMIN } from '../api'
+import { getCachedRole, loadRole } from '../App'
 
 function fmtETA(hours: number | null): { text: string; cls: string } {
   if (hours === null) return { text: '—', cls: 'text-gray-400' }
@@ -37,6 +38,15 @@ export default function KeyCapacity() {
   // the new "Pool 上 Key" panel. Storing in state (not URL) is fine —
   // both views are cheap to unmount / remount.
   const [tab, setTab] = useState<'capacity' | 'pool'>('capacity')
+  // Project admin (role=7) can only see the classic capacity view — the
+  // Pool 上 Key panel calls super-admin-scoped local-pool endpoints that
+  // would 403 for them.
+  const [role, setRole] = useState<number | null>(getCachedRole())
+  useEffect(() => {
+    if (getCachedRole() !== null) return
+    void loadRole().then(setRole)
+  }, [])
+  const isProjectAdmin = role === ROLE_PROJECT_ADMIN
 
   // 批量改优先级状态：勾选的 channel.id 集合 + 目标优先级值
   const [selected, setSelected] = useState<Set<number>>(new Set())
@@ -126,12 +136,16 @@ export default function KeyCapacity() {
     </button>
   )
 
-  const tabBar = (
-    <div className="flex items-center gap-1 border-b border-gray-200 mb-4">
-      {[
+  const tabDefs = isProjectAdmin
+    ? [{ id: 'capacity' as const, label: '额度与批量创建' }]
+    : [
         { id: 'capacity' as const, label: '额度与批量创建' },
         { id: 'pool' as const, label: 'Pool 上 Key（本地）' },
-      ].map(t => (
+      ]
+
+  const tabBar = (
+    <div className="flex items-center gap-1 border-b border-gray-200 mb-4">
+      {tabDefs.map(t => (
         <button
           key={t.id}
           onClick={() => setTab(t.id)}

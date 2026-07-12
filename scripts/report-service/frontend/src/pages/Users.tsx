@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import Layout from '../components/Layout'
-import { api, ROLE_ADMIN, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_TESTER, ROLE_USER, type AuthMe, type AuthUser } from '../api'
+import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_TESTER, ROLE_USER, type AuthMe, type AuthUser } from '../api'
 
 const ROLE_OPTIONS: { value: number; label: string }[] = [
   { value: ROLE_USER, label: 'User (All Keys only)' },
   { value: ROLE_STUDIO_OPERATOR, label: 'Studio Operator (batch-create, locked to bound studio)' },
   { value: ROLE_TESTER, label: 'Tester (Key Tester + Provider Testing only)' },
+  { value: ROLE_PROJECT_ADMIN, label: 'Project Admin (Key Capacity + Key Tester only)' },
   { value: ROLE_ADMIN, label: 'Admin (no Profit / Provider Testing)' },
   { value: ROLE_SUPER_ADMIN, label: 'Super Admin (all features)' },
 ]
