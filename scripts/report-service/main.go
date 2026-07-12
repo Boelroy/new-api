@@ -50,15 +50,17 @@ var (
 // Role tiers mirror common.RoleCommonUser / RoleAdminUser / RoleRootUser in
 // the main service. Routes are gated against these via requireRole.
 //
-// minTesterRole and minStudioOperatorRole are horizontal specializations,
-// not tiers: they grant access to a narrow set of endpoints
-// (Key Tester + Provider Testing for tester; batch channel creation scoped
-// to their bound studio for studio operator) without inheriting admin
-// permissions by virtue of being numerically above minUserRole.
+// minTesterRole, minStudioOperatorRole and minProjectAdminRole are
+// horizontal specializations, not tiers: they grant access to a narrow set
+// of endpoints (Key Tester + Provider Testing for tester; batch channel
+// creation scoped to their bound studio for studio operator; Key Capacity
+// + Key Tester for project admin) without inheriting admin permissions by
+// virtue of being numerically above minUserRole.
 const (
 	minUserRole           = 1   // any authenticated main-service user
 	minStudioOperatorRole = 2   // batch-create channels, scoped to bound studio
 	minTesterRole         = 5   // Key Tester + Provider Testing only
+	minProjectAdminRole   = 7   // Key Capacity + Key Tester only
 	minAdminRole          = 10  // common.RoleAdminUser
 	minSuperAdminRole     = 100 // common.RoleRootUser
 )
@@ -289,6 +291,23 @@ func requireRoleOrStudioOperator(min int) gin.HandlerFunc {
 		roleAny, _ := c.Get("role")
 		role, _ := roleAny.(int)
 		if role >= min || role == minStudioOperatorRole {
+			c.Next()
+			return
+		}
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		c.Abort()
+	}
+}
+
+// requireRoleOrProjectAdmin grants access to callers at min tier OR the
+// project-admin role. Project admin (role=7) is a horizontal
+// specialization: they can view Key Capacity and use Key Tester, but do
+// not inherit any other admin surface.
+func requireRoleOrProjectAdmin(min int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		roleAny, _ := c.Get("role")
+		role, _ := roleAny.(int)
+		if role >= min || role == minProjectAdminRole {
 			c.Next()
 			return
 		}
@@ -1283,7 +1302,7 @@ func handleLogout(c *gin.Context) {
 
 func isValidRoleTier(role int) bool {
 	switch role {
-	case minUserRole, minStudioOperatorRole, minTesterRole, minAdminRole, minSuperAdminRole:
+	case minUserRole, minStudioOperatorRole, minTesterRole, minProjectAdminRole, minAdminRole, minSuperAdminRole:
 		return true
 	}
 	return false
@@ -1329,7 +1348,7 @@ func handleUserCreate(c *gin.Context) {
 		return
 	}
 	if !isValidRoleTier(body.Role) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 5, 10, or 100"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 5, 7, 10, or 100"})
 		return
 	}
 	// Anti-escalation on create: an admin (non-super) can only mint accounts
@@ -1394,7 +1413,7 @@ func handleUserUpdate(c *gin.Context) {
 	// out, and cannot demote the last remaining super admin via this handler.
 	if body.Role != nil {
 		if !isValidRoleTier(*body.Role) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 5, 10, or 100"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 5, 7, 10, or 100"})
 			return
 		}
 		if target.Role >= minSuperAdminRole && *body.Role < minSuperAdminRole {
@@ -3008,19 +3027,49 @@ func main() {
 	api.GET("/allkeys/rpm", handleAllKeysRPM)
 	// Studio Operator (role=2) can batch-create channels scoped to their
 	// bound studio. The handler enforces the studio lock; admin+ retain
-	// full freedom. GET /config/batch-models is opened at the same tier
-	// so the operator can see which models will be assigned; POST stays
-	// admin-only so they can't change the default list.
-	api.POST("/channels/batch-create", requireRoleOrStudioOperator(minAdminRole), handleBatchCreateChannels)
-	api.GET("/config/batch-models", requireRoleOrStudioOperator(minAdminRole), handleGetBatchModels)
+	// full freedom. Project admin (role=7) is also allowed because they
+	// own the Key Capacity page (which hosts BatchCreatePanel).
+	// GET /config/batch-models is opened at the same tier so the operator
+	// can see which models will be assigned; POST stays admin-only so they
+	// can't change the default list.
+	api.POST("/channels/batch-create", func(c *gin.Context) {
+		roleAny, _ := c.Get("role")
+		role, _ := roleAny.(int)
+		if role >= minAdminRole || role == minStudioOperatorRole || role == minProjectAdminRole {
+			c.Next()
+			return
+		}
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		c.Abort()
+	}, handleBatchCreateChannels)
+	api.GET("/config/batch-models", func(c *gin.Context) {
+		roleAny, _ := c.Get("role")
+		role, _ := roleAny.(int)
+		if role >= minAdminRole || role == minStudioOperatorRole || role == minProjectAdminRole {
+			c.Next()
+			return
+		}
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		c.Abort()
+	}, handleGetBatchModels)
+
+	// Key Capacity page endpoints. Shared by admin+ and project_admin
+	// (role=7). Project admin is a horizontal role scoped to the Key
+	// Capacity + Key Tester surfaces; it does not inherit any other admin
+	// route.
+	api.GET("/keys/data", requireRoleOrProjectAdmin(minAdminRole), handleKeysData)
+	api.POST("/keys/quota", requireRoleOrProjectAdmin(minAdminRole), handleSaveQuotas)
+	api.POST("/channels/batch-priority", requireRoleOrProjectAdmin(minAdminRole), handleBatchUpdateChannelPriority)
+	// Studios list is needed by BatchCreatePanel (Key Capacity) so project
+	// admin can populate the studio dropdown. Also used by admin+ Users
+	// page and by studio_operator's locked-studio UI — safe to open
+	// broadly.
+	api.GET("/studios", requireRoleOrProjectAdmin(minAdminRole), handleStudiosList)
 
 	adminAPI := api.Group("", requireRole(minAdminRole))
 	adminAPI.GET("/report", handleReport)
 	adminAPI.GET("/export/csv", handleExportCSV)
 	adminAPI.GET("/export/html", handleExportHTML)
-	adminAPI.GET("/keys/data", handleKeysData)
-	adminAPI.POST("/keys/quota", handleSaveQuotas)
-	adminAPI.POST("/channels/batch-priority", handleBatchUpdateChannelPriority)
 	adminAPI.POST("/config/batch-models", handleSetBatchModels)
 	adminAPI.GET("/cache-stats", handleCacheStats)
 	adminAPI.POST("/refresh", handleRefresh)
@@ -3032,16 +3081,16 @@ func main() {
 	// page can manage it even on deployments where the profit report is off.
 	adminAPI.POST("/keys/pricing", handleSaveKeyPricing)
 	adminAPI.POST("/keys/pricing/bulk", handleBulkSaveKeyPricing)
-	adminAPI.GET("/studios", handleStudiosList)
 	adminAPI.GET("/detect/models", handleDetectModels)
-	// Key Tester: admin+, tester (role=5), and studio_operator (role=2).
-	// Tester is scoped to Key Tester + Provider Testing (see the testingAPI
-	// group below); studio_operator additionally gets Key Tester as a
-	// horizontal utility for the batch-upload flow they own.
+	// Key Tester: admin+, tester (role=5), studio_operator (role=2), and
+	// project_admin (role=7). Tester is scoped to Key Tester + Provider
+	// Testing (see the testingAPI group below); studio_operator additionally
+	// gets Key Tester as a horizontal utility for the batch-upload flow they
+	// own; project_admin owns the Key Capacity + Key Tester surfaces.
 	api.POST("/keys/test", func(c *gin.Context) {
 		roleAny, _ := c.Get("role")
 		role, _ := roleAny.(int)
-		if role >= minAdminRole || role == minTesterRole || role == minStudioOperatorRole {
+		if role >= minAdminRole || role == minTesterRole || role == minStudioOperatorRole || role == minProjectAdminRole {
 			c.Next()
 			return
 		}
