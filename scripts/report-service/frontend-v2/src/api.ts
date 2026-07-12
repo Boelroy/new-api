@@ -61,6 +61,11 @@ export interface KeyPoolRow {
   failed_reason: string;
   created_at: number;
   updated_at: number;
+  // Populated in drilldown / usage responses.
+  channel_name?: string;
+  profile_name?: string;
+  used_quota_raw?: number;
+  used_usd?: number;
 }
 
 export interface UsageRow extends KeyPoolRow {
@@ -161,4 +166,6 @@ export const api = {
   createProfile: (b: unknown) => request<{ id: number }>('POST', '/api/v2/profiles', b),
   updateProfile: (id: number, b: unknown) => request<{ ok: boolean }>('PATCH', `/api/v2/profiles/${id}`, b),
   deleteProfile: (id: number) => request<{ ok: boolean }>('DELETE', `/api/v2/profiles/${id}`),
+  profileChannels: (id: number) =>
+    request<{ profile: { id: number; name: string }; keys: KeyPoolRow[] }>('GET', `/api/v2/profiles/${id}/channels`),
 };

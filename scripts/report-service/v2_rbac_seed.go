@@ -98,6 +98,21 @@ var builtinRoleSeeds = []builtinRoleSeed{
 		},
 	},
 	{
+		// Project Admin: Key Capacity + Key Tester only. A horizontal
+		// role that owns per-project key-capacity oversight without any
+		// broader admin surface.
+		Name:        RoleProjectAdmin,
+		DisplayName: "Project Admin",
+		Level:       LevelProjectAdmin,
+		Permissions: []Permission{
+			{ActionKeysPoolView, ScopeAnyStudio},
+			{ActionKeysPoolUpload, ScopeAnyStudio},
+			{ActionKeysNewapiView, ScopeAnyStudio},
+			{ActionKeysNewapiUploadDir, ScopeAnyStudio},
+			{ActionTestingKeyTester, ScopeGlobal},
+		},
+	},
+	{
 		Name:        RoleUser,
 		DisplayName: "User",
 		Level:       LevelUser,
@@ -219,6 +234,8 @@ func builtinRoleNameForLegacy(v1Role int) string {
 		return RoleSuperadmin
 	case minAdminRole:
 		return RoleAdmin
+	case minProjectAdminRole:
+		return RoleProjectAdmin
 	case minStudioOperatorRole:
 		return RoleStudioOperator
 	case minTesterRole:

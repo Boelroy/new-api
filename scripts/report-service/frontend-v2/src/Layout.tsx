@@ -21,7 +21,9 @@ const NAV: NavItem[] = [
   { to: '/usage', labelKey: 'nav.usage', perm: 'usage.view', scope: 'self' },
   { to: '/roles', labelKey: 'nav.roles', perm: 'roles.view' },
   { to: '/users', labelKey: 'nav.users', perm: 'users.view' },
-  { to: '/profiles', labelKey: 'nav.profiles', perm: 'remote_newapi.profile.manage' },
+  // Sites: admins/super get CRUD; viewers with keys.newapi.view get a
+  // slim read-only list so they can still drill into a site's channels.
+  { to: '/profiles', labelKey: 'nav.profiles', perm: 'keys.newapi.view', scope: 'own_studio' },
   { to: '/settings', labelKey: 'nav.settings', perm: 'system.config' },
 ];
 

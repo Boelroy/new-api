@@ -10,6 +10,7 @@ import KeysPool from './pages/KeysPool';
 import KeysActive from './pages/KeysActive';
 import Usage from './pages/Usage';
 import Profiles from './pages/Profiles';
+import ProfileKeys from './pages/ProfileKeys';
 // (three legacy /v2/usage/{my,studio,all} routes were merged into one
 // /v2/usage page with an in-page scope switcher.)
 import Settings from './pages/Settings';
@@ -46,6 +47,7 @@ export default function App() {
           <Route path="usage/studio" element={<Navigate to="/usage" replace />} />
           <Route path="usage/all" element={<Navigate to="/usage" replace />} />
           <Route path="profiles" element={<Profiles />} />
+          <Route path="profiles/:id/keys" element={<ProfileKeys />} />
           <Route path="settings" element={<Settings />} />
         </Route>
       </Routes>

@@ -1,16 +1,27 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api, ProfileFull } from '../api';
+import { useAuth } from '../auth';
 import { useI18n } from '../i18n';
 
 export default function Profiles() {
   const { t } = useI18n();
-  const [rows, setRows] = useState<ProfileFull[]>([]);
+  const { hasPerm } = useAuth();
+  const canManage = hasPerm('remote_newapi.profile.manage');
+  const canViewKeys = hasPerm('keys.newapi.view', 'own_studio');
+  // Rows can be slim (view-only) or full (with host/pool config). We treat
+  // them uniformly via a soft-typed Partial so studio_operator viewers can
+  // land here without null-crashing on host/token fields.
+  const [rows, setRows] = useState<Partial<ProfileFull>[]>([]);
   const [err, setErr] = useState('');
   const [editing, setEditing] = useState<ProfileFull | null>(null);
   const [creating, setCreating] = useState(false);
 
   const reload = async () => {
     try {
+      // Backend serves the same URL; response shape depends on caller
+      // perms. listProfilesFull TS binding is a superset — extra fields
+      // are simply undefined in slim mode.
       const p = await api.listProfilesFull();
       setRows(p.profiles);
     } catch (e: any) { setErr(e?.message ?? String(e)); }
@@ -21,7 +32,9 @@ export default function Profiles() {
     <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-xl text-slate-900 font-semibold">{t('profiles.title')}</h1>
-        <button className="btn btn-primary" onClick={() => setCreating(true)}>{t('profiles.new')}</button>
+        {canManage && (
+          <button className="btn btn-primary" onClick={() => setCreating(true)}>{t('profiles.new')}</button>
+        )}
       </div>
       {err && <div className="text-red-600 text-sm">{err}</div>}
       <div className="card overflow-x-auto">
@@ -30,9 +43,9 @@ export default function Profiles() {
             <tr>
               <th className="th">{t('users.col.id')}</th>
               <th className="th">{t('profiles.col.name')}</th>
-              <th className="th">{t('profiles.col.host')}</th>
-              <th className="th">{t('profiles.col.token')}</th>
-              <th className="th">{t('profiles.col.pool')}</th>
+              {canManage && <th className="th">{t('profiles.col.host')}</th>}
+              {canManage && <th className="th">{t('profiles.col.token')}</th>}
+              {canManage && <th className="th">{t('profiles.col.pool')}</th>}
               <th className="th"></th>
             </tr>
           </thead>
@@ -41,22 +54,33 @@ export default function Profiles() {
               <tr key={p.id}>
                 <td className="td">{p.id}</td>
                 <td className="td">{p.name}</td>
-                <td className="td font-mono text-xs">{p.host}</td>
-                <td className="td">
-                  {p.has_access_token ? <span className="text-green-700">{t('profiles.token.set')}</span> : <span className="text-red-600">{t('profiles.token.missing')}</span>}
-                </td>
-                <td className="td text-xs text-slate-400">
-                  {p.auto_mode ? t('profiles.pool.auto', { base: p.rpm_base, min: p.rpm_min }) : `${p.pool_interval_sec}s / ${p.pool_batch_size}`}
-                </td>
+                {canManage && <td className="td font-mono text-xs">{p.host}</td>}
+                {canManage && (
+                  <td className="td">
+                    {p.has_access_token ? <span className="text-green-700">{t('profiles.token.set')}</span> : <span className="text-red-600">{t('profiles.token.missing')}</span>}
+                  </td>
+                )}
+                {canManage && (
+                  <td className="td text-xs text-slate-400">
+                    {p.auto_mode ? t('profiles.pool.auto', { base: p.rpm_base ?? 0, min: p.rpm_min ?? 0 }) : `${p.pool_interval_sec ?? 60}s / ${p.pool_batch_size ?? 2}`}
+                  </td>
+                )}
                 <td className="td text-right space-x-2">
-                  <button className="btn" onClick={() => setEditing(p)}>{t('common.edit')}</button>
-                  <button
-                    className="btn btn-danger"
-                    onClick={async () => {
-                      if (!confirm(t('profiles.deleteConfirm', { name: p.name }))) return;
-                      try { await api.deleteProfile(p.id); reload(); } catch (e: any) { alert(e?.message); }
-                    }}
-                  >{t('common.delete')}</button>
+                  {canViewKeys && (
+                    <Link to={`/profiles/${p.id}/keys`} className="btn">{t('profiles.viewKeys')}</Link>
+                  )}
+                  {canManage && (
+                    <button className="btn" onClick={() => setEditing(p as ProfileFull)}>{t('common.edit')}</button>
+                  )}
+                  {canManage && (
+                    <button
+                      className="btn btn-danger"
+                      onClick={async () => {
+                        if (!confirm(t('profiles.deleteConfirm', { name: p.name ?? '' }))) return;
+                        try { await api.deleteProfile(p.id!); reload(); } catch (e: any) { alert(e?.message); }
+                      }}
+                    >{t('common.delete')}</button>
+                  )}
                 </td>
               </tr>
             ))}

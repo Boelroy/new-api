@@ -26,6 +26,8 @@ func registerV2ProfilesRoutes(api *gin.RouterGroup) {
 	api.POST("/profiles", requirePermission(ActionRemoteProfileManage, ScopeGlobal), v2HandleProfileCreate)
 	api.PATCH("/profiles/:id", requirePermission(ActionRemoteProfileManage, ScopeGlobal), v2HandleProfileUpdate)
 	api.DELETE("/profiles/:id", requirePermission(ActionRemoteProfileManage, ScopeGlobal), v2HandleProfileDelete)
+	// Drilldown: list all channels on a profile (unified V2 + pre-V2 rows).
+	registerV2ProfileChannelsRoute(api)
 }
 
 type v2ProfileSlim struct {

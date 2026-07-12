@@ -34,6 +34,7 @@ import (
 const (
 	RoleSuperadmin     = "superadmin"
 	RoleAdmin          = "admin"
+	RoleProjectAdmin   = "project_admin"
 	RoleStudioOperator = "studio_operator"
 	RoleTester         = "tester"
 	RoleUser           = "user"
@@ -45,6 +46,7 @@ const (
 const (
 	LevelSuperadmin     = 100
 	LevelAdmin          = 50
+	LevelProjectAdmin   = 25
 	LevelStudioOperator = 20
 	LevelTester         = 15
 	LevelUser           = 10
@@ -669,6 +671,8 @@ func legacyLevelForRole(v1Role int) int {
 		return LevelSuperadmin
 	case minAdminRole:
 		return LevelAdmin
+	case minProjectAdminRole:
+		return LevelProjectAdmin
 	case minStudioOperatorRole:
 		return LevelStudioOperator
 	case minTesterRole:

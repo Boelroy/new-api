@@ -39,6 +39,13 @@ type KeyPoolRow struct {
 	// to a channel; 0 otherwise. status=3 means auto-disabled = dead.
 	RemoteStatus int
 
+	// The following fields are populated by drilldown / usage queries that
+	// join into remote_channel_current + remote_newapi_profile. Zero
+	// values in queries that don't need them.
+	ChannelName  string
+	ProfileName  string
+	UsedQuotaRaw int64
+
 	// keyEncrypted is the AES-GCM ciphertext. Unexported so it never
 	// appears in JSON marshaling by mistake. Populated by queryKeyPoolRows.
 	keyEncrypted string
@@ -70,6 +77,13 @@ type KeyPoolDTO struct {
 	FailedReason      string   `json:"failed_reason"`
 	CreatedAt         int64    `json:"created_at"`
 	UpdatedAt         int64    `json:"updated_at"`
+
+	// Populated in drilldown / usage responses. omitempty on the numeric
+	// ones keeps the shape clean for endpoints that don't need them.
+	ChannelName  string  `json:"channel_name,omitempty"`
+	ProfileName  string  `json:"profile_name,omitempty"`
+	UsedQuotaRaw int64   `json:"used_quota_raw,omitempty"`
+	UsedUSD      float64 `json:"used_usd,omitempty"`
 }
 
 // isDeadRow returns true when the row's linked remote channel is
@@ -115,6 +129,13 @@ func serializeKeyRow(r KeyPoolRow, canRevealDead bool) KeyPoolDTO {
 		FailedReason:      r.FailedReason,
 		CreatedAt:         r.CreatedAt,
 		UpdatedAt:         r.UpdatedAt,
+		ChannelName:       r.ChannelName,
+		ProfileName:       r.ProfileName,
+		UsedQuotaRaw:      r.UsedQuotaRaw,
+	}
+	if r.UsedQuotaRaw > 0 {
+		// quotaPerUnit lives in main.go (500000 raw units = 1 USD).
+		dto.UsedUSD = roundTo(float64(r.UsedQuotaRaw)/quotaPerUnit, 6)
 	}
 	if !dead || !canRevealDead {
 		return dto
