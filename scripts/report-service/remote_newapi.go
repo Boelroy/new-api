@@ -3767,14 +3767,19 @@ func writeProfileErrorSummary(c *gin.Context, e profileErrorSummaryEntry, window
 const (
 	// errorLogSyncInterval is how often we run one sync tick per profile.
 	errorLogSyncInterval = 60 * time.Second
-	// errorLogPageSize is the paginated /api/log/ page size per HTTP call.
-	// 200 is the remote's typical soft cap and keeps a page under ~1MB.
-	errorLogPageSize = 200
+	// errorLogPageSize matches the remote's hard cap. newapi
+	// (common/page_info.go GetPageQuery) silently caps page_size at 100
+	// — asking for more just means our short-page break condition
+	// trips on page 1 and we sync ~100 rows/tick instead of the
+	// intended throughput. Keep this at 100 so the short-page check
+	// stays honest.
+	errorLogPageSize = 100
 	// errorLogPagesPerTick bounds the pagination depth per tick so a
-	// backlog doesn't monopolise the sync loop. 2000 rows / minute is
-	// plenty for realistic error volumes; a genuine flood catches up
-	// over subsequent ticks.
-	errorLogPagesPerTick = 10
+	// backlog doesn't monopolise the sync loop. With page_size=100 the
+	// per-tick cap is 100 × pagesPerTick rows. 2000 rows/min is plenty
+	// for realistic error volumes; a genuine flood catches up over
+	// subsequent ticks.
+	errorLogPagesPerTick = 20
 	// errorLogInitialBackfill is how far back we go on first sync per
 	// profile (last_synced_at = 0). Trades startup time for immediate
 	// usefulness on the "过去 24 小时" window.
@@ -3869,7 +3874,11 @@ func syncOneProfileErrorLogs(profileID int64) {
 
 	ingested := 0
 	maxCreated := lastSynced
+	remoteTotal := int64(-1)
+	pagesRead := 0
+	drained := false
 	for page := 1; page <= errorLogPagesPerTick; page++ {
+		pagesRead = page
 		q := url.Values{}
 		q.Set("type", "5")
 		q.Set("start_timestamp", strconv.FormatInt(startAt, 10))
@@ -3898,7 +3907,11 @@ func syncOneProfileErrorLogs(profileID int64) {
 			recordErrorSyncFailure(profileID, fmt.Sprintf("page %d decode: %v", page, err))
 			return
 		}
+		if remoteTotal < 0 {
+			remoteTotal = resp.Total
+		}
 		if len(resp.Items) == 0 {
+			drained = true
 			break
 		}
 		for _, it := range resp.Items {
@@ -3932,8 +3945,17 @@ func syncOneProfileErrorLogs(profileID int64) {
 		// If this page came back short of the requested size, we've
 		// caught up — no need to fetch page+1.
 		if len(resp.Items) < errorLogPageSize {
+			drained = true
 			break
 		}
+	}
+	// Log backlog when we hit the tick cap without draining: remote
+	// clearly has more rows in the window than we managed to ingest.
+	// The gap fills over subsequent ticks unless the error rate is
+	// higher than pageSize × pagesPerTick per minute (2000 by default).
+	if !drained && pagesRead >= errorLogPagesPerTick && remoteTotal > int64(ingested) {
+		log.Printf("[error-sync] profile=%d BACKLOG: ingested=%d/tick, remote_total=%d (window %ds, next tick will resume)",
+			profileID, ingested, remoteTotal, endAt-startAt)
 	}
 
 	// Update state row. UPSERT so first-ever run creates it.
