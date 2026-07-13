@@ -3104,10 +3104,16 @@ func handleRemoteTestKey(c *gin.Context) {
 // requested-window quota AND the remote's hardcoded-60s rpm/tpm. TTL is
 // short (30s) since rpm/tpm are the "realtime" bit and a 5-min stale
 // value defeats the point.
+//
+// errRpm mirrors rpm but for LogTypeError (type=5) rows — used to
+// surface an error-rate column on the /remote-channels page. Fetched
+// with the same TTL as the success stats via a piggyback call to
+// /api/log/stat?type=5 per channel.
 type lastHourEntry struct {
 	quota   int64
 	rpm     int64
 	tpm     int64
+	errRpm  int64
 	fetched time.Time
 }
 
@@ -3166,6 +3172,7 @@ func handleRemoteChannelLastHour(c *gin.Context) {
 	dataOut := make(map[string]int64, len(body.ChannelIDs))
 	rpmOut := make(map[string]int64, len(body.ChannelIDs))
 	tpmOut := make(map[string]int64, len(body.ChannelIDs))
+	errRpmOut := make(map[string]int64, len(body.ChannelIDs))
 	for _, chID := range body.ChannelIDs {
 		cacheKey := strconv.FormatInt(body.ProfileID, 10) + ":" + strconv.FormatInt(chID, 10)
 		lastHourCacheMu.Lock()
@@ -3176,10 +3183,14 @@ func handleRemoteChannelLastHour(c *gin.Context) {
 			dataOut[idStr] = entry.quota
 			rpmOut[idStr] = entry.rpm
 			tpmOut[idStr] = entry.tpm
+			errRpmOut[idStr] = entry.errRpm
 			continue
 		}
+		// Two piggyback calls: successful logs (type=2, quota/rpm/tpm) and
+		// error logs (type=5, rpm only — errors have 0 quota so quota/tpm
+		// aren't meaningful). Cached together so a refresh doesn't double-hit.
 		q := url.Values{}
-		q.Set("type", "2") // consume logs only
+		q.Set("type", "2")
 		q.Set("channel", idStr)
 		q.Set("start_timestamp", strconv.FormatInt(oneHourAgo.Unix(), 10))
 		q.Set("end_timestamp", strconv.FormatInt(now.Unix(), 10))
@@ -3189,6 +3200,7 @@ func handleRemoteChannelLastHour(c *gin.Context) {
 			dataOut[idStr] = 0
 			rpmOut[idStr] = 0
 			tpmOut[idStr] = 0
+			errRpmOut[idStr] = 0
 			continue
 		}
 		// Remote returns {quota, rpm, tpm}; rpm/tpm are always over the last 60s
@@ -3203,14 +3215,317 @@ func handleRemoteChannelLastHour(c *gin.Context) {
 			dataOut[idStr] = 0
 			rpmOut[idStr] = 0
 			tpmOut[idStr] = 0
+			errRpmOut[idStr] = 0
 			continue
 		}
+		// Error stats — best-effort. If this call fails we keep the success
+		// numbers and record err_rpm=0; the UI shows "—" and moves on.
+		var errRpm int64
+		qErr := url.Values{}
+		qErr.Set("type", "5")
+		qErr.Set("channel", idStr)
+		qErr.Set("start_timestamp", strconv.FormatInt(oneHourAgo.Unix(), 10))
+		qErr.Set("end_timestamp", strconv.FormatInt(now.Unix(), 10))
+		if errData, errErr := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/stat", token, userID, qErr, nil); errErr == nil {
+			var errStat struct {
+				Rpm int64 `json:"rpm"`
+			}
+			if err := json.Unmarshal(errData, &errStat); err == nil {
+				errRpm = errStat.Rpm
+			}
+		}
+
 		dataOut[idStr] = stat.Quota
 		rpmOut[idStr] = stat.Rpm
 		tpmOut[idStr] = stat.Tpm
+		errRpmOut[idStr] = errRpm
 		lastHourCacheMu.Lock()
-		lastHourCache[cacheKey] = lastHourEntry{quota: stat.Quota, rpm: stat.Rpm, tpm: stat.Tpm, fetched: now}
+		lastHourCache[cacheKey] = lastHourEntry{
+			quota:   stat.Quota,
+			rpm:     stat.Rpm,
+			tpm:     stat.Tpm,
+			errRpm:  errRpm,
+			fetched: now,
+		}
 		lastHourCacheMu.Unlock()
 	}
-	c.JSON(http.StatusOK, gin.H{"data": dataOut, "rpm": rpmOut, "tpm": tpmOut})
+	c.JSON(http.StatusOK, gin.H{
+		"data":    dataOut,
+		"rpm":     rpmOut,
+		"tpm":     tpmOut,
+		"err_rpm": errRpmOut,
+	})
+}
+
+// ---- Handler: per-channel error breakdown ----
+
+// errorBreakdownTTL — cache the categorised counts a little longer than
+// the last-hour stats. Errors don't shift by the second, and a paginated
+// log fetch is heavier than /api/log/stat.
+const errorBreakdownTTL = 5 * time.Minute
+
+// errorBreakdownEntry caches one breakdown per (profile_id, channel_id, window).
+type errorBreakdownEntry struct {
+	total       int64
+	buckets     []errorBucket
+	fetched     time.Time
+}
+
+type errorBucket struct {
+	ErrorType  string `json:"error_type"`
+	StatusCode int    `json:"status_code"`
+	Count      int    `json:"count"`
+}
+
+var (
+	errorBreakdownCache   = make(map[string]errorBreakdownEntry)
+	errorBreakdownCacheMu sync.Mutex
+)
+
+// handleRemoteChannelErrors returns the categorised breakdown of error
+// logs (LogTypeError=5) for a single channel over `window_sec` seconds
+// (default 3600). Groups by (error_type, status_code) from log.other
+// JSON. Cached for 5 minutes per (profile_id, channel_id, window) so
+// repeated inspection doesn't hammer the remote.
+//
+// Response:
+//   {
+//     "total":   425,
+//     "buckets": [{"error_type":"openai_error","status_code":429,"count":300}, ...]
+//   }
+func handleRemoteChannelErrors(c *gin.Context) {
+	var body struct {
+		ProfileID  int64 `json:"profile_id"`
+		ChannelID  int64 `json:"channel_id"`
+		WindowSec  int64 `json:"window_sec"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.ProfileID <= 0 || body.ChannelID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id and channel_id are required"})
+		return
+	}
+	if body.WindowSec <= 0 || body.WindowSec > 24*3600 {
+		body.WindowSec = 3600
+	}
+
+	cacheKey := fmt.Sprintf("%d:%d:%d", body.ProfileID, body.ChannelID, body.WindowSec)
+	now := time.Now()
+	errorBreakdownCacheMu.Lock()
+	entry, ok := errorBreakdownCache[cacheKey]
+	errorBreakdownCacheMu.Unlock()
+	if ok && now.Sub(entry.fetched) < errorBreakdownTTL {
+		c.JSON(http.StatusOK, gin.H{"total": entry.total, "buckets": entry.buckets, "cached": true})
+		return
+	}
+
+	host, userID, token, err := loadRemoteProfileByID(body.ProfileID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+
+	windowStart := now.Add(-time.Duration(body.WindowSec) * time.Second)
+	// One page of up to 200 rows. If the channel has > 200 errors in the
+	// window we truncate — but the pageInfo.total from the remote gives
+	// the real total, so the top-level count stays honest even when the
+	// bucket breakdown is a sample. Sufficient for a UI hover.
+	q := url.Values{}
+	q.Set("type", "5")
+	q.Set("channel", strconv.FormatInt(body.ChannelID, 10))
+	q.Set("start_timestamp", strconv.FormatInt(windowStart.Unix(), 10))
+	q.Set("end_timestamp", strconv.FormatInt(now.Unix(), 10))
+	q.Set("p", "1")
+	q.Set("page_size", "200")
+
+	data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/", token, userID, q, nil)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Remote paginated response wraps items + total.
+	var resp struct {
+		Items []struct {
+			Content string `json:"content"`
+			Other   string `json:"other"`
+		} `json:"items"`
+		Total int64 `json:"total"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "decode: " + err.Error()})
+		return
+	}
+
+	// Aggregate by (error_type, status_code). Missing / unparseable values
+	// fall into ("unknown", 0) so nothing is silently dropped.
+	type key struct {
+		Type   string
+		Status int
+	}
+	counts := make(map[key]int)
+	for _, it := range resp.Items {
+		var oj map[string]interface{}
+		_ = json.Unmarshal([]byte(it.Other), &oj)
+		var k key
+		if s, ok := oj["error_type"].(string); ok {
+			k.Type = s
+		} else {
+			k.Type = "unknown"
+		}
+		if v, ok := oj["status_code"].(float64); ok {
+			k.Status = int(v)
+		}
+		counts[k]++
+	}
+	buckets := make([]errorBucket, 0, len(counts))
+	for k, n := range counts {
+		buckets = append(buckets, errorBucket{ErrorType: k.Type, StatusCode: k.Status, Count: n})
+	}
+	// Sort descending by count for stable UI order.
+	sort.Slice(buckets, func(i, j int) bool {
+		if buckets[i].Count != buckets[j].Count {
+			return buckets[i].Count > buckets[j].Count
+		}
+		if buckets[i].ErrorType != buckets[j].ErrorType {
+			return buckets[i].ErrorType < buckets[j].ErrorType
+		}
+		return buckets[i].StatusCode < buckets[j].StatusCode
+	})
+
+	errorBreakdownCacheMu.Lock()
+	errorBreakdownCache[cacheKey] = errorBreakdownEntry{total: resp.Total, buckets: buckets, fetched: now}
+	errorBreakdownCacheMu.Unlock()
+
+	c.JSON(http.StatusOK, gin.H{
+		"total":       resp.Total,
+		"buckets":     buckets,
+		"sample_size": len(resp.Items),
+		"window_sec":  body.WindowSec,
+	})
+}
+
+// ---- Handler: per-channel success / error counts over a window ----
+
+// channelCountsTTL — 5min cache lines up with the error-breakdown cache
+// and prevents refresh spam. Counts don't shift by the second and users
+// typically eyeball one profile at a time.
+const channelCountsTTL = 5 * time.Minute
+
+type channelCountsEntry struct {
+	success int64
+	errors  int64
+	fetched time.Time
+}
+
+var (
+	channelCountsCache   = make(map[string]channelCountsEntry)
+	channelCountsCacheMu sync.Mutex
+)
+
+// handleRemoteChannelCounts returns exact success + error counts for
+// each channel over the last `window_sec` seconds. Uses the remote's
+// paginated /api/log/ endpoint with page_size=1 to grab `total` from
+// pageInfo — cheap regardless of the actual count. Two calls per
+// channel (type=2 success, type=5 error).
+//
+// Response:
+//   {"data": {"123": {"success": 8123, "errors": 425}, ...}, "window_sec": 3600}
+func handleRemoteChannelCounts(c *gin.Context) {
+	var body struct {
+		ProfileID  int64   `json:"profile_id"`
+		ChannelIDs []int64 `json:"channel_ids"`
+		WindowSec  int64   `json:"window_sec"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.ProfileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	if len(body.ChannelIDs) == 0 {
+		c.JSON(http.StatusOK, gin.H{"data": map[string]any{}})
+		return
+	}
+	const maxIDs = 200
+	if len(body.ChannelIDs) > maxIDs {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("too many channel_ids (max %d)", maxIDs)})
+		return
+	}
+	if body.WindowSec <= 0 || body.WindowSec > 7*24*3600 {
+		body.WindowSec = 3600
+	}
+
+	host, userID, token, err := loadRemoteProfileByID(body.ProfileID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 120*time.Second)
+	defer cancel()
+
+	now := time.Now()
+	windowStart := now.Add(-time.Duration(body.WindowSec) * time.Second)
+
+	type row struct {
+		Success int64 `json:"success"`
+		Errors  int64 `json:"errors"`
+	}
+	out := make(map[string]row, len(body.ChannelIDs))
+
+	// One-page probe of the paginated log endpoint. We only need `total`;
+	// pull the smallest page possible to stay fast.
+	probe := func(logType int, chID int64) int64 {
+		q := url.Values{}
+		q.Set("type", strconv.Itoa(logType))
+		q.Set("channel", strconv.FormatInt(chID, 10))
+		q.Set("start_timestamp", strconv.FormatInt(windowStart.Unix(), 10))
+		q.Set("end_timestamp", strconv.FormatInt(now.Unix(), 10))
+		q.Set("p", "1")
+		q.Set("page_size", "1")
+		data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/", token, userID, q, nil)
+		if err != nil {
+			return 0
+		}
+		var resp struct {
+			Total int64 `json:"total"`
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return 0
+		}
+		return resp.Total
+	}
+
+	for _, chID := range body.ChannelIDs {
+		cacheKey := fmt.Sprintf("%d:%d:%d", body.ProfileID, chID, body.WindowSec)
+		channelCountsCacheMu.Lock()
+		entry, ok := channelCountsCache[cacheKey]
+		channelCountsCacheMu.Unlock()
+		idStr := strconv.FormatInt(chID, 10)
+		if ok && now.Sub(entry.fetched) < channelCountsTTL {
+			out[idStr] = row{Success: entry.success, Errors: entry.errors}
+			continue
+		}
+		successCount := probe(2, chID)
+		errorCount := probe(5, chID)
+		out[idStr] = row{Success: successCount, Errors: errorCount}
+		channelCountsCacheMu.Lock()
+		channelCountsCache[cacheKey] = channelCountsEntry{
+			success: successCount,
+			errors:  errorCount,
+			fetched: now,
+		}
+		channelCountsCacheMu.Unlock()
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":       out,
+		"window_sec": body.WindowSec,
+	})
 }

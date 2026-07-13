@@ -465,9 +465,10 @@ export type RemoteChannelUpdateRequest = {
 }
 
 export type RemoteChannelLastHourResponse = {
-  data: Record<string, number> // channel_id -> quota (raw units), 1h window
-  rpm?: Record<string, number> // channel_id -> requests / min, 60s window
-  tpm?: Record<string, number> // channel_id -> tokens / min, 60s window
+  data: Record<string, number>    // channel_id -> quota (raw units), 1h window
+  rpm?: Record<string, number>    // channel_id -> requests / min (60s window)
+  tpm?: Record<string, number>    // channel_id -> tokens / min (60s window)
+  err_rpm?: Record<string, number> // channel_id -> ERROR requests / min (60s window, LogTypeError=5)
 }
 
 // Row in the scheduled-upload queue. `key_masked` is "…" + last 8 chars;
@@ -833,6 +834,34 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ profile_id: profileID, channel_ids: channelIDs }),
+    }),
+
+  // Categorised error breakdown for one channel over the past N seconds
+  // (default 1h). Groups upstream error logs by (error_type, status_code).
+  // Backend caches for 5min per (profile, channel, window).
+  remoteChannelErrors: (profileID: number, channelID: number, windowSec = 3600) =>
+    request<{
+      total: number
+      buckets: Array<{ error_type: string; status_code: number; count: number }>
+      sample_size?: number
+      window_sec?: number
+    }>('/api/remote-newapi/channels/errors', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile_id: profileID, channel_id: channelID, window_sec: windowSec }),
+    }),
+
+  // Success / error counts per channel over `windowSec` (default 1h).
+  // Uses the remote paginated log endpoint with page_size=1 to pull
+  // `total` from pageInfo — cheap regardless of the actual count.
+  remoteChannelCounts: (profileID: number, channelIDs: number[], windowSec = 3600) =>
+    request<{
+      data: Record<string, { success: number; errors: number }>
+      window_sec: number
+    }>('/api/remote-newapi/channels/counts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile_id: profileID, channel_ids: channelIDs, window_sec: windowSec }),
     }),
 
   // Historical snapshots written by the periodic sync loop (see

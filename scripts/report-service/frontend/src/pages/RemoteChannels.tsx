@@ -167,6 +167,20 @@ function RemoteChannelsAdmin() {
   const [seriesCache, setSeriesCache] = useState<Record<number, { t: number; q: number }[]>>({})
   const [seriesLoading, setSeriesLoading] = useState<number | null>(null)
 
+  // Error-rate stats. Opt-in via toolbar button since it costs 2 remote
+  // API calls per channel; backend caches for 5 minutes so subsequent
+  // clicks reuse. rpm/errRpm are both 60s-window request counts (see
+  // /api/log/stat on newapi). Rate = errRpm / (rpm + errRpm) when either
+  // is nonzero; blank when both are 0 (no traffic to measure against).
+  // Error-rate uses precise counts from the remote paginated log endpoint
+  // over `errWindowSec`, not the hardcoded-60s RPM. Preset window keeps
+  // the UI simple; adding a full date-range picker is trivial later.
+  const [errStats, setErrStats] = useState<Record<number, { success: number; errors: number }>>({})
+  const [errRateLoading, setErrRateLoading] = useState(false)
+  const [errWindowSec, setErrWindowSec] = useState(3600) // 1h default
+  // Modal state for the categorised error breakdown popup. null = closed.
+  const [breakdownFor, setBreakdownFor] = useState<{ id: number; name: string } | null>(null)
+
   // Date filter: client-side by channel.created_time, dates interpreted in
   // UTC so [today, today] means "since UTC 00:00 today" and doesn't shift
   // with the operator's browser timezone. Default = today (UTC) on both
@@ -412,6 +426,31 @@ function RemoteChannelsAdmin() {
       setMeta(null)
     } finally {
       setFetching(false)
+    }
+  }
+
+  // Fetch success + error counts for every channel over errWindowSec.
+  // Backend caches 5 min per (profile, channel, window) so re-clicks are
+  // instant. Populates the "错误率" column; the per-channel breakdown
+  // popover fetches its own type-bucketed data lazily on click.
+  const loadErrorRates = async () => {
+    if (!selectedID || channels.length === 0) return
+    setErrRateLoading(true)
+    try {
+      const ids = channels.map(c => c.id)
+      const res = await api.remoteChannelCounts(selectedID, ids, errWindowSec)
+      const next: Record<number, { success: number; errors: number }> = {}
+      for (const c of channels) {
+        const key = String(c.id)
+        const cnt = res.data[key]
+        next[c.id] = { success: cnt?.success ?? 0, errors: cnt?.errors ?? 0 }
+      }
+      setErrStats(next)
+    } catch (e: any) {
+      console.warn('error rate load failed', e)
+      alert('加载错误率失败：' + (e?.message || e))
+    } finally {
+      setErrRateLoading(false)
     }
   }
 
@@ -1068,6 +1107,28 @@ function RemoteChannelsAdmin() {
       >
         + 批量上 key
       </button>
+      <div className="inline-flex items-center gap-1 border border-rose-300 rounded-md">
+        <select
+          value={errWindowSec}
+          onChange={e => setErrWindowSec(parseInt(e.target.value, 10))}
+          className="text-xs px-2 py-1.5 bg-white text-rose-700 border-r border-rose-200 focus:outline-none rounded-l-md"
+          title="错误率统计的时间窗口"
+        >
+          <option value={5 * 60}>过去 5 分钟</option>
+          <option value={15 * 60}>过去 15 分钟</option>
+          <option value={60 * 60}>过去 1 小时</option>
+          <option value={6 * 60 * 60}>过去 6 小时</option>
+          <option value={24 * 60 * 60}>过去 24 小时</option>
+        </select>
+        <button
+          onClick={loadErrorRates}
+          disabled={!selectedID || errRateLoading || channels.length === 0}
+          className="text-rose-600 px-2.5 py-1.5 text-xs hover:bg-rose-50 disabled:opacity-40 rounded-r-md"
+          title="用选中的时间窗口拉每个渠道的成功/错误数，计算错误率。5 分钟缓存。"
+        >
+          {errRateLoading ? '加载中…' : '加载错误率'}
+        </button>
+      </div>
       <button
         onClick={fetchChannels}
         disabled={!selectedID || fetching}
@@ -1426,6 +1487,7 @@ function RemoteChannelsAdmin() {
                       <th className="px-3 py-2 text-right font-medium">额度 (USD)</th>
                       <th className="px-3 py-2 text-right font-medium" title="本地维护的上游成本, CNY / USD 额度">单价 CNY</th>
                       <th className="px-3 py-2 text-left font-medium">状态</th>
+                      <th className="px-3 py-2 text-right font-medium" title="过去 60 秒的错误率 = err_rpm / (rpm + err_rpm)。点击单元格查看错误类型分桶。">错误率</th>
                       <th className="px-3 py-2 text-left font-medium">Note</th>
                       <th className="px-3 py-2 text-left font-medium">操作</th>
                     </tr>
@@ -1505,6 +1567,12 @@ function RemoteChannelsAdmin() {
                               <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] ${STATUS_CLS[c.status] ?? 'bg-gray-100 text-gray-600'}`}>
                                 {STATUS_LABEL[c.status] ?? c.status}
                               </span>
+                            </td>
+                            <td className="px-3 py-2 tabular-nums text-right">
+                              <ErrorRateCell
+                                stat={errStats[c.id]}
+                                onOpen={() => setBreakdownFor({ id: c.id, name: c.name })}
+                              />
                             </td>
                             <td className="px-3 py-2 text-gray-500 max-w-[180px] truncate" title={c.note || ''}>
                               {c.note || '—'}
@@ -2050,7 +2118,153 @@ function RemoteChannelsAdmin() {
           </div>
         </div>
       )}
+      {breakdownFor && selectedID && (
+        <BreakdownModal
+          profileID={selectedID}
+          channel={breakdownFor}
+          windowSec={errWindowSec}
+          onClose={() => setBreakdownFor(null)}
+        />
+      )}
     </Layout>
+  )
+}
+
+// ErrorRateCell renders "err / (err+ok)" as a percentage in a coloured
+// pill. Clicking opens the breakdown modal for the same channel.
+// stat=undefined ⇒ user hasn't clicked "加载错误率" yet.
+function ErrorRateCell({
+  stat,
+  onOpen,
+}: {
+  stat: { success: number; errors: number } | undefined
+  onOpen: () => void
+}) {
+  if (!stat) return <span className="text-gray-300">—</span>
+  const total = stat.success + stat.errors
+  if (total === 0) return <span className="text-gray-300" title="窗口内无请求">0</span>
+  const rate = stat.errors / total
+  const pct = rate * 100
+  const cls =
+    pct >= 20 ? 'bg-rose-100 text-rose-700 border-rose-200'
+    : pct >= 5 ? 'bg-amber-100 text-amber-700 border-amber-200'
+    : pct > 0  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+    : 'bg-gray-50 text-gray-500 border-gray-200'
+  return (
+    <button
+      onClick={onOpen}
+      className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[11px] tabular-nums hover:opacity-80 ${cls}`}
+      title={`${stat.errors} 错误 / ${total} 总请求 · 点击查看类型分桶`}
+    >
+      {pct.toFixed(pct < 1 ? 2 : 1)}%
+    </button>
+  )
+}
+
+// BreakdownModal fetches (error_type, status_code) buckets for one
+// channel over the same window as the summary cell. Backend already
+// caches for 5min so this is cheap even on repeated opens.
+function BreakdownModal({
+  profileID,
+  channel,
+  windowSec,
+  onClose,
+}: {
+  profileID: number
+  channel: { id: number; name: string }
+  windowSec: number
+  onClose: () => void
+}) {
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState<string | null>(null)
+  const [data, setData] = useState<{
+    total: number
+    buckets: Array<{ error_type: string; status_code: number; count: number }>
+    sample_size?: number
+  } | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      setLoading(true)
+      setErr(null)
+      try {
+        const res = await api.remoteChannelErrors(profileID, channel.id, windowSec)
+        if (cancelled) return
+        setData(res)
+      } catch (e: any) {
+        if (cancelled) return
+        setErr(e?.message || String(e))
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [profileID, channel.id, windowSec])
+
+  const humanWindow = windowSec < 3600
+    ? `${Math.round(windowSec / 60)} 分钟`
+    : `${(windowSec / 3600).toFixed(windowSec % 3600 === 0 ? 0 : 1)} 小时`
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-lg" onClick={e => e.stopPropagation()}>
+        <div className="px-4 py-3 border-b border-gray-100 flex items-start justify-between">
+          <div>
+            <div className="text-sm font-medium text-gray-900">
+              渠道 <span className="font-mono text-xs">{channel.name}</span> · 错误类型分桶
+            </div>
+            <div className="text-[11px] text-gray-500 mt-0.5">过去 {humanWindow}</div>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-lg leading-none">×</button>
+        </div>
+        <div className="p-4 max-h-[60vh] overflow-y-auto">
+          {loading && <div className="text-sm text-gray-500">加载中…</div>}
+          {err && <div className="text-sm text-rose-600">{err}</div>}
+          {data && (
+            <>
+              <div className="mb-3 text-sm text-gray-700">
+                共 <span className="font-semibold text-rose-700">{data.total}</span> 条错误日志
+                {data.sample_size !== undefined && data.sample_size < data.total && (
+                  <span className="text-[11px] text-gray-400 ml-2">
+                    （分桶基于最新 {data.sample_size} 条采样）
+                  </span>
+                )}
+              </div>
+              {data.buckets.length === 0 ? (
+                <div className="text-sm text-gray-500">窗口内没有错误</div>
+              ) : (
+                <table className="w-full text-xs">
+                  <thead className="bg-gray-50 text-gray-500">
+                    <tr>
+                      <th className="text-left px-3 py-2 font-medium">错误类型</th>
+                      <th className="text-left px-3 py-2 font-medium">状态码</th>
+                      <th className="text-right px-3 py-2 font-medium">数量</th>
+                      <th className="text-right px-3 py-2 font-medium">占比</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.buckets.map((b, i) => {
+                      const share = data.sample_size ? (b.count / data.sample_size) * 100 : 0
+                      return (
+                        <tr key={i} className="border-t border-gray-100">
+                          <td className="px-3 py-2 font-mono text-[11px]">{b.error_type || '—'}</td>
+                          <td className="px-3 py-2 tabular-nums">{b.status_code || '—'}</td>
+                          <td className="px-3 py-2 tabular-nums text-right">{b.count}</td>
+                          <td className="px-3 py-2 tabular-nums text-right text-gray-500">
+                            {share > 0 ? share.toFixed(1) + '%' : '—'}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
   )
 }
 
