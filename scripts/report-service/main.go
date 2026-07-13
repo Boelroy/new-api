@@ -2900,6 +2900,43 @@ func main() {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_remote_snapshot_by_time
 		   ON remote_channel_snapshot(profile_id, captured_at DESC)`,
+		// Local mirror of remote error logs. Populated by
+		// startRemoteErrorLogSync on a 60s tick per profile. Backs the
+		// error summary / breakdown queries so we don't hit /api/log/
+		// on every UI refresh. Primary key (profile_id, remote_log_id)
+		// deduplicates across sync ticks (which overlap by 60s).
+		`CREATE TABLE IF NOT EXISTS remote_error_log (
+			profile_id      BIGINT NOT NULL,
+			remote_log_id   BIGINT NOT NULL,
+			channel_id      BIGINT NOT NULL DEFAULT 0,
+			model_name      TEXT   NOT NULL DEFAULT '',
+			token_name      TEXT   NOT NULL DEFAULT '',
+			group_name      TEXT   NOT NULL DEFAULT '',
+			created_at      BIGINT NOT NULL,
+			ingested_at     BIGINT NOT NULL,
+			error_type      TEXT   NOT NULL DEFAULT '',
+			status_code     INT    NOT NULL DEFAULT 0,
+			error_code      TEXT   NOT NULL DEFAULT '',
+			request_path    TEXT   NOT NULL DEFAULT '',
+			content_snippet TEXT   NOT NULL DEFAULT '',
+			PRIMARY KEY (profile_id, remote_log_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_remote_error_log_time
+		   ON remote_error_log(profile_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_remote_error_log_channel
+		   ON remote_error_log(profile_id, channel_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_remote_error_log_status
+		   ON remote_error_log(profile_id, status_code, created_at DESC)`,
+		// Per-profile high-water mark + last-run state so incremental
+		// sync knows where to resume. Rows created lazily on first sync
+		// tick for a profile.
+		`CREATE TABLE IF NOT EXISTS remote_error_sync_state (
+			profile_id     BIGINT PRIMARY KEY,
+			last_synced_at BIGINT NOT NULL DEFAULT 0,
+			last_run_at    BIGINT NOT NULL DEFAULT 0,
+			last_error     TEXT   NOT NULL DEFAULT '',
+			total_ingested BIGINT NOT NULL DEFAULT 0
+		)`,
 		// Scheduled upload queue: keys are staged here and either uploaded
 		// immediately (pool_size=0) or throttled (pool_size>0, at most that
 		// many active at a time — the "5-dollar drip" pattern). Keys are
@@ -3005,6 +3042,7 @@ func main() {
 	startRemoteSnapshotPrune()
 	startRemotePendingScheduler()
 	startLocalPendingScheduler()
+	startRemoteErrorLogSync()
 	if profitEnabled {
 		startPipiSync()
 	}

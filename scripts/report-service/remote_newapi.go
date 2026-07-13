@@ -15,10 +15,10 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -3565,7 +3565,10 @@ func handleRemoteChannelCounts(c *gin.Context) {
 
 // ---- Handler: profile-wide error summary + bucket breakdown ----
 
-const profileErrorSummaryTTL = 5 * time.Minute
+// Now that errors come from the local mirror (kept fresh by the 60s
+// sync loop), the summary itself only needs a short cache to
+// deduplicate concurrent UI refreshes.
+const profileErrorSummaryTTL = 30 * time.Second
 
 type profileErrorSummaryEntry struct {
 	totalSuccess int64
@@ -3618,176 +3621,101 @@ func handleRemoteProfileErrorSummary(c *gin.Context) {
 	entry, ok := profileErrorSummaryCache[cacheKey]
 	profileErrorSummaryCacheMu.Unlock()
 	if ok && now.Sub(entry.fetched) < profileErrorSummaryTTL {
-		writeProfileErrorSummary(c, entry, windowSec, true)
+		writeProfileErrorSummary(c, entry, windowSec, true, profileID)
 		return
 	}
 
+	windowStart := now.Add(-time.Duration(windowSec) * time.Second)
+
+	// Error side is entirely local now — startRemoteErrorLogSync keeps
+	// remote_error_log fresh on a 60s tick, and the query is a couple
+	// of indexed range scans. Precise for any window we have coverage
+	// for; the response's `sync_lag_sec` tells the UI when we last
+	// caught up so it can flag stale windows.
+	var totalErrors int64
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM remote_error_log
+		  WHERE profile_id = $1 AND created_at >= $2 AND created_at <= $3`,
+		profileID, windowStart.Unix(), now.Unix(),
+	).Scan(&totalErrors); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "local errors: " + err.Error()})
+		return
+	}
+
+	// Bucket breakdown — pure local aggregation, exact counts.
+	bucketRows, err := db.Query(
+		`SELECT COALESCE(NULLIF(error_type,''),'unknown') AS et,
+		        status_code,
+		        COUNT(*)
+		   FROM remote_error_log
+		  WHERE profile_id = $1 AND created_at >= $2 AND created_at <= $3
+		  GROUP BY et, status_code
+		  ORDER BY COUNT(*) DESC, status_code ASC, et ASC
+		  LIMIT 200`,
+		profileID, windowStart.Unix(), now.Unix(),
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "local buckets: " + err.Error()})
+		return
+	}
+	buckets := make([]errorBucket, 0)
+	for bucketRows.Next() {
+		var b errorBucket
+		if err := bucketRows.Scan(&b.ErrorType, &b.StatusCode, &b.Count); err != nil {
+			bucketRows.Close()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "scan bucket: " + err.Error()})
+			return
+		}
+		buckets = append(buckets, b)
+	}
+	bucketRows.Close()
+
+	// Success side still needs remote — one page_size=1 call gets the
+	// exact total via pageInfo. Wrapped in a short timeout so a flaky
+	// remote can't stall the local-only path.
 	host, userID, token, err := loadRemoteProfileByID(profileID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
-
-	windowStart := now.Add(-time.Duration(windowSec) * time.Second)
-
-	// Precise totals — page_size=1 keeps the response tiny; we only want
-	// pageInfo.total. Runs in parallel with the sample fetch to keep the
-	// worst-case latency bounded to the slowest single call.
-	type totalsResult struct {
-		total int64
-		err   error
-	}
-	fetchTotal := func(logType int, ch chan<- totalsResult) {
-		q := url.Values{}
-		q.Set("type", strconv.Itoa(logType))
-		q.Set("start_timestamp", strconv.FormatInt(windowStart.Unix(), 10))
-		q.Set("end_timestamp", strconv.FormatInt(now.Unix(), 10))
-		q.Set("p", "1")
-		q.Set("page_size", "1")
-		data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/", token, userID, q, nil)
-		if err != nil {
-			ch <- totalsResult{err: err}
-			return
-		}
+	var totalSuccess int64
+	q := url.Values{}
+	q.Set("type", "2")
+	q.Set("start_timestamp", strconv.FormatInt(windowStart.Unix(), 10))
+	q.Set("end_timestamp", strconv.FormatInt(now.Unix(), 10))
+	q.Set("p", "1")
+	q.Set("page_size", "1")
+	if data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/", token, userID, q, nil); err == nil {
 		var resp struct {
 			Total int64 `json:"total"`
 		}
-		if err := json.Unmarshal(data, &resp); err != nil {
-			ch <- totalsResult{err: err}
-			return
+		if err := json.Unmarshal(data, &resp); err == nil {
+			totalSuccess = resp.Total
 		}
-		ch <- totalsResult{total: resp.Total}
 	}
-
-	// Sample of error rows for bucket breakdown. 500 keeps the response
-	// small (≤~1MB) while giving a stable distribution for any realistic
-	// error volume.
-	const sampleCap = 500
-	type sampleResult struct {
-		items []map[string]interface{}
-		err   error
-	}
-	fetchSample := func(ch chan<- sampleResult) {
-		q := url.Values{}
-		q.Set("type", "5")
-		q.Set("start_timestamp", strconv.FormatInt(windowStart.Unix(), 10))
-		q.Set("end_timestamp", strconv.FormatInt(now.Unix(), 10))
-		q.Set("p", "1")
-		q.Set("page_size", strconv.Itoa(sampleCap))
-		data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/", token, userID, q, nil)
-		if err != nil {
-			ch <- sampleResult{err: err}
-			return
-		}
-		var resp struct {
-			Items []struct {
-				Other string `json:"other"`
-			} `json:"items"`
-		}
-		if err := json.Unmarshal(data, &resp); err != nil {
-			ch <- sampleResult{err: err}
-			return
-		}
-		out := make([]map[string]interface{}, 0, len(resp.Items))
-		for _, it := range resp.Items {
-			var oj map[string]interface{}
-			if err := json.Unmarshal([]byte(it.Other), &oj); err == nil {
-				out = append(out, oj)
-			}
-		}
-		ch <- sampleResult{items: out}
-	}
-
-	successCh := make(chan totalsResult, 1)
-	errorCh := make(chan totalsResult, 1)
-	sampleCh := make(chan sampleResult, 1)
-	go fetchTotal(2, successCh)
-	go fetchTotal(5, errorCh)
-	go fetchSample(sampleCh)
-	sRes := <-successCh
-	eRes := <-errorCh
-	smpRes := <-sampleCh
-
-	if sRes.err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "success total: " + sRes.err.Error()})
-		return
-	}
-	if eRes.err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "error total: " + eRes.err.Error()})
-		return
-	}
-	// sample fetch failing is not fatal — surface just the totals.
-	sampleItems := smpRes.items
-
-	// Aggregate the sample.
-	type key struct {
-		Type   string
-		Status int
-	}
-	sampleCounts := make(map[key]int)
-	for _, oj := range sampleItems {
-		var k key
-		if s, ok := oj["error_type"].(string); ok {
-			k.Type = s
-		} else {
-			k.Type = "unknown"
-		}
-		if v, ok := oj["status_code"].(float64); ok {
-			k.Status = int(v)
-		}
-		sampleCounts[k]++
-	}
-
-	// Scale sample counts up to the true total_errors so the numbers in
-	// the UI reconcile with the summary card. When sample >= total we
-	// leave them as-is (exact).
-	buckets := make([]errorBucket, 0, len(sampleCounts))
-	scale := 1.0
-	if len(sampleItems) > 0 && eRes.total > int64(len(sampleItems)) {
-		scale = float64(eRes.total) / float64(len(sampleItems))
-	}
-	for k, n := range sampleCounts {
-		scaled := int(math.Round(float64(n) * scale))
-		buckets = append(buckets, errorBucket{
-			ErrorType:  k.Type,
-			StatusCode: k.Status,
-			Count:      scaled,
-		})
-	}
-	sort.Slice(buckets, func(i, j int) bool {
-		if buckets[i].Count != buckets[j].Count {
-			return buckets[i].Count > buckets[j].Count
-		}
-		if buckets[i].StatusCode != buckets[j].StatusCode {
-			return buckets[i].StatusCode < buckets[j].StatusCode
-		}
-		return buckets[i].ErrorType < buckets[j].ErrorType
-	})
 
 	entry = profileErrorSummaryEntry{
-		totalSuccess: sRes.total,
-		totalErrors:  eRes.total,
+		totalSuccess: totalSuccess,
+		totalErrors:  totalErrors,
 		buckets:      buckets,
-		sampleSize:   len(sampleItems),
+		sampleSize:   int(totalErrors), // exact — buckets aren't sampled
 		fetched:      now,
 	}
 	profileErrorSummaryCacheMu.Lock()
 	profileErrorSummaryCache[cacheKey] = entry
 	profileErrorSummaryCacheMu.Unlock()
 
-	writeProfileErrorSummary(c, entry, windowSec, false)
+	writeProfileErrorSummary(c, entry, windowSec, false, profileID)
 }
 
-func writeProfileErrorSummary(c *gin.Context, e profileErrorSummaryEntry, windowSec int64, cached bool) {
+func writeProfileErrorSummary(c *gin.Context, e profileErrorSummaryEntry, windowSec int64, cached bool, profileID int64) {
 	total := e.totalSuccess + e.totalErrors
 	rate := 0.0
 	if total > 0 {
 		rate = float64(e.totalErrors) / float64(total)
 	}
-	// share = bucket count / total_errors. Callers use it for the "占错误 %"
-	// column; extrapolated buckets sum to ~total_errors so shares are stable.
 	type wireBucket struct {
 		ErrorType  string  `json:"error_type"`
 		StatusCode int     `json:"status_code"`
@@ -3807,14 +3735,304 @@ func writeProfileErrorSummary(c *gin.Context, e profileErrorSummaryEntry, window
 			Share:      share,
 		})
 	}
+	// Sync lag lets the UI flag "just deployed / still catching up".
+	var lastSynced int64
+	_ = db.QueryRow(
+		`SELECT last_synced_at FROM remote_error_sync_state WHERE profile_id=$1`,
+		profileID,
+	).Scan(&lastSynced)
+	var lag int64
+	if lastSynced > 0 {
+		lag = time.Now().Unix() - lastSynced
+		if lag < 0 {
+			lag = 0
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"total_success": e.totalSuccess,
-		"total_errors":  e.totalErrors,
-		"error_rate":    rate,
-		"buckets":       buckets,
-		"sample_size":   e.sampleSize,
-		"truncated":     int64(e.sampleSize) < e.totalErrors,
-		"window_sec":    windowSec,
-		"cached":        cached,
+		"total_success":  e.totalSuccess,
+		"total_errors":   e.totalErrors,
+		"error_rate":     rate,
+		"buckets":        buckets,
+		"sample_size":    e.sampleSize,
+		"truncated":      false,
+		"window_sec":     windowSec,
+		"cached":         cached,
+		"last_synced_at": lastSynced,
+		"sync_lag_sec":   lag,
 	})
+}
+
+// ---- Error-log sync: pull remote error logs to local table ----
+
+const (
+	// errorLogSyncInterval is how often we run one sync tick per profile.
+	errorLogSyncInterval = 60 * time.Second
+	// errorLogPageSize is the paginated /api/log/ page size per HTTP call.
+	// 200 is the remote's typical soft cap and keeps a page under ~1MB.
+	errorLogPageSize = 200
+	// errorLogPagesPerTick bounds the pagination depth per tick so a
+	// backlog doesn't monopolise the sync loop. 2000 rows / minute is
+	// plenty for realistic error volumes; a genuine flood catches up
+	// over subsequent ticks.
+	errorLogPagesPerTick = 10
+	// errorLogInitialBackfill is how far back we go on first sync per
+	// profile (last_synced_at = 0). Trades startup time for immediate
+	// usefulness on the "过去 24 小时" window.
+	errorLogInitialBackfill = 24 * time.Hour
+	// errorLogOverlap is how far we rewind from the high-water mark on
+	// each incremental sync to catch any late-arriving remote rows.
+	errorLogOverlap = 60 * time.Second
+	// errorLogContentTrim caps the persisted content_snippet size so a
+	// verbose upstream error doesn't blow up the table.
+	errorLogContentTrim = 512
+	// errorLogRetention drops rows older than this age. Kept aligned
+	// with remote_channel_snapshot's default retention semantics.
+	errorLogRetention = 14 * 24 * time.Hour
+	errorLogRetentionInterval = time.Hour
+)
+
+// startRemoteErrorLogSync launches the per-profile sync loop. Each tick
+// finds every configured remote profile and, one at a time, pulls new
+// error log rows since the last high-water mark (or 24h back on first
+// run). Serial across profiles to bound remote load — a deployment
+// with dozens of profiles still uses at most 1 remote in flight.
+func startRemoteErrorLogSync() {
+	go func() {
+		time.Sleep(3 * time.Second) // let the schema settle
+		tick := time.NewTicker(errorLogSyncInterval)
+		defer tick.Stop()
+		syncAllProfilesErrorLogs()
+		for range tick.C {
+			syncAllProfilesErrorLogs()
+		}
+	}()
+	go func() {
+		tick := time.NewTicker(errorLogRetentionInterval)
+		defer tick.Stop()
+		pruneRemoteErrorLogs()
+		for range tick.C {
+			pruneRemoteErrorLogs()
+		}
+	}()
+}
+
+func syncAllProfilesErrorLogs() {
+	rows, err := db.Query(`SELECT id FROM remote_newapi_profile ORDER BY id`)
+	if err != nil {
+		log.Printf("[error-sync] list profiles: %v", err)
+		return
+	}
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			log.Printf("[error-sync] scan profile id: %v", err)
+			return
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	for _, pid := range ids {
+		syncOneProfileErrorLogs(pid)
+	}
+}
+
+func syncOneProfileErrorLogs(profileID int64) {
+	host, userID, token, err := loadRemoteProfileByID(profileID)
+	if err != nil {
+		recordErrorSyncFailure(profileID, "load profile: "+err.Error())
+		return
+	}
+
+	// Read HWM. Missing row = first ever sync for this profile; fall
+	// back to (now - initial backfill).
+	var lastSynced int64
+	if err := db.QueryRow(
+		`SELECT last_synced_at FROM remote_error_sync_state WHERE profile_id=$1`,
+		profileID,
+	).Scan(&lastSynced); err != nil && err != sql.ErrNoRows {
+		recordErrorSyncFailure(profileID, "read state: "+err.Error())
+		return
+	}
+	now := time.Now()
+	var startAt int64
+	if lastSynced == 0 {
+		startAt = now.Add(-errorLogInitialBackfill).Unix()
+	} else {
+		startAt = lastSynced - int64(errorLogOverlap.Seconds())
+	}
+	endAt := now.Unix()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	ingested := 0
+	maxCreated := lastSynced
+	for page := 1; page <= errorLogPagesPerTick; page++ {
+		q := url.Values{}
+		q.Set("type", "5")
+		q.Set("start_timestamp", strconv.FormatInt(startAt, 10))
+		q.Set("end_timestamp", strconv.FormatInt(endAt, 10))
+		q.Set("p", strconv.Itoa(page))
+		q.Set("page_size", strconv.Itoa(errorLogPageSize))
+		data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/", token, userID, q, nil)
+		if err != nil {
+			recordErrorSyncFailure(profileID, fmt.Sprintf("page %d: %v", page, err))
+			return
+		}
+		var resp struct {
+			Items []struct {
+				ID        int64  `json:"id"`
+				ChannelId int64  `json:"channel_id"`
+				CreatedAt int64  `json:"created_at"`
+				ModelName string `json:"model_name"`
+				TokenName string `json:"token_name"`
+				Group     string `json:"group"`
+				Content   string `json:"content"`
+				Other     string `json:"other"`
+			} `json:"items"`
+			Total int64 `json:"total"`
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			recordErrorSyncFailure(profileID, fmt.Sprintf("page %d decode: %v", page, err))
+			return
+		}
+		if len(resp.Items) == 0 {
+			break
+		}
+		for _, it := range resp.Items {
+			if it.CreatedAt > maxCreated {
+				maxCreated = it.CreatedAt
+			}
+			et, sc, ec, rp := parseErrorLogOther(it.Other)
+			snippet := it.Content
+			if len(snippet) > errorLogContentTrim {
+				snippet = snippet[:errorLogContentTrim]
+			}
+			// Sanitize any accidental key material or bearer token.
+			snippet = sanitizeUpstreamErrorSnippet(snippet)
+			res, err := db.Exec(
+				`INSERT INTO remote_error_log
+				  (profile_id, remote_log_id, channel_id, model_name, token_name, group_name,
+				   created_at, ingested_at, error_type, status_code, error_code, request_path, content_snippet)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+				 ON CONFLICT (profile_id, remote_log_id) DO NOTHING`,
+				profileID, it.ID, it.ChannelId, it.ModelName, it.TokenName, it.Group,
+				it.CreatedAt, now.Unix(), et, sc, ec, rp, snippet,
+			)
+			if err != nil {
+				recordErrorSyncFailure(profileID, "insert: "+err.Error())
+				return
+			}
+			if n, _ := res.RowsAffected(); n > 0 {
+				ingested++
+			}
+		}
+		// If this page came back short of the requested size, we've
+		// caught up — no need to fetch page+1.
+		if len(resp.Items) < errorLogPageSize {
+			break
+		}
+	}
+
+	// Update state row. UPSERT so first-ever run creates it.
+	_, err = db.Exec(
+		`INSERT INTO remote_error_sync_state (profile_id, last_synced_at, last_run_at, last_error, total_ingested)
+		 VALUES ($1, $2, $3, '', $4)
+		 ON CONFLICT (profile_id) DO UPDATE
+		   SET last_synced_at = GREATEST(remote_error_sync_state.last_synced_at, EXCLUDED.last_synced_at),
+		       last_run_at    = EXCLUDED.last_run_at,
+		       last_error     = '',
+		       total_ingested = remote_error_sync_state.total_ingested + EXCLUDED.total_ingested`,
+		profileID, maxCreated, now.Unix(), int64(ingested),
+	)
+	if err != nil {
+		log.Printf("[error-sync] update state for profile=%d: %v", profileID, err)
+		return
+	}
+	if ingested > 0 {
+		log.Printf("[error-sync] profile=%d ingested=%d hwm=%d", profileID, ingested, maxCreated)
+	}
+}
+
+func recordErrorSyncFailure(profileID int64, reason string) {
+	log.Printf("[error-sync] profile=%d FAILED: %s", profileID, reason)
+	now := time.Now().Unix()
+	// Cap the failure message length to avoid pathological content.
+	if len(reason) > 500 {
+		reason = reason[:500]
+	}
+	_, err := db.Exec(
+		`INSERT INTO remote_error_sync_state (profile_id, last_synced_at, last_run_at, last_error, total_ingested)
+		 VALUES ($1, 0, $2, $3, 0)
+		 ON CONFLICT (profile_id) DO UPDATE
+		   SET last_run_at = EXCLUDED.last_run_at,
+		       last_error  = EXCLUDED.last_error`,
+		profileID, now, reason,
+	)
+	if err != nil {
+		log.Printf("[error-sync] record failure for profile=%d: %v", profileID, err)
+	}
+}
+
+// parseErrorLogOther extracts the fields we care about from the
+// json-encoded `other` blob newapi attaches to error logs
+// (see controller/relay.go RecordErrorLog callsite).
+func parseErrorLogOther(otherJSON string) (errorType string, statusCode int, errorCode, requestPath string) {
+	if otherJSON == "" {
+		return "unknown", 0, "", ""
+	}
+	var oj map[string]interface{}
+	if err := json.Unmarshal([]byte(otherJSON), &oj); err != nil {
+		return "unknown", 0, "", ""
+	}
+	if s, ok := oj["error_type"].(string); ok {
+		errorType = s
+	}
+	if errorType == "" {
+		errorType = "unknown"
+	}
+	if v, ok := oj["status_code"].(float64); ok {
+		statusCode = int(v)
+	}
+	if s, ok := oj["error_code"].(string); ok {
+		errorCode = s
+	} else if v, ok := oj["error_code"].(float64); ok {
+		errorCode = strconv.FormatFloat(v, 'f', -1, 64)
+	}
+	if s, ok := oj["request_path"].(string); ok {
+		requestPath = s
+	}
+	return
+}
+
+// sanitizeUpstreamErrorSnippet strips a couple of well-known key-shaped
+// substrings out of an upstream error message before persisting it, so
+// we don't accidentally hold onto anything that resembles a token in
+// content_snippet. Cheap, best-effort — the primary guard is that
+// error logs don't usually echo full tokens back in the first place.
+var (
+	keyLikePattern1 = regexp.MustCompile(`sk-[A-Za-z0-9\-_]{16,}`)
+	keyLikePattern2 = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9\-_.]{16,}`)
+	keyLikePattern3 = regexp.MustCompile(`(?i)api[_-]?key["'\s:=]+[A-Za-z0-9\-_]{16,}`)
+)
+
+func sanitizeUpstreamErrorSnippet(s string) string {
+	s = keyLikePattern1.ReplaceAllString(s, "sk-****")
+	s = keyLikePattern2.ReplaceAllString(s, "Bearer ****")
+	s = keyLikePattern3.ReplaceAllString(s, "api_key=****")
+	return s
+}
+
+func pruneRemoteErrorLogs() {
+	cutoff := time.Now().Add(-errorLogRetention).Unix()
+	res, err := db.Exec(`DELETE FROM remote_error_log WHERE created_at < $1`, cutoff)
+	if err != nil {
+		log.Printf("[error-sync] prune: %v", err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("[error-sync] pruned %d rows older than %s", n, errorLogRetention)
+	}
 }

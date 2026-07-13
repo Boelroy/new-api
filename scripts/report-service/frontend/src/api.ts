@@ -865,10 +865,10 @@ export const api = {
     }),
 
   // Profile-wide aggregate: total success/error counts + bucket
-  // distribution by (error_type, status_code) over `windowSec`. Bucket
-  // counts are extrapolated from up to a 500-row sample when
-  // total_errors exceeds sample_size; `truncated` tells the UI to hint
-  // that the exact numbers are approximate.
+  // distribution by (error_type, status_code) over `windowSec`. Error
+  // side is now backed by the local remote_error_log table (kept fresh
+  // by a 60s sync loop), so bucket counts are exact rather than
+  // sampled. `sync_lag_sec` reflects how stale the local mirror is.
   remoteProfileErrorSummary: (profileID: number, windowSec = 3600) => {
     const qs = new URLSearchParams({ window_sec: String(windowSec) })
     return request<{
@@ -880,6 +880,8 @@ export const api = {
       truncated: boolean
       window_sec: number
       cached: boolean
+      last_synced_at: number
+      sync_lag_sec: number
     }>(`/api/remote-newapi/profiles/${profileID}/error-summary?${qs}`)
   },
 

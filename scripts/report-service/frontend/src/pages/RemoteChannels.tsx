@@ -2314,6 +2314,8 @@ function ProfileErrorSummary({
     truncated: boolean
     window_sec: number
     cached: boolean
+    last_synced_at?: number
+    sync_lag_sec?: number
   } | null>(null)
   const [selectedCode, setSelectedCode] = useState<number | null>(null)
   const [selectedType, setSelectedType] = useState<string | null>(null)
@@ -2363,7 +2365,7 @@ function ProfileErrorSummary({
         <div>
           <div className="text-sm font-semibold text-gray-900">错误率汇总 · {humanWindow}</div>
           <div className="text-[11px] text-gray-400 mt-0.5">
-            profile 层面聚合。点击下方状态码 / 类型行只看该类错误。5 分钟缓存。
+            profile 层面聚合，本地按分钟同步的错误日志分析。点击下方状态码 / 类型行只看该类错误。
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -2417,9 +2419,9 @@ function ProfileErrorSummary({
           />
         </div>
 
-        {data && data.truncated && (
+        {data && data.sync_lag_sec !== undefined && data.sync_lag_sec > 180 && (
           <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
-            错误数超过 {data.sample_size} 条采样上限 —— 分桶数量按比例外推，可能与实际值有 1–2% 偏差。
+            本地错误日志同步落后 {Math.round(data.sync_lag_sec / 60)} 分钟 —— 最新的错误可能还没进本地分析。
           </div>
         )}
 
