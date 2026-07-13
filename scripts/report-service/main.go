@@ -3155,6 +3155,7 @@ func main() {
 	superAPI.POST("/remote-newapi/channels/last-hour", handleRemoteChannelLastHour)
 	superAPI.POST("/remote-newapi/channels/errors", handleRemoteChannelErrors)
 	superAPI.POST("/remote-newapi/channels/counts", handleRemoteChannelCounts)
+	superAPI.GET("/remote-newapi/profiles/:id/error-summary", handleRemoteProfileErrorSummary)
 	superAPI.GET("/remote-newapi/snapshots", handleRemoteSnapshotHistory)
 	superAPI.GET("/remote-newapi/channels/cached", handleRemoteCachedChannels)
 	// Per-(profile, studio) accept/reject flag for studio-operator key

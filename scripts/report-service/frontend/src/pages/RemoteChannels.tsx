@@ -1474,6 +1474,13 @@ function RemoteChannelsAdmin() {
                 结果被截断 —— 远端 total={meta.total}, 只拉到 {channels.length}。远端超过 5000 个渠道时启用。
               </div>
             )}
+            {selectedID && (
+              <ProfileErrorSummary
+                profileID={selectedID}
+                windowSec={errWindowSec}
+                onWindowChange={setErrWindowSec}
+              />
+            )}
             <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
@@ -2278,6 +2285,230 @@ function BreakdownModal({
         </div>
       </div>
     </div>
+  )
+}
+
+// ProfileErrorSummary sits above the channels table and shows the
+// profile-wide aggregate for the selected time window: total requests,
+// total errors, error rate, plus a sorted-by-count breakdown of every
+// (error_type, status_code) bucket. Clicking a row narrows the summary
+// to just that code so it's easy to answer "how many 429s in the last
+// hour?" without eyeballing per-channel numbers.
+function ProfileErrorSummary({
+  profileID,
+  windowSec,
+  onWindowChange,
+}: {
+  profileID: number
+  windowSec: number
+  onWindowChange: (secs: number) => void
+}) {
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [data, setData] = useState<{
+    total_success: number
+    total_errors: number
+    error_rate: number
+    buckets: Array<{ error_type: string; status_code: number; count: number; share: number }>
+    sample_size: number
+    truncated: boolean
+    window_sec: number
+    cached: boolean
+  } | null>(null)
+  const [selectedCode, setSelectedCode] = useState<number | null>(null)
+  const [selectedType, setSelectedType] = useState<string | null>(null)
+
+  const load = async () => {
+    setLoading(true)
+    setErr(null)
+    try {
+      const res = await api.remoteProfileErrorSummary(profileID, windowSec)
+      setData(res)
+      setSelectedCode(null)
+      setSelectedType(null)
+    } catch (e: any) {
+      setErr(e?.message || String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Auto-load when profile or window changes. Backend caches 5min so
+  // toggling the dropdown doesn't hammer the remote.
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileID, windowSec])
+
+  const filteredBuckets = data
+    ? data.buckets.filter(b => {
+        if (selectedCode != null && b.status_code !== selectedCode) return false
+        if (selectedType != null && b.error_type !== selectedType) return false
+        return true
+      })
+    : []
+  const filteredErrors = filteredBuckets.reduce((s, b) => s + b.count, 0)
+  const total = data ? data.total_success + data.total_errors : 0
+  const shownRate = (selectedCode != null || selectedType != null)
+    ? (total > 0 ? filteredErrors / total : 0)
+    : (data?.error_rate ?? 0)
+
+  const humanWindow = windowSec < 3600
+    ? `过去 ${Math.round(windowSec / 60)} 分钟`
+    : `过去 ${(windowSec / 3600).toFixed(windowSec % 3600 === 0 ? 0 : 1)} 小时`
+
+  return (
+    <section className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+      <div className="px-4 py-2.5 border-b border-gray-100 flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <div className="text-sm font-semibold text-gray-900">错误率汇总 · {humanWindow}</div>
+          <div className="text-[11px] text-gray-400 mt-0.5">
+            profile 层面聚合。点击下方状态码 / 类型行只看该类错误。5 分钟缓存。
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <select
+            value={windowSec}
+            onChange={e => onWindowChange(parseInt(e.target.value, 10))}
+            className="text-xs px-2 py-1 border border-gray-300 rounded-md bg-white"
+          >
+            <option value={5 * 60}>过去 5 分钟</option>
+            <option value={15 * 60}>过去 15 分钟</option>
+            <option value={60 * 60}>过去 1 小时</option>
+            <option value={6 * 60 * 60}>过去 6 小时</option>
+            <option value={24 * 60 * 60}>过去 24 小时</option>
+          </select>
+          <button
+            onClick={load}
+            disabled={loading}
+            className="text-xs px-2 py-1 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-40"
+          >
+            {loading ? '加载中…' : '刷新'}
+          </button>
+        </div>
+      </div>
+
+      <div className="p-4 space-y-3">
+        {err && <div className="text-xs text-rose-600">{err}</div>}
+        <div className="grid grid-cols-4 gap-3">
+          <MetricCard
+            label="总请求"
+            value={data ? total.toLocaleString() : '—'}
+          />
+          <MetricCard
+            label={selectedCode != null || selectedType != null ? '过滤后错误数' : '错误数'}
+            value={data ? filteredErrors.toLocaleString() : '—'}
+            color={filteredErrors > 0 ? 'text-rose-600' : 'text-gray-500'}
+          />
+          <MetricCard
+            label={selectedCode != null || selectedType != null ? '过滤后错误率' : '错误率'}
+            value={data && total > 0 ? (shownRate * 100).toFixed(shownRate < 0.01 ? 3 : 2) + '%' : '—'}
+            color={
+              shownRate >= 0.2 ? 'text-rose-600'
+              : shownRate >= 0.05 ? 'text-amber-600'
+              : shownRate > 0 ? 'text-emerald-600'
+              : 'text-gray-400'
+            }
+          />
+          <MetricCard
+            label="成功数"
+            value={data ? data.total_success.toLocaleString() : '—'}
+            color="text-emerald-600"
+          />
+        </div>
+
+        {data && data.truncated && (
+          <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+            错误数超过 {data.sample_size} 条采样上限 —— 分桶数量按比例外推，可能与实际值有 1–2% 偏差。
+          </div>
+        )}
+
+        {(selectedCode != null || selectedType != null) && (
+          <div className="text-[11px] flex items-center gap-2">
+            <span className="text-gray-500">当前过滤：</span>
+            {selectedCode != null && (
+              <span className="px-1.5 py-0.5 rounded-md bg-rose-100 text-rose-700 border border-rose-200 font-mono">
+                {selectedCode}
+              </span>
+            )}
+            {selectedType != null && (
+              <span className="px-1.5 py-0.5 rounded-md bg-indigo-100 text-indigo-700 border border-indigo-200 font-mono">
+                {selectedType}
+              </span>
+            )}
+            <button
+              onClick={() => { setSelectedCode(null); setSelectedType(null) }}
+              className="text-gray-500 hover:text-gray-900 underline"
+            >
+              清除
+            </button>
+          </div>
+        )}
+
+        {data && data.buckets.length > 0 && (
+          <div className="border border-gray-200 rounded overflow-hidden">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 text-gray-500">
+                <tr>
+                  <th className="text-left px-3 py-2 font-medium">状态码</th>
+                  <th className="text-left px-3 py-2 font-medium">错误类型</th>
+                  <th className="text-right px-3 py-2 font-medium">数量</th>
+                  <th className="text-right px-3 py-2 font-medium">占错误 %</th>
+                  <th className="text-right px-3 py-2 font-medium">占总请求 %</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.buckets.map((b, i) => {
+                  const active =
+                    (selectedCode == null || selectedCode === b.status_code) &&
+                    (selectedType == null || selectedType === b.error_type)
+                  const overallShare = total > 0 ? b.count / total : 0
+                  return (
+                    <tr
+                      key={i}
+                      className={`border-t border-gray-100 hover:bg-gray-50 cursor-pointer ${active ? '' : 'opacity-40'}`}
+                      onClick={() => {
+                        // Toggle-friendly: clicking the currently focused
+                        // row clears the filter.
+                        if (selectedCode === b.status_code && selectedType === b.error_type) {
+                          setSelectedCode(null); setSelectedType(null)
+                        } else {
+                          setSelectedCode(b.status_code || null)
+                          setSelectedType(b.error_type || null)
+                        }
+                      }}
+                    >
+                      <td className="px-3 py-1.5 tabular-nums">
+                        <span className={`inline-block px-1.5 py-0.5 rounded font-mono text-[11px] ${
+                          b.status_code === 429 ? 'bg-amber-100 text-amber-800' :
+                          b.status_code >= 500 ? 'bg-rose-100 text-rose-800' :
+                          b.status_code >= 400 ? 'bg-orange-100 text-orange-800' :
+                          'bg-gray-100 text-gray-700'
+                        }`}>
+                          {b.status_code || '—'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-1.5 font-mono text-[11px]">{b.error_type || 'unknown'}</td>
+                      <td className="px-3 py-1.5 tabular-nums text-right">{b.count.toLocaleString()}</td>
+                      <td className="px-3 py-1.5 tabular-nums text-right text-gray-500">
+                        {(b.share * 100).toFixed(1)}%
+                      </td>
+                      <td className="px-3 py-1.5 tabular-nums text-right text-gray-500">
+                        {(overallShare * 100).toFixed(overallShare < 0.001 ? 3 : 2)}%
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {data && data.total_errors === 0 && (
+          <div className="text-xs text-gray-500">窗口内没有错误 ✨</div>
+        )}
+      </div>
+    </section>
   )
 }
 

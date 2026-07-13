@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -3559,5 +3560,261 @@ func handleRemoteChannelCounts(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"data":       out,
 		"window_sec": body.WindowSec,
+	})
+}
+
+// ---- Handler: profile-wide error summary + bucket breakdown ----
+
+const profileErrorSummaryTTL = 5 * time.Minute
+
+type profileErrorSummaryEntry struct {
+	totalSuccess int64
+	totalErrors  int64
+	buckets      []errorBucket
+	sampleSize   int
+	fetched      time.Time
+}
+
+var (
+	profileErrorSummaryCache   = make(map[string]profileErrorSummaryEntry)
+	profileErrorSummaryCacheMu sync.Mutex
+)
+
+// handleRemoteProfileErrorSummary returns profile-wide error stats over
+// `window_sec` seconds (default 3600, max 7d).
+//   - true totals via /api/log/?page_size=1&type=X reading pageInfo.total
+//   - bucket distribution via one page of up to 500 recent error rows;
+//     each row's `other` JSON contributes an (error_type, status_code)
+//     tuple. When the bucket sample is smaller than total_errors the
+//     bucket counts are scaled proportionally so the numbers reconcile.
+//
+// Response:
+//   {
+//     "total_success": 12345,
+//     "total_errors":  678,
+//     "error_rate":    0.0521,
+//     "buckets": [
+//       {"error_type":"openai_error","status_code":429,"count":300,"share":0.442},
+//       ...
+//     ],
+//     "sample_size":  500,
+//     "truncated":    true,
+//     "window_sec":   3600
+//   }
+func handleRemoteProfileErrorSummary(c *gin.Context) {
+	profileID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || profileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid profile id"})
+		return
+	}
+	windowSec, _ := strconv.ParseInt(c.DefaultQuery("window_sec", "3600"), 10, 64)
+	if windowSec <= 0 || windowSec > 7*24*3600 {
+		windowSec = 3600
+	}
+
+	cacheKey := fmt.Sprintf("%d:%d", profileID, windowSec)
+	now := time.Now()
+	profileErrorSummaryCacheMu.Lock()
+	entry, ok := profileErrorSummaryCache[cacheKey]
+	profileErrorSummaryCacheMu.Unlock()
+	if ok && now.Sub(entry.fetched) < profileErrorSummaryTTL {
+		writeProfileErrorSummary(c, entry, windowSec, true)
+		return
+	}
+
+	host, userID, token, err := loadRemoteProfileByID(profileID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	defer cancel()
+
+	windowStart := now.Add(-time.Duration(windowSec) * time.Second)
+
+	// Precise totals — page_size=1 keeps the response tiny; we only want
+	// pageInfo.total. Runs in parallel with the sample fetch to keep the
+	// worst-case latency bounded to the slowest single call.
+	type totalsResult struct {
+		total int64
+		err   error
+	}
+	fetchTotal := func(logType int, ch chan<- totalsResult) {
+		q := url.Values{}
+		q.Set("type", strconv.Itoa(logType))
+		q.Set("start_timestamp", strconv.FormatInt(windowStart.Unix(), 10))
+		q.Set("end_timestamp", strconv.FormatInt(now.Unix(), 10))
+		q.Set("p", "1")
+		q.Set("page_size", "1")
+		data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/", token, userID, q, nil)
+		if err != nil {
+			ch <- totalsResult{err: err}
+			return
+		}
+		var resp struct {
+			Total int64 `json:"total"`
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			ch <- totalsResult{err: err}
+			return
+		}
+		ch <- totalsResult{total: resp.Total}
+	}
+
+	// Sample of error rows for bucket breakdown. 500 keeps the response
+	// small (≤~1MB) while giving a stable distribution for any realistic
+	// error volume.
+	const sampleCap = 500
+	type sampleResult struct {
+		items []map[string]interface{}
+		err   error
+	}
+	fetchSample := func(ch chan<- sampleResult) {
+		q := url.Values{}
+		q.Set("type", "5")
+		q.Set("start_timestamp", strconv.FormatInt(windowStart.Unix(), 10))
+		q.Set("end_timestamp", strconv.FormatInt(now.Unix(), 10))
+		q.Set("p", "1")
+		q.Set("page_size", strconv.Itoa(sampleCap))
+		data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/", token, userID, q, nil)
+		if err != nil {
+			ch <- sampleResult{err: err}
+			return
+		}
+		var resp struct {
+			Items []struct {
+				Other string `json:"other"`
+			} `json:"items"`
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			ch <- sampleResult{err: err}
+			return
+		}
+		out := make([]map[string]interface{}, 0, len(resp.Items))
+		for _, it := range resp.Items {
+			var oj map[string]interface{}
+			if err := json.Unmarshal([]byte(it.Other), &oj); err == nil {
+				out = append(out, oj)
+			}
+		}
+		ch <- sampleResult{items: out}
+	}
+
+	successCh := make(chan totalsResult, 1)
+	errorCh := make(chan totalsResult, 1)
+	sampleCh := make(chan sampleResult, 1)
+	go fetchTotal(2, successCh)
+	go fetchTotal(5, errorCh)
+	go fetchSample(sampleCh)
+	sRes := <-successCh
+	eRes := <-errorCh
+	smpRes := <-sampleCh
+
+	if sRes.err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "success total: " + sRes.err.Error()})
+		return
+	}
+	if eRes.err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "error total: " + eRes.err.Error()})
+		return
+	}
+	// sample fetch failing is not fatal — surface just the totals.
+	sampleItems := smpRes.items
+
+	// Aggregate the sample.
+	type key struct {
+		Type   string
+		Status int
+	}
+	sampleCounts := make(map[key]int)
+	for _, oj := range sampleItems {
+		var k key
+		if s, ok := oj["error_type"].(string); ok {
+			k.Type = s
+		} else {
+			k.Type = "unknown"
+		}
+		if v, ok := oj["status_code"].(float64); ok {
+			k.Status = int(v)
+		}
+		sampleCounts[k]++
+	}
+
+	// Scale sample counts up to the true total_errors so the numbers in
+	// the UI reconcile with the summary card. When sample >= total we
+	// leave them as-is (exact).
+	buckets := make([]errorBucket, 0, len(sampleCounts))
+	scale := 1.0
+	if len(sampleItems) > 0 && eRes.total > int64(len(sampleItems)) {
+		scale = float64(eRes.total) / float64(len(sampleItems))
+	}
+	for k, n := range sampleCounts {
+		scaled := int(math.Round(float64(n) * scale))
+		buckets = append(buckets, errorBucket{
+			ErrorType:  k.Type,
+			StatusCode: k.Status,
+			Count:      scaled,
+		})
+	}
+	sort.Slice(buckets, func(i, j int) bool {
+		if buckets[i].Count != buckets[j].Count {
+			return buckets[i].Count > buckets[j].Count
+		}
+		if buckets[i].StatusCode != buckets[j].StatusCode {
+			return buckets[i].StatusCode < buckets[j].StatusCode
+		}
+		return buckets[i].ErrorType < buckets[j].ErrorType
+	})
+
+	entry = profileErrorSummaryEntry{
+		totalSuccess: sRes.total,
+		totalErrors:  eRes.total,
+		buckets:      buckets,
+		sampleSize:   len(sampleItems),
+		fetched:      now,
+	}
+	profileErrorSummaryCacheMu.Lock()
+	profileErrorSummaryCache[cacheKey] = entry
+	profileErrorSummaryCacheMu.Unlock()
+
+	writeProfileErrorSummary(c, entry, windowSec, false)
+}
+
+func writeProfileErrorSummary(c *gin.Context, e profileErrorSummaryEntry, windowSec int64, cached bool) {
+	total := e.totalSuccess + e.totalErrors
+	rate := 0.0
+	if total > 0 {
+		rate = float64(e.totalErrors) / float64(total)
+	}
+	// share = bucket count / total_errors. Callers use it for the "占错误 %"
+	// column; extrapolated buckets sum to ~total_errors so shares are stable.
+	type wireBucket struct {
+		ErrorType  string  `json:"error_type"`
+		StatusCode int     `json:"status_code"`
+		Count      int     `json:"count"`
+		Share      float64 `json:"share"`
+	}
+	buckets := make([]wireBucket, 0, len(e.buckets))
+	for _, b := range e.buckets {
+		share := 0.0
+		if e.totalErrors > 0 {
+			share = float64(b.Count) / float64(e.totalErrors)
+		}
+		buckets = append(buckets, wireBucket{
+			ErrorType:  b.ErrorType,
+			StatusCode: b.StatusCode,
+			Count:      b.Count,
+			Share:      share,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"total_success": e.totalSuccess,
+		"total_errors":  e.totalErrors,
+		"error_rate":    rate,
+		"buckets":       buckets,
+		"sample_size":   e.sampleSize,
+		"truncated":     int64(e.sampleSize) < e.totalErrors,
+		"window_sec":    windowSec,
+		"cached":        cached,
 	})
 }

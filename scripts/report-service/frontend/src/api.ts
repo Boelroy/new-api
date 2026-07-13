@@ -864,6 +864,25 @@ export const api = {
       body: JSON.stringify({ profile_id: profileID, channel_ids: channelIDs, window_sec: windowSec }),
     }),
 
+  // Profile-wide aggregate: total success/error counts + bucket
+  // distribution by (error_type, status_code) over `windowSec`. Bucket
+  // counts are extrapolated from up to a 500-row sample when
+  // total_errors exceeds sample_size; `truncated` tells the UI to hint
+  // that the exact numbers are approximate.
+  remoteProfileErrorSummary: (profileID: number, windowSec = 3600) => {
+    const qs = new URLSearchParams({ window_sec: String(windowSec) })
+    return request<{
+      total_success: number
+      total_errors: number
+      error_rate: number
+      buckets: Array<{ error_type: string; status_code: number; count: number; share: number }>
+      sample_size: number
+      truncated: boolean
+      window_sec: number
+      cached: boolean
+    }>(`/api/remote-newapi/profiles/${profileID}/error-summary?${qs}`)
+  },
+
   // Historical snapshots written by the periodic sync loop (see
   // startRemoteSnapshotSync). Two shapes:
   //   • without channel_id: latest snapshot per channel within `since`,
