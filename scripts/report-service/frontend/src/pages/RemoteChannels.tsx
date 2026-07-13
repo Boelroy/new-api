@@ -430,20 +430,33 @@ function RemoteChannelsAdmin() {
   }
 
   // Fetch success + error counts for every channel over errWindowSec.
-  // Backend caches 5 min per (profile, channel, window) so re-clicks are
-  // instant. Populates the "错误率" column; the per-channel breakdown
-  // popover fetches its own type-bucketed data lazily on click.
+  // Backend caps at 200 channels per request and caches 5 min per
+  // (profile, channel, window) so re-clicks are instant. Populates the
+  // "错误率" column; the per-channel breakdown popover fetches its own
+  // type-bucketed data lazily on click.
   const loadErrorRates = async () => {
     if (!selectedID || channels.length === 0) return
     setErrRateLoading(true)
     try {
       const ids = channels.map(c => c.id)
-      const res = await api.remoteChannelCounts(selectedID, ids, errWindowSec)
       const next: Record<number, { success: number; errors: number }> = {}
+      // Chunk to stay under the backend's max_channel_ids cap. Serial so
+      // we don't fan out too much when a profile has hundreds of
+      // channels — the backend itself parallelises within each chunk.
+      const chunkSize = 200
+      for (let i = 0; i < ids.length; i += chunkSize) {
+        const chunk = ids.slice(i, i + chunkSize)
+        const res = await api.remoteChannelCounts(selectedID, chunk, errWindowSec)
+        for (const idStr of Object.keys(res.data)) {
+          const idNum = parseInt(idStr, 10)
+          const cnt = res.data[idStr]
+          next[idNum] = { success: cnt?.success ?? 0, errors: cnt?.errors ?? 0 }
+        }
+      }
+      // Ensure channels missing from the response show 0/0 rather than
+      // staying undefined (which would render as "—").
       for (const c of channels) {
-        const key = String(c.id)
-        const cnt = res.data[key]
-        next[c.id] = { success: cnt?.success ?? 0, errors: cnt?.errors ?? 0 }
+        if (next[c.id] == null) next[c.id] = { success: 0, errors: 0 }
       }
       setErrStats(next)
     } catch (e: any) {

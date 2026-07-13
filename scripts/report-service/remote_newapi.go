@@ -3502,6 +3502,16 @@ func handleRemoteChannelCounts(c *gin.Context) {
 		return resp.Total
 	}
 
+	// Partition into cache hits (served instantly) and misses (probed
+	// concurrently below). Cache hits fill `out` directly; misses go
+	// through a bounded worker pool so a 200-channel refresh doesn't
+	// serialise into a minute-long request.
+	type miss struct {
+		chID  int64
+		idStr string
+	}
+	misses := make([]miss, 0, len(body.ChannelIDs))
+	var outMu sync.Mutex
 	for _, chID := range body.ChannelIDs {
 		cacheKey := fmt.Sprintf("%d:%d:%d", body.ProfileID, chID, body.WindowSec)
 		channelCountsCacheMu.Lock()
@@ -3512,16 +3522,38 @@ func handleRemoteChannelCounts(c *gin.Context) {
 			out[idStr] = row{Success: entry.success, Errors: entry.errors}
 			continue
 		}
-		successCount := probe(2, chID)
-		errorCount := probe(5, chID)
-		out[idStr] = row{Success: successCount, Errors: errorCount}
-		channelCountsCacheMu.Lock()
-		channelCountsCache[cacheKey] = channelCountsEntry{
-			success: successCount,
-			errors:  errorCount,
-			fetched: now,
+		misses = append(misses, miss{chID: chID, idStr: idStr})
+	}
+	if len(misses) > 0 {
+		// 8 workers ≈ 25 request-pairs per worker at 200 misses. Enough
+		// concurrency to matter without hammering the remote — its
+		// /api/log/ query is DB-bound and can pile up under contention.
+		const workers = 8
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, workers)
+		for _, m := range misses {
+			m := m
+			wg.Add(1)
+			sem <- struct{}{}
+			go func() {
+				defer wg.Done()
+				defer func() { <-sem }()
+				successCount := probe(2, m.chID)
+				errorCount := probe(5, m.chID)
+				outMu.Lock()
+				out[m.idStr] = row{Success: successCount, Errors: errorCount}
+				outMu.Unlock()
+				cacheKey := fmt.Sprintf("%d:%d:%d", body.ProfileID, m.chID, body.WindowSec)
+				channelCountsCacheMu.Lock()
+				channelCountsCache[cacheKey] = channelCountsEntry{
+					success: successCount,
+					errors:  errorCount,
+					fetched: now,
+				}
+				channelCountsCacheMu.Unlock()
+			}()
 		}
-		channelCountsCacheMu.Unlock()
+		wg.Wait()
 	}
 
 	c.JSON(http.StatusOK, gin.H{
