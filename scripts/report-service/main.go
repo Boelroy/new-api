@@ -3163,11 +3163,12 @@ func main() {
 	superAPI.GET("/remote-newapi/pending", handlePendingKeyList)
 	superAPI.DELETE("/remote-newapi/pending/:id", handlePendingKeyDelete)
 
-	// Local pool: KeyCapacity 'Pool 上 Key' tab. Same shape as the
-	// remote pool but writes to the local channels table. Kept open to
-	// studio_operator via requireRoleOrStudioOperator — that's a
-	// separate feature and not affected by the /remote-channels rollback.
-	localPoolAPI := api.Group("", requireRoleOrStudioOperator(minSuperAdminRole))
+	// Local pool: KeyCapacity 'Pool 上 Key' tab + studio operator's
+	// /pool-upload slim page. Admin+ (Key Capacity) and studio_operator
+	// (Pool Upload) both hit these; require admin or the horizontal
+	// operator role. Previous wiring was accidentally at
+	// minSuperAdminRole which 403'd role=10 admins.
+	localPoolAPI := api.Group("", requireRoleOrStudioOperator(minAdminRole))
 	localPoolAPI.POST("/local-pool/enqueue", handleLocalPoolEnqueue)
 	localPoolAPI.GET("/local-pool/queue", handleLocalPoolList)
 	localPoolAPI.DELETE("/local-pool/pending/:id", handleLocalPoolDelete)

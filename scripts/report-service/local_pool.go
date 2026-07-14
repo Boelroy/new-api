@@ -282,12 +282,11 @@ func handleLocalPoolEnqueue(c *gin.Context) {
 		models = strings.TrimSpace(loadLocalPoolConfig().DefaultModels)
 	}
 	now := time.Now().Unix()
-	// Studio operator batches default to 5 USD per key when the row
-	// omits quota_usd (the "5 刀 key" flow). Super admin still has to
-	// specify — leaving quota unset there is more likely a mistake than
-	// intent, so keep the skip.
-	isOperator := callerIsStudioOperator(c)
-	const studioOperatorDefaultQuotaUSD = 5.0
+	// Every local-pool row is a "5 刀 key" now: when the caller omits
+	// quota_usd (or sends <= 0) fall back to 5 USD. Applies to admin
+	// and studio operator alike — both surfaces treat this pool as the
+	// small-quota drip lane, so blank means "default 5", not "skip".
+	const defaultPoolQuotaUSD = 5.0
 	inserted, skipped := 0, 0
 	for _, ch := range body.Channels {
 		key := strings.TrimSpace(ch.Key)
@@ -297,12 +296,7 @@ func handleLocalPoolEnqueue(c *gin.Context) {
 		}
 		quotaUSD := ch.QuotaUSD
 		if quotaUSD <= 0 {
-			if isOperator {
-				quotaUSD = studioOperatorDefaultQuotaUSD
-			} else {
-				skipped++
-				continue
-			}
+			quotaUSD = defaultPoolQuotaUSD
 		}
 		enc, err := encryptRemoteToken(key)
 		if err != nil {

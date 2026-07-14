@@ -40,7 +40,6 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
   const [studioMode, setStudioMode] = useState<'pick' | 'new'>('pick')
   const [studios, setStudios] = useState<string[]>([])
   const [suffix, setSuffix] = useState('')
-  const [unitPrice, setUnitPrice] = useState('')
   const [models, setModels] = useState('')
   const [input, setInput] = useState('')
   const [enqueueBusy, setEnqueueBusy] = useState(false)
@@ -96,12 +95,16 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
 
   const loadPending = useCallback(async () => {
     try {
-      const res = await api.localPoolList(studioLocked ? undefined : (studio || undefined))
+      // Admin views the entire local pool queue regardless of which
+      // studio picker they've selected — the picker is only for
+      // enqueue targeting. Studio operator is scoped server-side by
+      // the studio_operator branch inside handleLocalPoolList.
+      const res = await api.localPoolList()
       setPending(res.items)
     } catch (e) {
       console.warn('local pool list failed', e)
     }
-  }, [studio, studioLocked])
+  }, [])
 
   // Config + RPM endpoints are admin-only. Studio operator sees neither
   // the config bar nor the RPM readout — that surface is admin-only. In
@@ -143,12 +146,11 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
       setEnqueueMsg({ ok: false, text: 'suffix 不能为空' })
       return
     }
-    // Parse "key quota_usd" lines. Same shape as BatchCreatePanel so
-    // operator muscle memory carries over. When the panel is locked to a
-    // studio (studio operator flow), lines are allowed to skip the
-    // quota_usd column — the backend will default to 5 USD per key.
-    const channels: { key: string; quota_usd: number; unit_price_cny?: number }[] = []
-    const globalUnit = unitPrice.trim() ? parseFloat(unitPrice.trim()) : NaN
+    // Every local-pool row is a small-quota drip key. Only the key is
+    // required; if quota_usd is present we use it, otherwise the
+    // backend fills 5 USD. unit_price_cny is no longer accepted here —
+    // upstream cost editing lives on the admin key-pricing surface.
+    const channels: { key: string; quota_usd: number }[] = []
     for (const raw of input.split('\n')) {
       const line = raw.trim()
       if (!line || line.startsWith('#')) continue
@@ -156,19 +158,8 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
       const key = parts[0]
       if (!key) continue
       const q = parts[1] ? parseFloat(parts[1]) : NaN
-      let quotaUSD: number
-      if (isNaN(q) || q <= 0) {
-        if (!studioLocked) continue  // admin flow: keep the strict skip
-        quotaUSD = 0  // studio op flow: 0 → backend fills in 5 USD default
-      } else {
-        quotaUSD = q
-      }
-      const item: { key: string; quota_usd: number; unit_price_cny?: number } = { key, quota_usd: quotaUSD }
-      if (parts[2]) {
-        const u = parseFloat(parts[2])
-        if (!isNaN(u) && u > 0) item.unit_price_cny = u
-      }
-      channels.push(item)
+      const quotaUSD = !isNaN(q) && q > 0 ? q : 0  // 0 → server defaults to 5
+      channels.push({ key, quota_usd: quotaUSD })
     }
     if (channels.length === 0) {
       setEnqueueMsg({ ok: false, text: '未解析到有效行' })
@@ -179,7 +170,6 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
       const res = await api.localPoolEnqueue({
         studio: studioLocked ? '' : studio.trim(),  // server overrides when operator
         suffix: suffix.trim(),
-        unit_price_cny: !isNaN(globalUnit) && globalUnit > 0 ? globalUnit : undefined,
         models: models.trim() || undefined,
         channels,
       })
@@ -370,17 +360,6 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
           </div>
         </div>
         <div>
-          <label className="block text-[11px] text-gray-500 mb-1">
-            单价 CNY / USD 额度（可选，默认每行的第 3 列）
-          </label>
-          <input
-            value={unitPrice}
-            onChange={e => setUnitPrice(e.target.value)}
-            placeholder="例如 3.5"
-            className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
-          />
-        </div>
-        <div>
           <label className="block text-[11px] text-gray-500 mb-1 flex items-center justify-between">
             <span>
               Models（逗号分隔；留空用上面的"默认模型"）
@@ -405,15 +384,13 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
         </div>
         <div>
           <label className="block text-[11px] text-gray-500 mb-1">
-            Keys（每行：<code>key {studioLocked ? '[quota_usd]' : 'quota_usd'} [unit_price_cny]</code>{studioLocked && '，额度省略默认 5 USD'}）
+            Keys（每行：<code>key [quota_usd]</code>，额度省略默认 5 USD）
           </label>
           <textarea
             value={input}
             onChange={e => setInput(e.target.value)}
             rows={8}
-            placeholder={studioLocked
-              ? 'sk-...\nsk-... 10\nsk-... 10 3.5'
-              : 'sk-... 10\nsk-... 20 3.5'}
+            placeholder={'sk-...\nsk-... 10'}
             className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
           />
         </div>
