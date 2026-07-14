@@ -27,9 +27,13 @@ type Props = {
   // Studio operator sees a locked studio (JWT-bound). Super admin picks
   // from a dropdown / creates new one — matches BatchCreatePanel UX.
   lockedStudio?: string
+  // Pool 节流 is a system-wide setting; supplier admins can view the
+  // current values but only super admin can edit. Default true so the
+  // super-admin flow doesn't need to opt in.
+  configEditable?: boolean
 }
 
-export default function LocalPoolPanel({ lockedStudio }: Props) {
+export default function LocalPoolPanel({ lockedStudio, configEditable = true }: Props) {
   const [cfg, setCfg] = useState<LocalPoolConfig | null>(null)
   const [cfgDirty, setCfgDirty] = useState(false)
   const [cfgSaving, setCfgSaving] = useState(false)
@@ -224,7 +228,8 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
               value={cfg?.pool_interval_sec ?? ''}
               onChange={e => { setCfg(c => c && { ...c, pool_interval_sec: parseInt(e.target.value, 10) || 0 }); setCfgDirty(true) }}
               inputMode="numeric"
-              className="w-16 border border-gray-300 rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none focus:border-gray-900"
+              readOnly={!configEditable}
+              className={`w-16 border rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none ${configEditable ? 'border-gray-300 focus:border-gray-900' : 'border-gray-200 bg-gray-50 text-gray-500'}`}
             />
             <span className="text-[10px] text-gray-400">秒</span>
           </label>
@@ -234,7 +239,8 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
               value={cfg?.pool_batch_size ?? ''}
               onChange={e => { setCfg(c => c && { ...c, pool_batch_size: parseInt(e.target.value, 10) || 0 }); setCfgDirty(true) }}
               inputMode="numeric"
-              className="w-14 border border-gray-300 rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none focus:border-gray-900"
+              readOnly={!configEditable}
+              className={`w-14 border rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none ${configEditable ? 'border-gray-300 focus:border-gray-900' : 'border-gray-200 bg-gray-50 text-gray-500'}`}
             />
             <span className="text-[10px] text-gray-400">个 key</span>
           </label>
@@ -243,6 +249,7 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
               type="checkbox"
               checked={cfg?.auto_mode ?? false}
               onChange={e => { setCfg(c => c && { ...c, auto_mode: e.target.checked }); setCfgDirty(true) }}
+              disabled={!configEditable}
             />
             自动模式
           </label>
@@ -254,7 +261,8 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
                   value={cfg.rpm_base}
                   onChange={e => { setCfg(c => c && { ...c, rpm_base: parseInt(e.target.value, 10) || 0 }); setCfgDirty(true) }}
                   inputMode="numeric"
-                  className="w-16 border border-gray-300 rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none focus:border-gray-900"
+                  readOnly={!configEditable}
+                  className={`w-16 border rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none ${configEditable ? 'border-gray-300 focus:border-gray-900' : 'border-gray-200 bg-gray-50 text-gray-500'}`}
                 />
               </label>
               <label className="flex items-center gap-1.5 text-xs text-gray-700">
@@ -263,19 +271,24 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
                   value={cfg.rpm_min}
                   onChange={e => { setCfg(c => c && { ...c, rpm_min: parseInt(e.target.value, 10) || 0 }); setCfgDirty(true) }}
                   inputMode="numeric"
-                  className="w-14 border border-gray-300 rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none focus:border-gray-900"
+                  readOnly={!configEditable}
+                  className={`w-14 border rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none ${configEditable ? 'border-gray-300 focus:border-gray-900' : 'border-gray-200 bg-gray-50 text-gray-500'}`}
                 />
                 <span className="text-[10px] text-gray-400">RPM 停</span>
               </label>
             </>
           )}
-          <button
-            onClick={saveCfg}
-            disabled={!cfgDirty || cfgSaving}
-            className="bg-gray-900 text-white rounded px-2 py-0.5 text-xs hover:opacity-85 disabled:opacity-40"
-          >
-            {cfgSaving ? '保存中…' : '保存'}
-          </button>
+          {configEditable ? (
+            <button
+              onClick={saveCfg}
+              disabled={!cfgDirty || cfgSaving}
+              className="bg-gray-900 text-white rounded px-2 py-0.5 text-xs hover:opacity-85 disabled:opacity-40"
+            >
+              {cfgSaving ? '保存中…' : '保存'}
+            </button>
+          ) : (
+            <span className="text-[10px] text-gray-400 italic">只读 · 仅 super admin 可修改</span>
+          )}
           {cfgMsg && (
             <span className={`text-[11px] ${cfgMsg.ok ? 'text-emerald-600' : 'text-rose-600'}`}>
               {cfgMsg.text}
@@ -295,7 +308,8 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
             onChange={e => { setCfg(c => c && { ...c, default_models: e.target.value }); setCfgDirty(true) }}
             rows={2}
             placeholder="claude-opus-4-7,claude-sonnet-4-6,..."
-            className="w-full border border-gray-300 rounded px-2 py-1 text-[11px] font-mono focus:outline-none focus:border-gray-900"
+            readOnly={!configEditable}
+            className={`w-full border rounded px-2 py-1 text-[11px] font-mono focus:outline-none ${configEditable ? 'border-gray-300 focus:border-gray-900' : 'border-gray-200 bg-gray-50 text-gray-500'}`}
           />
         </div>
         <div className="px-4 pb-2 text-[10px] text-gray-400 flex flex-wrap gap-4">

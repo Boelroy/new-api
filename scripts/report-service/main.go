@@ -3172,8 +3172,12 @@ func main() {
 	localPoolAPI.POST("/local-pool/enqueue", handleLocalPoolEnqueue)
 	localPoolAPI.GET("/local-pool/queue", handleLocalPoolList)
 	localPoolAPI.DELETE("/local-pool/pending/:id", handleLocalPoolDelete)
+	// Pool config is read by any admin (they need to see the current
+	// throttle so the queue view + RPM readout make sense) but only
+	// super admin can change it — this is a system-wide setting and the
+	// supplier tier (role=10) shouldn't be able to widen the drip.
 	adminAPI.GET("/local-pool/config", handleLocalPoolConfigGet)
-	adminAPI.POST("/local-pool/config", handleLocalPoolConfigSet)
+	superAPI.POST("/local-pool/config", handleLocalPoolConfigSet)
 	adminAPI.GET("/local-pool/rpm", handleLocalRPM)
 
 	superAPI.POST("/remote-newapi/profiles", handleRemoteProfileCreate)

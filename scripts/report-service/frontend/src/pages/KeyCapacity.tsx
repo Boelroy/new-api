@@ -3,7 +3,7 @@ import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
 import BatchCreatePanel from '../components/BatchCreatePanel'
 import LocalPoolPanel from '../components/LocalPoolPanel'
-import { api, ChannelRow, ROLE_PROJECT_ADMIN } from '../api'
+import { api, ChannelRow, ROLE_PROJECT_ADMIN, ROLE_SUPER_ADMIN } from '../api'
 import { getCachedRole, loadRole } from '../App'
 
 function fmtETA(hours: number | null): { text: string; cls: string } {
@@ -168,7 +168,7 @@ export default function KeyCapacity() {
       actions={tab === 'capacity' ? actions : undefined}
     >
       {tabBar}
-      {tab === 'pool' && <LocalPoolPanel />}
+      {tab === 'pool' && <LocalPoolPanel configEditable={role !== null && role >= ROLE_SUPER_ADMIN} />}
       {tab === 'capacity' && (<>
       <SummaryCards cards={[
         { label: '启用 Key 数', value: String(channels.length), color: 'text-blue-600' },
