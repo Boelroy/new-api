@@ -1194,9 +1194,10 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
                         <div className="text-sm font-medium text-gray-900 truncate">{p.name}</div>
-                        {isSuperAdmin && p.host && (
-                          <div className="text-[11px] text-gray-500 truncate">{p.host}</div>
-                        )}
+                        {/* URL is intentionally not shown on the card,
+                            even for super admin — it's still editable
+                            through the edit modal. Keeps the display
+                            surface clean of credential-adjacent info. */}
                         {isSuperAdmin && (
                           <div className="text-[10px] text-gray-400 mt-1">
                             user_id={p.user_id} · token {p.has_token ? '已保存' : '未设'}
