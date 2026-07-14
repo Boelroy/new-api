@@ -109,17 +109,24 @@ type remoteProfile struct {
 	UpdatedAt       int64  `json:"updated_at"`
 }
 
-// remoteProfilePublic is the studio-operator view of a profile: name and
-// batch-upload defaults only. Fields the operator must not see (host,
-// user_id, has_token, pool tuning knobs) are omitted from the JSON. Used
-// by handleRemoteProfileList when the caller is not super_admin.
+// remoteProfilePublic is the non-super-admin view of a profile. Admin
+// (supplier tier) sees every operational knob so the queue panel can
+// render the pool throttle and the batch-upload modal can preload the
+// defaults, but never the credential-adjacent fields (host, user_id,
+// has_token). Studio operator, when reachable, additionally uses this
+// shape — they only care about name + defaults on the batch modal.
 type remoteProfilePublic struct {
-	ID            int64  `json:"id"`
-	Name          string `json:"name"`
-	DefaultModels string `json:"default_models"`
-	DefaultGroup  string `json:"default_group"`
-	CreatedAt     int64  `json:"created_at"`
-	UpdatedAt     int64  `json:"updated_at"`
+	ID              int64  `json:"id"`
+	Name            string `json:"name"`
+	DefaultModels   string `json:"default_models"`
+	DefaultGroup    string `json:"default_group"`
+	PoolIntervalSec int    `json:"pool_interval_sec"`
+	PoolBatchSize   int    `json:"pool_batch_size"`
+	AutoMode        bool   `json:"auto_mode"`
+	RPMBase         int    `json:"rpm_base"`
+	RPMMin          int    `json:"rpm_min"`
+	CreatedAt       int64  `json:"created_at"`
+	UpdatedAt       int64  `json:"updated_at"`
 }
 
 // Pool tuning safety bounds. Interval too small hammers the remote;
@@ -203,6 +210,19 @@ func callerIsStudioOperator(c *gin.Context) bool {
 	return false
 }
 
+// callerIsSuperAdmin reports whether the caller has the super_admin
+// tier. Used by handlers that need to gate credential-adjacent output
+// (profile.host, .user_id, .has_token) — admin sees the profile name
+// but nothing that resembles a URL or upstream identifier.
+func callerIsSuperAdmin(c *gin.Context) bool {
+	if v, ok := c.Get("role"); ok {
+		if r, ok := v.(int); ok {
+			return r >= minSuperAdminRole
+		}
+	}
+	return false
+}
+
 // callerStudio returns the studio JWT claim, trimmed. Empty means the
 // account isn't bound to any studio yet.
 func callerStudio(c *gin.Context) string {
@@ -249,11 +269,13 @@ func handleRemoteProfileList(c *gin.Context) {
 		return
 	}
 	defer rows.Close()
-	// Studio operators never learn the host / user_id / has_token / pool
-	// tuning — they only need a name to pick a profile in the batch-upload
-	// modal. Emit the stripped shape so those fields aren't even present
-	// as empty strings in the JSON.
-	stripped := callerIsStudioOperator(c)
+	// Only super admin sees host / user_id / has_token / pool tuning on
+	// the profile — those fields are credential-adjacent. Admin (the
+	// supplier tier) and studio operator alike get the stripped shape
+	// so a URL never reaches the UI or a leaked screenshot. Studio
+	// operator also loses the pool tuning knobs implicitly via the same
+	// stripped shape (they only need name to pick in the batch modal).
+	stripped := !callerIsSuperAdmin(c)
 	full := make([]remoteProfile, 0)
 	slim := make([]remoteProfilePublic, 0)
 	for rows.Next() {
@@ -270,12 +292,17 @@ func handleRemoteProfileList(c *gin.Context) {
 		p.HasToken = enc != ""
 		if stripped {
 			slim = append(slim, remoteProfilePublic{
-				ID:            p.ID,
-				Name:          p.Name,
-				DefaultModels: p.DefaultModels,
-				DefaultGroup:  p.DefaultGroup,
-				CreatedAt:     p.CreatedAt,
-				UpdatedAt:     p.UpdatedAt,
+				ID:              p.ID,
+				Name:            p.Name,
+				DefaultModels:   p.DefaultModels,
+				DefaultGroup:    p.DefaultGroup,
+				PoolIntervalSec: p.PoolIntervalSec,
+				PoolBatchSize:   p.PoolBatchSize,
+				AutoMode:        p.AutoMode,
+				RPMBase:         p.RPMBase,
+				RPMMin:          p.RPMMin,
+				CreatedAt:       p.CreatedAt,
+				UpdatedAt:       p.UpdatedAt,
 			})
 			continue
 		}

@@ -3,6 +3,7 @@ import Layout from '../components/Layout'
 import {
   api,
   ROLE_STUDIO_OPERATOR,
+  ROLE_SUPER_ADMIN,
   type PendingKey,
   type RemoteChannel,
   type RemoteChannelCreateResult,
@@ -102,9 +103,10 @@ function usdFromQuota(q: number) {
 
 export default function RemoteChannels() {
   // Studio-operator gets the slim page — profile picker, batch-upload
-  // modal, own-studio pending queue. Everything else on the admin view
-  // (channel table, profile CRUD, priority editor, snapshot chart) is
-  // gated to super_admin server-side and doesn't render for them.
+  // modal, own-studio pending queue. Admin+ gets the full inspector,
+  // but with profile create/edit/delete + host display gated to super
+  // admin. The RemoteChannelsAdmin sub-component reads role again to
+  // toggle those pieces.
   const [role, setRole] = useState<number | null>(getCachedRole())
   useEffect(() => {
     if (role !== null) return
@@ -112,10 +114,14 @@ export default function RemoteChannels() {
   }, [role])
   if (role === null) return null
   if (role === ROLE_STUDIO_OPERATOR) return <RemoteChannelsStudio />
-  return <RemoteChannelsAdmin />
+  return <RemoteChannelsAdmin role={role} />
 }
 
-function RemoteChannelsAdmin() {
+function RemoteChannelsAdmin({ role }: { role: number }) {
+  // Super admin can create / edit / delete profiles + see host / user_id.
+  // Everyone else on this page is admin (route gate min ROLE_ADMIN); they
+  // drive channel-level ops but never see credentials or profile CRUD.
+  const isSuperAdmin = role >= ROLE_SUPER_ADMIN
   const [profiles, setProfiles] = useState<RemoteProfile[]>([])
   const [selectedID, setSelectedID] = useState<number | null>(null)
   const [loadingProfiles, setLoadingProfiles] = useState(true)
@@ -1048,8 +1054,9 @@ function RemoteChannelsAdmin() {
 
   // Top-of-page actions: profile-level ops only. Everything else moved
   // into the channels-table toolbar so it lives next to the data it
-  // affects.
-  const actions = (
+  // affects. Profile CRUD is gated to super admin — admin sees an empty
+  // action row (channel operations still available inline).
+  const actions = isSuperAdmin ? (
     <div className="flex items-center gap-2 flex-wrap">
       <button
         onClick={openCreate}
@@ -1058,7 +1065,7 @@ function RemoteChannelsAdmin() {
         + New profile
       </button>
     </div>
-  )
+  ) : null
 
   // Channel-table toolbar. Rendered above the table, right-aligned so
   // the numbers stay dominant. Filters + row-selection actions + fetch.
@@ -1167,7 +1174,9 @@ function RemoteChannelsAdmin() {
           </div>
           {profiles.length === 0 && !loadingProfiles && (
             <p className="text-xs text-gray-500">
-              还没有 profile，点右上角 <span className="font-medium">"+ New profile"</span> 添加。
+              {isSuperAdmin
+                ? <>还没有 profile，点右上角 <span className="font-medium">"+ New profile"</span> 添加。</>
+                : <>还没有 profile。联系 super admin 创建后再回来。</>}
             </p>
           )}
           {profiles.length > 0 && (
@@ -1185,21 +1194,27 @@ function RemoteChannelsAdmin() {
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
                         <div className="text-sm font-medium text-gray-900 truncate">{p.name}</div>
-                        <div className="text-[11px] text-gray-500 truncate">{p.host}</div>
-                        <div className="text-[10px] text-gray-400 mt-1">
-                          user_id={p.user_id} · token {p.has_token ? '已保存' : '未设'}
+                        {isSuperAdmin && p.host && (
+                          <div className="text-[11px] text-gray-500 truncate">{p.host}</div>
+                        )}
+                        {isSuperAdmin && (
+                          <div className="text-[10px] text-gray-400 mt-1">
+                            user_id={p.user_id} · token {p.has_token ? '已保存' : '未设'}
+                          </div>
+                        )}
+                      </div>
+                      {isSuperAdmin && (
+                        <div className="flex flex-col gap-1 shrink-0">
+                          <button
+                            onClick={e => { e.stopPropagation(); openEdit(p) }}
+                            className="text-[10px] text-gray-500 hover:text-gray-900"
+                          >编辑</button>
+                          <button
+                            onClick={e => { e.stopPropagation(); void deleteProfile(p) }}
+                            className="text-[10px] text-rose-500 hover:text-rose-700"
+                          >删除</button>
                         </div>
-                      </div>
-                      <div className="flex flex-col gap-1 shrink-0">
-                        <button
-                          onClick={e => { e.stopPropagation(); openEdit(p) }}
-                          className="text-[10px] text-gray-500 hover:text-gray-900"
-                        >编辑</button>
-                        <button
-                          onClick={e => { e.stopPropagation(); void deleteProfile(p) }}
-                          className="text-[10px] text-rose-500 hover:text-rose-700"
-                        >删除</button>
-                      </div>
+                      )}
                     </div>
                   </div>
                 )

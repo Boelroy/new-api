@@ -209,13 +209,13 @@ export default function Sidebar({ open, onClose }: Props) {
     items = []
   } else if (role >= ROLE_ADMIN) {
     items = ADMIN_NAV_ITEMS.slice()
-    // Users page is available to admin+ (read + password reset); super admin
-    // gets extra super-only surfaces (Profit, Remote Channels, Testing).
-    items = [...items, USERS_ITEM]
+    // Users + Remote Channels are available to admin+ (Remote Channels
+    // in a read-only-for-profile mode; profile CRUD is still super
+    // admin only). Super admin gets extras: Profit, Provider Testing.
+    items = [...items, REMOTE_CHANNELS_ITEM, USERS_ITEM]
     if (role >= ROLE_SUPER_ADMIN) {
       if (showProfit) items = [items[0], PROFIT_ITEM, ...items.slice(1)]
       if (showTesting) items = [...items, TESTING_ITEM]
-      items = [...items.filter(i => i !== USERS_ITEM), REMOTE_CHANNELS_ITEM, USERS_ITEM]
     }
   } else if (role === ROLE_TESTER) {
     // Tester is scoped to Key Tester (always) and Provider Testing

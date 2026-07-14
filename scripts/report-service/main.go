@@ -3159,15 +3159,17 @@ func main() {
 	superAPI := api.Group("", requireRole(minSuperAdminRole))
 	superAPI.PATCH("/users/:id", handleUserUpdate)
 
-	// Remote New-API inspector: super admin only. Token is AES-GCM
-	// encrypted at rest. Studio operator entry point was rolled back —
-	// all remote-newapi/* routes are now super_admin only again. The
-	// handler-side studio_operator branches are kept as defensive dead
-	// code so re-enabling later is a one-line route change.
-	superAPI.GET("/remote-newapi/profiles", handleRemoteProfileList)
-	superAPI.POST("/remote-newapi/pending", handlePendingKeyEnqueue)
-	superAPI.GET("/remote-newapi/pending", handlePendingKeyList)
-	superAPI.DELETE("/remote-newapi/pending/:id", handlePendingKeyDelete)
+	// Remote New-API inspector. Admin (supplier tier) can view profiles
+	// and drive every channel-level operation (fetch, edit, pool upload,
+	// bulk pricing, snapshots, etc.); only super admin creates / edits /
+	// deletes profile rows since those carry credentials.
+	// The profile list handler strips host / user_id / has_token when the
+	// caller isn't super_admin so URL and remote user_id never reach the
+	// admin UI.
+	adminAPI.GET("/remote-newapi/profiles", handleRemoteProfileList)
+	adminAPI.POST("/remote-newapi/pending", handlePendingKeyEnqueue)
+	adminAPI.GET("/remote-newapi/pending", handlePendingKeyList)
+	adminAPI.DELETE("/remote-newapi/pending/:id", handlePendingKeyDelete)
 
 	// Local pool: KeyCapacity 'Pool 上 Key' tab + studio operator's
 	// /pool-upload slim page. Admin+ (Key Capacity) and studio_operator
@@ -3186,32 +3188,35 @@ func main() {
 	superAPI.POST("/local-pool/config", handleLocalPoolConfigSet)
 	adminAPI.GET("/local-pool/rpm", handleLocalRPM)
 
+	// Profile mutations remain super_admin only — the write path touches
+	// credentials (host + access_token) that admin must never see or
+	// change. Everything else on the Remote Channels surface is admin+.
 	superAPI.POST("/remote-newapi/profiles", handleRemoteProfileCreate)
 	superAPI.PATCH("/remote-newapi/profiles/:id", handleRemoteProfileUpdate)
 	superAPI.DELETE("/remote-newapi/profiles/:id", handleRemoteProfileDelete)
-	superAPI.POST("/remote-newapi/channels", handleRemoteFetchChannels)
-	superAPI.GET("/remote-newapi/channels/:id", handleRemoteChannelGet)
-	superAPI.POST("/remote-newapi/channels/create", handleRemoteChannelCreate)
-	superAPI.PATCH("/remote-newapi/channels", handleRemoteChannelUpdate)
-	superAPI.PATCH("/remote-newapi/channels/meta/bulk", handleRemoteMetaBulkUpdate)
-	superAPI.POST("/remote-newapi/channels/downstream/bulk", handleRemoteDownstreamBulk)
-	superAPI.GET("/remote-newapi/downstream-daily", handleRemoteDownstreamDailyList)
-	superAPI.POST("/remote-newapi/downstream-daily", handleRemoteDownstreamDailyUpsert)
-	superAPI.DELETE("/remote-newapi/downstream-daily", handleRemoteDownstreamDailyDelete)
-	superAPI.GET("/remote-newapi/stat/summary", handleRemoteStatSummary)
-	superAPI.DELETE("/remote-newapi/channels/:id", handleRemoteChannelDelete)
-	superAPI.POST("/remote-newapi/channels/test", handleRemoteTestKey)
-	superAPI.POST("/remote-newapi/channels/last-hour", handleRemoteChannelLastHour)
-	superAPI.POST("/remote-newapi/channels/errors", handleRemoteChannelErrors)
-	superAPI.POST("/remote-newapi/channels/counts", handleRemoteChannelCounts)
-	superAPI.GET("/remote-newapi/profiles/:id/error-summary", handleRemoteProfileErrorSummary)
-	superAPI.GET("/remote-newapi/snapshots", handleRemoteSnapshotHistory)
-	superAPI.GET("/remote-newapi/channels/cached", handleRemoteCachedChannels)
+	adminAPI.POST("/remote-newapi/channels", handleRemoteFetchChannels)
+	adminAPI.GET("/remote-newapi/channels/:id", handleRemoteChannelGet)
+	adminAPI.POST("/remote-newapi/channels/create", handleRemoteChannelCreate)
+	adminAPI.PATCH("/remote-newapi/channels", handleRemoteChannelUpdate)
+	adminAPI.PATCH("/remote-newapi/channels/meta/bulk", handleRemoteMetaBulkUpdate)
+	adminAPI.POST("/remote-newapi/channels/downstream/bulk", handleRemoteDownstreamBulk)
+	adminAPI.GET("/remote-newapi/downstream-daily", handleRemoteDownstreamDailyList)
+	adminAPI.POST("/remote-newapi/downstream-daily", handleRemoteDownstreamDailyUpsert)
+	adminAPI.DELETE("/remote-newapi/downstream-daily", handleRemoteDownstreamDailyDelete)
+	adminAPI.GET("/remote-newapi/stat/summary", handleRemoteStatSummary)
+	adminAPI.DELETE("/remote-newapi/channels/:id", handleRemoteChannelDelete)
+	adminAPI.POST("/remote-newapi/channels/test", handleRemoteTestKey)
+	adminAPI.POST("/remote-newapi/channels/last-hour", handleRemoteChannelLastHour)
+	adminAPI.POST("/remote-newapi/channels/errors", handleRemoteChannelErrors)
+	adminAPI.POST("/remote-newapi/channels/counts", handleRemoteChannelCounts)
+	adminAPI.GET("/remote-newapi/profiles/:id/error-summary", handleRemoteProfileErrorSummary)
+	adminAPI.GET("/remote-newapi/snapshots", handleRemoteSnapshotHistory)
+	adminAPI.GET("/remote-newapi/channels/cached", handleRemoteCachedChannels)
 	// Per-(profile, studio) accept/reject flag for studio-operator key
-	// uploads. Super admin only — operator hits an enqueue that gets 403
-	// if their studio is closed on the profile.
-	superAPI.GET("/remote-newapi/studio-policy", handleStudioPolicyList)
-	superAPI.POST("/remote-newapi/studio-policy", handleStudioPolicyUpsert)
+	// uploads. Admin can flip these because they're operational (which
+	// studios upload to which pool) rather than credential-adjacent.
+	adminAPI.GET("/remote-newapi/studio-policy", handleStudioPolicyList)
+	adminAPI.POST("/remote-newapi/studio-policy", handleStudioPolicyUpsert)
 
 	// Provider Testing: super_admin or tester role.
 	testingAPI := api.Group("", requireRoleOrTester(minSuperAdminRole))
