@@ -92,6 +92,22 @@ const USERS_ITEM: Item = {
   ),
 }
 
+// Studio operator's dedicated slim page for uploading keys into the
+// local pool. Renders LocalPoolPanel with lockedStudio wired from JWT.
+// Kept out of the admin sidebar since admin+/super_admin already have
+// the Pool tab inside Key Capacity.
+const POOL_UPLOAD_ITEM: Item = {
+  to: '/pool-upload',
+  label: '上 5刀 Key',
+  icon: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v10" />
+      <path d="M9.5 10a2.5 2.5 0 0 1 5 0c0 1-1 1.5-2.5 2s-2.5 1-2.5 2a2.5 2.5 0 0 0 5 0" />
+    </svg>
+  ),
+}
+
 // Remote New-API inspector: super admin only. Lives right after the
 // admin nav items in the super-admin render path below.
 const REMOTE_CHANNELS_ITEM: Item = {
@@ -209,12 +225,12 @@ export default function Sidebar({ open, onClose }: Props) {
     // Project admin sees Key Capacity + Key Tester only.
     items = [KEY_CAPACITY_ITEM, KEY_TESTER_ITEM]
   } else if (role === ROLE_STUDIO_OPERATOR) {
-    // Studio operator is scoped to All Keys + Key Tester. Remote Channels
-    // used to render a slim view for this role but the entry point has
-    // been rolled back to super_admin only. Route + backend both enforce
-    // super_admin now; leaving the studio slim page component in the
-    // tree is harmless (unreachable via routing).
-    items = [ALL_KEYS_ITEM, KEY_TESTER_ITEM]
+    // Studio operator: All Keys (visibility into their studio's local
+    // channels) + Key Tester + a dedicated Pool upload page. The pool
+    // page wraps LocalPoolPanel with lockedStudio from JWT so operators
+    // can drip 5-USD keys into the local pool without touching the
+    // super-admin Remote Channels surface.
+    items = [ALL_KEYS_ITEM, POOL_UPLOAD_ITEM, KEY_TESTER_ITEM]
   } else {
     // Regular users only see All Keys.
     items = [ALL_KEYS_ITEM]

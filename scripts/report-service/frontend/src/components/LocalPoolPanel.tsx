@@ -103,16 +103,19 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
     }
   }, [studio, studioLocked])
 
-  useEffect(() => { void loadCfg() }, [loadCfg])
-  useEffect(() => { void loadRPM() }, [loadRPM])
+  // Config + RPM endpoints are admin-only. Studio operator sees neither
+  // the config bar nor the RPM readout — that surface is admin-only. In
+  // that mode we also skip the 30s poll for rpm.
+  useEffect(() => { if (!studioLocked) void loadCfg() }, [loadCfg, studioLocked])
+  useEffect(() => { if (!studioLocked) void loadRPM() }, [loadRPM, studioLocked])
   useEffect(() => { void loadPending() }, [loadPending])
   useEffect(() => {
     const t = setInterval(() => {
       void loadPending()
-      void loadRPM()
+      if (!studioLocked) void loadRPM()
     }, 30000)
     return () => clearInterval(t)
-  }, [loadPending, loadRPM])
+  }, [loadPending, loadRPM, studioLocked])
 
   const saveCfg = async () => {
     if (!cfg) return
@@ -141,7 +144,9 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
       return
     }
     // Parse "key quota_usd" lines. Same shape as BatchCreatePanel so
-    // operator muscle memory carries over.
+    // operator muscle memory carries over. When the panel is locked to a
+    // studio (studio operator flow), lines are allowed to skip the
+    // quota_usd column — the backend will default to 5 USD per key.
     const channels: { key: string; quota_usd: number; unit_price_cny?: number }[] = []
     const globalUnit = unitPrice.trim() ? parseFloat(unitPrice.trim()) : NaN
     for (const raw of input.split('\n')) {
@@ -151,8 +156,14 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
       const key = parts[0]
       if (!key) continue
       const q = parts[1] ? parseFloat(parts[1]) : NaN
-      if (isNaN(q) || q <= 0) continue
-      const item: { key: string; quota_usd: number; unit_price_cny?: number } = { key, quota_usd: q }
+      let quotaUSD: number
+      if (isNaN(q) || q <= 0) {
+        if (!studioLocked) continue  // admin flow: keep the strict skip
+        quotaUSD = 0  // studio op flow: 0 → backend fills in 5 USD default
+      } else {
+        quotaUSD = q
+      }
+      const item: { key: string; quota_usd: number; unit_price_cny?: number } = { key, quota_usd: quotaUSD }
       if (parts[2]) {
         const u = parseFloat(parts[2])
         if (!isNaN(u) && u > 0) item.unit_price_cny = u
@@ -208,7 +219,10 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
 
   return (
     <div className="space-y-4">
-      {/* Pool 节流 config bar */}
+      {/* Pool 节流 config bar — admin only. Studio operator has no
+          write access on /api/local-pool/config and shouldn't see the
+          global throttle knobs. */}
+      {!studioLocked && (
       <div className="bg-white border border-gray-200 rounded-xl">
         <div className="flex flex-wrap items-center gap-3 px-4 py-2.5">
           <div className="text-[10px] uppercase tracking-wider text-gray-500 font-medium">
@@ -300,6 +314,7 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
           <span>Priority = 存活最高 + 1，逐条累加</span>
         </div>
       </div>
+      )}
 
       {/* Enqueue form */}
       <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
@@ -390,13 +405,15 @@ export default function LocalPoolPanel({ lockedStudio }: Props) {
         </div>
         <div>
           <label className="block text-[11px] text-gray-500 mb-1">
-            Keys（每行：<code>key quota_usd [unit_price_cny]</code>）
+            Keys（每行：<code>key {studioLocked ? '[quota_usd]' : 'quota_usd'} [unit_price_cny]</code>{studioLocked && '，额度省略默认 5 USD'}）
           </label>
           <textarea
             value={input}
             onChange={e => setInput(e.target.value)}
             rows={8}
-            placeholder={'sk-... 10\nsk-... 20 3.5'}
+            placeholder={studioLocked
+              ? 'sk-...\nsk-... 10\nsk-... 10 3.5'
+              : 'sk-... 10\nsk-... 20 3.5'}
             className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
           />
         </div>

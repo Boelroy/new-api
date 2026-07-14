@@ -282,12 +282,27 @@ func handleLocalPoolEnqueue(c *gin.Context) {
 		models = strings.TrimSpace(loadLocalPoolConfig().DefaultModels)
 	}
 	now := time.Now().Unix()
+	// Studio operator batches default to 5 USD per key when the row
+	// omits quota_usd (the "5 刀 key" flow). Super admin still has to
+	// specify — leaving quota unset there is more likely a mistake than
+	// intent, so keep the skip.
+	isOperator := callerIsStudioOperator(c)
+	const studioOperatorDefaultQuotaUSD = 5.0
 	inserted, skipped := 0, 0
 	for _, ch := range body.Channels {
 		key := strings.TrimSpace(ch.Key)
-		if key == "" || ch.QuotaUSD <= 0 {
+		if key == "" {
 			skipped++
 			continue
+		}
+		quotaUSD := ch.QuotaUSD
+		if quotaUSD <= 0 {
+			if isOperator {
+				quotaUSD = studioOperatorDefaultQuotaUSD
+			} else {
+				skipped++
+				continue
+			}
 		}
 		enc, err := encryptRemoteToken(key)
 		if err != nil {
@@ -310,7 +325,7 @@ func handleLocalPoolEnqueue(c *gin.Context) {
 			  models, status, created_at, updated_at)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,$8)
 			 ON CONFLICT (studio, key_hash) DO NOTHING`,
-			studio, suffix, hash, enc, ch.QuotaUSD, unitPtr, models, now,
+			studio, suffix, hash, enc, quotaUSD, unitPtr, models, now,
 		)
 		if err != nil {
 			skipped++
