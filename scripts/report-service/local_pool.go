@@ -690,9 +690,25 @@ func insertLocalChannelForPending(pendingID int64, studio, suffix, key string, q
 	quotaInt := int(quotaUSD)
 	name := fmt.Sprintf("%s-%s-%s-%d", dateStr, studio, suffix, quotaInt)
 	now := time.Now().Unix()
-	if groupName == "" {
-		groupName = "default"
+
+	// groupName may carry a comma-separated list of groups when the
+	// admin wants the same key to serve multiple pricing tiers (e.g.
+	// "default,5刀key"). new-api's channels."group" column is
+	// tolerant of the comma-joined form, but abilities.group is a
+	// single value the router matches against verbatim — so we must
+	// expand into one row per (group, model). Empty groups after
+	// trimming get dropped so a stray comma or blank entry can't
+	// insert an unroutable "" row.
+	groupList := make([]string, 0, 2)
+	for _, g := range strings.Split(groupName, ",") {
+		if trimmed := strings.TrimSpace(g); trimmed != "" {
+			groupList = append(groupList, trimmed)
+		}
 	}
+	if len(groupList) == 0 {
+		groupList = []string{"default"}
+	}
+	channelGroup := strings.Join(groupList, ",")
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -708,18 +724,27 @@ func insertLocalChannelForPending(pendingID int64, studio, suffix, key string, q
 		VALUES (14, $1, 1, $2, 0, $3, '', $8, $4,
 		        '', '', $7, 1, 0, $5::json, $6)
 		RETURNING id`,
-		key, name, now, activeModels, channelInfoDefault, studio, priority, groupName,
+		key, name, now, activeModels, channelInfoDefault, studio, priority, channelGroup,
 	).Scan(&channelID); err != nil {
 		return fmt.Errorf("insert channel: %v", err)
 	}
-	for _, m := range models {
-		if _, err := tx.Exec(`
-			INSERT INTO abilities ("group", model, channel_id, enabled, priority, weight)
-			VALUES ($4, $1, $2, true, $3, 0)
-			ON CONFLICT DO NOTHING`,
-			strings.TrimSpace(m), channelID, priority, groupName,
-		); err != nil {
-			return fmt.Errorf("insert ability: %v", err)
+	// Cross product: one abilities row per (group, model). ON CONFLICT
+	// DO NOTHING covers the (group, model, channel_id) primary key —
+	// a group that repeats in the config won't duplicate rows.
+	for _, g := range groupList {
+		for _, m := range models {
+			trimmedModel := strings.TrimSpace(m)
+			if trimmedModel == "" {
+				continue
+			}
+			if _, err := tx.Exec(`
+				INSERT INTO abilities ("group", model, channel_id, enabled, priority, weight)
+				VALUES ($4, $1, $2, true, $3, 0)
+				ON CONFLICT DO NOTHING`,
+				trimmedModel, channelID, priority, g,
+			); err != nil {
+				return fmt.Errorf("insert ability: %v", err)
+			}
 		}
 	}
 	if unitPtr != nil && *unitPtr > 0 {
