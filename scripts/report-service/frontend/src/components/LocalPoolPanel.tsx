@@ -312,6 +312,22 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
             className={`w-full border rounded px-2 py-1 text-[11px] font-mono focus:outline-none ${configEditable ? 'border-gray-300 focus:border-gray-900' : 'border-gray-200 bg-gray-50 text-gray-500'}`}
           />
         </div>
+        {/* Default group — the channels."group" the scheduler writes
+            into. Empty → 'default'. Snapshotted per-pending-row at
+            enqueue so mid-flight config changes don't retarget queued
+            keys. */}
+        <div className="px-4 pb-2.5">
+          <label className="block text-[10px] uppercase tracking-wider text-gray-500 font-medium mb-1">
+            默认分组（写入 channels."group"，空 = default）
+          </label>
+          <input
+            value={cfg?.default_group ?? ''}
+            onChange={e => { setCfg(c => c && { ...c, default_group: e.target.value }); setCfgDirty(true) }}
+            placeholder="default"
+            readOnly={!configEditable}
+            className={`w-full border rounded px-2 py-1 text-[11px] font-mono focus:outline-none ${configEditable ? 'border-gray-300 focus:border-gray-900' : 'border-gray-200 bg-gray-50 text-gray-500'}`}
+          />
+        </div>
         <div className="px-4 pb-2 text-[10px] text-gray-400 flex flex-wrap gap-4">
           <span>当前 RPM: <span className="tabular-nums text-gray-600">{rpmNow ?? '—'}</span></span>
           <span>下一 tick 上 key 数: <span className="tabular-nums text-gray-600">{effectiveN ?? '—'}</span></span>
@@ -452,6 +468,7 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
               <tr>
                 <th className="px-3 py-2 text-left font-medium">ID</th>
                 <th className="px-3 py-2 text-left font-medium">Studio</th>
+                <th className="px-3 py-2 text-left font-medium">Group</th>
                 <th className="px-3 py-2 text-left font-medium">Key</th>
                 <th className="px-3 py-2 text-left font-medium">Status</th>
                 <th className="px-3 py-2 text-right font-medium">Priority</th>
@@ -465,7 +482,7 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
             <tbody>
               {pending.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="px-4 py-6 text-center text-xs text-gray-400">
+                  <td colSpan={11} className="px-4 py-6 text-center text-xs text-gray-400">
                     队列为空
                   </td>
                 </tr>
@@ -474,6 +491,7 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
                   <tr key={row.id} className="border-b border-gray-100 hover:bg-gray-50">
                     <td className="px-3 py-2 tabular-nums">{row.id}</td>
                     <td className="px-3 py-2 font-mono text-[11px]">{row.studio}</td>
+                    <td className="px-3 py-2 font-mono text-[11px] text-gray-600">{row.group_name || 'default'}</td>
                     <td className="px-3 py-2 font-mono text-[11px]">{row.key_masked}</td>
                     <td className="px-3 py-2">
                       <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] ${STATUS_CLS[row.status]}`}>

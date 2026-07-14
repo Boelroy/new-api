@@ -1123,6 +1123,10 @@ export type LocalPoolConfig = {
   // tab has its own model rotation independent of the classic
   // batch-create default.
   default_models: string
+  // channels."group" value the scheduler uses when it inserts pool
+  // rows. Snapshotted per-pending-row at enqueue so a mid-flight
+  // change doesn't retarget already-queued keys. Empty → 'default'.
+  default_group: string
 }
 
 export type LocalPendingKey = {
@@ -1133,6 +1137,7 @@ export type LocalPendingKey = {
   quota_usd: number
   unit_price_cny?: number | null
   models: string
+  group_name: string
   status: 'pending' | 'active' | 'used' | 'failed'
   priority: number
   channel_id: number

@@ -46,6 +46,10 @@ const (
 	// two model rotations — operators tune the pool without disturbing
 	// the synchronous batch-create default and vice versa.
 	cfgLocalPoolDefaultModels = "local_pool_default_models"
+	// Default channels."group" for pool-inserted rows. Snapshotted per-
+	// pending-row at enqueue so a mid-flight config change won't retag
+	// already-queued keys. Empty → 'default' at upload time.
+	cfgLocalPoolDefaultGroup = "local_pool_default_group"
 
 	localPoolIntervalDef  = 60
 	localPoolBatchDef     = 2
@@ -70,6 +74,7 @@ type localPoolConfig struct {
 	RPMBase       int    `json:"rpm_base"`
 	RPMMin        int    `json:"rpm_min"`
 	DefaultModels string `json:"default_models"`
+	DefaultGroup  string `json:"default_group"`
 }
 
 func loadLocalPoolConfig() localPoolConfig {
@@ -109,6 +114,7 @@ func loadLocalPoolConfig() localPoolConfig {
 	readInt(cfgLocalPoolRPMBase, &out.RPMBase)
 	readInt(cfgLocalPoolRPMMin, &out.RPMMin)
 	readStr(cfgLocalPoolDefaultModels, &out.DefaultModels)
+	readStr(cfgLocalPoolDefaultGroup, &out.DefaultGroup)
 	// Reuse remote-pool clamps for the local values — same [min, max]
 	// safety bounds apply to both since they feed the same scheduler
 	// shape. Cheaper than duplicating five constants.
@@ -148,6 +154,7 @@ func handleLocalPoolConfigSet(c *gin.Context) {
 		RPMBase       *int    `json:"rpm_base,omitempty"`
 		RPMMin        *int    `json:"rpm_min,omitempty"`
 		DefaultModels *string `json:"default_models,omitempty"`
+		DefaultGroup  *string `json:"default_group,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -193,6 +200,12 @@ func handleLocalPoolConfigSet(c *gin.Context) {
 	}
 	if body.DefaultModels != nil {
 		if err := writeLocalPoolConfig(cfgLocalPoolDefaultModels, strings.TrimSpace(*body.DefaultModels)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.DefaultGroup != nil {
+		if err := writeLocalPoolConfig(cfgLocalPoolDefaultGroup, strings.TrimSpace(*body.DefaultGroup)); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -273,14 +286,16 @@ func handleLocalPoolEnqueue(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no channels provided"})
 		return
 	}
-	// Per-batch models; fall back to the local-pool default. Empty on
-	// both ends is OK — the scheduler will substitute the batch-create
-	// default when it uploads (and the operator will see 0 rows in
-	// abilities, which is a visible-enough error).
+	// Per-batch models + group; both fall back to the local-pool config.
+	// Models empty on both ends → scheduler cascades further to the
+	// batch-create default at upload time. Group empty on both ends →
+	// scheduler falls back to 'default' at upload time.
+	cfg := loadLocalPoolConfig()
 	models := strings.TrimSpace(body.Models)
 	if models == "" {
-		models = strings.TrimSpace(loadLocalPoolConfig().DefaultModels)
+		models = strings.TrimSpace(cfg.DefaultModels)
 	}
+	groupName := strings.TrimSpace(cfg.DefaultGroup)
 	now := time.Now().Unix()
 	// Every local-pool row is a "5 刀 key" now: when the caller omits
 	// quota_usd (or sends <= 0) fall back to 5 USD. Applies to admin
@@ -316,10 +331,10 @@ func handleLocalPoolEnqueue(c *gin.Context) {
 		res, err := db.Exec(
 			`INSERT INTO local_pending_key
 			 (studio, suffix, key_hash, key_encrypted, quota_usd, unit_price_cny,
-			  models, status, created_at, updated_at)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,$8)
+			  models, group_name, status, created_at, updated_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',$9,$9)
 			 ON CONFLICT (studio, key_hash) DO NOTHING`,
-			studio, suffix, hash, enc, quotaUSD, unitPtr, models, now,
+			studio, suffix, hash, enc, quotaUSD, unitPtr, models, groupName, now,
 		)
 		if err != nil {
 			skipped++
@@ -348,6 +363,7 @@ type localPendingView struct {
 	QuotaUSD     float64  `json:"quota_usd"`
 	UnitPriceCNY *float64 `json:"unit_price_cny,omitempty"`
 	Models       string   `json:"models"`
+	GroupName    string   `json:"group_name"`
 	Status       string   `json:"status"`
 	Priority     int64    `json:"priority"`
 	ChannelID    int64    `json:"channel_id"`
@@ -361,7 +377,7 @@ func handleLocalPoolList(c *gin.Context) {
 	studioFilter := strings.TrimSpace(c.Query("studio"))
 	statusFilter := strings.TrimSpace(c.Query("status"))
 	q := `SELECT id, studio, suffix, key_encrypted, quota_usd, unit_price_cny,
-	             models, status, priority, channel_id, attempts, failed_reason,
+	             models, group_name, status, priority, channel_id, attempts, failed_reason,
 	             created_at, updated_at
 	        FROM local_pending_key WHERE 1=1`
 	args := []any{}
@@ -395,7 +411,7 @@ func handleLocalPoolList(c *gin.Context) {
 			enc  string
 			unit sql.NullFloat64
 		)
-		if err := rows.Scan(&r.ID, &r.Studio, &r.Suffix, &enc, &r.QuotaUSD, &unit, &r.Models,
+		if err := rows.Scan(&r.ID, &r.Studio, &r.Suffix, &enc, &r.QuotaUSD, &unit, &r.Models, &r.GroupName,
 			&r.Status, &r.Priority, &r.ChannelID, &r.Attempts, &r.FailedReason,
 			&r.CreatedAt, &r.UpdatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -576,7 +592,7 @@ func uploadLocalPoolBatch(n int) {
 		return
 	}
 	rows, err := db.Query(
-		`SELECT id, studio, suffix, key_encrypted, quota_usd, unit_price_cny, models
+		`SELECT id, studio, suffix, key_encrypted, quota_usd, unit_price_cny, models, group_name
 		   FROM local_pending_key WHERE status='pending'
 		  ORDER BY created_at ASC, id ASC
 		  LIMIT $1`,
@@ -587,19 +603,20 @@ func uploadLocalPoolBatch(n int) {
 		return
 	}
 	type job struct {
-		id       int64
-		studio   string
-		suffix   string
-		enc      string
-		quota    float64
-		unitPtr  *float64
-		models   string
+		id      int64
+		studio  string
+		suffix  string
+		enc     string
+		quota   float64
+		unitPtr *float64
+		models  string
+		group   string
 	}
 	jobs := make([]job, 0, n)
 	for rows.Next() {
 		var j job
 		var unit sql.NullFloat64
-		if err := rows.Scan(&j.id, &j.studio, &j.suffix, &j.enc, &j.quota, &unit, &j.models); err != nil {
+		if err := rows.Scan(&j.id, &j.studio, &j.suffix, &j.enc, &j.quota, &unit, &j.models, &j.group); err != nil {
 			continue
 		}
 		if unit.Valid {
@@ -624,13 +641,19 @@ func uploadLocalPoolBatch(n int) {
 		pMax = localPoolFallbackPriority
 	}
 
-	// Fallback for legacy rows that were enqueued before we added a
-	// per-row `models` column (models='' in DB). Read the local-pool
-	// default; if that's also empty, cascade to the batch-create default
-	// so we never insert a channel with an empty models list.
-	fallbackModels := strings.TrimSpace(loadLocalPoolConfig().DefaultModels)
+	// Fallback for legacy rows enqueued before we added a per-row
+	// `models` column (models='' in DB). Read the local-pool default;
+	// if that's also empty, cascade to the batch-create default so we
+	// never insert a channel with an empty models list. Same cascade for
+	// group_name — empty → local pool default_group → 'default'.
+	cfg := loadLocalPoolConfig()
+	fallbackModels := strings.TrimSpace(cfg.DefaultModels)
 	if fallbackModels == "" {
 		fallbackModels = getBatchCreateModels()
+	}
+	fallbackGroup := strings.TrimSpace(cfg.DefaultGroup)
+	if fallbackGroup == "" {
+		fallbackGroup = "default"
 	}
 	dateStr := time.Now().UTC().Format("0102")
 
@@ -645,9 +668,13 @@ func uploadLocalPoolBatch(n int) {
 			modelsStr = fallbackModels
 		}
 		modelsList := strings.Split(modelsStr, ",")
+		groupStr := strings.TrimSpace(j.group)
+		if groupStr == "" {
+			groupStr = fallbackGroup
+		}
 		pMax++
 		if err := insertLocalChannelForPending(j.id, j.studio, j.suffix, key, j.quota, j.unitPtr,
-			pMax, dateStr, modelsStr, modelsList); err != nil {
+			pMax, dateStr, modelsStr, modelsList, groupStr); err != nil {
 			recordLocalFailure(j.id, err.Error())
 			continue
 		}
@@ -659,10 +686,13 @@ func uploadLocalPoolBatch(n int) {
 // for a single pending row and flips it to 'active' on success. All in
 // one tx so a mid-flight failure doesn't leave orphan abilities rows.
 func insertLocalChannelForPending(pendingID int64, studio, suffix, key string, quotaUSD float64,
-	unitPtr *float64, priority int64, dateStr, activeModels string, models []string) error {
+	unitPtr *float64, priority int64, dateStr, activeModels string, models []string, groupName string) error {
 	quotaInt := int(quotaUSD)
 	name := fmt.Sprintf("%s-%s-%s-%d", dateStr, studio, suffix, quotaInt)
 	now := time.Now().Unix()
+	if groupName == "" {
+		groupName = "default"
+	}
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -675,19 +705,19 @@ func insertLocalChannelForPending(pendingID int64, studio, suffix, key string, q
 		INSERT INTO channels
 		(type, key, status, name, weight, created_time, base_url, "group", models,
 		 model_mapping, status_code_mapping, priority, auto_ban, used_quota, channel_info, tag)
-		VALUES (14, $1, 1, $2, 0, $3, '', 'default', $4,
+		VALUES (14, $1, 1, $2, 0, $3, '', $8, $4,
 		        '', '', $7, 1, 0, $5::json, $6)
 		RETURNING id`,
-		key, name, now, activeModels, channelInfoDefault, studio, priority,
+		key, name, now, activeModels, channelInfoDefault, studio, priority, groupName,
 	).Scan(&channelID); err != nil {
 		return fmt.Errorf("insert channel: %v", err)
 	}
 	for _, m := range models {
 		if _, err := tx.Exec(`
 			INSERT INTO abilities ("group", model, channel_id, enabled, priority, weight)
-			VALUES ('default', $1, $2, true, $3, 0)
+			VALUES ($4, $1, $2, true, $3, 0)
 			ON CONFLICT DO NOTHING`,
-			strings.TrimSpace(m), channelID, priority,
+			strings.TrimSpace(m), channelID, priority, groupName,
 		); err != nil {
 			return fmt.Errorf("insert ability: %v", err)
 		}

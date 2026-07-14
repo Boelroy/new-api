@@ -3021,6 +3021,12 @@ func main() {
 		// kept nullable-string rather than TEXT NOT NULL DEFAULT '' so
 		// existing rows migrate cleanly on rolling deploys.
 		`ALTER TABLE local_pending_key ADD COLUMN IF NOT EXISTS models TEXT NOT NULL DEFAULT ''`,
+		// Per-row snapshot of the channels."group" that this key will
+		// upload into. Enqueue-time snapshot from local_pool_default_group
+		// (report_config), same pattern as models above so a mid-flight
+		// config change doesn't retroactively re-target pending rows.
+		// Empty string → scheduler falls back to 'default' at insert time.
+		`ALTER TABLE local_pending_key ADD COLUMN IF NOT EXISTS group_name TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
