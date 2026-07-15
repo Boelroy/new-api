@@ -214,6 +214,27 @@ func callerIsStudioOperator(c *gin.Context) bool {
 	return false
 }
 
+// callerIsRemoteStudioOperator mirrors callerIsStudioOperator but for
+// the role=3 slot that owns remote-channel batch upload only.
+func callerIsRemoteStudioOperator(c *gin.Context) bool {
+	if v, ok := c.Get("role"); ok {
+		if r, ok := v.(int); ok {
+			return r == minRemoteStudioOperatorRole
+		}
+	}
+	return false
+}
+
+// callerNeedsRemoteStudioLock is the union we use inside remote-newapi
+// handlers: any caller in {studio_operator, remote_studio_operator}
+// gets the same studio-scope guarantees (tag forced to their studio,
+// (profile, studio) accept policy enforced, priority overrides wiped).
+// Split from the individual helpers so if we ever re-enable studio_operator
+// on the remote surface, the guards already apply to both.
+func callerNeedsRemoteStudioLock(c *gin.Context) bool {
+	return callerIsStudioOperator(c) || callerIsRemoteStudioOperator(c)
+}
+
 // callerIsSuperAdmin reports whether the caller has the super_admin
 // tier. Used by handlers that need to gate credential-adjacent output
 // (profile.host, .user_id, .has_token) — admin sees the profile name
@@ -1469,7 +1490,7 @@ func handlePendingKeyEnqueue(c *gin.Context) {
 	// pool_size to a positive sentinel so the row goes into the new pool
 	// FIFO instead of the "immediate upload" path — operators never bypass
 	// the throttle. Super admin keeps free control over all these fields.
-	if callerIsStudioOperator(c) {
+	if callerNeedsRemoteStudioLock(c) {
 		studio := callerStudio(c)
 		if studio == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "your account has no studio binding; ask an admin to bind one before uploading keys"})
@@ -1606,7 +1627,7 @@ func handlePendingKeyList(c *gin.Context) {
 	// Studio operator only ever sees their own studio's rows. Empty studio
 	// on their JWT is a config error — surface it instead of silently
 	// returning an empty list, so admin can fix the binding.
-	if callerIsStudioOperator(c) {
+	if callerNeedsRemoteStudioLock(c) {
 		studio := callerStudio(c)
 		if studio == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "your account has no studio binding; ask an admin to bind one before viewing the queue"})
@@ -1798,7 +1819,7 @@ func handlePendingKeyDelete(c *gin.Context) {
 	// Studio operator additionally may only cancel rows tagged with their
 	// own studio; a stray attempt at someone else's row yields deleted:0
 	// (idempotent no-op, no info leak).
-	if callerIsStudioOperator(c) {
+	if callerNeedsRemoteStudioLock(c) {
 		studio := callerStudio(c)
 		if studio == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "your account has no studio binding; ask an admin to bind one before canceling queue entries"})

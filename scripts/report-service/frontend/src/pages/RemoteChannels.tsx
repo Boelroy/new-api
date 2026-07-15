@@ -3,6 +3,7 @@ import Layout from '../components/Layout'
 import {
   api,
   ROLE_STUDIO_OPERATOR,
+  ROLE_REMOTE_STUDIO_OPERATOR,
   ROLE_SUPER_ADMIN,
   type PendingKey,
   type RemoteChannel,
@@ -169,7 +170,13 @@ export default function RemoteChannels() {
     void loadRole().then(setRole)
   }, [role])
   if (role === null) return null
-  if (role === ROLE_STUDIO_OPERATOR) return <RemoteChannelsStudio />
+  // Both studio-operator roles get the slim page. remote_studio_operator
+  // was carved off as its own role so a deployment can enable remote
+  // batch upload without touching local batch-create; both share the
+  // same UX because the studio-lock guarantees are the same either way.
+  if (role === ROLE_STUDIO_OPERATOR || role === ROLE_REMOTE_STUDIO_OPERATOR) {
+    return <RemoteChannelsStudio />
+  }
   return <RemoteChannelsAdmin role={role} />
 }
 

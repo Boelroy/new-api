@@ -89,6 +89,25 @@ var builtinRoleSeeds = []builtinRoleSeed{
 		},
 	},
 	{
+		// Remote studio operator: batch-upload keys to REMOTE profiles
+		// (not the local channels table). Locally identical permission
+		// set to studio_operator; the split lives in V1 (numeric role
+		// tier + which route middleware accepts them) so upgrading /
+		// deploying one lane at a time is possible.
+		Name:        RoleRemoteStudioOperator,
+		DisplayName: "Remote Studio Operator",
+		Level:       LevelRemoteStudioOperator,
+		Permissions: []Permission{
+			{ActionKeysPoolUpload, ScopeOwnStudio},
+			{ActionKeysPoolView, ScopeOwnStudio},
+			{ActionKeysPoolDelete, ScopeOwnStudio},
+			{ActionKeysNewapiUploadDir, ScopeOwnStudio},
+			{ActionKeysNewapiView, ScopeOwnStudio},
+			{ActionUsageView, ScopeOwnStudio},
+			{ActionTestingKeyTester, ScopeGlobal},
+		},
+	},
+	{
 		Name:        RoleTester,
 		DisplayName: "Tester",
 		Level:       LevelTester,
@@ -236,6 +255,8 @@ func builtinRoleNameForLegacy(v1Role int) string {
 		return RoleAdmin
 	case minProjectAdminRole:
 		return RoleProjectAdmin
+	case minRemoteStudioOperatorRole:
+		return RoleRemoteStudioOperator
 	case minStudioOperatorRole:
 		return RoleStudioOperator
 	case minTesterRole:

@@ -507,6 +507,10 @@ func legacyV1RoleForLevel(level int) int {
 		return minSuperAdminRole
 	case level >= LevelAdmin:
 		return minAdminRole
+	case level >= LevelProjectAdmin:
+		return minProjectAdminRole
+	case level >= LevelRemoteStudioOperator:
+		return minRemoteStudioOperatorRole
 	case level >= LevelStudioOperator:
 		return minStudioOperatorRole
 	case level >= LevelTester:

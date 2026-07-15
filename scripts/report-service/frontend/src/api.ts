@@ -339,6 +339,7 @@ export type CacheStatsResponse = {
 // permissions via numeric compare.
 export const ROLE_USER = 1
 export const ROLE_STUDIO_OPERATOR = 2
+export const ROLE_REMOTE_STUDIO_OPERATOR = 3
 export const ROLE_TESTER = 5
 export const ROLE_PROJECT_ADMIN = 7
 export const ROLE_ADMIN = 10

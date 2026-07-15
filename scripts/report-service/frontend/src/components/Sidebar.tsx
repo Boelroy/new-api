@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_TESTER } from '../api'
+import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_TESTER } from '../api'
 
 type Item = {
   to: string
@@ -231,6 +231,12 @@ export default function Sidebar({ open, onClose }: Props) {
     // can drip 5-USD keys into the local pool without touching the
     // super-admin Remote Channels surface.
     items = [ALL_KEYS_ITEM, POOL_UPLOAD_ITEM, KEY_TESTER_ITEM]
+  } else if (role === ROLE_REMOTE_STUDIO_OPERATOR) {
+    // Remote studio operator: same shape as studio_operator but the
+    // batch-upload surface lives on the Remote Channels slim page
+    // instead of Pool upload. All Keys stays visible so the operator
+    // can eyeball their studio's active channels.
+    items = [ALL_KEYS_ITEM, REMOTE_CHANNELS_ITEM, KEY_TESTER_ITEM]
   } else {
     // Regular users only see All Keys.
     items = [ALL_KEYS_ITEM]

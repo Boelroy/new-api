@@ -32,24 +32,26 @@ import (
 
 // Built-in role slugs. Their permission sets are seeded in v2_rbac_seed.go.
 const (
-	RoleSuperadmin     = "superadmin"
-	RoleAdmin          = "admin"
-	RoleProjectAdmin   = "project_admin"
-	RoleStudioOperator = "studio_operator"
-	RoleTester         = "tester"
-	RoleUser           = "user"
+	RoleSuperadmin           = "superadmin"
+	RoleAdmin                = "admin"
+	RoleProjectAdmin         = "project_admin"
+	RoleStudioOperator       = "studio_operator"
+	RoleRemoteStudioOperator = "remote_studio_operator"
+	RoleTester               = "tester"
+	RoleUser                 = "user"
 )
 
 // Built-in level constants — larger = more powerful. Custom roles created
 // through the UI must have level strictly less than the caller's max role
 // level.
 const (
-	LevelSuperadmin     = 100
-	LevelAdmin          = 50
-	LevelProjectAdmin   = 25
-	LevelStudioOperator = 20
-	LevelTester         = 15
-	LevelUser           = 10
+	LevelSuperadmin           = 100
+	LevelAdmin                = 50
+	LevelProjectAdmin         = 25
+	LevelRemoteStudioOperator = 22
+	LevelStudioOperator       = 20
+	LevelTester               = 15
+	LevelUser                 = 10
 )
 
 // Scopes.
@@ -673,6 +675,8 @@ func legacyLevelForRole(v1Role int) int {
 		return LevelAdmin
 	case minProjectAdminRole:
 		return LevelProjectAdmin
+	case minRemoteStudioOperatorRole:
+		return LevelRemoteStudioOperator
 	case minStudioOperatorRole:
 		return LevelStudioOperator
 	case minTesterRole:

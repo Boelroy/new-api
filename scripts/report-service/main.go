@@ -57,12 +57,13 @@ var (
 // + Key Tester for project admin) without inheriting admin permissions by
 // virtue of being numerically above minUserRole.
 const (
-	minUserRole           = 1   // any authenticated main-service user
-	minStudioOperatorRole = 2   // batch-create channels, scoped to bound studio
-	minTesterRole         = 5   // Key Tester + Provider Testing only
-	minProjectAdminRole   = 7   // Key Capacity + Key Tester only
-	minAdminRole          = 10  // common.RoleAdminUser
-	minSuperAdminRole     = 100 // common.RoleRootUser
+	minUserRole                 = 1   // any authenticated main-service user
+	minStudioOperatorRole       = 2   // batch-create LOCAL channels, scoped to bound studio
+	minRemoteStudioOperatorRole = 3   // batch-upload REMOTE channels, scoped to bound studio
+	minTesterRole               = 5   // Key Tester + Provider Testing only
+	minProjectAdminRole         = 7   // Key Capacity + Key Tester only
+	minAdminRole                = 10  // common.RoleAdminUser
+	minSuperAdminRole           = 100 // common.RoleRootUser
 )
 
 // SSO session cache: maps session cookie value → (role, expiry).
@@ -273,6 +274,23 @@ func requireRoleOrTester(min int) gin.HandlerFunc {
 		roleAny, _ := c.Get("role")
 		role, _ := roleAny.(int)
 		if role >= min || role == minTesterRole {
+			c.Next()
+			return
+		}
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		c.Abort()
+	}
+}
+
+// requireRoleOrRemoteStudioOperator grants access to callers at min tier
+// OR the remote-studio-operator role. Symmetric with
+// requireRoleOrStudioOperator but keyed to the different role slot so
+// local batch and remote batch access are separately grantable.
+func requireRoleOrRemoteStudioOperator(min int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		roleAny, _ := c.Get("role")
+		role, _ := roleAny.(int)
+		if role >= min || role == minRemoteStudioOperatorRole {
 			c.Next()
 			return
 		}
@@ -1302,7 +1320,8 @@ func handleLogout(c *gin.Context) {
 
 func isValidRoleTier(role int) bool {
 	switch role {
-	case minUserRole, minStudioOperatorRole, minTesterRole, minProjectAdminRole, minAdminRole, minSuperAdminRole:
+	case minUserRole, minStudioOperatorRole, minRemoteStudioOperatorRole,
+		minTesterRole, minProjectAdminRole, minAdminRole, minSuperAdminRole:
 		return true
 	}
 	return false
@@ -1348,7 +1367,7 @@ func handleUserCreate(c *gin.Context) {
 		return
 	}
 	if !isValidRoleTier(body.Role) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 5, 7, 10, or 100"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 5, 7, 10, or 100"})
 		return
 	}
 	// Anti-escalation on create: an admin (non-super) can only mint accounts
@@ -1413,7 +1432,7 @@ func handleUserUpdate(c *gin.Context) {
 	// out, and cannot demote the last remaining super admin via this handler.
 	if body.Role != nil {
 		if !isValidRoleTier(*body.Role) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 5, 7, 10, or 100"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 5, 7, 10, or 100"})
 			return
 		}
 		if target.Role >= minSuperAdminRole && *body.Role < minSuperAdminRole {
@@ -3180,10 +3199,15 @@ func main() {
 	// The profile list handler strips host / user_id / has_token when the
 	// caller isn't super_admin so URL and remote user_id never reach the
 	// admin UI.
-	adminAPI.GET("/remote-newapi/profiles", handleRemoteProfileList)
-	adminAPI.POST("/remote-newapi/pending", handlePendingKeyEnqueue)
-	adminAPI.GET("/remote-newapi/pending", handlePendingKeyList)
-	adminAPI.DELETE("/remote-newapi/pending/:id", handlePendingKeyDelete)
+	// Remote studio operator (role=3) shares these paths with admin+ but
+	// through a shared middleware — the handlers themselves force
+	// tag=user.studio and honour the (profile, studio) accept policy so
+	// operators can only touch their own studio's queue rows.
+	remoteOperatorAPI := api.Group("", requireRoleOrRemoteStudioOperator(minAdminRole))
+	remoteOperatorAPI.GET("/remote-newapi/profiles", handleRemoteProfileList)
+	remoteOperatorAPI.POST("/remote-newapi/pending", handlePendingKeyEnqueue)
+	remoteOperatorAPI.GET("/remote-newapi/pending", handlePendingKeyList)
+	remoteOperatorAPI.DELETE("/remote-newapi/pending/:id", handlePendingKeyDelete)
 
 	// Local pool: KeyCapacity 'Pool 上 Key' tab + studio operator's
 	// /pool-upload slim page. Admin+ (Key Capacity) and studio_operator
@@ -3225,7 +3249,11 @@ func main() {
 	adminAPI.POST("/remote-newapi/channels/counts", handleRemoteChannelCounts)
 	adminAPI.GET("/remote-newapi/profiles/:id/error-summary", handleRemoteProfileErrorSummary)
 	adminAPI.GET("/remote-newapi/snapshots", handleRemoteSnapshotHistory)
-	adminAPI.GET("/remote-newapi/channels/cached", handleRemoteCachedChannels)
+	// Cached channel list: also readable by remote_studio_operator so the
+	// slim page can render the existing channels list. Backend doesn't
+	// need scope filtering here because the mirror table already reflects
+	// what's live on the profile — no key material.
+	remoteOperatorAPI.GET("/remote-newapi/channels/cached", handleRemoteCachedChannels)
 	// Per-(profile, studio) accept/reject flag for studio-operator key
 	// uploads. Admin can flip these because they're operational (which
 	// studios upload to which pool) rather than credential-adjacent.
