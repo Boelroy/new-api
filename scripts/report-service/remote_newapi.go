@@ -2007,6 +2007,17 @@ func handleVertexChannelCreate(c *gin.Context) {
 		return
 	}
 
+	// Same uploader-identity capture as handlePendingKeyEnqueue — 0 for
+	// SSO callers without an rs_auth_user row. Written into the
+	// attribution row below so 我的远程渠道 can filter Vertex uploads
+	// the same way it filters Anthropic/Gemini ones.
+	uploadedBy := int64(0)
+	if v, ok := c.Get("user_id"); ok {
+		if uid, ok := v.(int64); ok {
+			uploadedBy = uid
+		}
+	}
+
 	// Only JSON mode is supported (matches the "只支持 JSON" product decision).
 	// API-key mode would take a different code path (single key string,
 	// no reverse-lookup complications) and we can add it when actually needed.
@@ -2063,6 +2074,46 @@ func handleVertexChannelCreate(c *gin.Context) {
 			})
 			continue
 		}
+
+		// Attribution row into remote_pending_key so 我的远程渠道 and
+		// 上传队列 pick up this Vertex upload the same way they pick up
+		// Anthropic/Gemini ones. status='active' + activated_at=now
+		// tells the scheduler it's already done (no re-upload attempt);
+		// pool_size=0 keeps it out of the pool refill logic. The
+		// (profile_id, key_hash) uniqueness prevents duplicate rows if
+		// the same SA JSON is uploaded twice.
+		noteStr := strings.TrimSpace(it.Note)
+		quota := 0.0
+		if it.QuotaUSD != nil {
+			quota = *it.QuotaUSD
+		}
+		enc, encErr := encryptRemoteToken(keyStr)
+		if encErr == nil {
+			nowTS := time.Now().Unix()
+			if _, err := db.Exec(
+				`INSERT INTO remote_pending_key
+				 (profile_id, key_hash, key_encrypted, quota_usd, note, name_prefix,
+				  group_name, tag, models, priority, pool_size, status, channel_type, uploaded_by,
+				  remote_channel_id, activated_at, created_at, updated_at)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0,0,'active',41,$10,$11,$12,$12,$12)
+				 ON CONFLICT (profile_id, key_hash) DO UPDATE SET
+				   remote_channel_id = EXCLUDED.remote_channel_id,
+				   status            = 'active',
+				   activated_at      = EXCLUDED.activated_at,
+				   uploaded_by       = EXCLUDED.uploaded_by,
+				   tag               = EXCLUDED.tag,
+				   updated_at        = EXCLUDED.updated_at,
+				   failed_reason     = ''`,
+				body.ProfileID, pendingKeyHash(keyStr), enc, quota, noteStr, body.NamePrefix,
+				body.Group, body.Tag, body.Models, uploadedBy,
+				chID, nowTS,
+			); err != nil {
+				log.Printf("[vertex-create] attribution insert profile=%d channel=%d: %v", body.ProfileID, chID, err)
+			}
+		} else {
+			log.Printf("[vertex-create] encrypt key for attribution profile=%d channel=%d: %v", body.ProfileID, chID, encErr)
+		}
+
 		results = append(results, gin.H{
 			"index":      idx,
 			"ok":         true,
