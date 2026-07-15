@@ -29,6 +29,54 @@ const DEFAULT_ANTHROPIC_MODELS = [
   'claude-fable-5',
 ].join(',')
 
+const DEFAULT_GEMINI_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-image',
+  'gemini-2.5-flash-preview-tts',
+  'gemini-2.5-pro',
+  'gemini-3-flash-preview',
+  'gemini-3-pro-image',
+  'gemini-3-pro-image-preview',
+  'gemini-3.1-flash-image',
+  'gemini-3.1-flash-image-preview',
+  'gemini-3.1-flash-lite',
+  'gemini-3.1-flash-lite-preview',
+  'gemini-3.1-pro-preview',
+  'gemini-3.1-pro-preview-customtools',
+  'gemini-3.5-flash',
+].join(',')
+
+// Channel type integers from newapi's constant/channel.go — 14 = Anthropic,
+// 24 = Gemini. Sent through remotePendingEnqueue.type on both the pool
+// and immediate lanes. Duplicated (intentionally, see file header) from
+// RemoteChannels.tsx to keep this operator surface standalone.
+const CHANNEL_TYPE_ANTHROPIC = 14
+const CHANNEL_TYPE_GEMINI = 24
+
+type PresetID = 'anthropic' | 'gemini'
+type PresetSpec = {
+  id: PresetID
+  label: string
+  type: number
+  fallbackModels: string
+  fallbackGroup: string
+  profileGroupField: 'default_group' | 'default_gemini_group'
+  profileModelsField: 'default_models' | 'default_gemini_models'
+}
+const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
+  { id: 'anthropic', label: 'Anthropic (Claude)', type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS, fallbackGroup: 'default', profileGroupField: 'default_group',        profileModelsField: 'default_models' },
+  { id: 'gemini',    label: 'Gemini',              type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,    fallbackGroup: 'gemini',  profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
+]
+
+function resolvePresetGroup(preset: PresetSpec, profile: RemoteProfile | undefined): string {
+  const fromProfile = (profile?.[preset.profileGroupField] || '').trim()
+  return fromProfile || preset.fallbackGroup
+}
+function resolvePresetModels(preset: PresetSpec, profile: RemoteProfile | undefined): string {
+  const fromProfile = (profile?.[preset.profileModelsField] || '').trim()
+  return fromProfile || preset.fallbackModels
+}
+
 function todayYYYYMMDD() {
   const d = new Date()
   const y = d.getFullYear()
@@ -69,6 +117,7 @@ export default function RemoteChannelsStudio() {
   const [batchPrefix, setBatchPrefix] = useState('')
   const [batchGroup, setBatchGroup] = useState('default')
   const [batchModels, setBatchModels] = useState(DEFAULT_ANTHROPIC_MODELS)
+  const [batchPresetID, setBatchPresetID] = useState<PresetID>('anthropic')
   const [batchInput, setBatchInput] = useState('')
   const [batchBusy, setBatchBusy] = useState(false)
   const [batchErr, setBatchErr] = useState<string | null>(null)
@@ -81,6 +130,7 @@ export default function RemoteChannelsStudio() {
   const [immPrefix, setImmPrefix] = useState('')
   const [immGroup, setImmGroup] = useState('default')
   const [immModels, setImmModels] = useState(DEFAULT_ANTHROPIC_MODELS)
+  const [immPresetID, setImmPresetID] = useState<PresetID>('anthropic')
   const [immInput, setImmInput] = useState('')
   const [immBusy, setImmBusy] = useState(false)
   const [immErr, setImmErr] = useState<string | null>(null)
@@ -139,8 +189,10 @@ export default function RemoteChannelsStudio() {
     // can still edit it (e.g. append -alpha / -beta) but the studio
     // stays visible.
     setBatchPrefix(userStudio)
-    setBatchGroup((p?.default_group || '').trim() || 'default')
-    setBatchModels((p?.default_models || '').trim() || DEFAULT_ANTHROPIC_MODELS)
+    const initialPreset = CHANNEL_TYPE_PRESETS[0]
+    setBatchPresetID(initialPreset.id)
+    setBatchGroup(resolvePresetGroup(initialPreset, p))
+    setBatchModels(resolvePresetModels(initialPreset, p))
     setBatchInput('')
     setBatchErr(null)
     setBatchOpen(true)
@@ -180,6 +232,7 @@ export default function RemoteChannelsStudio() {
       const res = await api.remotePendingEnqueue({
         profile_id: selectedID,
         name_prefix: fullNamePrefix,
+        type: CHANNEL_TYPE_PRESETS.find(p => p.id === batchPresetID)?.type,
         group: batchGroup.trim() || 'default',
         models: batchModels.trim(),
         pool_size: 1,
@@ -198,8 +251,10 @@ export default function RemoteChannelsStudio() {
   const openImmediate = () => {
     const p = profiles.find(x => x.id === selectedID)
     setImmPrefix(userStudio)
-    setImmGroup((p?.default_group || '').trim() || 'default')
-    setImmModels((p?.default_models || '').trim() || DEFAULT_ANTHROPIC_MODELS)
+    const initialPreset = CHANNEL_TYPE_PRESETS[0]
+    setImmPresetID(initialPreset.id)
+    setImmGroup(resolvePresetGroup(initialPreset, p))
+    setImmModels(resolvePresetModels(initialPreset, p))
     setImmInput('')
     setImmErr(null)
     setImmOpen(true)
@@ -235,6 +290,7 @@ export default function RemoteChannelsStudio() {
       const res = await api.remotePendingEnqueue({
         profile_id: selectedID,
         name_prefix: fullNamePrefix,
+        type: CHANNEL_TYPE_PRESETS.find(p => p.id === immPresetID)?.type,
         group: immGroup.trim() || 'default',
         models: immModels.trim(),
         pool_size: 0,
@@ -402,6 +458,32 @@ export default function RemoteChannelsStudio() {
               </div>
 
               <div>
+                <label className="block text-[11px] text-gray-500 mb-1">渠道类型</label>
+                <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
+                  {CHANNEL_TYPE_PRESETS.map(p => {
+                    const active = batchPresetID === p.id
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => {
+                          setBatchPresetID(p.id)
+                          const prof = profiles.find(x => x.id === selectedID)
+                          setBatchGroup(resolvePresetGroup(p, prof))
+                          setBatchModels(resolvePresetModels(p, prof))
+                        }}
+                        className={`px-3 py-1 text-xs border-r border-gray-200 last:border-r-0 transition-colors ${
+                          active ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                        }`}
+                      >
+                        {p.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              <div>
                 <label className="block text-[11px] text-gray-500 mb-1">Group</label>
                 <input
                   value={batchGroup}
@@ -478,6 +560,31 @@ export default function RemoteChannelsStudio() {
                     placeholder="例如 studio-A"
                     className="flex-1 border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900"
                   />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">渠道类型</label>
+                <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
+                  {CHANNEL_TYPE_PRESETS.map(p => {
+                    const active = immPresetID === p.id
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => {
+                          setImmPresetID(p.id)
+                          const prof = profiles.find(x => x.id === selectedID)
+                          setImmGroup(resolvePresetGroup(p, prof))
+                          setImmModels(resolvePresetModels(p, prof))
+                        }}
+                        className={`px-3 py-1 text-xs border-r border-gray-200 last:border-r-0 transition-colors ${
+                          active ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                        }`}
+                      >
+                        {p.label}
+                      </button>
+                    )
+                  })}
                 </div>
               </div>
               <div>
