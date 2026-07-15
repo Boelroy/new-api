@@ -69,22 +69,27 @@ type PresetSpec = {
   id: PresetID
   label: string
   type: number
-  models: string
-  testModel: string
+  fallbackModels: string
   fallbackGroup: string
+  testModel: string
   profileGroupField: 'default_group' | 'default_gemini_group'
+  profileModelsField: 'default_models' | 'default_gemini_models'
 }
 const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
-  { id: 'anthropic', label: 'Anthropic (Claude)', type: CHANNEL_TYPE_ANTHROPIC, models: DEFAULT_ANTHROPIC_MODELS, testModel: 'claude-haiku-4-5-20251001', fallbackGroup: 'default', profileGroupField: 'default_group' },
-  { id: 'gemini',    label: 'Gemini',              type: CHANNEL_TYPE_GEMINI,    models: DEFAULT_GEMINI_MODELS,    testModel: 'gemini-2.5-flash',              fallbackGroup: 'gemini',  profileGroupField: 'default_gemini_group' },
+  { id: 'anthropic', label: 'Anthropic (Claude)', type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS, fallbackGroup: 'default', testModel: 'claude-haiku-4-5-20251001', profileGroupField: 'default_group',        profileModelsField: 'default_models' },
+  { id: 'gemini',    label: 'Gemini',              type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,    fallbackGroup: 'gemini',  testModel: 'gemini-2.5-flash',              profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
 ]
 
-// resolvePresetGroup picks the batch upload group for a preset: profile
-// field (default_group / default_gemini_group) if set, else the preset's
-// built-in fallback ('default' / 'gemini').
+// resolvePresetGroup / resolvePresetModels pick the batch upload group +
+// models for a preset. Priority: profile-saved value → preset fallback
+// baked into the frontend so the field is never empty.
 function resolvePresetGroup(preset: PresetSpec, profile: RemoteProfile | undefined): string {
   const fromProfile = (profile?.[preset.profileGroupField] || '').trim()
   return fromProfile || preset.fallbackGroup
+}
+function resolvePresetModels(preset: PresetSpec, profile: RemoteProfile | undefined): string {
+  const fromProfile = (profile?.[preset.profileModelsField] || '').trim()
+  return fromProfile || preset.fallbackModels
 }
 
 const DEFAULT_TEST_MODEL = 'claude-haiku-4-5-20251001'
@@ -258,6 +263,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   const [formDefaultModels, setFormDefaultModels] = useState('')
   const [formDefaultGroup, setFormDefaultGroup] = useState('')
   const [formDefaultGeminiGroup, setFormDefaultGeminiGroup] = useState('')
+  const [formDefaultGeminiModels, setFormDefaultGeminiModels] = useState('')
   // Pool throttle lives on the profile but is edited from the upload
   // queue panel (right where the operator watches keys stream through).
   // `pool_dirty` guards against clobbering an unsaved edit if the
@@ -390,6 +396,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setFormDefaultModels(DEFAULT_ANTHROPIC_MODELS)
     setFormDefaultGroup('default')
     setFormDefaultGeminiGroup('')
+    setFormDefaultGeminiModels('')
     setFormErr(null)
     setFormOpen(true)
   }
@@ -407,6 +414,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setFormDefaultModels(p.default_models || '')
     setFormDefaultGroup(p.default_group || '')
     setFormDefaultGeminiGroup(p.default_gemini_group || '')
+    setFormDefaultGeminiModels(p.default_gemini_models || '')
     setFormErr(null)
     setFormOpen(true)
   }
@@ -431,6 +439,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           default_models: formDefaultModels.trim(),
           default_group: formDefaultGroup.trim(),
           default_gemini_group: formDefaultGeminiGroup.trim(),
+          default_gemini_models: formDefaultGeminiModels.trim(),
         })
         await reloadProfiles()
         setSelectedID(created.id)
@@ -441,6 +450,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           default_models: formDefaultModels.trim(),
           default_group: formDefaultGroup.trim(),
           default_gemini_group: formDefaultGeminiGroup.trim(),
+          default_gemini_models: formDefaultGeminiModels.trim(),
         }
         if (formHost.trim()) patch.host = formHost.trim()
         if (formToken.trim()) patch.access_token = formToken.trim()
@@ -855,9 +865,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     const initialPreset = CHANNEL_TYPE_PRESETS[0]
     setBatchPresetID(initialPreset.id)
     setBatchGroup(resolvePresetGroup(initialPreset, p))
+    setBatchModels(resolvePresetModels(initialPreset, p))
     setBatchTag('')
     setBatchPriority('')
-    setBatchModels((p?.default_models || '').trim() || DEFAULT_ANTHROPIC_MODELS)
     setBatchInput('')
     setBatchErr(null)
     setBatchResults(null)
@@ -1965,12 +1975,11 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                       type="button"
                       onClick={() => {
                         setBatchPresetID(p.id)
-                        // Rewrite models to the preset's default list AND
-                        // switch the group to whatever this preset resolves
-                        // for the current profile. Fallback is baked in
-                        // (default / gemini) so the field is never empty.
-                        setBatchModels(p.models)
+                        // Rewrite both models and group. Each resolver
+                        // picks profile-saved value first, then preset
+                        // fallback — field is never empty.
                         const prof = profiles.find(x => x.id === selectedID)
+                        setBatchModels(resolvePresetModels(p, prof))
                         setBatchGroup(resolvePresetGroup(p, prof))
                       }}
                       className={`px-3 py-1.5 text-xs border-r border-gray-200 last:border-r-0 transition-colors ${
@@ -1983,7 +1992,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                 })}
               </div>
               <p className="text-[10px] text-gray-400 mt-1">
-                切换预设会同步重写下方的 <span className="font-mono">Models</span> 和 <span className="font-mono">Group</span>；Gemini 走 <span className="font-mono">default_gemini_group</span>（在站点编辑里配），未设置则用 <span className="font-mono">'gemini'</span>。
+                切换预设会同步重写下方的 <span className="font-mono">Models</span> 和 <span className="font-mono">Group</span>。Gemini 用站点上配置的 <span className="font-mono">default_gemini_group</span> / <span className="font-mono">default_gemini_models</span>；未设置则回退到内置默认。
               </p>
             </Field>
             <Field label="Models（逗号分隔）">
@@ -2228,12 +2237,21 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                     className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
                   />
                 </Field>
-                <Field label="默认 Models (逗号分隔)">
+                <Field label="默认 Models (Anthropic, 逗号分隔)">
                   <textarea
                     value={formDefaultModels}
                     onChange={e => setFormDefaultModels(e.target.value)}
                     rows={3}
                     placeholder="claude-opus-4-7,claude-sonnet-4-6,..."
+                    className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
+                  />
+                </Field>
+                <Field label="默认 Models (Gemini, 逗号分隔)">
+                  <textarea
+                    value={formDefaultGeminiModels}
+                    onChange={e => setFormDefaultGeminiModels(e.target.value)}
+                    rows={3}
+                    placeholder="gemini-2.5-flash,gemini-2.5-pro,...（留空则用内置默认）"
                     className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
                   />
                 </Field>

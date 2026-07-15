@@ -93,21 +93,22 @@ func decryptRemoteToken(enc string) (string, error) {
 // ---- Data model ----
 
 type remoteProfile struct {
-	ID                 int64  `json:"id"`
-	Name               string `json:"name"`
-	Host               string `json:"host"`
-	UserID             int64  `json:"user_id"`
-	HasToken           bool   `json:"has_token"` // token never returned; UI shows only whether set
-	DefaultModels      string `json:"default_models"`
-	DefaultGroup       string `json:"default_group"`
-	DefaultGeminiGroup string `json:"default_gemini_group"`
-	PoolIntervalSec    int    `json:"pool_interval_sec"`
-	PoolBatchSize      int    `json:"pool_batch_size"`
-	AutoMode           bool   `json:"auto_mode"`
-	RPMBase            int    `json:"rpm_base"`
-	RPMMin             int    `json:"rpm_min"`
-	CreatedAt          int64  `json:"created_at"`
-	UpdatedAt          int64  `json:"updated_at"`
+	ID                  int64  `json:"id"`
+	Name                string `json:"name"`
+	Host                string `json:"host"`
+	UserID              int64  `json:"user_id"`
+	HasToken            bool   `json:"has_token"` // token never returned; UI shows only whether set
+	DefaultModels       string `json:"default_models"`
+	DefaultGroup        string `json:"default_group"`
+	DefaultGeminiGroup  string `json:"default_gemini_group"`
+	DefaultGeminiModels string `json:"default_gemini_models"`
+	PoolIntervalSec     int    `json:"pool_interval_sec"`
+	PoolBatchSize       int    `json:"pool_batch_size"`
+	AutoMode            bool   `json:"auto_mode"`
+	RPMBase             int    `json:"rpm_base"`
+	RPMMin              int    `json:"rpm_min"`
+	CreatedAt           int64  `json:"created_at"`
+	UpdatedAt           int64  `json:"updated_at"`
 }
 
 // remoteProfilePublic is the non-super-admin view of a profile. Admin
@@ -117,18 +118,19 @@ type remoteProfile struct {
 // has_token). Studio operator, when reachable, additionally uses this
 // shape — they only care about name + defaults on the batch modal.
 type remoteProfilePublic struct {
-	ID                 int64  `json:"id"`
-	Name               string `json:"name"`
-	DefaultModels      string `json:"default_models"`
-	DefaultGroup       string `json:"default_group"`
-	DefaultGeminiGroup string `json:"default_gemini_group"`
-	PoolIntervalSec    int    `json:"pool_interval_sec"`
-	PoolBatchSize      int    `json:"pool_batch_size"`
-	AutoMode           bool   `json:"auto_mode"`
-	RPMBase            int    `json:"rpm_base"`
-	RPMMin             int    `json:"rpm_min"`
-	CreatedAt          int64  `json:"created_at"`
-	UpdatedAt          int64  `json:"updated_at"`
+	ID                  int64  `json:"id"`
+	Name                string `json:"name"`
+	DefaultModels       string `json:"default_models"`
+	DefaultGroup        string `json:"default_group"`
+	DefaultGeminiGroup  string `json:"default_gemini_group"`
+	DefaultGeminiModels string `json:"default_gemini_models"`
+	PoolIntervalSec     int    `json:"pool_interval_sec"`
+	PoolBatchSize       int    `json:"pool_batch_size"`
+	AutoMode            bool   `json:"auto_mode"`
+	RPMBase             int    `json:"rpm_base"`
+	RPMMin              int    `json:"rpm_min"`
+	CreatedAt           int64  `json:"created_at"`
+	UpdatedAt           int64  `json:"updated_at"`
 }
 
 // Pool tuning safety bounds. Interval too small hammers the remote;
@@ -260,7 +262,7 @@ func normalizeHost(raw string) (string, error) {
 func handleRemoteProfileList(c *gin.Context) {
 	rows, err := db.Query(
 		`SELECT id, name, host, user_id, access_token_enc,
-		        default_models, default_group, default_gemini_group,
+		        default_models, default_group, default_gemini_group, default_gemini_models,
 		        pool_interval_sec, pool_batch_size,
 		        auto_mode, rpm_base, rpm_min,
 		        created_at, updated_at
@@ -284,7 +286,7 @@ func handleRemoteProfileList(c *gin.Context) {
 		var p remoteProfile
 		var enc string
 		if err := rows.Scan(&p.ID, &p.Name, &p.Host, &p.UserID, &enc,
-			&p.DefaultModels, &p.DefaultGroup, &p.DefaultGeminiGroup,
+			&p.DefaultModels, &p.DefaultGroup, &p.DefaultGeminiGroup, &p.DefaultGeminiModels,
 			&p.PoolIntervalSec, &p.PoolBatchSize,
 			&p.AutoMode, &p.RPMBase, &p.RPMMin,
 			&p.CreatedAt, &p.UpdatedAt); err != nil {
@@ -294,18 +296,19 @@ func handleRemoteProfileList(c *gin.Context) {
 		p.HasToken = enc != ""
 		if stripped {
 			slim = append(slim, remoteProfilePublic{
-				ID:                 p.ID,
-				Name:               p.Name,
-				DefaultModels:      p.DefaultModels,
-				DefaultGroup:       p.DefaultGroup,
-				DefaultGeminiGroup: p.DefaultGeminiGroup,
-				PoolIntervalSec:    p.PoolIntervalSec,
-				PoolBatchSize:      p.PoolBatchSize,
-				AutoMode:           p.AutoMode,
-				RPMBase:            p.RPMBase,
-				RPMMin:             p.RPMMin,
-				CreatedAt:          p.CreatedAt,
-				UpdatedAt:          p.UpdatedAt,
+				ID:                  p.ID,
+				Name:                p.Name,
+				DefaultModels:       p.DefaultModels,
+				DefaultGroup:        p.DefaultGroup,
+				DefaultGeminiGroup:  p.DefaultGeminiGroup,
+				DefaultGeminiModels: p.DefaultGeminiModels,
+				PoolIntervalSec:     p.PoolIntervalSec,
+				PoolBatchSize:       p.PoolBatchSize,
+				AutoMode:            p.AutoMode,
+				RPMBase:             p.RPMBase,
+				RPMMin:              p.RPMMin,
+				CreatedAt:           p.CreatedAt,
+				UpdatedAt:           p.UpdatedAt,
 			})
 			continue
 		}
@@ -320,18 +323,19 @@ func handleRemoteProfileList(c *gin.Context) {
 
 func handleRemoteProfileCreate(c *gin.Context) {
 	var body struct {
-		Name               string `json:"name"`
-		Host               string `json:"host"`
-		UserID             int64  `json:"user_id"`
-		AccessToken        string `json:"access_token"`
-		DefaultModels      string `json:"default_models"`
-		DefaultGroup       string `json:"default_group"`
-		DefaultGeminiGroup string `json:"default_gemini_group"`
-		PoolIntervalSec    int    `json:"pool_interval_sec"`
-		PoolBatchSize      int    `json:"pool_batch_size"`
-		AutoMode           *bool  `json:"auto_mode,omitempty"`
-		RPMBase            int    `json:"rpm_base"`
-		RPMMin             int    `json:"rpm_min"`
+		Name                string `json:"name"`
+		Host                string `json:"host"`
+		UserID              int64  `json:"user_id"`
+		AccessToken         string `json:"access_token"`
+		DefaultModels       string `json:"default_models"`
+		DefaultGroup        string `json:"default_group"`
+		DefaultGeminiGroup  string `json:"default_gemini_group"`
+		DefaultGeminiModels string `json:"default_gemini_models"`
+		PoolIntervalSec     int    `json:"pool_interval_sec"`
+		PoolBatchSize       int    `json:"pool_batch_size"`
+		AutoMode            *bool  `json:"auto_mode,omitempty"`
+		RPMBase             int    `json:"rpm_base"`
+		RPMMin              int    `json:"rpm_min"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -342,6 +346,7 @@ func handleRemoteProfileCreate(c *gin.Context) {
 	body.DefaultModels = strings.TrimSpace(body.DefaultModels)
 	body.DefaultGroup = strings.TrimSpace(body.DefaultGroup)
 	body.DefaultGeminiGroup = strings.TrimSpace(body.DefaultGeminiGroup)
+	body.DefaultGeminiModels = strings.TrimSpace(body.DefaultGeminiModels)
 	if body.Name == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
 		return
@@ -379,12 +384,12 @@ func handleRemoteProfileCreate(c *gin.Context) {
 	var id int64
 	err = db.QueryRow(
 		`INSERT INTO remote_newapi_profile
-		 (name, host, user_id, access_token_enc, default_models, default_group, default_gemini_group,
+		 (name, host, user_id, access_token_enc, default_models, default_group, default_gemini_group, default_gemini_models,
 		  pool_interval_sec, pool_batch_size,
 		  auto_mode, rpm_base, rpm_min,
 		  created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13) RETURNING id`,
-		body.Name, host, body.UserID, enc, body.DefaultModels, body.DefaultGroup, body.DefaultGeminiGroup,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14) RETURNING id`,
+		body.Name, host, body.UserID, enc, body.DefaultModels, body.DefaultGroup, body.DefaultGeminiGroup, body.DefaultGeminiModels,
 		poolInterval, poolBatch,
 		autoMode, rpmBase, rpmMin, now,
 	).Scan(&id)
@@ -395,8 +400,9 @@ func handleRemoteProfileCreate(c *gin.Context) {
 	c.JSON(http.StatusOK, remoteProfile{
 		ID: id, Name: body.Name, Host: host, UserID: body.UserID,
 		HasToken: true, DefaultModels: body.DefaultModels, DefaultGroup: body.DefaultGroup,
-		DefaultGeminiGroup: body.DefaultGeminiGroup,
-		PoolIntervalSec: poolInterval, PoolBatchSize: poolBatch,
+		DefaultGeminiGroup:  body.DefaultGeminiGroup,
+		DefaultGeminiModels: body.DefaultGeminiModels,
+		PoolIntervalSec:     poolInterval, PoolBatchSize: poolBatch,
 		AutoMode: autoMode, RPMBase: rpmBase, RPMMin: rpmMin,
 		CreatedAt: now, UpdatedAt: now,
 	})
@@ -410,18 +416,19 @@ func handleRemoteProfileUpdate(c *gin.Context) {
 		return
 	}
 	var body struct {
-		Name               *string `json:"name,omitempty"`
-		Host               *string `json:"host,omitempty"`
-		UserID             *int64  `json:"user_id,omitempty"`
-		AccessToken        *string `json:"access_token,omitempty"` // empty string = leave unchanged
-		DefaultModels      *string `json:"default_models,omitempty"`
-		DefaultGroup       *string `json:"default_group,omitempty"`
-		DefaultGeminiGroup *string `json:"default_gemini_group,omitempty"`
-		PoolIntervalSec    *int    `json:"pool_interval_sec,omitempty"`
-		PoolBatchSize      *int    `json:"pool_batch_size,omitempty"`
-		AutoMode           *bool   `json:"auto_mode,omitempty"`
-		RPMBase            *int    `json:"rpm_base,omitempty"`
-		RPMMin             *int    `json:"rpm_min,omitempty"`
+		Name                *string `json:"name,omitempty"`
+		Host                *string `json:"host,omitempty"`
+		UserID              *int64  `json:"user_id,omitempty"`
+		AccessToken         *string `json:"access_token,omitempty"` // empty string = leave unchanged
+		DefaultModels       *string `json:"default_models,omitempty"`
+		DefaultGroup        *string `json:"default_group,omitempty"`
+		DefaultGeminiGroup  *string `json:"default_gemini_group,omitempty"`
+		DefaultGeminiModels *string `json:"default_gemini_models,omitempty"`
+		PoolIntervalSec     *int    `json:"pool_interval_sec,omitempty"`
+		PoolBatchSize       *int    `json:"pool_batch_size,omitempty"`
+		AutoMode            *bool   `json:"auto_mode,omitempty"`
+		RPMBase             *int    `json:"rpm_base,omitempty"`
+		RPMMin              *int    `json:"rpm_min,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -450,6 +457,15 @@ func handleRemoteProfileUpdate(c *gin.Context) {
 		if _, err := db.Exec(
 			`UPDATE remote_newapi_profile SET default_gemini_group=$1, updated_at=$2 WHERE id=$3`,
 			strings.TrimSpace(*body.DefaultGeminiGroup), now, id,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.DefaultGeminiModels != nil {
+		if _, err := db.Exec(
+			`UPDATE remote_newapi_profile SET default_gemini_models=$1, updated_at=$2 WHERE id=$3`,
+			strings.TrimSpace(*body.DefaultGeminiModels), now, id,
 		); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

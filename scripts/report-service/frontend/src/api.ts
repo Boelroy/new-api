@@ -372,11 +372,12 @@ export type RemoteProfile = {
   host?: string
   user_id?: number
   has_token?: boolean
-  default_models: string   // preloaded into the batch-upload models field
+  default_models: string   // preloaded into the batch-upload models field (anthropic)
   default_group: string    // preloaded into the batch-upload group field (anthropic uploads)
-  // Preloaded into the batch-upload group field when the Gemini preset is
-  // active. Empty ⇒ frontend falls back to the built-in 'gemini' default.
+  // Preloaded into the batch-upload group + models fields when the Gemini
+  // preset is active. Empty ⇒ frontend falls back to built-in defaults.
   default_gemini_group?: string
+  default_gemini_models?: string
   pool_interval_sec?: number  // pool refill cadence (seconds)
   pool_batch_size?: number    // ceiling for how many keys the pool refill uploads per tick
   auto_mode?: boolean         // when true scheduler sizes batch against live RPM
@@ -640,6 +641,7 @@ export const api = {
     default_models?: string
     default_group?: string
     default_gemini_group?: string
+    default_gemini_models?: string
     pool_interval_sec?: number
     pool_batch_size?: number
     auto_mode?: boolean
@@ -662,6 +664,7 @@ export const api = {
       default_models?: string
       default_group?: string
       default_gemini_group?: string
+      default_gemini_models?: string
       pool_interval_sec?: number
       pool_batch_size?: number
       auto_mode?: boolean

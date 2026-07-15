@@ -2822,6 +2822,10 @@ func main() {
 		// the Anthropic default_group. Empty string ⇒ frontend falls
 		// back to the built-in 'gemini' default.
 		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS default_gemini_group TEXT NOT NULL DEFAULT ''`,
+		// Same, for the Gemini default models list. Empty string ⇒
+		// frontend falls back to DEFAULT_GEMINI_MODELS baked into the
+		// batch upload page.
+		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS default_gemini_models TEXT NOT NULL DEFAULT ''`,
 		// Global-FIFO pool throttle knobs. `pool_interval_sec` is the tick
 		// interval for uploading queued pending_key rows; `pool_batch_size`
 		// is how many keys the tick uploads at once. The tick skips if any
