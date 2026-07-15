@@ -2816,6 +2816,12 @@ func main() {
 		// (YYYYMMDD-<mid>-<key-tail>-<hash>). Empty string = no default.
 		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS default_models TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS default_group  TEXT NOT NULL DEFAULT ''`,
+		// Per-channel-type group override for Gemini uploads. Added
+		// alongside the batch-upload preset picker so operators can send
+		// Gemini keys to a distinct newapi token group without touching
+		// the Anthropic default_group. Empty string ⇒ frontend falls
+		// back to the built-in 'gemini' default.
+		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS default_gemini_group TEXT NOT NULL DEFAULT ''`,
 		// Global-FIFO pool throttle knobs. `pool_interval_sec` is the tick
 		// interval for uploading queued pending_key rows; `pool_batch_size`
 		// is how many keys the tick uploads at once. The tick skips if any
