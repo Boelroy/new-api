@@ -143,6 +143,10 @@ export default function RemoteChannelsStudio() {
   // Live mirror of remote channels the operator uploaded — server-side
   // filters this to (studio, uploaded_by) so we don't have to guard here.
   const [channels, setChannels] = useState<RemoteChannel[]>([])
+  // "获取用量" fires a real remote fetch and rewrites the mirror; disable
+  // the button while it's running so back-to-back clicks don't stack
+  // 429s at the backend guard.
+  const [refreshingRemote, setRefreshingRemote] = useState(false)
   // Studio bound to this JWT — used as the default "middle segment" of
   // new channel names. Fetched once on mount; empty string until it
   // arrives (openBatch guards against opening the modal before that).
@@ -221,6 +225,20 @@ export default function RemoteChannelsStudio() {
       console.warn('cached channels failed', e)
     }
   }, [selectedID])
+
+  const refreshRemoteUsage = useCallback(async () => {
+    if (!selectedID || refreshingRemote) return
+    setRefreshingRemote(true)
+    try {
+      const res = await api.remoteChannelsRefresh(selectedID)
+      await reloadChannels()
+      alert(`已从远端拉取 ${res.fetched} 条渠道`)
+    } catch (e: any) {
+      alert('获取用量失败: ' + (e?.message || e))
+    } finally {
+      setRefreshingRemote(false)
+    }
+  }, [selectedID, refreshingRemote, reloadChannels])
 
   useEffect(() => {
     void reloadPending()
@@ -426,15 +444,25 @@ export default function RemoteChannelsStudio() {
             <div>
               <div className="text-sm font-medium text-gray-900">我的远程渠道</div>
               <div className="text-[11px] text-gray-400 mt-0.5">
-                你上传过的 Key 对应的远端渠道，每 30 秒自动刷新一次。
+                每 30 秒从本地镜像刷新一次；远端用量每 15 分钟同步一次，需要立即拉取请按「获取用量」。
               </div>
             </div>
-            <button
-              onClick={() => void reloadChannels()}
-              className="text-xs text-gray-600 border border-gray-300 rounded-md px-2 py-1 hover:bg-gray-50"
-            >
-              刷新
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => void refreshRemoteUsage()}
+                disabled={refreshingRemote || !selectedID}
+                className="text-xs text-white bg-gray-900 rounded-md px-2 py-1 hover:opacity-85 disabled:opacity-50"
+                title="向远端 new-api 发起一次拉取，更新用量数据"
+              >
+                {refreshingRemote ? '拉取中…' : '获取用量'}
+              </button>
+              <button
+                onClick={() => void reloadChannels()}
+                className="text-xs text-gray-600 border border-gray-300 rounded-md px-2 py-1 hover:bg-gray-50"
+              >
+                刷新
+              </button>
+            </div>
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">

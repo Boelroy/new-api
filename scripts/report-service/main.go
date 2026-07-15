@@ -3261,6 +3261,11 @@ func main() {
 	// need scope filtering here because the mirror table already reflects
 	// what's live on the profile — no key material.
 	remoteOperatorAPI.GET("/remote-newapi/channels/cached", handleRemoteCachedChannels)
+	// Manual "pull now" — same fetch+upsert the 15-min snapshot cron does,
+	// on demand. Studio operators still only see their own channels via
+	// the caller filter in handleRemoteCachedChannels; this endpoint just
+	// refreshes what the filter reads from.
+	remoteOperatorAPI.POST("/remote-newapi/channels/refresh", handleRemoteChannelsRefresh)
 	// Per-(profile, studio) accept/reject flag for studio-operator key
 	// uploads. Admin can flip these because they're operational (which
 	// studios upload to which pool) rather than credential-adjacent.

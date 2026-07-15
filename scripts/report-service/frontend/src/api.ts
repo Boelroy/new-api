@@ -710,6 +710,17 @@ export const api = {
       `/api/remote-newapi/channels/cached?profile_id=${profileID}`,
     ),
 
+  // Trigger the same paginated remote fetch the 15-min snapshot cron
+  // does, then UPSERT the local mirror. Studio operators call this from
+  // "获取用量" to break out of the cron cadence when they need fresh
+  // used_quota now. Backend guards against concurrent refreshes per
+  // profile — surface the 429 to the caller.
+  remoteChannelsRefresh: (profileID: number) =>
+    request<{ ok: boolean; fetched: number; total: number; refreshed: number }>(
+      `/api/remote-newapi/channels/refresh?profile_id=${profileID}`,
+      { method: 'POST' },
+    ),
+
   remoteFetchChannels: (
     payload: { profile_id?: number; host?: string; user_id?: number; access_token?: string; group?: string; status?: string; type?: string; page_size?: number },
   ) =>

@@ -2423,6 +2423,84 @@ func handleRemoteCachedChannels(c *gin.Context) {
 	})
 }
 
+// handleRemoteChannelsRefresh does what the 15-min snapshot cron does, on
+// demand: pull the full paginated channel list from the remote for the
+// given profile, write a snapshot row (for the sparkline), and UPSERT
+// the mirror so subsequent /channels/cached reads reflect fresh
+// used_quota. Studio operators call this from the "获取用量" button;
+// they still only *see* their own channels via the caller filter in
+// handleRemoteCachedChannels — this endpoint just refreshes the pool
+// the filter reads from.
+//
+// A per-(profile) in-flight guard prevents two operators (or one
+// impatient operator) from stacking fetches on top of each other. This
+// mirrors the snapshot loop's `inFlight` behaviour without sharing
+// state with it — the cron and the button intentionally don't block
+// each other, we just don't want *this* endpoint fired concurrently.
+var (
+	remoteChannelsRefreshInFlight   = map[int64]bool{}
+	remoteChannelsRefreshInFlightMu sync.Mutex
+)
+
+func handleRemoteChannelsRefresh(c *gin.Context) {
+	profileID, err := strconv.ParseInt(c.Query("profile_id"), 10, 64)
+	if err != nil || profileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	if callerNeedsRemoteStudioLock(c) && callerStudio(c) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "your account has no studio binding; ask an admin to bind one before refreshing"})
+		return
+	}
+
+	remoteChannelsRefreshInFlightMu.Lock()
+	if remoteChannelsRefreshInFlight[profileID] {
+		remoteChannelsRefreshInFlightMu.Unlock()
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "another refresh is already running for this profile, try again in a few seconds"})
+		return
+	}
+	remoteChannelsRefreshInFlight[profileID] = true
+	remoteChannelsRefreshInFlightMu.Unlock()
+	defer func() {
+		remoteChannelsRefreshInFlightMu.Lock()
+		delete(remoteChannelsRefreshInFlight, profileID)
+		remoteChannelsRefreshInFlightMu.Unlock()
+	}()
+
+	host, userID, token, err := loadRemoteProfileByID(profileID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 90s cap matches handleRemoteFetchChannels — enough headroom for a
+	// slow remote paging through a few thousand channels; short enough
+	// that a stuck request doesn't tie up the endpoint forever.
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
+	defer cancel()
+	channels, total, err := iterateRemoteChannels(ctx, host, token, userID, 100, nil)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	// Only reconcile the mirror when the fetch completed. upsertRemoteCurrent
+	// DELETEs rows missing from the input, so a partial page would drop
+	// real channels — guard by the same "no error" contract the cron uses.
+	if err := writeRemoteSnapshot(profileID, channels); err != nil {
+		log.Printf("[remote-current] refresh snapshot for profile %d: %v", profileID, err)
+	}
+	if err := upsertRemoteCurrent(profileID, channels); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"ok":         true,
+		"fetched":    len(channels),
+		"total":      total,
+		"refreshed":  time.Now().Unix(),
+	})
+}
+
 func handleRemoteSnapshotHistory(c *gin.Context) {
 	profileID, err := strconv.ParseInt(c.Query("profile_id"), 10, 64)
 	if err != nil || profileID <= 0 {
