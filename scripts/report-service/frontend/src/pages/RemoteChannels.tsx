@@ -93,7 +93,7 @@ type PresetSpec = {
 const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
   { id: 'anthropic', label: 'Anthropic (Claude)', kind: 'text',   type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS, fallbackGroup: 'default', testModel: 'claude-haiku-4-5-20251001', profileGroupField: 'default_group',        profileModelsField: 'default_models' },
   { id: 'gemini',    label: 'Gemini',              kind: 'text',   type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,    fallbackGroup: 'gemini',  testModel: 'gemini-2.5-flash',              profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
-  { id: 'vertex',    label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,    fallbackGroup: 'default', testModel: 'claude-sonnet-4-5@20250929',    profileGroupField: 'default_group',        profileModelsField: 'default_vertex_models' },
+  { id: 'vertex',    label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,    fallbackGroup: 'gemini',  testModel: 'claude-sonnet-4-5@20250929',    profileGroupField: 'default_gemini_group', profileModelsField: 'default_vertex_models' },
 ]
 
 // resolvePresetGroup / resolvePresetModels pick the batch upload group +
