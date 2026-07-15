@@ -2967,6 +2967,10 @@ func main() {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_pending_scheduler
 		   ON remote_pending_key(profile_id, status, pool_size, id)`,
+		// Channel type stored per queued row — 14=Anthropic default, 24=Gemini.
+		// Added in rc.133 so pool uploads can target Gemini without
+		// hardcoding the type in the scheduler.
+		`ALTER TABLE remote_pending_key ADD COLUMN IF NOT EXISTS channel_type INT NOT NULL DEFAULT 14`,
 		// Current mirror of the remote's channel list — one row per channel,
 		// UPSERTed on every sync (both cron and interactive). Lets the page
 		// render immediately on refresh without hitting the remote, and

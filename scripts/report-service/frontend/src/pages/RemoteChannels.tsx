@@ -36,6 +36,35 @@ const DEFAULT_ANTHROPIC_MODELS = [
   'claude-fable-5',
 ].join(',')
 
+const DEFAULT_GEMINI_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-image',
+  'gemini-2.5-flash-preview-tts',
+  'gemini-2.5-pro',
+  'gemini-3-flash-preview',
+  'gemini-3-pro-image',
+  'gemini-3-pro-image-preview',
+  'gemini-3.1-flash-image',
+  'gemini-3.1-flash-image-preview',
+  'gemini-3.1-flash-lite',
+  'gemini-3.1-flash-lite-preview',
+  'gemini-3.1-pro-preview',
+  'gemini-3.1-pro-preview-customtools',
+  'gemini-3.5-flash',
+].join(',')
+
+// Channel type integers from newapi constant/channel.go — 14 = Anthropic,
+// 24 = Gemini. Batch upload sends the picked value straight through to
+// handleRemoteChannelCreate.
+const CHANNEL_TYPE_ANTHROPIC = 14
+const CHANNEL_TYPE_GEMINI = 24
+
+// Preset menu items for the batch upload channel-type + models combo.
+const CHANNEL_TYPE_PRESETS: Array<{ id: string; label: string; type: number; models: string; testModel: string }> = [
+  { id: 'anthropic', label: 'Anthropic (Claude)', type: CHANNEL_TYPE_ANTHROPIC, models: DEFAULT_ANTHROPIC_MODELS, testModel: 'claude-haiku-4-5-20251001' },
+  { id: 'gemini',    label: 'Gemini',              type: CHANNEL_TYPE_GEMINI,    models: DEFAULT_GEMINI_MODELS,    testModel: 'gemini-2.5-flash' },
+]
+
 const DEFAULT_TEST_MODEL = 'claude-haiku-4-5-20251001'
 
 // FragmentRow is just <>{children}</> — used so `{channels.map(...)}` can
@@ -254,6 +283,10 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   const [pending, setPending] = useState<PendingKey[]>([])
   const [pendingOpen, setPendingOpen] = useState(false)
   const [batchModels, setBatchModels] = useState(DEFAULT_ANTHROPIC_MODELS)
+  // Preset (anthropic / gemini / ...) drives both the channel type sent
+  // to /handleRemoteChannelCreate AND the default model list. Changing
+  // this rewrites `batchModels` unless the user has hand-edited them.
+  const [batchPresetID, setBatchPresetID] = useState<string>('anthropic')
   const [batchInput, setBatchInput] = useState('')
   const [batchBusy, setBatchBusy] = useState(false)
   const [batchErr, setBatchErr] = useState<string | null>(null)
@@ -794,6 +827,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setBatchTag('')
     setBatchPriority('')
     setBatchModels((p?.default_models || '').trim() || DEFAULT_ANTHROPIC_MODELS)
+    // Reset preset selector to Anthropic; the user picks Gemini
+    // manually after opening if they want it.
+    setBatchPresetID('anthropic')
     setBatchInput('')
     setBatchErr(null)
     setBatchResults(null)
@@ -866,6 +902,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
         const res = await api.remotePendingEnqueue({
           profile_id: selectedID,
           name_prefix: fullNamePrefix,
+          type: CHANNEL_TYPE_PRESETS.find(p => p.id === batchPresetID)?.type,
           group: batchGroup.trim() || 'default',
           tag: batchTag.trim() || undefined,
           priority: batchLevelPriority,
@@ -883,6 +920,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
       const res = await api.remoteChannelCreate({
         profile_id: selectedID,
         name_prefix: fullNamePrefix,
+        type: CHANNEL_TYPE_PRESETS.find(p => p.id === batchPresetID)?.type,
         group: batchGroup.trim() || 'default',
         tag: batchTag.trim() || undefined,
         priority: batchLevelPriority,
@@ -1889,6 +1927,34 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                 </div>
               )}
             </div>
+            <Field label="渠道类型">
+              <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
+                {CHANNEL_TYPE_PRESETS.map(p => {
+                  const active = batchPresetID === p.id
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => {
+                        setBatchPresetID(p.id)
+                        // Rewrite models to the preset's default list.
+                        // Anyone who hand-tuned models can still edit
+                        // the textarea after picking a preset.
+                        setBatchModels(p.models)
+                      }}
+                      className={`px-3 py-1.5 text-xs border-r border-gray-200 last:border-r-0 transition-colors ${
+                        active ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  )
+                })}
+              </div>
+              <p className="text-[10px] text-gray-400 mt-1">
+                切换预设会重写下面的 models 列表；如需自定义，切完后再编辑即可。
+              </p>
+            </Field>
             <Field label="Models（逗号分隔）">
               <textarea
                 value={batchModels}

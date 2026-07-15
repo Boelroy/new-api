@@ -803,6 +803,9 @@ export const api = {
   remotePendingEnqueue: (payload: {
     profile_id: number
     name_prefix: string
+    // Optional channel type override (14 = Anthropic, 24 = Gemini, ...).
+    // Backend defaults to 14 when omitted.
+    type?: number
     models: string
     group?: string
     tag?: string

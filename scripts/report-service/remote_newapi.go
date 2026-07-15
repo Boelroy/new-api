@@ -1404,6 +1404,9 @@ func handlePendingKeyEnqueue(c *gin.Context) {
 	var body struct {
 		ProfileID  int64  `json:"profile_id"`
 		NamePrefix string `json:"name_prefix"`
+		// Channel type integer (newapi constant/channel.go); default
+		// 14 = Anthropic. 24 = Gemini is the other one Argus supports.
+		Type       int    `json:"type"`
 		Group      string `json:"group"`
 		Tag        string `json:"tag"`
 		Models     string `json:"models"`
@@ -1496,6 +1499,12 @@ func handlePendingKeyEnqueue(c *gin.Context) {
 		return
 	}
 
+	// Default channel type = 14 (Anthropic), matches handleRemoteChannelCreate.
+	channelType := body.Type
+	if channelType == 0 {
+		channelType = 14
+	}
+
 	now := time.Now().Unix()
 	inserted, skipped := 0, 0
 	for _, it := range body.Items {
@@ -1521,11 +1530,11 @@ func handlePendingKeyEnqueue(c *gin.Context) {
 		res, err := db.Exec(
 			`INSERT INTO remote_pending_key
 			 (profile_id, key_hash, key_encrypted, quota_usd, note, name_prefix,
-			  group_name, tag, models, priority, pool_size, status, created_at, updated_at)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12,$12)
+			  group_name, tag, models, priority, pool_size, status, channel_type, created_at, updated_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12,$13,$13)
 			 ON CONFLICT (profile_id, key_hash) DO NOTHING`,
 			body.ProfileID, hash, enc, quota, strings.TrimSpace(it.Note), strings.TrimSpace(body.NamePrefix),
-			body.Group, body.Tag, body.Models, prio, body.PoolSize, now,
+			body.Group, body.Tag, body.Models, prio, body.PoolSize, channelType, now,
 		)
 		if err != nil {
 			skipped++
@@ -2039,7 +2048,7 @@ func uploadImmediatePending(host, token string, userID, profileID int64) {
 	const immediatePerTick = 20
 	rows, err := db.Query(
 		`SELECT id, key_encrypted, quota_usd, note, name_prefix, group_name,
-		        tag, models, priority
+		        tag, models, priority, channel_type
 		   FROM remote_pending_key
 		  WHERE profile_id = $1 AND pool_size = 0 AND status = 'pending'
 		  ORDER BY id ASC LIMIT $2`,
@@ -2068,7 +2077,7 @@ func uploadPoolBatch(host, token string, userID, profileID int64, n int) {
 	}
 	rows, err := db.Query(
 		`SELECT id, key_encrypted, quota_usd, note, name_prefix, group_name,
-		        tag, models, priority
+		        tag, models, priority, channel_type
 		   FROM remote_pending_key
 		  WHERE profile_id = $1 AND pool_size > 0 AND status = 'pending'
 		  ORDER BY created_at ASC, id ASC
@@ -2104,15 +2113,16 @@ func uploadPoolBatch(host, token string, userID, profileID int64, n int) {
 // pendingUploadJob mirrors the columns needed to upload one pending row.
 // Kept private to the scheduler.
 type pendingUploadJob struct {
-	id       int64
-	enc      string
-	quota    float64
-	note     string
-	prefix   string
-	group    string
-	tag      string
-	models   string
-	priority int64
+	id          int64
+	enc         string
+	quota       float64
+	note        string
+	prefix      string
+	group       string
+	tag         string
+	models      string
+	priority    int64
+	channelType int
 }
 
 func scanUploadJobs(rows *sql.Rows) []pendingUploadJob {
@@ -2120,9 +2130,18 @@ func scanUploadJobs(rows *sql.Rows) []pendingUploadJob {
 	out := make([]pendingUploadJob, 0)
 	for rows.Next() {
 		var j pendingUploadJob
+		// channel_type is scanned into a sql.NullInt64 so old rows
+		// missing the column (pre-migration) still work — nil there
+		// falls back to 14 (Anthropic).
+		var ct sql.NullInt64
 		if err := rows.Scan(&j.id, &j.enc, &j.quota, &j.note, &j.prefix,
-			&j.group, &j.tag, &j.models, &j.priority); err != nil {
+			&j.group, &j.tag, &j.models, &j.priority, &ct); err != nil {
 			continue
+		}
+		if ct.Valid && ct.Int64 > 0 {
+			j.channelType = int(ct.Int64)
+		} else {
+			j.channelType = 14
 		}
 		out = append(out, j)
 	}
@@ -2153,6 +2172,7 @@ func runSingleUpload(host, token string, userID, profileID int64, j pendingUploa
 		ProfileID:  profileID,
 		Key:        key,
 		NamePrefix: j.prefix,
+		Type:       j.channelType,
 		Models:     j.models,
 		Group:      j.group,
 		Tag:        j.tag,
