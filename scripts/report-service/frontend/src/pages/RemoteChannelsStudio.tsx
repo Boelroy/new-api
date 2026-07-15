@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import Layout from '../components/Layout'
-import { api, type PendingKey, type RemoteProfile } from '../api'
+import { api, type PendingKey, type RemoteChannel, type RemoteProfile } from '../api'
 
 // Studio-operator slim view of Remote Channels. Deliberately does NOT
 // share code with the super_admin RemoteChannels.tsx — that page has
@@ -103,11 +103,46 @@ const STATUS_CLS: Record<PendingKey['status'], string> = {
   failed:  'bg-rose-100 text-rose-700',
 }
 
+// Remote-channel status codes come from newapi's channel model:
+//   1 = enabled, 2 = manually disabled, 3 = auto-disabled (upstream error).
+// The studio operator sees only the badge; the underlying number is not
+// exposed. Any unknown value falls back to a neutral gray label.
+function channelStatusLabel(status: number): string {
+  if (status === 1) return '启用'
+  if (status === 2) return '手动禁用'
+  if (status === 3) return '自动禁用'
+  return `状态 ${status}`
+}
+function channelStatusCls(status: number): string {
+  if (status === 1) return 'bg-emerald-100 text-emerald-800'
+  if (status === 3) return 'bg-rose-100 text-rose-700'
+  return 'bg-gray-100 text-gray-600'
+}
+
+function UsagePct({ used, quota }: { used: number; quota: number }) {
+  if (!quota || quota <= 0) return <span className="text-gray-300 text-[11px]">—</span>
+  const pct = Math.min(100, (used / quota) * 100)
+  return (
+    <div className="flex items-center gap-2 justify-end">
+      <div className="w-16 h-1 bg-gray-100 rounded overflow-hidden">
+        <div
+          className={`h-full ${pct >= 100 ? 'bg-rose-500' : pct >= 80 ? 'bg-amber-500' : 'bg-emerald-500'}`}
+          style={{ width: pct + '%' }}
+        />
+      </div>
+      <span className="text-[10px] tabular-nums text-gray-500 w-8 text-right">{pct.toFixed(0)}%</span>
+    </div>
+  )
+}
+
 export default function RemoteChannelsStudio() {
   const [profiles, setProfiles] = useState<RemoteProfile[]>([])
   const [selectedID, setSelectedID] = useState<number | null>(null)
   const [loadingProfiles, setLoadingProfiles] = useState(true)
   const [pending, setPending] = useState<PendingKey[]>([])
+  // Live mirror of remote channels the operator uploaded — server-side
+  // filters this to (studio, uploaded_by) so we don't have to guard here.
+  const [channels, setChannels] = useState<RemoteChannel[]>([])
   // Studio bound to this JWT — used as the default "middle segment" of
   // new channel names. Fetched once on mount; empty string until it
   // arrives (openBatch guards against opening the modal before that).
@@ -174,13 +209,31 @@ export default function RemoteChannelsStudio() {
     }
   }, [selectedID])
 
+  const reloadChannels = useCallback(async () => {
+    if (!selectedID) {
+      setChannels([])
+      return
+    }
+    try {
+      const res = await api.remoteCachedChannels(selectedID)
+      setChannels(res.channels)
+    } catch (e) {
+      console.warn('cached channels failed', e)
+    }
+  }, [selectedID])
+
   useEffect(() => {
     void reloadPending()
-    // Auto-refresh the queue so pending → active → used transitions land
-    // without the operator hunting for a refresh button.
-    const t = setInterval(() => { void reloadPending() }, 30000)
+    void reloadChannels()
+    // Auto-refresh both cards on the same tick so used_quota and the
+    // queue's active/used transitions stay in sync without doubling the
+    // network chatter.
+    const t = setInterval(() => {
+      void reloadPending()
+      void reloadChannels()
+    }, 30000)
     return () => clearInterval(t)
-  }, [selectedID, reloadPending])
+  }, [selectedID, reloadPending, reloadChannels])
 
   const openBatch = () => {
     const p = profiles.find(x => x.id === selectedID)
@@ -371,6 +424,71 @@ export default function RemoteChannelsStudio() {
         <div className="bg-white border border-gray-200 rounded-xl">
           <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
             <div>
+              <div className="text-sm font-medium text-gray-900">我的远程渠道</div>
+              <div className="text-[11px] text-gray-400 mt-0.5">
+                你上传过的 Key 对应的远端渠道，每 30 秒自动刷新一次。
+              </div>
+            </div>
+            <button
+              onClick={() => void reloadChannels()}
+              className="text-xs text-gray-600 border border-gray-300 rounded-md px-2 py-1 hover:bg-gray-50"
+            >
+              刷新
+            </button>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500">
+                <tr>
+                  <th className="text-left px-4 py-2 font-medium">名称</th>
+                  <th className="text-left px-4 py-2 font-medium">状态</th>
+                  <th className="text-left px-4 py-2 font-medium">Group</th>
+                  <th className="text-right px-4 py-2 font-medium" title="从 remote_channel_current 同步的累计用量">已用</th>
+                  <th className="text-right px-4 py-2 font-medium" title="上传时填写的额度上限">额度</th>
+                  <th className="text-right px-4 py-2 font-medium">剩余</th>
+                  <th className="text-left px-4 py-2 font-medium">创建时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                {channels.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-6 text-center text-xs text-gray-400">
+                      暂无渠道，先在下方队列上传 Key
+                    </td>
+                  </tr>
+                ) : (
+                  channels.map(ch => {
+                    const usedUSD = ch.used_quota / 500000
+                    const quotaUSD = ch.quota_usd ?? 0
+                    return (
+                      <tr key={ch.id} className="border-t border-gray-100">
+                        <td className="px-4 py-2 font-mono text-[11px]">{ch.name}</td>
+                        <td className="px-4 py-2">
+                          <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] ${channelStatusCls(ch.status)}`}>
+                            {channelStatusLabel(ch.status)}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2 text-[11px] text-gray-600">{ch.group || '—'}</td>
+                        <td className="px-4 py-2 text-right tabular-nums text-[11px]">${usedUSD.toFixed(4)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums text-[11px]">
+                          {quotaUSD > 0 ? `$${quotaUSD.toFixed(2)}` : <span className="text-gray-300">—</span>}
+                        </td>
+                        <td className="px-4 py-2 text-right">
+                          <UsagePct used={usedUSD} quota={quotaUSD} />
+                        </td>
+                        <td className="px-4 py-2 text-[11px] text-gray-500">{fmtTime(ch.created_time)}</td>
+                      </tr>
+                    )
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="bg-white border border-gray-200 rounded-xl">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+            <div>
               <div className="text-sm font-medium text-gray-900">上传队列</div>
               <div className="text-[11px] text-gray-400 mt-0.5">
                 pending → active → used。每 30 秒自动刷新一次。
@@ -389,6 +507,8 @@ export default function RemoteChannelsStudio() {
                 <tr>
                   <th className="text-left px-4 py-2 font-medium">Key</th>
                   <th className="text-left px-4 py-2 font-medium">状态</th>
+                  <th className="text-right px-4 py-2 font-medium" title="从 remote_channel_current 同步的累计用量">已用</th>
+                  <th className="text-right px-4 py-2 font-medium" title="上传时填写的额度上限">额度</th>
                   <th className="text-left px-4 py-2 font-medium">尝试</th>
                   <th className="text-left px-4 py-2 font-medium">创建时间</th>
                   <th className="text-left px-4 py-2 font-medium">失败原因</th>
@@ -398,18 +518,40 @@ export default function RemoteChannelsStudio() {
               <tbody>
                 {pending.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-4 py-6 text-center text-xs text-gray-400">
+                    <td colSpan={8} className="px-4 py-6 text-center text-xs text-gray-400">
                       队列为空
                     </td>
                   </tr>
                 ) : (
-                  pending.map(row => (
+                  pending.map(row => {
+                    const pct = row.quota_usd > 0 ? Math.min(100, (row.used_usd / row.quota_usd) * 100) : null
+                    return (
                     <tr key={row.id} className="border-t border-gray-100">
                       <td className="px-4 py-2 font-mono text-[11px]">{row.key_masked}</td>
                       <td className="px-4 py-2">
                         <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] ${STATUS_CLS[row.status]}`}>
                           {STATUS_LABEL[row.status]}
                         </span>
+                      </td>
+                      <td className="px-4 py-2 text-right tabular-nums">
+                        {row.used_usd > 0 ? (
+                          <div className="flex flex-col items-end gap-0.5">
+                            <span className="text-[11px]">${row.used_usd.toFixed(4)}</span>
+                            {pct != null && (
+                              <div className="w-14 h-1 bg-gray-100 rounded overflow-hidden">
+                                <div
+                                  className={`h-full ${pct >= 100 ? 'bg-rose-500' : pct >= 80 ? 'bg-amber-500' : 'bg-emerald-500'}`}
+                                  style={{ width: pct + '%' }}
+                                />
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-gray-300">—</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2 text-right tabular-nums text-[11px]">
+                        {row.quota_usd > 0 ? `$${row.quota_usd.toFixed(2)}` : <span className="text-gray-300">—</span>}
                       </td>
                       <td className="px-4 py-2 text-xs tabular-nums">{row.attempts}</td>
                       <td className="px-4 py-2 text-[11px] text-gray-500">{fmtTime(row.created_at)}</td>
@@ -429,7 +571,8 @@ export default function RemoteChannelsStudio() {
                         )}
                       </td>
                     </tr>
-                  ))
+                    )
+                  })
                 )}
               </tbody>
             </table>

@@ -1440,6 +1440,13 @@ type pendingKeyView struct {
 	RemoteChID   int64   `json:"remote_channel_id"`
 	Attempts     int     `json:"attempts"`
 	FailedReason string  `json:"failed_reason,omitempty"`
+	// Cumulative usage for the linked remote channel. Populated only
+	// for rows with a live remote_channel_current row (active/used
+	// keys). UsedQuotaRaw is raw units (500000 = $1); UsedUSD is
+	// pre-computed so the UI doesn't have to know the constant.
+	UsedQuotaRaw int64   `json:"used_quota_raw"`
+	UsedUSD      float64 `json:"used_usd"`
+	UploadedBy   int64   `json:"uploaded_by"`
 	CreatedAt    int64   `json:"created_at"`
 	UpdatedAt    int64   `json:"updated_at"`
 }
@@ -1558,6 +1565,18 @@ func handlePendingKeyEnqueue(c *gin.Context) {
 		channelType = 14
 	}
 
+	// Uploader identity — set from the JWT user_id claim so studio
+	// operators can later filter the queue view to just their own rows.
+	// SSO-authenticated users have user_id = 0 (no rs_auth_user row); in
+	// that case we still store 0 and the list handler treats it as
+	// "unknown uploader, show to everyone in the studio".
+	uploadedBy := int64(0)
+	if v, ok := c.Get("user_id"); ok {
+		if uid, ok := v.(int64); ok {
+			uploadedBy = uid
+		}
+	}
+
 	now := time.Now().Unix()
 	inserted, skipped := 0, 0
 	for _, it := range body.Items {
@@ -1583,11 +1602,11 @@ func handlePendingKeyEnqueue(c *gin.Context) {
 		res, err := db.Exec(
 			`INSERT INTO remote_pending_key
 			 (profile_id, key_hash, key_encrypted, quota_usd, note, name_prefix,
-			  group_name, tag, models, priority, pool_size, status, channel_type, created_at, updated_at)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12,$13,$13)
+			  group_name, tag, models, priority, pool_size, status, channel_type, uploaded_by, created_at, updated_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12,$13,$14,$14)
 			 ON CONFLICT (profile_id, key_hash) DO NOTHING`,
 			body.ProfileID, hash, enc, quota, strings.TrimSpace(it.Note), strings.TrimSpace(body.NamePrefix),
-			body.Group, body.Tag, body.Models, prio, body.PoolSize, channelType, now,
+			body.Group, body.Tag, body.Models, prio, body.PoolSize, channelType, uploadedBy, now,
 		)
 		if err != nil {
 			skipped++
@@ -1615,28 +1634,50 @@ func handlePendingKeyList(c *gin.Context) {
 		return
 	}
 	statusFilter := strings.TrimSpace(c.Query("status"))
-	q := `SELECT id, profile_id, key_encrypted, quota_usd, note, name_prefix,
-	             group_name, tag, models, priority, pool_size, status,
-	             remote_channel_id, attempts, failed_reason, created_at, updated_at
-	        FROM remote_pending_key WHERE profile_id=$1`
+	// LEFT JOIN into the mirror so active/used rows carry cumulative
+	// used_quota. Pending/failed rows have no channel yet so the joined
+	// value is NULL → COALESCE to 0.
+	q := `SELECT p.id, p.profile_id, p.key_encrypted, p.quota_usd, p.note, p.name_prefix,
+	             p.group_name, p.tag, p.models, p.priority, p.pool_size, p.status,
+	             p.remote_channel_id, p.attempts, p.failed_reason,
+	             COALESCE(p.uploaded_by, 0),
+	             COALESCE(rc.used_quota, 0),
+	             p.created_at, p.updated_at
+	        FROM remote_pending_key p
+	        LEFT JOIN remote_channel_current rc
+	          ON rc.profile_id = p.profile_id
+	         AND rc.remote_channel_id = p.remote_channel_id
+	       WHERE p.profile_id = $1`
 	args := []any{profileID}
 	if statusFilter != "" {
-		q += " AND status=$" + strconv.Itoa(len(args)+1)
+		q += " AND p.status = $" + strconv.Itoa(len(args)+1)
 		args = append(args, statusFilter)
 	}
 	// Studio operator only ever sees their own studio's rows. Empty studio
 	// on their JWT is a config error — surface it instead of silently
 	// returning an empty list, so admin can fix the binding.
+	//
+	// Additionally, when the caller has a local user_id (rs_auth_user
+	// row), filter to rows they uploaded. Pre-migration rows have
+	// uploaded_by = 0 and are shown to everyone in the studio as a
+	// permissive fallback; new rows land with the enqueuer's user_id
+	// and become invisible to other operators in the same studio.
 	if callerNeedsRemoteStudioLock(c) {
 		studio := callerStudio(c)
 		if studio == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "your account has no studio binding; ask an admin to bind one before viewing the queue"})
 			return
 		}
-		q += " AND tag=$" + strconv.Itoa(len(args)+1)
+		q += " AND p.tag = $" + strconv.Itoa(len(args)+1)
 		args = append(args, studio)
+		if v, ok := c.Get("user_id"); ok {
+			if uid, ok := v.(int64); ok && uid > 0 {
+				q += " AND (p.uploaded_by = 0 OR p.uploaded_by = $" + strconv.Itoa(len(args)+1) + ")"
+				args = append(args, uid)
+			}
+		}
 	}
-	q += " ORDER BY id DESC LIMIT 2000"
+	q += " ORDER BY p.id DESC LIMIT 2000"
 
 	rows, err := db.Query(q, args...)
 	if err != nil {
@@ -1647,12 +1688,16 @@ func handlePendingKeyList(c *gin.Context) {
 	out := make([]pendingKeyView, 0)
 	for rows.Next() {
 		var (
-			r   pendingKeyRow
-			enc string
+			r          pendingKeyRow
+			enc        string
+			uploadedBy int64
+			usedQuota  int64
 		)
 		if err := rows.Scan(&r.id, &r.profileID, &enc, &r.quotaUSD, &r.note, &r.namePrefix,
 			&r.group, &r.tag, &r.models, &r.priority, &r.poolSize, &r.status,
-			&r.remoteChID, &r.attempts, &r.failedReason, &r.createdAt, &r.updatedAt); err != nil {
+			&r.remoteChID, &r.attempts, &r.failedReason,
+			&uploadedBy, &usedQuota,
+			&r.createdAt, &r.updatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -1661,13 +1706,19 @@ func handlePendingKeyList(c *gin.Context) {
 		if k, err := decryptRemoteToken(enc); err == nil {
 			masked = maskKey(k)
 		}
+		usedUSD := 0.0
+		if usedQuota > 0 {
+			usedUSD = roundTo(float64(usedQuota)/quotaPerUnit, 6)
+		}
 		out = append(out, pendingKeyView{
 			ID: r.id, ProfileID: r.profileID, KeyMasked: masked,
 			QuotaUSD: r.quotaUSD, Note: r.note, NamePrefix: r.namePrefix,
 			Group: r.group, Tag: r.tag, Models: r.models, Priority: r.priority,
 			PoolSize: r.poolSize, Status: r.status, RemoteChID: r.remoteChID,
 			Attempts: r.attempts, FailedReason: r.failedReason,
-			CreatedAt: r.createdAt, UpdatedAt: r.updatedAt,
+			UsedQuotaRaw: usedQuota, UsedUSD: usedUSD,
+			UploadedBy: uploadedBy,
+			CreatedAt:  r.createdAt, UpdatedAt: r.updatedAt,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": out})
@@ -2285,14 +2336,34 @@ func handleRemoteCachedChannels(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
 		return
 	}
-	rows, err := db.Query(
-		`SELECT remote_channel_id, name, type, status, "group", tag,
-		        priority, weight, models, used_quota, created_time, updated_at
-		   FROM remote_channel_current
-		  WHERE profile_id = $1
-		  ORDER BY remote_channel_id DESC`,
-		profileID,
-	)
+	// Studio operators only see channels tied to keys they themselves
+	// enqueued (via remote_pending_key.uploaded_by). Pre-migration rows
+	// with uploaded_by = 0 remain visible to everyone in the studio,
+	// same permissive fallback as handlePendingKeyList.
+	q := `SELECT remote_channel_id, name, type, status, "group", tag,
+	             priority, weight, models, used_quota, created_time, updated_at
+	        FROM remote_channel_current
+	       WHERE profile_id = $1`
+	args := []any{profileID}
+	if callerNeedsRemoteStudioLock(c) {
+		studio := callerStudio(c)
+		if studio == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "your account has no studio binding; ask an admin to bind one before viewing channels"})
+			return
+		}
+		q += " AND remote_channel_id IN (SELECT remote_channel_id FROM remote_pending_key" +
+			" WHERE profile_id = $1 AND tag = $" + strconv.Itoa(len(args)+1) + " AND remote_channel_id > 0"
+		args = append(args, studio)
+		if v, ok := c.Get("user_id"); ok {
+			if uid, ok := v.(int64); ok && uid > 0 {
+				q += " AND (uploaded_by = 0 OR uploaded_by = $" + strconv.Itoa(len(args)+1) + ")"
+				args = append(args, uid)
+			}
+		}
+		q += ")"
+	}
+	q += " ORDER BY remote_channel_id DESC"
+	rows, err := db.Query(q, args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

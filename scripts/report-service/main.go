@@ -3000,6 +3000,13 @@ func main() {
 		// Added in rc.133 so pool uploads can target Gemini without
 		// hardcoding the type in the scheduler.
 		`ALTER TABLE remote_pending_key ADD COLUMN IF NOT EXISTS channel_type INT NOT NULL DEFAULT 14`,
+		// rs_auth_user.id of the operator who enqueued this row. 0 for
+		// pre-migration rows so the studio-operator "just my uploads"
+		// filter can fall back to a permissive default. Set on every
+		// new enqueue from the JWT user_id claim.
+		`ALTER TABLE remote_pending_key ADD COLUMN IF NOT EXISTS uploaded_by BIGINT NOT NULL DEFAULT 0`,
+		`CREATE INDEX IF NOT EXISTS idx_remote_pending_uploaded_by
+		   ON remote_pending_key(profile_id, uploaded_by)`,
 		// Current mirror of the remote's channel list — one row per channel,
 		// UPSERTed on every sync (both cron and interactive). Lets the page
 		// render immediately on refresh without hitting the remote, and

@@ -494,6 +494,14 @@ export type PendingKey = {
   remote_channel_id: number    // filled once uploaded
   attempts: number
   failed_reason?: string
+  // Cumulative usage joined from remote_channel_current. Zero for
+  // rows that haven't yet mapped to a remote channel.
+  used_quota_raw: number
+  used_usd: number
+  // rs_auth_user.id of the operator who enqueued this row. 0 for
+  // pre-migration rows (shown to everyone in the studio). Studio
+  // operators only see their own new rows via backend filtering.
+  uploaded_by: number
   created_at: number
   updated_at: number
 }
