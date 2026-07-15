@@ -98,7 +98,7 @@ export type ProfitByGroup = {
 
 export type ProfitByTag = {
   tag: string
-  source: 'main' | 'pipi'
+  source: 'main' | 'pipi' | 'remote'
   used_usd: number
   cost_usd: number
   revenue_usd: number

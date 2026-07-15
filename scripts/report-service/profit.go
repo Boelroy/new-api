@@ -685,6 +685,26 @@ func handleProfitDaily(c *gin.Context) {
 	}
 
 	summary := ProfitSummary{Start: startDate, End: endDate}
+
+	// --- Remote Channels layer ---
+	// Load first so per-day totals can be folded into `daily` before the
+	// summary is finalized. remoteRows drive the standalone Remote table
+	// on the frontend; remotePerDay is what makes the top summary and the
+	// daily bar chart reflect main + pipi + remote as a single blended
+	// total. RemoteUsedUSD / RemoteCostUSD / RemoteRevenueUSD /
+	// RemoteProfitUSD stay populated so the UI can still break out Remote
+	// as its own section.
+	remoteRows, remotePerDay, err := loadRemoteDaily(startDate, endDate, getFX)
+	if err != nil {
+		log.Printf("[profit] loadRemoteDaily: %v", err)
+	}
+	for date, tot := range remotePerDay {
+		d := getDay(date)
+		d.UsedUSD += tot.UsedUSD
+		d.CostUSD += tot.CostUSD
+		d.RevenueUSD += tot.RevenueUSD
+	}
+
 	for _, d := range daily {
 		d.ProfitUSD = d.RevenueUSD - d.CostUSD
 		if d.UsedUSD > 0 {
@@ -752,23 +772,41 @@ func handleProfitDaily(c *gin.Context) {
 		emit("pipi", "pipi", pipiTagAgg)
 	}
 
-	summary.UsedUSD = roundTo(summary.UsedUSD, 4)
-	summary.CostUSD = roundTo(summary.CostUSD, 4)
-	summary.RevenueUSD = roundTo(summary.RevenueUSD, 4)
-	summary.ProfitUSD = roundTo(summary.RevenueUSD-summary.CostUSD, 4)
-	if summary.UsedUSD > 0 {
-		summary.ProfitRate = roundTo((summary.RevenueUSD-summary.CostUSD)/summary.UsedUSD, 4)
+	// --- Remote-side by_tag buckets ---
+	// Aggregate remote channels per profile so the ByTag breakdown adds
+	// up to the (now blended) top total. Tag label is the profile name;
+	// source is "remote" to distinguish from the main / pipi buckets.
+	type remoteProfileAgg struct {
+		name     string
+		buckets  tagBucket
+	}
+	remoteByProfile := map[int64]*remoteProfileAgg{}
+	for _, r := range remoteRows {
+		a, ok := remoteByProfile[r.ProfileID]
+		if !ok {
+			a = &remoteProfileAgg{name: r.ProfileName, buckets: tagBucket{channels: map[int]struct{}{}}}
+			remoteByProfile[r.ProfileID] = a
+		}
+		a.buckets.usedUSD += r.UsedUSD
+		a.buckets.costUSD += r.CostUSD
+		a.buckets.revenueUSD += r.RevenueUSD
+		if r.ChannelID > 0 {
+			a.buckets.channels[int(r.ChannelID)] = struct{}{}
+		}
+	}
+	for pid, agg := range remoteByProfile {
+		label := agg.name
+		if label == "" {
+			label = fmt.Sprintf("profile#%d", pid)
+		}
+		emit(label, "remote", &agg.buckets)
 	}
 
-	// --- Remote Channels layer ---
-	// Kept separate from main / pipi totals so the operator can see it as
-	// its own section. `unit_price_cny` gets pulled from remote_channel_meta
-	// (single value per channel); `downstream_cny` walks the per-date table
-	// with "latest ≤ day" semantics so yesterday's rate carries forward.
-	remoteRows, err := loadRemoteDaily(startDate, endDate, getFX)
-	if err != nil {
-		log.Printf("[profit] loadRemoteDaily: %v", err)
-	}
+	// Populate the Remote breakdown section. Totals mirror what got folded
+	// into `daily` above so the standalone Remote row on the UI still adds
+	// up the same way. summary.UsedUSD / CostUSD / RevenueUSD already
+	// include these numbers via the fold; the Remote* fields are for the
+	// dedicated breakdown card only.
 	summary.ByRemoteChannel = remoteRows
 	for _, r := range remoteRows {
 		summary.RemoteUsedUSD += r.UsedUSD
@@ -779,6 +817,14 @@ func handleProfitDaily(c *gin.Context) {
 	summary.RemoteCostUSD = roundTo(summary.RemoteCostUSD, 4)
 	summary.RemoteRevenueUSD = roundTo(summary.RemoteRevenueUSD, 4)
 	summary.RemoteProfitUSD = roundTo(summary.RemoteRevenueUSD-summary.RemoteCostUSD, 4)
+
+	summary.UsedUSD = roundTo(summary.UsedUSD, 4)
+	summary.CostUSD = roundTo(summary.CostUSD, 4)
+	summary.RevenueUSD = roundTo(summary.RevenueUSD, 4)
+	summary.ProfitUSD = roundTo(summary.RevenueUSD-summary.CostUSD, 4)
+	if summary.UsedUSD > 0 {
+		summary.ProfitRate = roundTo((summary.RevenueUSD-summary.CostUSD)/summary.UsedUSD, 4)
+	}
 
 	for id := range missingChIDs {
 		summary.MissingPricing.ChannelIDs = append(summary.MissingPricing.ChannelIDs, id)
@@ -800,23 +846,35 @@ type remoteDailyDelta struct {
 	usedUSD     float64
 }
 
+// remoteDailyPerDate holds the aggregate remote used/cost/revenue for one
+// date across every profile+channel that had activity. Used by
+// handleProfitDaily to fold Remote Channels into the daily+summary
+// totals so the top summary reflects the true blended profit.
+type remoteDailyPerDate struct {
+	UsedUSD    float64
+	CostUSD    float64
+	RevenueUSD float64
+}
+
 // loadRemoteDaily walks remote_channel_snapshot, computes per-day
 // used-quota deltas (last snapshot of day D − last of D−1), joins with
 // remote_channel_meta.unit_price_cny and per-date downstream_cny, and
 // aggregates per (profile, channel) into a profit row for the window.
+// Also returns a per-date rollup so callers can merge remote activity
+// into the main daily aggregation without a second query.
 // Returns an empty slice when no snapshots or no downstream configured
 // intersect the window.
-func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]ProfitByRemoteChannel, error) {
+func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]ProfitByRemoteChannel, map[string]*remoteDailyPerDate, error) {
 	// Grow the snapshot window by 1 day on each side so the "last of D−1"
 	// lookup for the start-of-window date still finds a baseline, and
 	// end-of-window carryover isn't lost when the tick lands after midnight.
 	start, err := time.Parse("2006-01-02", startDate)
 	if err != nil {
-		return nil, fmt.Errorf("parse startDate: %v", err)
+		return nil, nil, fmt.Errorf("parse startDate: %v", err)
 	}
 	end, err := time.Parse("2006-01-02", endDate)
 	if err != nil {
-		return nil, fmt.Errorf("parse endDate: %v", err)
+		return nil, nil, fmt.Errorf("parse endDate: %v", err)
 	}
 	startExpanded := start.AddDate(0, 0, -1).Unix()
 	endExpanded := end.AddDate(0, 0, 2).Unix() // end + 1 day margin, exclusive upper
@@ -842,7 +900,7 @@ func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]P
 		startExpanded, endExpanded,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("query snapshots: %v", err)
+		return nil, nil, fmt.Errorf("query snapshots: %v", err)
 	}
 	defer rows.Close()
 
@@ -856,7 +914,7 @@ func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]P
 		var pid, chID, quota int64
 		var date string
 		if err := rows.Scan(&pid, &chID, &date, &quota); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		k := [2]int64{pid, chID}
 		series[k] = append(series[k], lastSnap{date: date, quota: quota})
@@ -878,13 +936,13 @@ func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]P
 			start.Unix(),
 		)
 		if err != nil {
-			return nil, fmt.Errorf("query baseline: %v", err)
+			return nil, nil, fmt.Errorf("query baseline: %v", err)
 		}
 		for bRows.Next() {
 			var pid, chID, q int64
 			if err := bRows.Scan(&pid, &chID, &q); err != nil {
 				bRows.Close()
-				return nil, err
+				return nil, nil, err
 			}
 			baselines[[2]int64{pid, chID}] = q
 		}
@@ -917,7 +975,7 @@ func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]P
 	metaRows, err := db.Query(`SELECT profile_id, remote_channel_id, unit_price_cny
 	                             FROM remote_channel_meta`)
 	if err != nil {
-		return nil, fmt.Errorf("query meta: %v", err)
+		return nil, nil, fmt.Errorf("query meta: %v", err)
 	}
 	defer metaRows.Close()
 	metaPrice := make(map[[2]int64]float64)
@@ -925,7 +983,7 @@ func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]P
 		var pid, chID int64
 		var price sql.NullFloat64
 		if err := metaRows.Scan(&pid, &chID, &price); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if price.Valid {
 			metaPrice[[2]int64{pid, chID}] = price.Float64
@@ -944,7 +1002,7 @@ func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]P
 		endDate,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("query downstream_daily: %v", err)
+		return nil, nil, fmt.Errorf("query downstream_daily: %v", err)
 	}
 	defer dsRows.Close()
 	type dsRow struct {
@@ -958,7 +1016,7 @@ func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]P
 		var date string
 		var value float64
 		if err := dsRows.Scan(&pid, &date, &value); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		dsByProfile[pid] = append(dsByProfile[pid], dsRow{date: date, value: value})
 	}
@@ -1003,6 +1061,24 @@ func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]P
 		nRows.Close()
 	}
 
+	// perDate accumulates the per-day rollup used by handleProfitDaily to
+	// fold Remote into the main daily aggregation. Grown lazily so dates
+	// with no remote activity stay absent from the map.
+	perDate := make(map[string]*remoteDailyPerDate)
+	bumpPerDate := func(date string, used, cost, rev float64) {
+		if used == 0 && cost == 0 && rev == 0 {
+			return
+		}
+		d, ok := perDate[date]
+		if !ok {
+			d = &remoteDailyPerDate{}
+			perDate[date] = d
+		}
+		d.UsedUSD += used
+		d.CostUSD += cost
+		d.RevenueUSD += rev
+	}
+
 	out := make([]ProfitByRemoteChannel, 0, len(deltas))
 	for k, dates := range deltas {
 		var usedUSD, costUSD, revenueUSD float64
@@ -1024,8 +1100,10 @@ func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]P
 			if fx <= 0 {
 				fx = defaultFXRate
 			}
+			var dayCost, dayRev float64
 			if hasPrice {
-				costUSD += day * priceValue / fx
+				dayCost = day * priceValue / fx
+				costUSD += dayCost
 			}
 			// Per-profile per-day downstream discount is a USD-to-USD
 			// multiplier — matches the existing report_downstream_pricing
@@ -1035,8 +1113,10 @@ func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]P
 				if d > discountMax {
 					discountMax = d
 				}
-				revenueUSD += day * d
+				dayRev = day * d
+				revenueUSD += dayRev
 			}
+			bumpPerDate(date, day, dayCost, dayRev)
 		}
 		if usedUSD == 0 && costUSD == 0 && revenueUSD == 0 {
 			continue
@@ -1066,7 +1146,7 @@ func loadRemoteDaily(startDate, endDate string, getFX func(string) float64) ([]P
 	}
 	// Descending profit so the biggest movers show up first.
 	sort.Slice(out, func(i, j int) bool { return out[i].ProfitUSD > out[j].ProfitUSD })
-	return out, nil
+	return out, perDate, nil
 }
 
 // usdFromRawQuota converts new-api's raw quota-unit counter into USD.

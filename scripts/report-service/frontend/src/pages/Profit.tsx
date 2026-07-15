@@ -231,7 +231,7 @@ export default function Profit() {
       .filter(t => t.revenue_usd > 0 || t.cost_usd > 0)
       .sort((a, b) => b.profit_usd - a.profit_usd)
       .map(t => ({
-        name: (t.tag || '(无)') + (t.source === 'pipi' ? ' ·pipi' : ''),
+        name: (t.tag || '(无)') + (t.source === 'pipi' ? ' ·pipi' : t.source === 'remote' ? ' ·remote' : ''),
         profit: t.profit_usd,
       }))
   }, [profit])
@@ -555,7 +555,7 @@ export default function Profit() {
               {profit && [...profit.by_tag].sort((a, b) => b.cost_usd - a.cost_usd).map((t, i) => (
                 <tr key={i} className="hover:bg-gray-50 border-t border-gray-100">
                   <td className="px-3 py-1.5">
-                    <span className={`px-1.5 py-0.5 rounded text-[10px] ${t.source === 'pipi' ? 'bg-violet-100 text-violet-700' : 'bg-blue-100 text-blue-700'}`}>{t.source}</span>
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] ${t.source === 'pipi' ? 'bg-violet-100 text-violet-700' : t.source === 'remote' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'}`}>{t.source}</span>
                   </td>
                   <td className="px-3 py-1.5 font-mono">{t.tag || <span className="text-gray-400">(无)</span>}</td>
                   <td className="px-3 py-1.5 text-right tabular-nums text-gray-500">{t.key_count}</td>
@@ -631,7 +631,7 @@ export default function Profit() {
         <div className="bg-white border border-gray-200 rounded-xl mb-4">
           <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
             <div>
-              <div className="text-sm font-semibold">Remote Channels 毛利</div>
+              <div className="text-sm font-semibold">Remote Channels 毛利 <span className="text-[10px] text-gray-400 font-normal">（已计入顶部合计）</span></div>
               <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">
                 {profit.by_remote_channel!.length} channels across {aggRows.length} profile{aggRows.length === 1 ? '' : 's'} · used = ${(profit.remote_used_usd ?? 0).toFixed(2)} · cost = ${(profit.remote_cost_usd ?? 0).toFixed(2)} · revenue = ${(profit.remote_revenue_usd ?? 0).toFixed(2)} · profit = <span className={(profit.remote_profit_usd ?? 0) >= 0 ? 'text-emerald-600' : 'text-rose-700'}>${(profit.remote_profit_usd ?? 0).toFixed(2)}</span>
               </div>
