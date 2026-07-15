@@ -1899,10 +1899,11 @@ func handleSaveQuotas(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"saved": saved})
 }
 
-// Default model list for new Anthropic channels. Used as the fallback when
-// the admin hasn't overridden it via report_config('batch_create_default_models').
-// Keep this list in sync with the set of Claude models the org currently sells
-// so a fresh deployment gets sensible defaults on batch create.
+// Default model lists per channel type. Used as the fallback when the admin
+// hasn't overridden the type-specific list via
+// report_config('batch_create_default_models_<type>'). Keep these lists in
+// sync with the set of models the org currently sells so a fresh deployment
+// gets sensible defaults on batch create for each preset.
 var defaultAnthropicModels = strings.Join([]string{
 	"claude-opus-4-7",
 	"claude-sonnet-4-6",
@@ -1915,14 +1916,69 @@ var defaultAnthropicModels = strings.Join([]string{
 	"claude-sonnet-5",
 }, ",")
 
-// getBatchCreateModels reads the runtime-configurable model list. Admins can
-// edit it from the Key Capacity page to add / remove models without a redeploy.
-// Empty rows fall back to defaultAnthropicModels.
-func getBatchCreateModels() string {
+var defaultOpenAIModels = strings.Join([]string{
+	"gpt-5",
+	"gpt-5-mini",
+	"gpt-5-nano",
+	"gpt-4.1",
+	"gpt-4o",
+	"gpt-4o-mini",
+	"o4-mini",
+	"o3",
+}, ",")
+
+var defaultGeminiModels = strings.Join([]string{
+	"gemini-2.5-flash",
+	"gemini-2.5-pro",
+	"gemini-3-flash-preview",
+	"gemini-3-pro-image",
+	"gemini-3.1-flash-lite",
+	"gemini-3.5-flash",
+}, ",")
+
+var defaultVertexModels = strings.Join([]string{
+	"claude-sonnet-4-5@20250929",
+	"claude-opus-4-1@20250805",
+	"claude-3-5-sonnet-v2@20241022",
+	"claude-3-5-haiku@20241022",
+}, ",")
+
+// batchModelsConfigKey normalises the storage key for a given channel type.
+// Type 14 keeps the legacy key so pre-rc.154 saved lists remain effective
+// after upgrade without a migration; the other types use the new
+// _<type> suffix.
+func batchModelsConfigKey(channelType int) string {
+	if channelType <= 0 || channelType == 14 {
+		return "batch_create_default_models"
+	}
+	return fmt.Sprintf("batch_create_default_models_%d", channelType)
+}
+
+func batchModelsFallback(channelType int) string {
+	switch channelType {
+	case 1:
+		return defaultOpenAIModels
+	case 24:
+		return defaultGeminiModels
+	case 41:
+		return defaultVertexModels
+	}
+	return defaultAnthropicModels
+}
+
+// getBatchCreateModels reads the runtime-configurable model list for a given
+// channel type. Admins can edit it from the Key Capacity page to add / remove
+// models without a redeploy. Empty / missing rows fall back to the
+// per-type default. Type 14 (Anthropic) reads the legacy un-suffixed key so
+// existing saved lists remain effective post-upgrade.
+func getBatchCreateModels(channelType int) string {
+	if channelType <= 0 {
+		channelType = 14
+	}
 	var v string
-	err := db.QueryRow(`SELECT value FROM report_config WHERE key='batch_create_default_models'`).Scan(&v)
+	err := db.QueryRow(`SELECT value FROM report_config WHERE key=$1`, batchModelsConfigKey(channelType)).Scan(&v)
 	if err != nil || strings.TrimSpace(v) == "" {
-		return defaultAnthropicModels
+		return batchModelsFallback(channelType)
 	}
 	// Preserve original ordering but strip any stray whitespace between commas.
 	parts := strings.Split(v, ",")
@@ -1934,21 +1990,48 @@ func getBatchCreateModels() string {
 		}
 	}
 	if len(cleaned) == 0 {
-		return defaultAnthropicModels
+		return batchModelsFallback(channelType)
 	}
 	return strings.Join(cleaned, ",")
 }
 
+// parseBatchModelsType picks the channel type out of a query string. Missing
+// or invalid ⇒ 14 (Anthropic), matching handleBatchCreateChannels' default.
+func parseBatchModelsType(raw string) int {
+	if raw == "" {
+		return 14
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 14
+	}
+	return n
+}
+
 func handleGetBatchModels(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"models": getBatchCreateModels()})
+	t := parseBatchModelsType(c.Query("type"))
+	c.JSON(http.StatusOK, gin.H{"models": getBatchCreateModels(t), "type": t})
 }
 
 func handleSetBatchModels(c *gin.Context) {
 	var body struct {
 		Models string `json:"models"`
+		Type   int    `json:"type"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	channelType := body.Type
+	if channelType <= 0 {
+		channelType = 14
+	}
+	// Allowlist matches handleBatchCreateChannels — refuse anything we can't
+	// batch-create anyway so we don't silently accumulate stale config rows.
+	switch channelType {
+	case 1, 14, 24, 41:
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unsupported channel type %d", channelType)})
 		return
 	}
 	// Normalize: collapse whitespace/comma/newline separators, drop empties.
@@ -1963,14 +2046,14 @@ func handleSetBatchModels(c *gin.Context) {
 	now := time.Now().Unix()
 	if _, err := db.Exec(
 		`INSERT INTO report_config (key, value, updated_at)
-		 VALUES ('batch_create_default_models', $1, $2)
+		 VALUES ($1, $2, $3)
 		 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`,
-		joined, now,
+		batchModelsConfigKey(channelType), joined, now,
 	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"models": joined})
+	c.JSON(http.StatusOK, gin.H{"models": joined, "type": channelType})
 }
 
 const channelInfoDefault = `{"is_multi_key":false,"multi_key_size":0,"multi_key_status_list":null,"multi_key_polling_index":0,"multi_key_mode":""}`
@@ -2083,7 +2166,7 @@ func handleBatchCreateChannels(c *gin.Context) {
 	dateStr := time.Now().UTC().Format("0102")
 	activeModels := strings.TrimSpace(payload.Models)
 	if activeModels == "" {
-		activeModels = getBatchCreateModels()
+		activeModels = getBatchCreateModels(channelType)
 	}
 	models := strings.Split(activeModels, ",")
 	now := time.Now().Unix()

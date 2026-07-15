@@ -622,14 +622,18 @@ export const api = {
     return request<CacheStatsResponse>(`/api/cache-stats${suffix ? '?' + suffix : ''}`)
   },
 
-  getBatchCreateModels: () =>
-    request<{ models: string }>('/api/config/batch-models'),
+  // rc.154+: per channel-type saved defaults. Omitting `type` reads the
+  // legacy Anthropic (14) list, so old callers keep working.
+  getBatchCreateModels: (type?: number) =>
+    request<{ models: string; type: number }>(
+      `/api/config/batch-models${type ? `?type=${type}` : ''}`,
+    ),
 
-  saveBatchCreateModels: (models: string) =>
-    request<{ models: string }>('/api/config/batch-models', {
+  saveBatchCreateModels: (models: string, type?: number) =>
+    request<{ models: string; type: number }>('/api/config/batch-models', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ models }),
+      body: JSON.stringify(type ? { models, type } : { models }),
     }),
 
   getAllKeys: (start?: string, end?: string) => {

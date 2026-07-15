@@ -649,7 +649,10 @@ func uploadLocalPoolBatch(n int) {
 	cfg := loadLocalPoolConfig()
 	fallbackModels := strings.TrimSpace(cfg.DefaultModels)
 	if fallbackModels == "" {
-		fallbackModels = getBatchCreateModels()
+		// Local pool inherits the Anthropic default — it's Claude-only in
+		// practice. Explicit type=14 keeps the call site self-documenting
+		// after the per-type refactor.
+		fallbackModels = getBatchCreateModels(14)
 	}
 	fallbackGroup := strings.TrimSpace(cfg.DefaultGroup)
 	if fallbackGroup == "" {

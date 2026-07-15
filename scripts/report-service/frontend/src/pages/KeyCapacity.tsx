@@ -157,7 +157,7 @@ export default function KeyCapacity() {
         { label: '预计剩余时长', value: etaFmt.text, color: etaFmt.cls },
       ]} />
 
-      <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-6 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-[420px_1fr] gap-6 items-start">
         <div className="space-y-4">
           <BatchCreatePanel onCreated={load} />
         </div>

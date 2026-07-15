@@ -102,8 +102,12 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   const [region, setRegion] = useState('us-central1')
   const [vertexFiles, setVertexFiles] = useState<VertexFile[]>([])
 
-  // 可配置的默认 model 列表（存在 report_config 里；仅 Anthropic 预设读取）
-  const [modelsCfg, setModelsCfg] = useState('')
+  // 可配置的默认 model 列表 —— 按预设分开存（rc.154+）。key 是 preset.id，
+  // value 是服务端保存的 models 字符串；'' 或缺失表示尚未保存过（前端会
+  // 回退到 preset.fallbackModels）。切换预设时按需拉取，避免打开面板就
+  // 打四次接口。
+  const [modelsByPreset, setModelsByPreset] = useState<Partial<Record<PresetID, string>>>({})
+  const modelsCfg = modelsByPreset[presetID] ?? ''
   const [modelsCfgOpen, setModelsCfgOpen] = useState(false)
   const [modelsSaving, setModelsSaving] = useState(false)
   const [modelsMsg, setModelsMsg] = useState<string | null>(null)
@@ -126,33 +130,34 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
         } catch { /* leave dropdown empty on error */ }
       })()
     }
-    void (async () => {
-      try {
-        const res = await api.getBatchCreateModels()
-        setModelsCfg(res.models)
-      } catch { /* fall back to placeholder */ }
-    })()
   }, [studioLocked])
 
+  // Fetch the saved default-models list for the currently-selected preset
+  // if we haven't cached it yet. Lazy per-preset so opening the panel only
+  // hits /config/batch-models once per type used. Server empty string is
+  // memoised so we don't refetch the "never saved" case.
+  useEffect(() => {
+    if (modelsByPreset[presetID] !== undefined) return
+    void (async () => {
+      try {
+        const res = await api.getBatchCreateModels(preset.type)
+        setModelsByPreset(prev => ({ ...prev, [presetID]: res.models ?? '' }))
+      } catch {
+        setModelsByPreset(prev => ({ ...prev, [presetID]: '' }))
+      }
+    })()
+  }, [presetID, preset.type, modelsByPreset])
+
   // Re-seed models + group whenever the preset changes, unless the operator
-  // has hand-edited them (dirty flag). Anthropic reads the server-side
-  // configurable list so an admin's saved changes still land; other
-  // presets use the baked fallback lists.
+  // has hand-edited them (dirty flag). Prefers the server-saved list for
+  // the current preset; falls back to the baked list if none saved.
   useEffect(() => {
     if (!modelsDirty) {
-      if (preset.id === 'anthropic' && modelsCfg) {
-        setModels(modelsCfg)
-      } else {
-        setModels(preset.fallbackModels)
-      }
+      setModels(modelsCfg && modelsCfg.trim() ? modelsCfg : preset.fallbackModels)
     }
     if (!groupDirty) {
       setGroup(preset.fallbackGroup)
     }
-    // Deliberately not depending on `modelsDirty`/`groupDirty`: those
-    // flags are meant to keep user input across preset switches, not to
-    // trigger a re-seed when they flip. Depending only on presetID + the
-    // config-loaded Anthropic list keeps the seed path predictable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [presetID, modelsCfg])
 
@@ -180,8 +185,12 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
     setModelsMsg(null)
     setModelsSaving(true)
     try {
-      const res = await api.saveBatchCreateModels(modelsCfg)
-      setModelsCfg(res.models)
+      // Persist the currently-displayed list for the active preset. Passing
+      // preset.type keeps each preset's saved list in its own report_config
+      // row so switching Anthropic → OpenAI doesn't clobber the other's
+      // saved defaults.
+      const res = await api.saveBatchCreateModels(modelsCfg, preset.type)
+      setModelsByPreset(prev => ({ ...prev, [presetID]: res.models }))
       setModelsMsg('已保存')
     } catch (e: any) {
       setModelsMsg('失败: ' + (e?.message || e))
@@ -427,7 +436,8 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
           </div>
         </div>
       </div>
-      {/* 可折叠：默认模型列表配置。改了会作用到之后所有批量创建。
+      {/* 可折叠：默认模型列表配置。改了只作用到当前预设 —— 每个 preset
+          (Anthropic / OpenAI / Gemini / Vertex) 各自有一条 report_config 记录。
           Studio Operator (canConfigureModels=false) 只显示当前列表、不允许改。 */}
       <div className="border border-gray-200 rounded-md mb-2 bg-gray-50/50">
         <button
@@ -435,17 +445,24 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
           onClick={() => setModelsCfgOpen(v => !v)}
           className="w-full flex items-center justify-between px-2.5 py-1.5 text-[11px] text-gray-600 hover:bg-gray-100"
         >
-          <span>默认模型列表 <span className="text-gray-400">({modelsCfg.split(',').filter(Boolean).length} 个)</span></span>
+          <span>
+            {preset.label} 默认模型列表{' '}
+            <span className="text-gray-400">({modelsCfg.split(',').filter(Boolean).length} 个)</span>
+          </span>
           <span className="text-gray-400">{modelsCfgOpen ? '▲' : '▼'}</span>
         </button>
         {modelsCfgOpen && (
           <div className="p-2.5 pt-1 space-y-2">
             <textarea
               value={modelsCfg}
-              onChange={e => canConfigureModels && setModelsCfg(e.target.value)}
+              onChange={e => {
+                if (!canConfigureModels) return
+                const v = e.target.value
+                setModelsByPreset(prev => ({ ...prev, [presetID]: v }))
+              }}
               readOnly={!canConfigureModels}
               rows={4}
-              placeholder={'一行或逗号分隔一个模型名，例如\nclaude-opus-4-7,claude-sonnet-4-6,claude-opus-4-6'}
+              placeholder={preset.fallbackModels}
               className={`w-full border border-gray-200 rounded-md p-2 text-[11px] font-mono resize-y focus:outline-none focus:border-gray-900 ${
                 canConfigureModels ? 'bg-white' : 'bg-gray-100 cursor-not-allowed text-gray-600'
               }`}
