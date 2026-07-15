@@ -2146,7 +2146,14 @@ func handleBatchCreateChannels(c *gin.Context) {
 	}
 	groupName := strings.TrimSpace(payload.Group)
 	if groupName == "" {
-		groupName = "default"
+		switch channelType {
+		case 1:
+			groupName = "openai"
+		case 24, 41:
+			groupName = "gemini"
+		default:
+			groupName = "default"
+		}
 	}
 	settings := strings.TrimSpace(payload.Settings)
 	other := strings.TrimSpace(payload.Other)

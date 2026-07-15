@@ -62,7 +62,7 @@ const DEFAULT_VERTEX_MODELS = [
 
 const PRESETS: PresetSpec[] = [
   { id: 'anthropic', label: 'Anthropic', kind: 'text',   type: 14, fallbackGroup: 'default', fallbackModels: DEFAULT_ANTHROPIC_MODELS },
-  { id: 'openai',    label: 'OpenAI',    kind: 'text',   type: 1,  fallbackGroup: 'default', fallbackModels: DEFAULT_OPENAI_MODELS },
+  { id: 'openai',    label: 'OpenAI',    kind: 'text',   type: 1,  fallbackGroup: 'openai',  fallbackModels: DEFAULT_OPENAI_MODELS },
   { id: 'gemini',    label: 'Gemini',    kind: 'text',   type: 24, fallbackGroup: 'gemini',  fallbackModels: DEFAULT_GEMINI_MODELS },
   { id: 'vertex',    label: 'Vertex AI', kind: 'vertex', type: 41, fallbackGroup: 'gemini',  fallbackModels: DEFAULT_VERTEX_MODELS },
 ]
