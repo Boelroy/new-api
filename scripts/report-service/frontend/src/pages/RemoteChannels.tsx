@@ -54,31 +54,46 @@ const DEFAULT_GEMINI_MODELS = [
   'gemini-3.5-flash',
 ].join(',')
 
+// Vertex-on-Anthropic model naming (used when default_vertex_models is
+// empty on the profile). Duplicated from RemoteChannelsStudio.tsx —
+// keeping the two pages standalone is intentional (see file header of
+// the studio page for why).
+const DEFAULT_VERTEX_MODELS = [
+  'claude-sonnet-4-5@20250929',
+  'claude-opus-4-1@20250805',
+  'claude-3-5-sonnet-v2@20241022',
+  'claude-3-5-haiku@20241022',
+].join(',')
+
 // Channel type integers from newapi constant/channel.go — 14 = Anthropic,
-// 24 = Gemini. Batch upload sends the picked value straight through to
-// handleRemoteChannelCreate.
+// 24 = Gemini, 41 = Vertex AI. Batch upload sends the picked value
+// straight through to handleRemoteChannelCreate (text presets) or into
+// handleVertexChannelCreate (vertex preset).
 const CHANNEL_TYPE_ANTHROPIC = 14
 const CHANNEL_TYPE_GEMINI = 24
+const CHANNEL_TYPE_VERTEX = 41
 
 // Preset menu items for the batch upload channel-type + models + group
 // combo. Each preset resolves its group from a specific profile field
 // (default_group for anthropic, default_gemini_group for gemini) with a
 // hardcoded fallback so the field still works when a profile hasn't set
 // its own preference.
-type PresetID = 'anthropic' | 'gemini'
+type PresetID = 'anthropic' | 'gemini' | 'vertex'
 type PresetSpec = {
   id: PresetID
   label: string
+  kind: 'text' | 'vertex'
   type: number
   fallbackModels: string
   fallbackGroup: string
   testModel: string
   profileGroupField: 'default_group' | 'default_gemini_group'
-  profileModelsField: 'default_models' | 'default_gemini_models'
+  profileModelsField: 'default_models' | 'default_gemini_models' | 'default_vertex_models'
 }
 const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
-  { id: 'anthropic', label: 'Anthropic (Claude)', type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS, fallbackGroup: 'default', testModel: 'claude-haiku-4-5-20251001', profileGroupField: 'default_group',        profileModelsField: 'default_models' },
-  { id: 'gemini',    label: 'Gemini',              type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,    fallbackGroup: 'gemini',  testModel: 'gemini-2.5-flash',              profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
+  { id: 'anthropic', label: 'Anthropic (Claude)', kind: 'text',   type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS, fallbackGroup: 'default', testModel: 'claude-haiku-4-5-20251001', profileGroupField: 'default_group',        profileModelsField: 'default_models' },
+  { id: 'gemini',    label: 'Gemini',              kind: 'text',   type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,    fallbackGroup: 'gemini',  testModel: 'gemini-2.5-flash',              profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
+  { id: 'vertex',    label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,    fallbackGroup: 'default', testModel: 'claude-sonnet-4-5@20250929',    profileGroupField: 'default_group',        profileModelsField: 'default_vertex_models' },
 ]
 
 // resolvePresetGroup / resolvePresetModels pick the batch upload group +
@@ -94,6 +109,123 @@ function resolvePresetModels(preset: PresetSpec, profile: RemoteProfile | undefi
 }
 
 const DEFAULT_TEST_MODEL = 'claude-haiku-4-5-20251001'
+
+// One parsed Service Account JSON in the Vertex admin upload UI. Files
+// are pre-parsed so the JSON blob is ready for remoteVertexCreate and
+// invalid uploads are rejected before submit. Kept module-scope so the
+// component-level state array can carry it.
+type VertexAdminFile = { name: string; json: unknown; quotaUSD?: number; note?: string }
+
+// readVertexAdminFiles is the module-level equivalent of the studio
+// page's readVertexFiles — same shape, returns parsed + errors so the
+// caller can surface partial success. Kept out of the component so the
+// two admin modals (batch / new one for immediate later) can share.
+async function readVertexAdminFiles(list: FileList | null): Promise<{ parsed: VertexAdminFile[]; errors: string[] }> {
+  if (!list || list.length === 0) return { parsed: [], errors: [] }
+  const parsed: VertexAdminFile[] = []
+  const errors: string[] = []
+  for (const f of Array.from(list)) {
+    try {
+      const txt = await f.text()
+      const json = JSON.parse(txt)
+      parsed.push({ name: f.name, json })
+    } catch (e: any) {
+      errors.push(`${f.name}: ${e?.message || 'JSON 解析失败'}`)
+    }
+  }
+  return { parsed, errors }
+}
+
+// VertexAdminInputSection is the region + file-picker block rendered in
+// the admin batch modal when the Vertex preset is active. Same visual
+// language as the studio page's VertexInputSection.
+function VertexAdminInputSection({
+  region,
+  onRegionChange,
+  files,
+  onFilesChange,
+  onPickFiles,
+}: {
+  region: string
+  onRegionChange: (v: string) => void
+  files: VertexAdminFile[]
+  onFilesChange: (next: VertexAdminFile[]) => void
+  onPickFiles: (list: FileList | null) => void
+}) {
+  return (
+    <>
+      <div>
+        <label className="block text-[11px] text-gray-500 mb-1">
+          Deployment Region <span className="text-rose-500">*</span>
+        </label>
+        <input
+          value={region}
+          onChange={e => onRegionChange(e.target.value)}
+          placeholder="us-central1"
+          className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900"
+        />
+        <p className="text-[10px] text-gray-400 mt-1">
+          写进 newapi 的 channel.other 字段。本批次所有 JSON 共用此 region。
+        </p>
+      </div>
+      <div>
+        <label className="block text-[11px] text-gray-500 mb-1">
+          Service Account JSON 文件（可多选）
+        </label>
+        <input
+          type="file"
+          accept=".json,application/json"
+          multiple
+          onChange={e => {
+            onPickFiles(e.target.files)
+            e.target.value = ''
+          }}
+          className="block w-full text-[11px] text-gray-700 file:mr-3 file:py-1 file:px-2 file:rounded file:border file:border-gray-300 file:text-[11px] file:bg-gray-50 file:hover:bg-gray-100"
+        />
+        {files.length > 0 && (
+          <ul className="mt-2 divide-y divide-gray-100 border border-gray-200 rounded-md">
+            {files.map((f, i) => (
+              <li key={i} className="px-3 py-2 flex items-center gap-2 text-[11px]">
+                <span className="flex-1 truncate font-mono text-gray-700" title={f.name}>{f.name}</span>
+                <input
+                  type="number"
+                  placeholder="quota"
+                  step="0.01"
+                  value={f.quotaUSD ?? ''}
+                  onChange={e => {
+                    const v = e.target.value === '' ? undefined : parseFloat(e.target.value)
+                    const next = files.slice()
+                    next[i] = { ...f, quotaUSD: v && v > 0 ? v : undefined }
+                    onFilesChange(next)
+                  }}
+                  className="w-20 border border-gray-300 rounded px-1.5 py-0.5 text-[11px] tabular-nums focus:outline-none focus:border-gray-900"
+                />
+                <input
+                  type="text"
+                  placeholder="备注"
+                  value={f.note ?? ''}
+                  onChange={e => {
+                    const next = files.slice()
+                    next[i] = { ...f, note: e.target.value }
+                    onFilesChange(next)
+                  }}
+                  className="w-36 border border-gray-300 rounded px-1.5 py-0.5 text-[11px] focus:outline-none focus:border-gray-900"
+                />
+                <button
+                  type="button"
+                  onClick={() => onFilesChange(files.filter((_, j) => j !== i))}
+                  className="text-rose-600 hover:underline"
+                >
+                  删除
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </>
+  )
+}
 
 // FragmentRow is just <>{children}</> — used so `{channels.map(...)}` can
 // emit two adjacent <tr> elements (main row + expandable sparkline) and
@@ -327,6 +459,12 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   const [batchBusy, setBatchBusy] = useState(false)
   const [batchErr, setBatchErr] = useState<string | null>(null)
   const [batchResults, setBatchResults] = useState<RemoteChannelCreateResult[] | null>(null)
+  // Vertex preset state (Vertex bypasses the pending queue and the
+  // remoteChannelCreate lane — it needs region + settings JSON that the
+  // other channel types don't carry). See handleVertexChannelCreate on
+  // the backend for the tradeoff.
+  const [batchRegion, setBatchRegion] = useState('us-central1')
+  const [batchVertexFiles, setBatchVertexFiles] = useState<VertexAdminFile[]>([])
 
   // Row edit modal.
   const [rowOpen, setRowOpen] = useState(false)
@@ -878,6 +1016,8 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setBatchInput('')
     setBatchErr(null)
     setBatchResults(null)
+    setBatchVertexFiles([])
+    setBatchRegion('us-central1')
     setBatchOpen(true)
   }
 
@@ -896,6 +1036,50 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setBatchErr(null)
     if (!batchPrefix.trim()) return setBatchErr('name_prefix is required')
     if (!batchModels.trim()) return setBatchErr('models is required')
+    const preset = CHANNEL_TYPE_PRESETS.find(p => p.id === batchPresetID)
+    const fullNamePrefix = todayYYYYMMDD() + '-' + batchPrefix.trim()
+
+    // Vertex takes a fundamentally different input (JSON files + region).
+    // It bypasses both the pending queue and the sync remoteChannelCreate
+    // lane, so we branch here before the text-mode line parsing.
+    if (preset?.kind === 'vertex') {
+      if (!batchRegion.trim()) return setBatchErr('Region 不能为空')
+      if (batchVertexFiles.length === 0) return setBatchErr('请至少选择一个 Service Account JSON 文件')
+      setBatchBusy(true)
+      try {
+        const res = await api.remoteVertexCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: batchModels.trim(),
+          group: batchGroup.trim() || 'default',
+          region: batchRegion.trim(),
+          items: batchVertexFiles.map(f => ({
+            key_json: f.json,
+            quota_usd: f.quotaUSD,
+            note: f.note,
+          })),
+        })
+        // Adapt the Vertex result shape onto the existing batchResults UI
+        // (key / ok / channel_id / error) so the results panel keeps
+        // working. `key` here is a display-only file name.
+        setBatchResults(
+          res.results.map((r, idx) => ({
+            key: batchVertexFiles[idx]?.name ?? `item ${r.index}`,
+            ok: r.ok,
+            channel_id: r.channel_id,
+            error: r.error,
+          }))
+        )
+        // Refresh remote channel list so newly created rows appear.
+        void fetchChannels()
+      } catch (e: any) {
+        setBatchErr(e?.message || String(e))
+      } finally {
+        setBatchBusy(false)
+      }
+      return
+    }
+
     const items: { key: string; quota_usd?: number; note?: string; priority?: number }[] = []
     for (const raw of batchInput.split('\n')) {
       const t = raw.trim()
@@ -928,10 +1112,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
         items.forEach((it, i) => { it.priority = Math.max(1, basePriority + i * step) })
       }
     }
-    // Final name_prefix = <YYYYMMDD>-<user middle>. Backend then appends
-    // -<key末8>-<sha8> per key, so the full channel name is
-    // 20260707-mid-abcd1234-3f5c9e2a.
-    const fullNamePrefix = todayYYYYMMDD() + '-' + batchPrefix.trim()
+    // fullNamePrefix already computed above (before the Vertex branch).
 
     setBatchBusy(true)
     try {
@@ -2020,11 +2201,30 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                 rows={8}
                 placeholder={'sk-ant-api03-xxxx 220\nsk-ant-api03-yyyy 500 备注文字\n# 井号开头的行会被忽略'}
                 className="w-full border border-gray-300 rounded-md p-2 text-[11px] font-mono resize-y focus:outline-none focus:border-gray-900"
+                disabled={batchPresetID === 'vertex'}
               />
               <p className="text-[10px] text-gray-400 mt-1">
                 额度和备注可省。额度写在本地 remote_channel_meta；key 明文只走一次 POST，不落本地。
               </p>
             </div>
+            {batchPresetID === 'vertex' && (
+              <div className="mt-3 space-y-3 border border-dashed border-gray-300 rounded-md p-3 bg-gray-50/50">
+                <p className="text-[11px] text-gray-500">
+                  Vertex 走独立通道，绕过 Pending 队列 —— 不会出现在下方"上传队列"，直接创建远端渠道。
+                </p>
+                <VertexAdminInputSection
+                  region={batchRegion}
+                  onRegionChange={setBatchRegion}
+                  files={batchVertexFiles}
+                  onFilesChange={setBatchVertexFiles}
+                  onPickFiles={async list => {
+                    const { parsed, errors } = await readVertexAdminFiles(list)
+                    setBatchVertexFiles(prev => [...prev, ...parsed])
+                    if (errors.length) setBatchErr(errors.join('; '))
+                  }}
+                />
+              </div>
+            )}
             {batchErr && <p className="text-xs text-rose-600 mt-2">{batchErr}</p>}
             {batchResults && (
               <div className="mt-3 border border-gray-200 rounded-md max-h-56 overflow-y-auto">

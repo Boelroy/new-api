@@ -46,26 +46,44 @@ const DEFAULT_GEMINI_MODELS = [
   'gemini-3.5-flash',
 ].join(',')
 
+// Vertex model naming follows GCP's model-garden IDs (@publisher, or
+// versioned suffixes). Only Anthropic-on-Vertex is common in production
+// use — Gemini-on-Vertex is served via the Gemini channel instead. This
+// list is only a fallback for profiles that haven't set default_vertex_models.
+const DEFAULT_VERTEX_MODELS = [
+  'claude-sonnet-4-5@20250929',
+  'claude-opus-4-1@20250805',
+  'claude-3-5-sonnet-v2@20241022',
+  'claude-3-5-haiku@20241022',
+].join(',')
+
 // Channel type integers from newapi's constant/channel.go — 14 = Anthropic,
-// 24 = Gemini. Sent through remotePendingEnqueue.type on both the pool
-// and immediate lanes. Duplicated (intentionally, see file header) from
-// RemoteChannels.tsx to keep this operator surface standalone.
+// 24 = Gemini, 41 = Vertex AI. Sent through remotePendingEnqueue.type for
+// the first two; Vertex has its own endpoint (see remoteVertexCreate).
+// Duplicated (intentionally, see file header) from RemoteChannels.tsx to
+// keep this operator surface standalone.
 const CHANNEL_TYPE_ANTHROPIC = 14
 const CHANNEL_TYPE_GEMINI = 24
+const CHANNEL_TYPE_VERTEX = 41
 
-type PresetID = 'anthropic' | 'gemini'
+type PresetID = 'anthropic' | 'gemini' | 'vertex'
+// `kind` gates the modal's form flow: 'text' presets use the per-line
+// key textarea + pending-queue path; 'vertex' presets swap in a JSON
+// file picker + region input and post directly to remoteVertexCreate.
 type PresetSpec = {
   id: PresetID
   label: string
+  kind: 'text' | 'vertex'
   type: number
   fallbackModels: string
   fallbackGroup: string
   profileGroupField: 'default_group' | 'default_gemini_group'
-  profileModelsField: 'default_models' | 'default_gemini_models'
+  profileModelsField: 'default_models' | 'default_gemini_models' | 'default_vertex_models'
 }
 const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
-  { id: 'anthropic', label: 'Anthropic (Claude)', type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS, fallbackGroup: 'default', profileGroupField: 'default_group',        profileModelsField: 'default_models' },
-  { id: 'gemini',    label: 'Gemini',              type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,    fallbackGroup: 'gemini',  profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
+  { id: 'anthropic', label: 'Anthropic (Claude)', kind: 'text',   type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS, fallbackGroup: 'default', profileGroupField: 'default_group',        profileModelsField: 'default_models' },
+  { id: 'gemini',    label: 'Gemini',              kind: 'text',   type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,    fallbackGroup: 'gemini',  profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
+  { id: 'vertex',    label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,    fallbackGroup: 'default', profileGroupField: 'default_group',        profileModelsField: 'default_vertex_models' },
 ]
 
 function resolvePresetGroup(preset: PresetSpec, profile: RemoteProfile | undefined): string {
@@ -135,6 +153,103 @@ function UsagePct({ used, quota }: { used: number; quota: number }) {
   )
 }
 
+// One parsed Service Account JSON in the Vertex upload UI. Files are
+// parsed on selection so validation errors surface before submit, and
+// the JSON blob is kept ready for `remoteVertexCreate`.
+type VertexFile = { name: string; json: unknown; quotaUSD?: number; note?: string }
+
+// Vertex-mode form section. Used inside both the batch and immediate
+// modals; kept a plain function component (no memoisation, no props
+// callback tricks) because there are only two callers on the same page.
+function VertexInputSection({
+  region,
+  onRegionChange,
+  files,
+  onFilesChange,
+  onPickFiles,
+}: {
+  region: string
+  onRegionChange: (v: string) => void
+  files: VertexFile[]
+  onFilesChange: (next: VertexFile[]) => void
+  onPickFiles: (list: FileList | null) => void
+}) {
+  return (
+    <>
+      <div>
+        <label className="block text-[11px] text-gray-500 mb-1">
+          Deployment Region <span className="text-rose-500">*</span>
+        </label>
+        <input
+          value={region}
+          onChange={e => onRegionChange(e.target.value)}
+          placeholder="us-central1"
+          className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900"
+        />
+        <p className="text-[10px] text-gray-400 mt-1">
+          写进 newapi 的 channel.other 字段。本批次所有 JSON 共用此 region。
+        </p>
+      </div>
+      <div>
+        <label className="block text-[11px] text-gray-500 mb-1">
+          Service Account JSON 文件（可多选）
+        </label>
+        <input
+          type="file"
+          accept=".json,application/json"
+          multiple
+          onChange={e => {
+            onPickFiles(e.target.files)
+            // allow re-picking the same file
+            e.target.value = ''
+          }}
+          className="block w-full text-[11px] text-gray-700 file:mr-3 file:py-1 file:px-2 file:rounded file:border file:border-gray-300 file:text-[11px] file:bg-gray-50 file:hover:bg-gray-100"
+        />
+        {files.length > 0 && (
+          <ul className="mt-2 divide-y divide-gray-100 border border-gray-200 rounded-md">
+            {files.map((f, i) => (
+              <li key={i} className="px-3 py-2 flex items-center gap-2 text-[11px]">
+                <span className="flex-1 truncate font-mono text-gray-700" title={f.name}>{f.name}</span>
+                <input
+                  type="number"
+                  placeholder="quota"
+                  step="0.01"
+                  value={f.quotaUSD ?? ''}
+                  onChange={e => {
+                    const v = e.target.value === '' ? undefined : parseFloat(e.target.value)
+                    const next = files.slice()
+                    next[i] = { ...f, quotaUSD: v && v > 0 ? v : undefined }
+                    onFilesChange(next)
+                  }}
+                  className="w-20 border border-gray-300 rounded px-1.5 py-0.5 text-[11px] tabular-nums focus:outline-none focus:border-gray-900"
+                />
+                <input
+                  type="text"
+                  placeholder="备注"
+                  value={f.note ?? ''}
+                  onChange={e => {
+                    const next = files.slice()
+                    next[i] = { ...f, note: e.target.value }
+                    onFilesChange(next)
+                  }}
+                  className="w-36 border border-gray-300 rounded px-1.5 py-0.5 text-[11px] focus:outline-none focus:border-gray-900"
+                />
+                <button
+                  type="button"
+                  onClick={() => onFilesChange(files.filter((_, j) => j !== i))}
+                  className="text-rose-600 hover:underline"
+                >
+                  删除
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </>
+  )
+}
+
 export default function RemoteChannelsStudio() {
   const [profiles, setProfiles] = useState<RemoteProfile[]>([])
   const [selectedID, setSelectedID] = useState<number | null>(null)
@@ -173,6 +288,39 @@ export default function RemoteChannelsStudio() {
   const [immInput, setImmInput] = useState('')
   const [immBusy, setImmBusy] = useState(false)
   const [immErr, setImmErr] = useState<string | null>(null)
+
+  // Vertex-only state. Deliberately not merged with batch/immediate text
+  // state: the inputs are different shapes (JSON files + region vs
+  // multi-line key textarea), and keeping them siblings makes the
+  // conditional render branches inside each modal small and readable.
+  //
+  // Files are pre-parsed on selection so we can (a) reject invalid JSON
+  // early, (b) render the filename list back to the operator, and (c)
+  // ship the JSON body without a re-read. `perFile` carries the optional
+  // quota + note per SA JSON (parallel to text-mode's line syntax).
+  const [batchRegion, setBatchRegion] = useState('us-central1')
+  const [batchVertexFiles, setBatchVertexFiles] = useState<VertexFile[]>([])
+  const [immRegion, setImmRegion] = useState('us-central1')
+  const [immVertexFiles, setImmVertexFiles] = useState<VertexFile[]>([])
+
+  // Read a FileList → VertexFile[]. On parse failure we skip the bad
+  // file and surface a message; partial success is fine and matches how
+  // the backend treats the batch (per-item error results).
+  const readVertexFiles = useCallback(async (files: FileList | null): Promise<{ parsed: VertexFile[]; errors: string[] }> => {
+    if (!files || files.length === 0) return { parsed: [], errors: [] }
+    const parsed: VertexFile[] = []
+    const errors: string[] = []
+    for (const f of Array.from(files)) {
+      try {
+        const txt = await f.text()
+        const json = JSON.parse(txt)
+        parsed.push({ name: f.name, json })
+      } catch (e: any) {
+        errors.push(`${f.name}: ${e?.message || 'JSON 解析失败'}`)
+      }
+    }
+    return { parsed, errors }
+  }, [])
 
   useEffect(() => {
     void (async () => {
@@ -265,6 +413,8 @@ export default function RemoteChannelsStudio() {
     setBatchGroup(resolvePresetGroup(initialPreset, p))
     setBatchModels(resolvePresetModels(initialPreset, p))
     setBatchInput('')
+    setBatchVertexFiles([])
+    setBatchRegion('us-central1')
     setBatchErr(null)
     setBatchOpen(true)
   }
@@ -274,6 +424,43 @@ export default function RemoteChannelsStudio() {
     setBatchErr(null)
     if (!batchPrefix.trim()) return setBatchErr('中间段不能为空')
     if (!batchModels.trim()) return setBatchErr('models 不能为空')
+    const preset = CHANNEL_TYPE_PRESETS.find(p => p.id === batchPresetID)
+    const fullNamePrefix = todayYYYYMMDD() + '-' + batchPrefix.trim()
+
+    if (preset?.kind === 'vertex') {
+      if (!batchRegion.trim()) return setBatchErr('Region 不能为空')
+      if (batchVertexFiles.length === 0) return setBatchErr('请至少选择一个 Service Account JSON 文件')
+      setBatchBusy(true)
+      try {
+        const res = await api.remoteVertexCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: batchModels.trim(),
+          group: batchGroup.trim() || 'default',
+          region: batchRegion.trim(),
+          items: batchVertexFiles.map(f => ({
+            key_json: f.json,
+            quota_usd: f.quotaUSD,
+            note: f.note,
+          })),
+        })
+        const failed = res.results.filter(r => !r.ok)
+        if (failed.length === 0) {
+          alert(`已上传 ${res.ok} 个 Vertex 渠道`)
+        } else {
+          alert(`成功 ${res.ok} / ${res.total}\n失败：\n` + failed.map(r => `#${r.index} ${r.error}`).join('\n'))
+        }
+        setBatchOpen(false)
+        // Vertex bypasses the pending queue — refresh channels instead.
+        void reloadChannels()
+      } catch (e: any) {
+        setBatchErr(e?.message || String(e))
+      } finally {
+        setBatchBusy(false)
+      }
+      return
+    }
+
     const items: { key: string; quota_usd?: number; note?: string }[] = []
     for (const raw of batchInput.split('\n')) {
       const t = raw.trim()
@@ -292,7 +479,6 @@ export default function RemoteChannelsStudio() {
       items.push(item)
     }
     if (items.length === 0) return setBatchErr('未解析到有效行')
-    const fullNamePrefix = todayYYYYMMDD() + '-' + batchPrefix.trim()
     setBatchBusy(true)
     try {
       // pool_size=1 = "go into the pool" sentinel. Actual throttle
@@ -303,7 +489,7 @@ export default function RemoteChannelsStudio() {
       const res = await api.remotePendingEnqueue({
         profile_id: selectedID,
         name_prefix: fullNamePrefix,
-        type: CHANNEL_TYPE_PRESETS.find(p => p.id === batchPresetID)?.type,
+        type: preset?.type,
         group: batchGroup.trim() || 'default',
         models: batchModels.trim(),
         pool_size: 1,
@@ -327,6 +513,8 @@ export default function RemoteChannelsStudio() {
     setImmGroup(resolvePresetGroup(initialPreset, p))
     setImmModels(resolvePresetModels(initialPreset, p))
     setImmInput('')
+    setImmVertexFiles([])
+    setImmRegion('us-central1')
     setImmErr(null)
     setImmOpen(true)
   }
@@ -336,6 +524,42 @@ export default function RemoteChannelsStudio() {
     setImmErr(null)
     if (!immPrefix.trim()) return setImmErr('中间段不能为空')
     if (!immModels.trim()) return setImmErr('models 不能为空')
+    const preset = CHANNEL_TYPE_PRESETS.find(p => p.id === immPresetID)
+    const fullNamePrefix = todayYYYYMMDD() + '-' + immPrefix.trim()
+
+    if (preset?.kind === 'vertex') {
+      if (!immRegion.trim()) return setImmErr('Region 不能为空')
+      if (immVertexFiles.length === 0) return setImmErr('请至少选择一个 Service Account JSON 文件')
+      setImmBusy(true)
+      try {
+        const res = await api.remoteVertexCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: immModels.trim(),
+          group: immGroup.trim() || 'default',
+          region: immRegion.trim(),
+          items: immVertexFiles.map(f => ({
+            key_json: f.json,
+            quota_usd: f.quotaUSD,
+            note: f.note,
+          })),
+        })
+        const failed = res.results.filter(r => !r.ok)
+        if (failed.length === 0) {
+          alert(`已上传 ${res.ok} 个 Vertex 渠道`)
+        } else {
+          alert(`成功 ${res.ok} / ${res.total}\n失败：\n` + failed.map(r => `#${r.index} ${r.error}`).join('\n'))
+        }
+        setImmOpen(false)
+        void reloadChannels()
+      } catch (e: any) {
+        setImmErr(e?.message || String(e))
+      } finally {
+        setImmBusy(false)
+      }
+      return
+    }
+
     const items: { key: string; quota_usd?: number; note?: string }[] = []
     for (const raw of immInput.split('\n')) {
       const t = raw.trim()
@@ -352,7 +576,6 @@ export default function RemoteChannelsStudio() {
       items.push(item)
     }
     if (items.length === 0) return setImmErr('未解析到有效行')
-    const fullNamePrefix = todayYYYYMMDD() + '-' + immPrefix.trim()
     setImmBusy(true)
     try {
       // immediate=true → server flips pool_size to 0 so the row goes
@@ -361,7 +584,7 @@ export default function RemoteChannelsStudio() {
       const res = await api.remotePendingEnqueue({
         profile_id: selectedID,
         name_prefix: fullNamePrefix,
-        type: CHANNEL_TYPE_PRESETS.find(p => p.id === immPresetID)?.type,
+        type: preset?.type,
         group: immGroup.trim() || 'default',
         models: immModels.trim(),
         pool_size: 0,
@@ -683,11 +906,26 @@ export default function RemoteChannelsStudio() {
                   rows={8}
                   placeholder="sk-... 10&#10;sk-... 20 备注"
                   className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
+                  disabled={batchPresetID === 'vertex'}
                 />
               </div>
+              {batchPresetID === 'vertex' && (
+                <VertexInputSection
+                  region={batchRegion}
+                  onRegionChange={setBatchRegion}
+                  files={batchVertexFiles}
+                  onFilesChange={setBatchVertexFiles}
+                  onPickFiles={async list => {
+                    const { parsed, errors } = await readVertexFiles(list)
+                    setBatchVertexFiles(prev => [...prev, ...parsed])
+                    if (errors.length) setBatchErr(errors.join('; '))
+                  }}
+                />
+              )}
               <p className="text-[11px] text-gray-400">
-                上 Key 后进入 Pool 队列。管理员配置了每次上几个 + 检查间隔。
-                同批 Key 会按 FIFO 依次进池，前一批全部消耗完之前不会开始新一批。
+                {batchPresetID === 'vertex'
+                  ? 'Vertex 走独立通道 —— 上传后不进 Pool 队列，直接创建远端渠道。'
+                  : '上 Key 后进入 Pool 队列。管理员配置了每次上几个 + 检查间隔。同批 Key 会按 FIFO 依次进池，前一批全部消耗完之前不会开始新一批。'}
               </p>
               {batchErr && <p className="text-xs text-rose-600">{batchErr}</p>}
             </div>
@@ -785,8 +1023,22 @@ export default function RemoteChannelsStudio() {
                   rows={8}
                   placeholder="sk-... 10&#10;sk-... 20 备注"
                   className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
+                  disabled={immPresetID === 'vertex'}
                 />
               </div>
+              {immPresetID === 'vertex' && (
+                <VertexInputSection
+                  region={immRegion}
+                  onRegionChange={setImmRegion}
+                  files={immVertexFiles}
+                  onFilesChange={setImmVertexFiles}
+                  onPickFiles={async list => {
+                    const { parsed, errors } = await readVertexFiles(list)
+                    setImmVertexFiles(prev => [...prev, ...parsed])
+                    if (errors.length) setImmErr(errors.join('; '))
+                  }}
+                />
+              )}
               {immErr && <p className="text-xs text-rose-600">{immErr}</p>}
             </div>
             <div className="mt-5 flex justify-end gap-2">

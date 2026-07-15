@@ -2845,6 +2845,12 @@ func main() {
 		// frontend falls back to DEFAULT_GEMINI_MODELS baked into the
 		// batch upload page.
 		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS default_gemini_models TEXT NOT NULL DEFAULT ''`,
+		// Default models list for Vertex AI (channel_type=41) uploads.
+		// Vertex model names differ from AI Studio (they include the
+		// publisher-prefix or the @publisher-version suffix), so a
+		// separate list is cleaner than reusing default_gemini_models.
+		// Empty string ⇒ frontend falls back to DEFAULT_VERTEX_MODELS.
+		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS default_vertex_models TEXT NOT NULL DEFAULT ''`,
 		// Global-FIFO pool throttle knobs. `pool_interval_sec` is the tick
 		// interval for uploading queued pending_key rows; `pool_batch_size`
 		// is how many keys the tick uploads at once. The tick skips if any
@@ -3215,6 +3221,13 @@ func main() {
 	remoteOperatorAPI.POST("/remote-newapi/pending", handlePendingKeyEnqueue)
 	remoteOperatorAPI.GET("/remote-newapi/pending", handlePendingKeyList)
 	remoteOperatorAPI.DELETE("/remote-newapi/pending/:id", handlePendingKeyDelete)
+	// Vertex AI channel creation. Bypasses the pending queue — Vertex
+	// carries region + settings which the pending schema doesn't have,
+	// and Vertex batches are small enough that one synchronous POST per
+	// SA JSON is fine. Studio operators land here through the same
+	// role gate as the pending endpoints; handleVertexChannelCreate
+	// re-enforces the studio-lock invariants internally.
+	remoteOperatorAPI.POST("/remote-newapi/vertex/create", handleVertexChannelCreate)
 
 	// Local pool: KeyCapacity 'Pool 上 Key' tab + studio operator's
 	// /pool-upload slim page. Admin+ (Key Capacity) and studio_operator

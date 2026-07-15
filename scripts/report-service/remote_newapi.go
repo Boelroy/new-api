@@ -102,6 +102,7 @@ type remoteProfile struct {
 	DefaultGroup        string `json:"default_group"`
 	DefaultGeminiGroup  string `json:"default_gemini_group"`
 	DefaultGeminiModels string `json:"default_gemini_models"`
+	DefaultVertexModels string `json:"default_vertex_models"`
 	PoolIntervalSec     int    `json:"pool_interval_sec"`
 	PoolBatchSize       int    `json:"pool_batch_size"`
 	AutoMode            bool   `json:"auto_mode"`
@@ -124,6 +125,7 @@ type remoteProfilePublic struct {
 	DefaultGroup        string `json:"default_group"`
 	DefaultGeminiGroup  string `json:"default_gemini_group"`
 	DefaultGeminiModels string `json:"default_gemini_models"`
+	DefaultVertexModels string `json:"default_vertex_models"`
 	PoolIntervalSec     int    `json:"pool_interval_sec"`
 	PoolBatchSize       int    `json:"pool_batch_size"`
 	AutoMode            bool   `json:"auto_mode"`
@@ -283,7 +285,7 @@ func normalizeHost(raw string) (string, error) {
 func handleRemoteProfileList(c *gin.Context) {
 	rows, err := db.Query(
 		`SELECT id, name, host, user_id, access_token_enc,
-		        default_models, default_group, default_gemini_group, default_gemini_models,
+		        default_models, default_group, default_gemini_group, default_gemini_models, default_vertex_models,
 		        pool_interval_sec, pool_batch_size,
 		        auto_mode, rpm_base, rpm_min,
 		        created_at, updated_at
@@ -307,7 +309,7 @@ func handleRemoteProfileList(c *gin.Context) {
 		var p remoteProfile
 		var enc string
 		if err := rows.Scan(&p.ID, &p.Name, &p.Host, &p.UserID, &enc,
-			&p.DefaultModels, &p.DefaultGroup, &p.DefaultGeminiGroup, &p.DefaultGeminiModels,
+			&p.DefaultModels, &p.DefaultGroup, &p.DefaultGeminiGroup, &p.DefaultGeminiModels, &p.DefaultVertexModels,
 			&p.PoolIntervalSec, &p.PoolBatchSize,
 			&p.AutoMode, &p.RPMBase, &p.RPMMin,
 			&p.CreatedAt, &p.UpdatedAt); err != nil {
@@ -323,6 +325,7 @@ func handleRemoteProfileList(c *gin.Context) {
 				DefaultGroup:        p.DefaultGroup,
 				DefaultGeminiGroup:  p.DefaultGeminiGroup,
 				DefaultGeminiModels: p.DefaultGeminiModels,
+				DefaultVertexModels: p.DefaultVertexModels,
 				PoolIntervalSec:     p.PoolIntervalSec,
 				PoolBatchSize:       p.PoolBatchSize,
 				AutoMode:            p.AutoMode,
@@ -352,6 +355,7 @@ func handleRemoteProfileCreate(c *gin.Context) {
 		DefaultGroup        string `json:"default_group"`
 		DefaultGeminiGroup  string `json:"default_gemini_group"`
 		DefaultGeminiModels string `json:"default_gemini_models"`
+		DefaultVertexModels string `json:"default_vertex_models"`
 		PoolIntervalSec     int    `json:"pool_interval_sec"`
 		PoolBatchSize       int    `json:"pool_batch_size"`
 		AutoMode            *bool  `json:"auto_mode,omitempty"`
@@ -368,6 +372,7 @@ func handleRemoteProfileCreate(c *gin.Context) {
 	body.DefaultGroup = strings.TrimSpace(body.DefaultGroup)
 	body.DefaultGeminiGroup = strings.TrimSpace(body.DefaultGeminiGroup)
 	body.DefaultGeminiModels = strings.TrimSpace(body.DefaultGeminiModels)
+	body.DefaultVertexModels = strings.TrimSpace(body.DefaultVertexModels)
 	if body.Name == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
 		return
@@ -405,12 +410,12 @@ func handleRemoteProfileCreate(c *gin.Context) {
 	var id int64
 	err = db.QueryRow(
 		`INSERT INTO remote_newapi_profile
-		 (name, host, user_id, access_token_enc, default_models, default_group, default_gemini_group, default_gemini_models,
+		 (name, host, user_id, access_token_enc, default_models, default_group, default_gemini_group, default_gemini_models, default_vertex_models,
 		  pool_interval_sec, pool_batch_size,
 		  auto_mode, rpm_base, rpm_min,
 		  created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14) RETURNING id`,
-		body.Name, host, body.UserID, enc, body.DefaultModels, body.DefaultGroup, body.DefaultGeminiGroup, body.DefaultGeminiModels,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15) RETURNING id`,
+		body.Name, host, body.UserID, enc, body.DefaultModels, body.DefaultGroup, body.DefaultGeminiGroup, body.DefaultGeminiModels, body.DefaultVertexModels,
 		poolInterval, poolBatch,
 		autoMode, rpmBase, rpmMin, now,
 	).Scan(&id)
@@ -423,6 +428,7 @@ func handleRemoteProfileCreate(c *gin.Context) {
 		HasToken: true, DefaultModels: body.DefaultModels, DefaultGroup: body.DefaultGroup,
 		DefaultGeminiGroup:  body.DefaultGeminiGroup,
 		DefaultGeminiModels: body.DefaultGeminiModels,
+		DefaultVertexModels: body.DefaultVertexModels,
 		PoolIntervalSec:     poolInterval, PoolBatchSize: poolBatch,
 		AutoMode: autoMode, RPMBase: rpmBase, RPMMin: rpmMin,
 		CreatedAt: now, UpdatedAt: now,
@@ -445,6 +451,7 @@ func handleRemoteProfileUpdate(c *gin.Context) {
 		DefaultGroup        *string `json:"default_group,omitempty"`
 		DefaultGeminiGroup  *string `json:"default_gemini_group,omitempty"`
 		DefaultGeminiModels *string `json:"default_gemini_models,omitempty"`
+		DefaultVertexModels *string `json:"default_vertex_models,omitempty"`
 		PoolIntervalSec     *int    `json:"pool_interval_sec,omitempty"`
 		PoolBatchSize       *int    `json:"pool_batch_size,omitempty"`
 		AutoMode            *bool   `json:"auto_mode,omitempty"`
@@ -487,6 +494,15 @@ func handleRemoteProfileUpdate(c *gin.Context) {
 		if _, err := db.Exec(
 			`UPDATE remote_newapi_profile SET default_gemini_models=$1, updated_at=$2 WHERE id=$3`,
 			strings.TrimSpace(*body.DefaultGeminiModels), now, id,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.DefaultVertexModels != nil {
+		if _, err := db.Exec(
+			`UPDATE remote_newapi_profile SET default_vertex_models=$1, updated_at=$2 WHERE id=$3`,
+			strings.TrimSpace(*body.DefaultVertexModels), now, id,
 		); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -1901,6 +1917,166 @@ func handlePendingKeyDelete(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"deleted": n})
 }
 
+// handleVertexChannelCreate uploads one or more Vertex AI service-account
+// JSON files to the remote as newapi channels (channel_type = 41). Runs
+// synchronously, one channel per JSON — Vertex batches are small (usually
+// under 10 SAs) and serial makes each error attributable.
+//
+// Bypasses remote_pending_key deliberately. The pending pipeline only
+// carries the (key_encrypted, group, models, channel_type) columns; adding
+// `other` (deployment region) + `settings` (vertex_key_type) would
+// require a schema+scheduler expansion that isn't worth it for a channel
+// type that only ever needs immediate creation. Trade-off: uploaded
+// Vertex channels don't show up in "上传队列" or the studio operator's
+// "我的远程渠道" filter until the 15-min snapshot cron (or the "获取
+// 用量" button) refreshes the mirror.
+//
+// Studio operator scope matches the pending path:
+//   - tag is forced to the caller's studio (never trust body.Tag)
+//   - (profile, studio) accept policy blocks 403 if disabled
+//   - priority is always 0 for studio operators
+func handleVertexChannelCreate(c *gin.Context) {
+	var body struct {
+		ProfileID  int64  `json:"profile_id"`
+		NamePrefix string `json:"name_prefix"`
+		Models     string `json:"models"`
+		Group      string `json:"group"`
+		Tag        string `json:"tag"`
+		Region     string `json:"region"`
+		Items      []struct {
+			KeyJSON  json.RawMessage `json:"key_json"`
+			QuotaUSD *float64        `json:"quota_usd,omitempty"`
+			Note     string          `json:"note,omitempty"`
+		} `json:"items"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	body.NamePrefix = strings.TrimSpace(body.NamePrefix)
+	body.Models = strings.TrimSpace(body.Models)
+	body.Group = strings.TrimSpace(body.Group)
+	body.Region = strings.TrimSpace(body.Region)
+	if body.ProfileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	if body.NamePrefix == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name_prefix is required"})
+		return
+	}
+	if body.Models == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "models is required"})
+		return
+	}
+	if body.Region == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "region is required"})
+		return
+	}
+	if body.Group == "" {
+		body.Group = "default"
+	}
+	if len(body.Items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no items provided"})
+		return
+	}
+
+	// Same studio-lock as handlePendingKeyEnqueue — tag is fixed to the
+	// caller's studio, accept-policy blocks upload, priority forced to 0.
+	if callerNeedsRemoteStudioLock(c) {
+		studio := callerStudio(c)
+		if studio == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "your account has no studio binding; ask an admin to bind one before uploading keys"})
+			return
+		}
+		accepting, err := studioAccepting(body.ProfileID, studio)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "policy check: " + err.Error()})
+			return
+		}
+		if !accepting {
+			c.JSON(http.StatusForbidden, gin.H{"error": "该 profile 暂不接收本工作室 key，请联系管理员"})
+			return
+		}
+		body.Tag = studio
+	}
+
+	host, userID, token, err := loadRemoteProfileByID(body.ProfileID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Only JSON mode is supported (matches the "只支持 JSON" product decision).
+	// API-key mode would take a different code path (single key string,
+	// no reverse-lookup complications) and we can add it when actually needed.
+	const settingsJSON = `{"vertex_key_type":"json"}`
+
+	// Cap the whole batch at 90s so a partial success still returns
+	// something useful. Per-upload timeout inside uploadOneKeyToRemote
+	// is 45s; realistically a batch of ≤10 finishes well inside that.
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
+	defer cancel()
+
+	results := make([]gin.H, 0, len(body.Items))
+	okCount := 0
+	for idx, it := range body.Items {
+		// Validate the SA JSON parses. We don't require specific fields
+		// (client_email, private_key, etc.) — that's newapi's problem;
+		// we just guard against garbage that would fail the upstream
+		// POST with a confusing error.
+		var probe map[string]any
+		if err := json.Unmarshal(it.KeyJSON, &probe); err != nil {
+			results = append(results, gin.H{
+				"index": idx,
+				"ok":    false,
+				"error": "invalid service account JSON: " + err.Error(),
+			})
+			continue
+		}
+		// newapi's channel.key column is a string; we send the JSON
+		// exactly as uploaded (whitespace-trimmed) so the round-trip is
+		// byte-stable and downstream tools can parse it back.
+		keyStr := strings.TrimSpace(string(it.KeyJSON))
+		chID, err := uploadOneKeyToRemote(ctx, uploadOneKeyParams{
+			Host:       host,
+			Token:      token,
+			UserID:     userID,
+			ProfileID:  body.ProfileID,
+			Key:        keyStr,
+			NamePrefix: body.NamePrefix,
+			Type:       41, // constant/channel.go ChannelTypeVertexAi
+			Models:     body.Models,
+			Group:      body.Group,
+			Tag:        body.Tag,
+			Priority:   0,
+			Other:      body.Region,
+			Settings:   settingsJSON,
+			QuotaUSD:   it.QuotaUSD,
+			Note:       it.Note,
+		})
+		if err != nil {
+			results = append(results, gin.H{
+				"index": idx,
+				"ok":    false,
+				"error": err.Error(),
+			})
+			continue
+		}
+		results = append(results, gin.H{
+			"index":      idx,
+			"ok":         true,
+			"channel_id": chID,
+		})
+		okCount++
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"results": results,
+		"ok":      okCount,
+		"total":   len(body.Items),
+	})
+}
+
 // pendingSchedulerNudge lets the enqueue handler skip the tick wait for
 // immediate (pool_size=0) uploads. Buffered=1 so overlapping enqueues
 // coalesce into one wake-up.
@@ -2775,6 +2951,14 @@ type uploadOneKeyParams struct {
 	BaseURL    string
 	QuotaUSD   *float64 // local meta persisted with the returned channel id
 	Note       string
+	// Vertex-only fields. Left blank for every other channel type.
+	// Other      = new-api channel.other (deployment region for Vertex,
+	//              e.g. "us-central1", or a JSON string mapping model→region).
+	// Settings   = pre-serialised channel.settings JSON string. For Vertex
+	//              this is `{"vertex_key_type":"json"}`. new-api stores
+	//              this column as TEXT, so we pass it through unchanged.
+	Other    string
+	Settings string
 }
 
 // uploadOneKeyToRemote creates one channel on the remote and returns the
@@ -2821,6 +3005,15 @@ func uploadOneKeyToRemote(ctx context.Context, p uploadOneKeyParams) (int64, err
 	}
 	if p.BaseURL != "" {
 		channelBody["base_url"] = p.BaseURL
+	}
+	if p.Other != "" {
+		channelBody["other"] = p.Other
+	}
+	if p.Settings != "" {
+		// new-api's channel POST expects settings as a serialised JSON
+		// *string* (it lands in a TEXT column). Callers already prepared
+		// the payload — do not re-marshal or wrap.
+		channelBody["settings"] = p.Settings
 	}
 	payload := gin.H{"mode": "single", "channel": channelBody}
 	if _, err := remoteDoJSON(ctx, http.MethodPost, p.Host, "/api/channel/", p.Token, p.UserID, nil, payload); err != nil {

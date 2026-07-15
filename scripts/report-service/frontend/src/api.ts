@@ -379,6 +379,11 @@ export type RemoteProfile = {
   // preset is active. Empty ⇒ frontend falls back to built-in defaults.
   default_gemini_group?: string
   default_gemini_models?: string
+  // Same story for Vertex AI (channel_type=41). Vertex model naming
+  // conventions differ from AI Studio (publisher prefix, @publisher
+  // suffix), so a separate default list is cleaner than reusing the
+  // Gemini one. Empty ⇒ frontend falls back to a hard-coded default.
+  default_vertex_models?: string
   pool_interval_sec?: number  // pool refill cadence (seconds)
   pool_batch_size?: number    // ceiling for how many keys the pool refill uploads per tick
   auto_mode?: boolean         // when true scheduler sizes batch against live RPM
@@ -859,6 +864,31 @@ export const api = {
 
   remotePendingDelete: (id: number) =>
     request<{ deleted: number }>(`/api/remote-newapi/pending/${id}`, { method: 'DELETE' }),
+
+  // Vertex AI (channel_type=41) bypasses the pending queue — Vertex
+  // needs region + settings JSON that the pending schema doesn't carry,
+  // and a batch of SA JSONs is small enough to POST synchronously.
+  // `key_json` on each item is the raw service-account JSON (parsed
+  // object); the client serialises with JSON.stringify so the backend
+  // sees the object exactly as uploaded. Each result carries `ok`
+  // and either `channel_id` or `error` — partial success is normal.
+  remoteVertexCreate: (payload: {
+    profile_id: number
+    name_prefix: string
+    models: string
+    group?: string
+    region: string
+    items: { key_json: unknown; quota_usd?: number; note?: string }[]
+  }) =>
+    request<{
+      results: { index: number; ok: boolean; channel_id?: number; error?: string }[]
+      ok: number
+      total: number
+    }>('/api/remote-newapi/vertex/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
 
   remoteChannelLastHour: (profileID: number, channelIDs: number[]) =>
     request<RemoteChannelLastHourResponse>('/api/remote-newapi/channels/last-hour', {
