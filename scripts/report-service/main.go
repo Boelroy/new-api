@@ -2714,6 +2714,42 @@ func main() {
 				UPDATE report_downstream_pricing SET discount = ROUND(discount / 6.77, 4);
 			END IF;
 		END $$`,
+		// per-day downstream pricing (USD multiplier), keyed by (group, date).
+		// Profit computation looks up the effective discount for each report day
+		// using "latest configured date ≤ day" semantics — mirrors the pattern
+		// already used by remote_downstream_daily for remote profiles. The old
+		// single-value report_downstream_pricing row remains as the last-known
+		// value for the group and continues to power legacy CRUD endpoints;
+		// upserting through the legacy path also writes today's daily row so
+		// the effective price stays coherent.
+		`CREATE TABLE IF NOT EXISTS report_downstream_daily (
+			"group"     TEXT   NOT NULL,
+			date        TEXT   NOT NULL,
+			discount    NUMERIC(8,4) NOT NULL,
+			note        TEXT   NOT NULL DEFAULT '',
+			updated_at  BIGINT NOT NULL,
+			PRIMARY KEY ("group", date)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_report_downstream_daily_group_date
+		    ON report_downstream_daily("group", date DESC)`,
+		// Bootstrap: seed daily table with a very early row per existing group
+		// so historical profit reports find a baseline discount. Only inserts
+		// rows for groups that have no daily entry at all — safe to re-run.
+		`INSERT INTO report_downstream_daily ("group", date, discount, note, updated_at)
+		 SELECT p."group", '1970-01-01', p.discount, 'bootstrap', EXTRACT(EPOCH FROM NOW())::BIGINT
+		   FROM report_downstream_pricing p
+		  WHERE NOT EXISTS (
+		        SELECT 1 FROM report_downstream_daily d WHERE d."group" = p."group"
+		  )
+		 ON CONFLICT ("group", date) DO NOTHING`,
+		// MaaS-Anthropic-D historical bootstrap: 7/1 baseline 0.70, 7/9 (UTC) → 0.73.
+		// Idempotent — DO NOTHING on conflict so operators can override later.
+		`INSERT INTO report_downstream_daily ("group", date, discount, note, updated_at)
+		 VALUES ('MaaS-Anthropic-D', '2026-07-01', 0.7000, 'bootstrap', EXTRACT(EPOCH FROM NOW())::BIGINT)
+		 ON CONFLICT ("group", date) DO NOTHING`,
+		`INSERT INTO report_downstream_daily ("group", date, discount, note, updated_at)
+		 VALUES ('MaaS-Anthropic-D', '2026-07-09', 0.7300, 'bootstrap', EXTRACT(EPOCH FROM NOW())::BIGINT)
+		 ON CONFLICT ("group", date) DO NOTHING`,
 		// per-day FX rate (CNY per USD). Falls back to default when a date has no row.
 		`CREATE TABLE IF NOT EXISTS report_fx_rate (
 			date        TEXT PRIMARY KEY,
@@ -3097,6 +3133,7 @@ func main() {
 	startRemoteErrorLogSync()
 	if profitEnabled {
 		startPipiSync()
+		startDownstreamDailyCarryForward()
 	}
 
 	gin.SetMode(gin.ReleaseMode)
@@ -3306,6 +3343,9 @@ func main() {
 		superAPI.GET("/profit/downstream/pricing", handleListDownstreamPricing)
 		superAPI.POST("/profit/downstream/pricing", handleSaveDownstreamPricing)
 		superAPI.DELETE("/profit/downstream/pricing/:group", handleDeleteDownstreamPricing)
+		superAPI.GET("/profit/downstream/daily", handleListDownstreamDaily)
+		superAPI.POST("/profit/downstream/daily", handleSaveDownstreamDaily)
+		superAPI.DELETE("/profit/downstream/daily", handleDeleteDownstreamDaily)
 		superAPI.GET("/profit/fx", handleListFXRate)
 		superAPI.POST("/profit/fx", handleSaveFXRate)
 		superAPI.POST("/profit/fx/default", handleSaveDefaultFXRate)

@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from 'recharts'
 import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
-import { api, DownstreamPricing, FXRate, ProfitSummary, setProfitApiKey } from '../api'
+import { api, DownstreamDaily, DownstreamPricing, FXRate, ProfitSummary, setProfitApiKey } from '../api'
 
 const COLORS = ['#2563eb','#059669','#d97706','#e11d48','#7c3aed','#ea580c','#0d9488','#c026d3','#3b82f6','#10b981']
 
@@ -42,6 +42,16 @@ export default function Profit() {
   const [fxNewDate, setFxNewDate] = useState(today())
   const [fxNewRate, setFxNewRate] = useState('')
 
+  // Main-side per-group per-day downstream discounts. Same pattern as the
+  // Remote block below but keyed by (group, date). Bootstrap rows for the
+  // 1970-01-01 sentinel are hidden — operators only care about real dates.
+  const [ddsRows, setDdsRows] = useState<DownstreamDaily[]>([])
+  const [ddsGroup, setDdsGroup] = useState<string>('')
+  const [ddsNewDate, setDdsNewDate] = useState(today())
+  const [ddsNewDiscount, setDdsNewDiscount] = useState('')
+  const [ddsNewNote, setDdsNewNote] = useState('')
+  const [ddsSaving, setDdsSaving] = useState(false)
+
   // Remote per-profile per-day downstream discounts.
   const [rdsRows, setRdsRows] = useState<{ profile_id: number; date: string; discount: number; note: string }[]>([])
   const [rdsProfiles, setRdsProfiles] = useState<{ id: number; name: string }[]>([])
@@ -73,6 +83,56 @@ export default function Profit() {
   }
 
   useEffect(() => { if (featureEnabled) void reloadRds() /* eslint-disable-line react-hooks/exhaustive-deps */ }, [featureEnabled])
+
+  const reloadDds = async () => {
+    try {
+      const res = await api.listDownstreamDaily()
+      // Hide the historical baseline row per group so operators only see
+      // dates they'd actually care about editing.
+      setDdsRows(res.items.filter(r => r.date !== '1970-01-01'))
+    } catch (e) {
+      console.warn('dds reload', e)
+    }
+  }
+
+  useEffect(() => { if (featureEnabled) void reloadDds() /* eslint-disable-line react-hooks/exhaustive-deps */ }, [featureEnabled])
+
+  const ddsGroupsAvailable = useMemo(() => {
+    const set = new Set<string>()
+    for (const d of downstream) set.add(d.group)
+    for (const r of ddsRows) set.add(r.group)
+    return Array.from(set).sort()
+  }, [downstream, ddsRows])
+
+  const submitDds = async () => {
+    const group = (ddsGroup || ddsGroupsAvailable[0] || '').trim()
+    if (!group) { alert('请选择 group'); return }
+    const v = parseFloat(ddsNewDiscount.trim())
+    if (Number.isNaN(v) || v < 0) { alert('折扣必须是 ≥ 0 的数字'); return }
+    setDdsSaving(true)
+    try {
+      await api.saveDownstreamDaily([{ group, date: ddsNewDate, discount: v, note: ddsNewNote.trim() }])
+      setDdsNewDiscount('')
+      setDdsNewNote('')
+      await reloadDds()
+      await load()
+    } catch (e: any) {
+      alert('保存失败: ' + (e?.message || e))
+    } finally {
+      setDdsSaving(false)
+    }
+  }
+
+  const deleteDds = async (group: string, date: string) => {
+    if (!confirm(`删除 ${group} 在 ${date} 的分段价格？删除后 profit 会回退到更早的分段。`)) return
+    try {
+      await api.deleteDownstreamDaily(group, date)
+      await reloadDds()
+      await load()
+    } catch (e: any) {
+      alert('删除失败: ' + (e?.message || e))
+    }
+  }
 
   const submitRds = async () => {
     if (!rdsProfileID) return
@@ -889,6 +949,107 @@ export default function Profit() {
                 </td>
                 <td></td>
               </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Main-side per-group per-day downstream pricing. Same lookup rule
+          as remote: "latest date ≤ report day" wins. Used to record price
+          changes with a fixed effective date so historical profit stays
+          consistent instead of re-costing after every price bump. */}
+      <div className="bg-white border border-gray-200 rounded-xl mt-4">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+          <div>
+            <div className="text-sm font-semibold">下游分段价格历史</div>
+            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">
+              Per-group per-day discount · 每天自动从前一日 carry-forward · 手动改此表覆盖当日
+            </div>
+          </div>
+        </div>
+        <div className="p-4 border-b border-gray-100 flex flex-wrap items-end gap-3">
+          <div>
+            <label className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">Group</label>
+            <select
+              value={ddsGroup}
+              onChange={e => setDdsGroup(e.target.value)}
+              className="border border-gray-300 rounded px-2 py-1 text-xs bg-white"
+            >
+              <option value="">（选择 group）</option>
+              {ddsGroupsAvailable.map(g => <option key={g} value={g}>{g}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">生效日期 (UTC)</label>
+            <input
+              type="date"
+              value={ddsNewDate}
+              onChange={e => setDdsNewDate(e.target.value)}
+              className="border border-gray-300 rounded px-2 py-1 text-xs bg-white"
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">折扣 (×)</label>
+            <input
+              type="number"
+              step="0.0001"
+              min="0"
+              value={ddsNewDiscount}
+              onChange={e => setDdsNewDiscount(e.target.value)}
+              placeholder="例如 0.73"
+              className="w-24 border border-gray-300 rounded px-2 py-1 text-xs tabular-nums"
+            />
+          </div>
+          <div className="flex-1 min-w-[120px]">
+            <label className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">备注</label>
+            <input
+              type="text"
+              value={ddsNewNote}
+              onChange={e => setDdsNewNote(e.target.value)}
+              placeholder="可选"
+              className="w-full border border-gray-300 rounded px-2 py-1 text-xs"
+            />
+          </div>
+          <button
+            onClick={submitDds}
+            disabled={ddsSaving}
+            className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-40"
+          >
+            {ddsSaving ? '保存中…' : '保存 / 覆盖'}
+          </button>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs whitespace-nowrap">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Group</th>
+                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">生效日期</th>
+                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">折扣</th>
+                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">备注</th>
+                <th className="px-3 py-2 w-12"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {ddsRows.length === 0 && (
+                <tr><td colSpan={5} className="px-3 py-3 text-center text-gray-400 text-[11px]">
+                  暂无分段。填上面表单保存即可 —— 未配置的日期沿用最近一次。
+                </td></tr>
+              )}
+              {ddsRows
+                .filter(r => !ddsGroup || r.group === ddsGroup)
+                .map(row => (
+                  <tr key={`${row.group}-${row.date}`} className="border-t border-gray-100 hover:bg-gray-50">
+                    <td className="px-3 py-1.5">{row.group}</td>
+                    <td className="px-3 py-1.5 font-mono">{row.date}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-blue-600">×{row.discount.toFixed(4)}</td>
+                    <td className="px-3 py-1.5 text-gray-500">
+                      {row.note ? row.note : <span className="text-gray-300">—</span>}
+                    </td>
+                    <td className="px-3 py-1.5 text-right">
+                      <button onClick={() => void deleteDds(row.group, row.date)} className="text-[10px] text-rose-500 hover:text-rose-700">删除</button>
+                    </td>
+                  </tr>
+                ))}
             </tbody>
           </table>
         </div>

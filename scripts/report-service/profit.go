@@ -198,6 +198,7 @@ func handleSaveDownstreamPricing(c *gin.Context) {
 		return
 	}
 	now := time.Now().Unix()
+	today := time.Now().UTC().Format("2006-01-02")
 	saved := 0
 	for _, p := range payload {
 		g := strings.TrimSpace(p.Group)
@@ -210,6 +211,18 @@ func handleSaveDownstreamPricing(c *gin.Context) {
 			ON CONFLICT ("group") DO UPDATE SET discount=$2, note=$3, updated_at=$4`,
 			g, p.Discount, p.Note, now)
 		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		// Mirror the new price into today's daily row so profit calc picks
+		// it up immediately without waiting on the carry-forward loop. Any
+		// existing explicit override for today gets replaced (this endpoint
+		// is the "set the current price" one).
+		if _, err := db.Exec(`
+			INSERT INTO report_downstream_daily ("group", date, discount, note, updated_at)
+			VALUES ($1,$2,$3,$4,$5)
+			ON CONFLICT ("group", date) DO UPDATE SET discount=$3, note=$4, updated_at=$5`,
+			g, today, p.Discount, p.Note, now); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -448,8 +461,17 @@ func handleProfitDaily(c *gin.Context) {
 	startDate := c.DefaultQuery("start", time.Now().UTC().AddDate(0, 0, -6).Format("2006-01-02"))
 	endDate := c.DefaultQuery("end", time.Now().UTC().Format("2006-01-02"))
 
-	// --- Downstream discount lookup (group -> multiplier) ---
-	discount := map[string]float64{}
+	// --- Downstream discount lookup (group + date -> multiplier) ---
+	// Per-day table is the authoritative source; the legacy single-value
+	// pricing table only provides a last-resort fallback for groups that
+	// never got a daily row (e.g. a channel that was priced but never had
+	// its bootstrap seed run yet).
+	dailyPrices, err := loadDownstreamDailyPricing()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "load downstream daily: " + err.Error()})
+		return
+	}
+	fallbackDiscount := map[string]float64{}
 	dpRows, err := db.Query(`SELECT "group", discount FROM report_downstream_pricing`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "load downstream pricing: " + err.Error()})
@@ -459,10 +481,34 @@ func handleProfitDaily(c *gin.Context) {
 		var g string
 		var p float64
 		if err := dpRows.Scan(&g, &p); err == nil {
-			discount[g] = p
+			fallbackDiscount[g] = p
 		}
 	}
 	dpRows.Close()
+
+	// getDiscount walks the ascending list of (date, discount) rows for
+	// the group and returns the last entry whose date <= day. Falls back
+	// to the single-value pricing table when no daily row is <= day for
+	// that group. Returns ok=false only when neither is available; the
+	// caller flags that in MissingPricing.
+	getDiscount := func(group, day string) (float64, bool) {
+		if rows, ok := dailyPrices[group]; ok {
+			best, hit := 0.0, false
+			for _, r := range rows {
+				if r.date > day {
+					break
+				}
+				best, hit = r.discount, true
+			}
+			if hit {
+				return best, true
+			}
+		}
+		if v, ok := fallbackDiscount[group]; ok {
+			return v, true
+		}
+		return 0, false
+	}
 
 	// --- FX rate lookup (date -> CNY/USD) ---
 	fx := map[string]float64{}
@@ -554,7 +600,7 @@ func handleProfitDaily(c *gin.Context) {
 
 	// Step 1 — non-pipi: revenue + cost both anchored on System 1's used_usd
 	for _, r := range step1 {
-		dis, dok := discount[r.tokenGroup]
+		dis, dok := getDiscount(r.tokenGroup, r.date)
 		if !dok {
 			missingGroups[r.tokenGroup] = true
 		}
@@ -595,7 +641,7 @@ func handleProfitDaily(c *gin.Context) {
 
 	// Step 2 — pipi revenue side (downstream group lives in System 1's logs)
 	for _, r := range step2 {
-		dis, dok := discount[r.tokenGroup]
+		dis, dok := getDiscount(r.tokenGroup, r.date)
 		if !dok {
 			missingGroups[r.tokenGroup] = true
 		}
@@ -1089,6 +1135,197 @@ func loadStep2(startDate, endDate string) ([]step2Row, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// ---- Per-day downstream pricing (group + date -> multiplier) ----
+
+// downstreamDailyRow is one (date, discount) tuple within a group's
+// ordered history. Only used internally by getDiscount().
+type downstreamDailyRow struct {
+	date     string
+	discount float64
+}
+
+// DownstreamDailyItem is the JSON shape returned by the list handler
+// and accepted by the upsert handler.
+type DownstreamDailyItem struct {
+	Group     string  `json:"group"`
+	Date      string  `json:"date"`
+	Discount  float64 `json:"discount"`
+	Note      string  `json:"note"`
+	UpdatedAt int64   `json:"updated_at"`
+}
+
+// loadDownstreamDailyPricing returns every configured (group, date) row
+// grouped by group and sorted ascending by date so callers can walk the
+// list once and pick the latest row ≤ target date.
+func loadDownstreamDailyPricing() (map[string][]downstreamDailyRow, error) {
+	rows, err := db.Query(
+		`SELECT "group", date, discount FROM report_downstream_daily ORDER BY "group", date ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string][]downstreamDailyRow)
+	for rows.Next() {
+		var g, d string
+		var v float64
+		if err := rows.Scan(&g, &d, &v); err != nil {
+			return nil, err
+		}
+		out[g] = append(out[g], downstreamDailyRow{date: d, discount: v})
+	}
+	return out, rows.Err()
+}
+
+// handleListDownstreamDaily returns configured rows, optionally filtered
+// by group and date range. Frontend uses it to render the editor grid.
+func handleListDownstreamDaily(c *gin.Context) {
+	group := strings.TrimSpace(c.Query("group"))
+	start := strings.TrimSpace(c.Query("start"))
+	end := strings.TrimSpace(c.Query("end"))
+	q := `SELECT "group", date, discount, note, updated_at FROM report_downstream_daily`
+	args := []any{}
+	conds := []string{}
+	if group != "" {
+		args = append(args, group)
+		conds = append(conds, fmt.Sprintf(`"group" = $%d`, len(args)))
+	}
+	if start != "" {
+		args = append(args, start)
+		conds = append(conds, fmt.Sprintf(`date >= $%d`, len(args)))
+	}
+	if end != "" {
+		args = append(args, end)
+		conds = append(conds, fmt.Sprintf(`date <= $%d`, len(args)))
+	}
+	if len(conds) > 0 {
+		q += " WHERE " + strings.Join(conds, " AND ")
+	}
+	q += ` ORDER BY "group", date DESC`
+
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	out := make([]DownstreamDailyItem, 0)
+	for rows.Next() {
+		var r DownstreamDailyItem
+		if err := rows.Scan(&r.Group, &r.Date, &r.Discount, &r.Note, &r.UpdatedAt); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		out = append(out, r)
+	}
+	c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+// handleSaveDownstreamDaily upserts one or more (group, date) rows. The
+// bootstrap sentinel date '1970-01-01' is rejected — operators should
+// edit real business dates, not the historical baseline.
+func handleSaveDownstreamDaily(c *gin.Context) {
+	var payload []struct {
+		Group    string  `json:"group"`
+		Date     string  `json:"date"`
+		Discount float64 `json:"discount"`
+		Note     string  `json:"note"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(payload) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "empty payload"})
+		return
+	}
+	now := time.Now().Unix()
+	saved := 0
+	for _, p := range payload {
+		g := strings.TrimSpace(p.Group)
+		if g == "" {
+			continue
+		}
+		date := strings.TrimSpace(p.Date)
+		if date == "" {
+			date = time.Now().UTC().Format("2006-01-02")
+		}
+		if _, err := time.Parse("2006-01-02", date); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "date must be YYYY-MM-DD: " + date})
+			return
+		}
+		if p.Discount < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "discount must be ≥ 0"})
+			return
+		}
+		if _, err := db.Exec(`
+			INSERT INTO report_downstream_daily ("group", date, discount, note, updated_at)
+			VALUES ($1,$2,$3,$4,$5)
+			ON CONFLICT ("group", date) DO UPDATE SET
+			  discount=EXCLUDED.discount,
+			  note=EXCLUDED.note,
+			  updated_at=EXCLUDED.updated_at`,
+			g, date, p.Discount, strings.TrimSpace(p.Note), now); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		saved++
+	}
+	c.JSON(http.StatusOK, gin.H{"saved": saved})
+}
+
+func handleDeleteDownstreamDaily(c *gin.Context) {
+	group := strings.TrimSpace(c.Query("group"))
+	date := strings.TrimSpace(c.Query("date"))
+	if group == "" || date == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "group and date are required"})
+		return
+	}
+	if _, err := db.Exec(
+		`DELETE FROM report_downstream_daily WHERE "group"=$1 AND date=$2`,
+		group, date,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// startDownstreamDailyCarryForward keeps report_downstream_daily current
+// by copying each group's most recent past discount into today's row when
+// today has no explicit entry. Marks the auto-created row with note
+// 'auto-carry' so the operator can spot it in the UI. Runs on startup
+// (after a short delay) and every 6h thereafter — DDL-only fills are
+// idempotent thanks to ON CONFLICT DO NOTHING.
+func startDownstreamDailyCarryForward() {
+	go func() {
+		time.Sleep(15 * time.Second)
+		if err := runDownstreamDailyCarryForward(); err != nil {
+			log.Printf("[profit] downstream carry-forward initial: %v", err)
+		}
+		t := time.NewTicker(6 * time.Hour)
+		for range t.C {
+			if err := runDownstreamDailyCarryForward(); err != nil {
+				log.Printf("[profit] downstream carry-forward: %v", err)
+			}
+		}
+	}()
+}
+
+func runDownstreamDailyCarryForward() error {
+	today := time.Now().UTC().Format("2006-01-02")
+	now := time.Now().Unix()
+	_, err := db.Exec(`
+		INSERT INTO report_downstream_daily ("group", date, discount, note, updated_at)
+		SELECT DISTINCT ON (d."group")
+		       d."group", $1, d.discount, 'auto-carry', $2
+		  FROM report_downstream_daily d
+		 WHERE d.date < $1
+		 ORDER BY d."group", d.date DESC
+		ON CONFLICT ("group", date) DO NOTHING`,
+		today, now)
+	return err
 }
 
 func loadStep3(startDate, endDate string) ([]step3Row, error) {

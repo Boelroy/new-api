@@ -50,6 +50,14 @@ export type DownstreamPricing = {
   updated_at: number
 }
 
+export type DownstreamDaily = {
+  group: string
+  date: string
+  discount: number
+  note: string
+  updated_at: number
+}
+
 export type FXRate = {
   date: string
   rate: number
@@ -1080,6 +1088,27 @@ export const api = {
     request<{ ok: boolean }>(`/api/profit/downstream/pricing/${encodeURIComponent(group)}`, {
       method: 'DELETE',
     }),
+
+  listDownstreamDaily: (params?: { group?: string; start?: string; end?: string }) => {
+    const q = new URLSearchParams()
+    if (params?.group) q.set('group', params.group)
+    if (params?.start) q.set('start', params.start)
+    if (params?.end) q.set('end', params.end)
+    const suffix = q.toString() ? `?${q.toString()}` : ''
+    return request<{ items: DownstreamDaily[] }>(`/api/profit/downstream/daily${suffix}`)
+  },
+
+  saveDownstreamDaily: (payload: { group: string; date: string; discount: number; note?: string }[]) =>
+    request<{ saved: number }>('/api/profit/downstream/daily', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  deleteDownstreamDaily: (group: string, date: string) => {
+    const q = new URLSearchParams({ group, date })
+    return request<{ ok: boolean }>(`/api/profit/downstream/daily?${q.toString()}`, { method: 'DELETE' })
+  },
 
   getFXRates: () => request<FXRateResponse>('/api/profit/fx'),
 
