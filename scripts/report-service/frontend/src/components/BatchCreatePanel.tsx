@@ -12,6 +12,65 @@ type Props = {
   canConfigureModels?: boolean
 }
 
+// Provider presets for the local batch-create panel. Mirrors the shape used
+// by RemoteChannelsStudio.tsx — same integers, same groups, same fallback
+// model lists — but the two components stay standalone on purpose (remote
+// upload vs local channel insert diverge downstream).
+type PresetID = 'anthropic' | 'openai' | 'gemini' | 'vertex'
+type PresetSpec = {
+  id: PresetID
+  label: string
+  kind: 'text' | 'vertex'
+  type: number
+  fallbackGroup: string
+  fallbackModels: string
+}
+const DEFAULT_ANTHROPIC_MODELS = [
+  'claude-sonnet-5',
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-sonnet-4-6',
+  'claude-opus-4-6',
+  'claude-haiku-4-5-20251001',
+  'claude-sonnet-4-5-20250929',
+  'claude-opus-4-5-20251101',
+].join(',')
+const DEFAULT_OPENAI_MODELS = [
+  'gpt-5',
+  'gpt-5-mini',
+  'gpt-5-nano',
+  'gpt-4.1',
+  'gpt-4o',
+  'gpt-4o-mini',
+  'o4-mini',
+  'o3',
+].join(',')
+const DEFAULT_GEMINI_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.5-pro',
+  'gemini-3-flash-preview',
+  'gemini-3-pro-image',
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash',
+].join(',')
+const DEFAULT_VERTEX_MODELS = [
+  'claude-sonnet-4-5@20250929',
+  'claude-opus-4-1@20250805',
+  'claude-3-5-sonnet-v2@20241022',
+  'claude-3-5-haiku@20241022',
+].join(',')
+
+const PRESETS: PresetSpec[] = [
+  { id: 'anthropic', label: 'Anthropic', kind: 'text',   type: 14, fallbackGroup: 'default', fallbackModels: DEFAULT_ANTHROPIC_MODELS },
+  { id: 'openai',    label: 'OpenAI',    kind: 'text',   type: 1,  fallbackGroup: 'default', fallbackModels: DEFAULT_OPENAI_MODELS },
+  { id: 'gemini',    label: 'Gemini',    kind: 'text',   type: 24, fallbackGroup: 'gemini',  fallbackModels: DEFAULT_GEMINI_MODELS },
+  { id: 'vertex',    label: 'Vertex AI', kind: 'vertex', type: 41, fallbackGroup: 'gemini',  fallbackModels: DEFAULT_VERTEX_MODELS },
+]
+
+// One parsed Service Account JSON in the Vertex upload UI. Files are
+// parsed on selection so JSON validation errors surface before submit.
+type VertexFile = { name: string; json: unknown; quotaUSD: number }
+
 export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigureModels = true }: Props) {
   const [studio, setStudio] = useState(lockedStudio ?? '')
   const [studioMode, setStudioMode] = useState<'pick' | 'new'>('pick')
@@ -27,7 +86,23 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   const [result, setResult] = useState<string | null>(null)
   const [studios, setStudios] = useState<string[]>([])
 
-  // 可配置的默认 model 列表（存在 report_config 里）
+  // Provider preset. Empty = 'anthropic' (backward-compatible default;
+  // pre-rc.150 the batch-create endpoint only produced Anthropic channels).
+  // Changing this rewrites `models` and `group` unless the user has hand-
+  // edited them (tracked by `modelsDirty` / `groupDirty`).
+  const [presetID, setPresetID] = useState<PresetID>('anthropic')
+  const preset = PRESETS.find(p => p.id === presetID) ?? PRESETS[0]
+  const [models, setModels] = useState(DEFAULT_ANTHROPIC_MODELS)
+  const [group, setGroup] = useState('default')
+  const [modelsDirty, setModelsDirty] = useState(false)
+  const [groupDirty, setGroupDirty] = useState(false)
+  // Vertex-only state. Region is the newapi channel.other value; files are
+  // pre-parsed on selection to reject invalid JSON before submit and to
+  // ship each SA JSON straight to the backend without a re-read.
+  const [region, setRegion] = useState('us-central1')
+  const [vertexFiles, setVertexFiles] = useState<VertexFile[]>([])
+
+  // 可配置的默认 model 列表（存在 report_config 里；仅 Anthropic 预设读取）
   const [modelsCfg, setModelsCfg] = useState('')
   const [modelsCfgOpen, setModelsCfgOpen] = useState(false)
   const [modelsSaving, setModelsSaving] = useState(false)
@@ -59,6 +134,48 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
     })()
   }, [studioLocked])
 
+  // Re-seed models + group whenever the preset changes, unless the operator
+  // has hand-edited them (dirty flag). Anthropic reads the server-side
+  // configurable list so an admin's saved changes still land; other
+  // presets use the baked fallback lists.
+  useEffect(() => {
+    if (!modelsDirty) {
+      if (preset.id === 'anthropic' && modelsCfg) {
+        setModels(modelsCfg)
+      } else {
+        setModels(preset.fallbackModels)
+      }
+    }
+    if (!groupDirty) {
+      setGroup(preset.fallbackGroup)
+    }
+    // Deliberately not depending on `modelsDirty`/`groupDirty`: those
+    // flags are meant to keep user input across preset switches, not to
+    // trigger a re-seed when they flip. Depending only on presetID + the
+    // config-loaded Anthropic list keeps the seed path predictable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [presetID, modelsCfg])
+
+  // File picker → parsed Vertex JSON list. Skip invalid files with a
+  // console warning rather than throwing — matches the remote Vertex
+  // upload's partial-success semantics.
+  const onPickVertexFiles = async (list: FileList | null) => {
+    if (!list || list.length === 0) return
+    const parsed: VertexFile[] = []
+    const errors: string[] = []
+    for (const f of Array.from(list)) {
+      try {
+        const txt = await f.text()
+        const json = JSON.parse(txt)
+        parsed.push({ name: f.name, json, quotaUSD: 5 })
+      } catch (e: any) {
+        errors.push(`${f.name}: ${e?.message || 'JSON 解析失败'}`)
+      }
+    }
+    setVertexFiles(prev => [...prev, ...parsed])
+    if (errors.length) setResult('部分文件解析失败: ' + errors.join('; '))
+  }
+
   const handleSaveModels = async () => {
     setModelsMsg(null)
     setModelsSaving(true)
@@ -86,6 +203,55 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       setResult('请填写后缀')
       return
     }
+
+    // Common defaults shared by text presets and Vertex.
+    const baseDefaults: {
+      priority?: number
+      unit_price_cny?: number
+      type?: number
+      group?: string
+      models?: string
+      other?: string
+      settings?: string
+    } = {
+      type: preset.type,
+      group: group.trim() || preset.fallbackGroup,
+      models: models.trim() || preset.fallbackModels,
+    }
+    if (costInput.trim()) {
+      const c = parseFloat(costInput.trim())
+      if (!isNaN(c) && c > 0) baseDefaults.unit_price_cny = c
+    }
+
+    // Vertex takes JSON files + a shared region, so it branches to a
+    // different input parser here but shares the same batchCreateChannels
+    // wire call. `key` becomes the raw SA JSON string; the backend stores
+    // it verbatim in channels.key (a TEXT column).
+    if (preset.kind === 'vertex') {
+      if (!region.trim()) return setResult('Vertex 需要 Deployment Region')
+      if (vertexFiles.length === 0) return setResult('请至少选择一个 Service Account JSON 文件')
+      baseDefaults.other = region.trim()
+      baseDefaults.settings = '{"vertex_key_type":"json"}'
+      const channels = vertexFiles.map(f => ({
+        key: JSON.stringify(f.json),
+        quota_usd: f.quotaUSD > 0 ? f.quotaUSD : 5,
+      }))
+      const basePriority = priorityInput.trim() ? parseInt(priorityInput.trim(), 10) : NaN
+      if (!isNaN(basePriority) && basePriority > 0) baseDefaults.priority = basePriority
+      setSubmitting(true)
+      try {
+        const res = await api.batchCreateChannels(studio.trim(), suffix.trim(), channels, baseDefaults)
+        setResult(`成功创建 ${res.count} 个 Vertex 渠道`)
+        setVertexFiles([])
+        onCreated()
+      } catch (e: any) {
+        setResult(`失败: ${e.message || e}`)
+      } finally {
+        setSubmitting(false)
+      }
+      return
+    }
+
     const channels: { key: string; quota_usd: number; priority?: number }[] = []
     input.split('\n').forEach(line => {
       const t = line.trim()
@@ -104,15 +270,10 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
     // Sequential-priority mode assigns per-channel priorities BEFORE the
     // request goes out. In 'same' mode we leave channels[i].priority unset
     // and rely on the batch-level `defaults.priority` (existing behaviour).
-    const defaults: { priority?: number; unit_price_cny?: number } = {}
-    if (costInput.trim()) {
-      const c = parseFloat(costInput.trim())
-      if (!isNaN(c) && c > 0) defaults.unit_price_cny = c
-    }
     const basePriority = priorityInput.trim() ? parseInt(priorityInput.trim(), 10) : NaN
     if (!isNaN(basePriority) && basePriority > 0) {
       if (prioMode === 'same') {
-        defaults.priority = basePriority
+        baseDefaults.priority = basePriority
       } else {
         const step = prioMode === 'desc' ? -1 : 1
         for (let i = 0; i < channels.length; i++) {
@@ -125,7 +286,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
     }
     setSubmitting(true)
     try {
-      const res = await api.batchCreateChannels(studio.trim(), suffix.trim(), channels, defaults)
+      const res = await api.batchCreateChannels(studio.trim(), suffix.trim(), channels, baseDefaults)
       setResult(`成功创建 ${res.count} 个渠道`)
       setInput('')
       onCreated()
@@ -139,6 +300,34 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   return (
     <div className="bg-white border border-gray-200 rounded-xl p-4">
       <h2 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">批量创建渠道</h2>
+      <div className="mb-3">
+        <label className="block text-[11px] text-gray-500 mb-1">渠道类型</label>
+        <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
+          {PRESETS.map(p => {
+            const active = presetID === p.id
+            return (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => {
+                  setPresetID(p.id)
+                  // Reset dirty flags on switch so the new preset's
+                  // fallback models/group re-seed; the user can still
+                  // edit after the seed and it'll stick until they
+                  // switch presets again.
+                  setModelsDirty(false)
+                  setGroupDirty(false)
+                }}
+                className={`px-3 py-1 text-xs border-r border-gray-200 last:border-r-0 transition-colors ${
+                  active ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                {p.label}
+              </button>
+            )
+          })}
+        </div>
+      </div>
       <div className="grid grid-cols-2 gap-2 mb-2">
         <div>
           <label className="block text-[11px] text-gray-500 mb-1">工作室</label>
@@ -282,13 +471,96 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
           </div>
         )}
       </div>
-      <textarea
-        value={input}
-        onChange={e => setInput(e.target.value)}
-        rows={8}
-        placeholder={'每行: key 额度（USD）\n\nsk-ant-api03-xxxx 220\nsk-ant-api03-yyyy 500'}
-        className="w-full border border-gray-200 rounded-md p-2.5 text-xs font-mono resize-y bg-gray-50 focus:outline-none focus:border-gray-900"
-      />
+      {/* Group + Models — per-preset overridable. Anthropic reads the
+          server-side configurable list (via the collapsible section
+          above); other presets seed from the baked fallback. Both
+          fields flip a dirty flag so a manual edit sticks across
+          re-renders — until the operator switches presets, at which
+          point the seed re-runs. */}
+      <div className="grid grid-cols-2 gap-2 mb-2">
+        <div>
+          <label className="block text-[11px] text-gray-500 mb-1">Group（写入 channels."group"）</label>
+          <input
+            value={group}
+            onChange={e => { setGroup(e.target.value); setGroupDirty(true) }}
+            placeholder={preset.fallbackGroup}
+            className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
+          />
+        </div>
+        <div>
+          <label className="block text-[11px] text-gray-500 mb-1">Models（逗号分隔）</label>
+          <textarea
+            value={models}
+            onChange={e => { setModels(e.target.value); setModelsDirty(true) }}
+            rows={1}
+            placeholder={preset.fallbackModels.slice(0, 60) + '…'}
+            className="w-full border border-gray-200 rounded-md px-2 py-1 text-[11px] font-mono focus:outline-none focus:border-gray-900 bg-gray-50"
+          />
+        </div>
+      </div>
+
+      {preset.kind === 'vertex' ? (
+        <div className="space-y-2 border border-dashed border-gray-300 rounded-md p-3 bg-gray-50/50">
+          <div>
+            <label className="block text-[11px] text-gray-500 mb-1">
+              Deployment Region <span className="text-rose-500">*</span>
+            </label>
+            <input
+              value={region}
+              onChange={e => setRegion(e.target.value)}
+              placeholder="us-central1"
+              className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900"
+            />
+            <p className="text-[10px] text-gray-400 mt-1">
+              写进 channels.other 字段。本批次所有 JSON 共用此 region。
+            </p>
+          </div>
+          <div>
+            <label className="block text-[11px] text-gray-500 mb-1">Service Account JSON 文件（可多选）</label>
+            <input
+              type="file"
+              accept=".json,application/json"
+              multiple
+              onChange={e => { onPickVertexFiles(e.target.files); e.target.value = '' }}
+              className="block w-full text-[11px] text-gray-700 file:mr-3 file:py-1 file:px-2 file:rounded file:border file:border-gray-300 file:text-[11px] file:bg-gray-50 file:hover:bg-gray-100"
+            />
+            {vertexFiles.length > 0 && (
+              <ul className="mt-2 divide-y divide-gray-100 border border-gray-200 rounded-md bg-white">
+                {vertexFiles.map((f, i) => (
+                  <li key={i} className="px-3 py-2 flex items-center gap-2 text-[11px]">
+                    <span className="flex-1 truncate font-mono text-gray-700" title={f.name}>{f.name}</span>
+                    <label className="text-[10px] text-gray-500">quota</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={f.quotaUSD}
+                      onChange={e => {
+                        const v = parseFloat(e.target.value)
+                        setVertexFiles(prev => prev.map((x, j) => j === i ? { ...x, quotaUSD: isNaN(v) ? 0 : v } : x))
+                      }}
+                      className="w-20 border border-gray-300 rounded px-1.5 py-0.5 text-[11px] tabular-nums focus:outline-none focus:border-gray-900"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setVertexFiles(prev => prev.filter((_, j) => j !== i))}
+                      className="text-rose-600 hover:underline"
+                    >删除</button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      ) : (
+        <textarea
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          rows={8}
+          placeholder={'每行: key 额度（USD）\n\nsk-... 220\nsk-... 500'}
+          className="w-full border border-gray-200 rounded-md p-2.5 text-xs font-mono resize-y bg-gray-50 focus:outline-none focus:border-gray-900"
+        />
+      )}
       <p className="text-[10px] text-gray-400 mt-2 leading-relaxed">
         命名 MMDD-工作室-后缀-容量；上方"默认成本/优先级"会写到所有新建渠道；channels.tag 用作 user 角色可见范围
         {!studioLocked && studios.length > 0 && <>。已有：{studios.join('、')}</>}

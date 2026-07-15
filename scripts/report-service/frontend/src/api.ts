@@ -587,7 +587,17 @@ export const api = {
     studio: string,
     suffix: string,
     channels: { key: string; quota_usd: number; priority?: number; unit_price_cny?: number }[],
-    defaults?: { priority?: number; unit_price_cny?: number },
+    defaults?: {
+      priority?: number
+      unit_price_cny?: number
+      // Preset extensions (rc.150+). Older calls omit them and the
+      // backend falls back to Anthropic (type=14, group='default').
+      type?: number           // 1=OpenAI, 14=Anthropic (default), 24=Gemini, 41=Vertex
+      group?: string          // e.g. 'default' | 'gemini'
+      models?: string         // comma-separated; empty → server default
+      other?: string          // Vertex region
+      settings?: string       // pre-serialised JSON string, e.g. '{"vertex_key_type":"json"}'
+    },
   ) =>
     request<{ created: { id: number; name: string }[]; count: number }>('/api/channels/batch-create', {
       method: 'POST',

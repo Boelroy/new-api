@@ -1979,6 +1979,21 @@ func handleBatchCreateChannels(c *gin.Context) {
 	var payload struct {
 		Studio   string `json:"studio"`
 		Suffix   string `json:"suffix"`
+		// Channel-shape fields. Type + Group are per-preset (Anthropic
+		// stays the compat default; OpenAI/Gemini/Vertex land in the
+		// same panel but with different provider integers + upstream
+		// groups). Models is optional — empty falls back to the server-
+		// side default list (getBatchCreateModels) so old clients still
+		// work. Other + Settings are Vertex-only: `other` carries the
+		// deployment region string that newapi's Vertex adaptor reads
+		// as the target region, and `settings` is a serialised JSON
+		// string like `{"vertex_key_type":"json"}` that newapi's
+		// channel model persists as-is.
+		Type     int    `json:"type"`
+		Group    string `json:"group"`
+		Models   string `json:"models"`
+		Other    string `json:"other"`
+		Settings string `json:"settings"`
 		// Default priority + unit price applied to every channel that does not
 		// override them in the per-row entry. Lets the form set a single value
 		// up top instead of repeating it on every key.
@@ -2033,8 +2048,43 @@ func handleBatchCreateChannels(c *gin.Context) {
 		defaultPriority = defaultChannelPriority
 	}
 
+	// Provider preset resolution. Type maps to newapi's constant/channel.go
+	// integers; unknown values are rejected up front so we don't accidentally
+	// create a channel newapi can't route.
+	channelType := payload.Type
+	if channelType == 0 {
+		channelType = 14 // Anthropic — legacy default for backward compat.
+	}
+	switch channelType {
+	case 1, 14, 24, 41: // OpenAI, Anthropic, Gemini (AI Studio), Vertex AI
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unsupported channel type %d", channelType)})
+		return
+	}
+	groupName := strings.TrimSpace(payload.Group)
+	if groupName == "" {
+		groupName = "default"
+	}
+	settings := strings.TrimSpace(payload.Settings)
+	other := strings.TrimSpace(payload.Other)
+	if channelType == 41 {
+		// Vertex needs both a region (channel.other) and vertex_key_type
+		// in settings. We enforce region here — settings gets defaulted
+		// so old clients that don't send it still work.
+		if other == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "region is required for Vertex AI channels"})
+			return
+		}
+		if settings == "" {
+			settings = `{"vertex_key_type":"json"}`
+		}
+	}
+
 	dateStr := time.Now().UTC().Format("0102")
-	activeModels := getBatchCreateModels()
+	activeModels := strings.TrimSpace(payload.Models)
+	if activeModels == "" {
+		activeModels = getBatchCreateModels()
+	}
 	models := strings.Split(activeModels, ",")
 	now := time.Now().Unix()
 
@@ -2065,15 +2115,21 @@ func handleBatchCreateChannels(c *gin.Context) {
 
 		var channelID int
 		// channels.tag = studio so rs_auth_user.studio bindings can filter
-		// All Keys by the same identifier the operator picked here.
+		// All Keys by the same identifier the operator picked here. The
+		// two Vertex-specific columns (`other`, `settings`) are always
+		// bound — for non-Vertex presets `other` is '' and `settings` is
+		// '' which matches what the legacy hard-coded INSERT emitted.
 		err := tx.QueryRow(`
 			INSERT INTO channels
 			(type, key, status, name, weight, created_time, base_url, "group", models,
-			 model_mapping, status_code_mapping, priority, auto_ban, used_quota, channel_info, tag)
-			VALUES (14, $1, 1, $2, 0, $3, '', 'default', $4,
-			        '', '', $7, 1, 0, $5::json, $6)
+			 model_mapping, status_code_mapping, priority, auto_ban, used_quota,
+			 channel_info, tag, other, settings)
+			VALUES ($1, $2, 1, $3, 0, $4, '', $5, $6,
+			        '', '', $7, 1, 0, $8::json, $9, $10, $11)
 			RETURNING id`,
-			key, name, now, activeModels, channelInfoDefault, studio, priority).Scan(&channelID)
+			channelType, key, name, now, groupName, activeModels,
+			priority, channelInfoDefault, studio, other, settings,
+		).Scan(&channelID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("insert channel: %v", err)})
 			return
@@ -2082,9 +2138,9 @@ func handleBatchCreateChannels(c *gin.Context) {
 		for _, m := range models {
 			_, err = tx.Exec(`
 				INSERT INTO abilities ("group", model, channel_id, enabled, priority, weight)
-				VALUES ('default', $1, $2, true, $3, 0)
+				VALUES ($1, $2, $3, true, $4, 0)
 				ON CONFLICT DO NOTHING`,
-				strings.TrimSpace(m), channelID, priority)
+				groupName, strings.TrimSpace(m), channelID, priority)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("insert ability: %v", err)})
 				return
