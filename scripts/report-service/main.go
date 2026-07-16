@@ -3084,6 +3084,22 @@ func main() {
 			updated_at       BIGINT NOT NULL,
 			PRIMARY KEY (profile_id, studio)
 		)`,
+		// Per-profile visibility allowlist for remote_studio_operator users
+		// (rs_auth_user.id, role=3). Missing rows → visible to all such users
+		// (backward-compatible default). One or more rows → ONLY the listed
+		// users can see / target the profile through the operator surface.
+		// Enforcement lives in handleRemoteProfileList (filters what an
+		// operator sees) and in each enqueue/upload preflight
+		// (profileVisibleToUser blocks non-listed callers even if they guess
+		// the profile_id).
+		`CREATE TABLE IF NOT EXISTS remote_profile_visibility (
+			profile_id BIGINT NOT NULL,
+			user_id    BIGINT NOT NULL,
+			created_at BIGINT NOT NULL,
+			PRIMARY KEY (profile_id, user_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_remote_profile_visibility_user
+		   ON remote_profile_visibility(user_id)`,
 		// Per-channel operator metadata that does not live on the remote new-api
 		// (额度上限 / 备注). Keyed by (profile_id, remote_channel_id). We keep it
 		// local so remote `tag` retains its original grouping semantics.
@@ -3465,6 +3481,13 @@ func main() {
 	superAPI.POST("/remote-newapi/profiles", handleRemoteProfileCreate)
 	superAPI.PATCH("/remote-newapi/profiles/:id", handleRemoteProfileUpdate)
 	superAPI.DELETE("/remote-newapi/profiles/:id", handleRemoteProfileDelete)
+	// Per-profile visibility allowlist. GET lists current allowlist +
+	// available role=3 users; PUT replaces the allowlist. Empty list =
+	// visible to all remote_studio_operator users (default). Admin+ is
+	// enough here — allowlist edits don't leak credentials, and the
+	// same tier already owns the profile list surface.
+	adminAPI.GET("/remote-newapi/profiles/:id/visibility", handleProfileVisibilityList)
+	adminAPI.PUT("/remote-newapi/profiles/:id/visibility", handleProfileVisibilitySet)
 	adminAPI.POST("/remote-newapi/channels", handleRemoteFetchChannels)
 	adminAPI.GET("/remote-newapi/channels/:id", handleRemoteChannelGet)
 	adminAPI.POST("/remote-newapi/channels/create", handleRemoteChannelCreate)

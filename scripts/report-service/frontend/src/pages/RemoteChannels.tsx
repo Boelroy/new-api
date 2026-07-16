@@ -438,6 +438,13 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   const [policyErr, setPolicyErr] = useState<string | null>(null)
   const [formBusy, setFormBusy] = useState(false)
   const [formErr, setFormErr] = useState<string | null>(null)
+  // Per-profile visibility allowlist. Only meaningful on edit (a new
+  // profile has no id yet — the picker becomes usable once the profile
+  // is saved and the operator list is fetched in openEdit). Empty =
+  // visible to all remote_studio_operator users.
+  const [visOperators, setVisOperators] = useState<{ id: number; username: string; studio: string }[]>([])
+  const [visAllowlist, setVisAllowlist] = useState<Set<number>>(new Set())
+  const [visLoading, setVisLoading] = useState(false)
 
   // Batch upload keys modal.
   const [batchOpen, setBatchOpen] = useState(false)
@@ -560,8 +567,32 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setFormDefaultGroup('default')
     setFormDefaultGeminiGroup('')
     setFormDefaultGeminiModels('')
+    setVisAllowlist(new Set())
+    setVisOperators([])
     setFormErr(null)
     setFormOpen(true)
+    // Prefetch the operator picker so the create modal can already
+    // display checkbox candidates; the actual allowlist gets saved via
+    // a follow-up PUT once the profile row exists.
+    void (async () => {
+      setVisLoading(true)
+      try {
+        const res = await api.remoteProfileVisibilityGet(0)
+        setVisOperators(res.operators || [])
+      } catch {
+        // 400 (invalid profile id) is expected here — fall back to a
+        // best-effort load via any existing profile.
+        try {
+          const anyProf = profiles[0]
+          if (anyProf) {
+            const res = await api.remoteProfileVisibilityGet(anyProf.id)
+            setVisOperators(res.operators || [])
+          }
+        } catch { /* ignore */ }
+      } finally {
+        setVisLoading(false)
+      }
+    })()
   }
 
   const openEdit = (p: RemoteProfile) => {
@@ -578,8 +609,23 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setFormDefaultGroup(p.default_group || '')
     setFormDefaultGeminiGroup(p.default_gemini_group || '')
     setFormDefaultGeminiModels(p.default_gemini_models || '')
+    setVisAllowlist(new Set())
+    setVisOperators([])
     setFormErr(null)
     setFormOpen(true)
+    // Fetch the current visibility allowlist + the operator picker in
+    // one round-trip. Failure is non-fatal — the modal still opens and
+    // the visibility section renders a "load failed" hint.
+    void (async () => {
+      setVisLoading(true)
+      try {
+        const res = await api.remoteProfileVisibilityGet(p.id)
+        setVisOperators(res.operators || [])
+        setVisAllowlist(new Set(res.allowlist || []))
+      } catch { /* leave defaults, section shows retry */ } finally {
+        setVisLoading(false)
+      }
+    })()
   }
 
   const submitForm = async () => {
@@ -591,6 +637,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     if (editingID === 0 && !formToken.trim()) return setFormErr('access_token is required for new profile')
     setFormBusy(true)
     try {
+      let targetID = editingID
       if (editingID === 0) {
         // New profile — pool tuning takes the schema defaults (60s / 2)
         // and is edited later from the upload queue panel.
@@ -604,6 +651,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           default_gemini_group: formDefaultGeminiGroup.trim(),
           default_gemini_models: formDefaultGeminiModels.trim(),
         })
+        targetID = created.id
         await reloadProfiles()
         setSelectedID(created.id)
       } else if (editingID) {
@@ -619,6 +667,18 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
         if (formToken.trim()) patch.access_token = formToken.trim()
         await api.remoteProfileUpdate(editingID, patch)
         await reloadProfiles()
+      }
+      if (targetID && targetID > 0) {
+        // Persist visibility allowlist alongside the profile save so the
+        // admin doesn't have to remember a second "Save visibility"
+        // button. Best-effort — a failure here surfaces via formErr but
+        // doesn't roll back the profile write.
+        try {
+          await api.remoteProfileVisibilitySet(targetID, Array.from(visAllowlist))
+        } catch (e: any) {
+          setFormErr('渠道已保存，但可见性写入失败: ' + (e?.message || String(e)))
+          return
+        }
       }
       setFormOpen(false)
     } catch (e: any) {
@@ -2565,6 +2625,61 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                     className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
                   />
                 </Field>
+              </div>
+
+              {/* Per-profile visibility. Empty allowlist = visible to all
+                  remote_studio_operator users (backward-compatible default).
+                  One or more selected = only those users may see the profile
+                  in the operator picker AND pass the upload preflight. */}
+              <div className="pt-2 border-t border-gray-100">
+                <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-2 flex items-center gap-2">
+                  <span>Remote Studio Operator 可见性</span>
+                  {visLoading && <span className="text-gray-300">加载中…</span>}
+                </div>
+                {visOperators.length === 0 && !visLoading && (
+                  <p className="text-[11px] text-gray-400">未找到 role=3 用户，或未来才创建。可稍后回来配置。</p>
+                )}
+                {visOperators.length > 0 && (
+                  <>
+                    <p className="text-[11px] text-gray-500 mb-2">
+                      {visAllowlist.size === 0
+                        ? '未勾选任何人 → 所有 remote studio operator 均可见（默认）'
+                        : `已勾选 ${visAllowlist.size} 位用户 → 仅这些用户可见`}
+                    </p>
+                    <div className="grid grid-cols-2 gap-1 max-h-40 overflow-y-auto border border-gray-200 rounded-md p-2 bg-gray-50/40">
+                      {visOperators.map(u => (
+                        <label key={u.id} className="flex items-center gap-2 text-[11px] cursor-pointer hover:bg-white rounded px-1 py-0.5">
+                          <input
+                            type="checkbox"
+                            checked={visAllowlist.has(u.id)}
+                            onChange={e => {
+                              setVisAllowlist(prev => {
+                                const next = new Set(prev)
+                                if (e.target.checked) next.add(u.id)
+                                else next.delete(u.id)
+                                return next
+                              })
+                            }}
+                          />
+                          <span className="font-mono flex-1 truncate">{u.username}</span>
+                          {u.studio && <span className="text-gray-400 text-[10px] truncate" title={u.studio}>{u.studio}</span>}
+                        </label>
+                      ))}
+                    </div>
+                    <div className="mt-1 flex gap-2 text-[10px]">
+                      <button
+                        type="button"
+                        onClick={() => setVisAllowlist(new Set(visOperators.map(u => u.id)))}
+                        className="text-gray-500 hover:text-gray-900 underline underline-offset-2"
+                      >全选</button>
+                      <button
+                        type="button"
+                        onClick={() => setVisAllowlist(new Set())}
+                        className="text-gray-500 hover:text-gray-900 underline underline-offset-2"
+                      >清空（改为全可见）</button>
+                    </div>
+                  </>
+                )}
               </div>
               {formErr && <p className="text-xs text-rose-600">{formErr}</p>}
             </div>

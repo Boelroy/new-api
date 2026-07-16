@@ -916,6 +916,26 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  // Per-profile visibility allowlist. Empty allowlist = visible to all
+  // remote_studio_operator users (default). Populated list = only the
+  // listed rs_auth_user ids may see the profile in the operator picker
+  // and pass the upload preflight. Admin+ only.
+  remoteProfileVisibilityGet: (profileID: number) =>
+    request<{
+      allowlist: number[]
+      operators: { id: number; username: string; studio: string }[]
+    }>(`/api/remote-newapi/profiles/${profileID}/visibility`),
+
+  remoteProfileVisibilitySet: (profileID: number, user_ids: number[]) =>
+    request<{ ok: boolean; allowlist: number[] }>(
+      `/api/remote-newapi/profiles/${profileID}/visibility`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_ids }),
+      },
+    ),
+
   // Azure OpenAI (channel_type=3) also bypasses the pending queue —
   // each Azure resource has its own base_url + api_version pair, which
   // the pending schema doesn't carry. Payload shape mirrors

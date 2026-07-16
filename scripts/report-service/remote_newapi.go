@@ -261,6 +261,117 @@ func callerStudio(c *gin.Context) string {
 	return ""
 }
 
+// callerUserID returns the JWT user_id claim, or 0 for SSO callers without an
+// rs_auth_user row. Used by the profile-visibility filter so an operator only
+// sees profiles they've been explicitly allowlisted on.
+func callerUserID(c *gin.Context) int64 {
+	if v, ok := c.Get("user_id"); ok {
+		if id, ok := v.(int64); ok {
+			return id
+		}
+	}
+	return 0
+}
+
+// profileHasVisibilityAllowlist reports whether a profile has one or more
+// rows in remote_profile_visibility. When true, only the listed rs_auth_user
+// ids may see / target it via the operator surface. When false, the profile
+// is visible to every remote_studio_operator (backward-compatible default).
+func profileHasVisibilityAllowlist(profileID int64) (bool, error) {
+	var n int
+	if err := db.QueryRow(
+		`SELECT COUNT(1) FROM remote_profile_visibility WHERE profile_id=$1`,
+		profileID,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// profileVisibleToUser is the enqueue/upload preflight check. Admins and
+// super admins bypass the check. For remote_studio_operator callers, the
+// profile is visible when either (a) it has no allowlist, or (b) the caller's
+// user_id is on the allowlist. SSO callers (user_id=0) are treated as
+// non-listed because no admin could have selected them explicitly.
+func profileVisibleToUser(c *gin.Context, profileID int64) (bool, error) {
+	if !callerIsRemoteStudioOperator(c) {
+		// Admin+ / super admin bypass. Studio operator (role=2) also bypasses:
+		// it isn't a remote-uploader tier by design; if we later wire it into
+		// the remote surface, this branch is where we'd flip the check on.
+		return true, nil
+	}
+	has, err := profileHasVisibilityAllowlist(profileID)
+	if err != nil {
+		return false, err
+	}
+	if !has {
+		return true, nil
+	}
+	uid := callerUserID(c)
+	if uid <= 0 {
+		return false, nil
+	}
+	var n int
+	if err := db.QueryRow(
+		`SELECT 1 FROM remote_profile_visibility WHERE profile_id=$1 AND user_id=$2`,
+		profileID, uid,
+	).Scan(&n); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// visibleProfileIDsForOperator returns the set of profile ids a
+// remote_studio_operator may see. Profiles with no allowlist row are always
+// included; profiles with an allowlist are included only when the caller
+// appears on it. Called from handleRemoteProfileList to keep the SELECT
+// unchanged and filter in Go — the list is small (single-digit profiles in
+// practice) so the extra query is cheap and the SQL stays legible.
+func visibleProfileIDsForOperator(userID int64) (map[int64]bool, error) {
+	// All profiles that have at least one visibility row.
+	restricted := make(map[int64]bool)
+	rows, err := db.Query(`SELECT DISTINCT profile_id FROM remote_profile_visibility`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err == nil {
+			restricted[id] = true
+		}
+	}
+	rows.Close()
+	// Profiles this specific user is allowlisted on.
+	allowed := make(map[int64]bool)
+	if userID > 0 {
+		rows2, err := db.Query(
+			`SELECT profile_id FROM remote_profile_visibility WHERE user_id=$1`,
+			userID,
+		)
+		if err != nil {
+			return nil, err
+		}
+		for rows2.Next() {
+			var id int64
+			if err := rows2.Scan(&id); err == nil {
+				allowed[id] = true
+			}
+		}
+		rows2.Close()
+	}
+	// Result set: keep every profile id encountered. Membership rule
+	// applied by the caller: include if !restricted[id] || allowed[id].
+	// We return the composed decision map to keep the caller shallow.
+	decision := make(map[int64]bool, len(restricted)+len(allowed))
+	for id := range restricted {
+		decision[id] = allowed[id]
+	}
+	return decision, nil
+}
+
 // normalizeHost trims trailing slash and rejects empty / non-http hosts.
 // The remote may include a path prefix; we only trim the trailing slash.
 func normalizeHost(raw string) (string, error) {
@@ -303,6 +414,18 @@ func handleRemoteProfileList(c *gin.Context) {
 	// operator also loses the pool tuning knobs implicitly via the same
 	// stripped shape (they only need name to pick in the batch modal).
 	stripped := !callerIsSuperAdmin(c)
+	// Remote studio operators additionally see only the profiles they've
+	// been explicitly allowlisted on (or profiles with no allowlist —
+	// backward-compatible default). Admin+ bypasses.
+	var visibility map[int64]bool
+	if callerIsRemoteStudioOperator(c) {
+		if v, err := visibleProfileIDsForOperator(callerUserID(c)); err == nil {
+			visibility = v
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
 	full := make([]remoteProfile, 0)
 	slim := make([]remoteProfilePublic, 0)
 	for rows.Next() {
@@ -315,6 +438,15 @@ func handleRemoteProfileList(c *gin.Context) {
 			&p.CreatedAt, &p.UpdatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
+		}
+		if visibility != nil {
+			// Row present in `visibility` = profile is on some allowlist. It
+			// slips through only when this specific user is on that list
+			// (value=true). Absent from the map = no allowlist at all →
+			// always visible.
+			if restricted, ok := visibility[p.ID]; ok && !restricted {
+				continue
+			}
 		}
 		p.HasToken = enc != ""
 		if stripped {
@@ -1519,6 +1651,16 @@ func handlePendingKeyEnqueue(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "your account has no studio binding; ask an admin to bind one before uploading keys"})
 			return
 		}
+		// Per-user visibility gate: if this profile is on any allowlist,
+		// the caller must appear on it. Prevents an operator who knows a
+		// profile_id from bypassing the picker by hand-crafting the payload.
+		if visible, err := profileVisibleToUser(c, body.ProfileID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "visibility check: " + err.Error()})
+			return
+		} else if !visible {
+			c.JSON(http.StatusForbidden, gin.H{"error": "该 profile 未对你开放，请联系管理员"})
+			return
+		}
 		// (profile, studio) rejection: admin has flipped this studio to
 		// "not accepting" for the target profile. 403, not 400 — the
 		// request is well-formed, it's an authorization decision.
@@ -1851,6 +1993,137 @@ func handleStudioPolicyUpsert(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ---- Handlers: per-profile visibility allowlist ----
+
+// handleProfileVisibilityList returns the rs_auth_user ids currently
+// allowlisted on the given profile plus a lookup of role=3 users the admin
+// might add. Empty items → "visible to all remote_studio_operator users".
+func handleProfileVisibilityList(c *gin.Context) {
+	profileID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || profileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid profile id"})
+		return
+	}
+	ids := make([]int64, 0)
+	rows, err := db.Query(
+		`SELECT user_id FROM remote_profile_visibility WHERE profile_id=$1 ORDER BY user_id ASC`,
+		profileID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	// Also return the set of remote_studio_operator users so the admin UI
+	// can render a picker without a second round-trip. Only id / username /
+	// studio — status/dates aren't relevant for the allowlist picker.
+	type opUser struct {
+		ID       int64  `json:"id"`
+		Username string `json:"username"`
+		Studio   string `json:"studio"`
+	}
+	users := make([]opUser, 0)
+	uRows, uErr := db.Query(
+		`SELECT id, username, COALESCE(studio, '')
+		   FROM rs_auth_user
+		  WHERE role = $1 AND status = 1
+		  ORDER BY username ASC`,
+		minRemoteStudioOperatorRole,
+	)
+	if uErr == nil {
+		for uRows.Next() {
+			var u opUser
+			if err := uRows.Scan(&u.ID, &u.Username, &u.Studio); err == nil {
+				users = append(users, u)
+			}
+		}
+		uRows.Close()
+	}
+	c.JSON(http.StatusOK, gin.H{"allowlist": ids, "operators": users})
+}
+
+// handleProfileVisibilitySet replaces the allowlist for a profile with the
+// posted set of rs_auth_user ids. Empty array clears the allowlist and the
+// profile falls back to "visible to all". Non-role=3 ids are silently
+// dropped (the picker only ever surfaces role=3 users, but we guard here
+// too in case an admin crafts the payload directly).
+func handleProfileVisibilitySet(c *gin.Context) {
+	profileID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || profileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid profile id"})
+		return
+	}
+	var body struct {
+		UserIDs []int64 `json:"user_ids"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// Filter out anything that isn't an active role=3 user so a stale UI
+	// selection can't accidentally allowlist an admin (which would be a
+	// no-op but wastes a row) or a disabled account.
+	valid := make([]int64, 0, len(body.UserIDs))
+	if len(body.UserIDs) > 0 {
+		// Build the IN clause via placeholders to keep the query prepared.
+		args := make([]any, 0, len(body.UserIDs)+2)
+		args = append(args, minRemoteStudioOperatorRole, 1) // role, status
+		placeholders := make([]string, len(body.UserIDs))
+		for i, id := range body.UserIDs {
+			placeholders[i] = "$" + strconv.Itoa(i+3)
+			args = append(args, id)
+		}
+		q := "SELECT id FROM rs_auth_user WHERE role=$1 AND status=$2 AND id IN (" + strings.Join(placeholders, ",") + ")"
+		rows, err := db.Query(q, args...)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err == nil {
+				valid = append(valid, id)
+			}
+		}
+		rows.Close()
+	}
+	// Replace-set semantics: wipe and reinsert in a transaction so an
+	// operator can't see a torn state (empty allowlist → briefly visible to
+	// all users) between the DELETE and INSERT.
+	tx, err := db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM remote_profile_visibility WHERE profile_id=$1`, profileID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	now := time.Now().Unix()
+	for _, id := range valid {
+		if _, err := tx.Exec(
+			`INSERT INTO remote_profile_visibility (profile_id, user_id, created_at) VALUES ($1,$2,$3)
+			 ON CONFLICT DO NOTHING`,
+			profileID, id, now,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "allowlist": valid})
 }
 
 // studioAccepting returns whether the (profile, studio) pair may
