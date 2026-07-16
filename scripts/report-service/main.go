@@ -1936,12 +1936,14 @@ var defaultGeminiModels = strings.Join([]string{
 	"gemini-3.5-flash",
 }, ",")
 
-var defaultVertexModels = strings.Join([]string{
-	"claude-sonnet-4-5@20250929",
-	"claude-opus-4-1@20250805",
-	"claude-3-5-sonnet-v2@20241022",
-	"claude-3-5-haiku@20241022",
-}, ",")
+// Vertex hosts Google's Gemini family (Claude-on-Vertex is a separate flow),
+// so the default deployment list mirrors Gemini.
+var defaultVertexModels = defaultGeminiModels
+
+// Azure hosts the OpenAI model family, so the default list mirrors OpenAI.
+// Users can still override per-deployment via model_mapping if their Azure
+// deployment names don't match the canonical OpenAI model IDs.
+var defaultAzureModels = defaultOpenAIModels
 
 // batchModelsConfigKey normalises the storage key for a given channel type.
 // Type 14 keeps the legacy key so pre-rc.154 saved lists remain effective
@@ -1958,6 +1960,8 @@ func batchModelsFallback(channelType int) string {
 	switch channelType {
 	case 1:
 		return defaultOpenAIModels
+	case 3:
+		return defaultAzureModels
 	case 24:
 		return defaultGeminiModels
 	case 41:
@@ -2029,7 +2033,7 @@ func handleSetBatchModels(c *gin.Context) {
 	// Allowlist matches handleBatchCreateChannels — refuse anything we can't
 	// batch-create anyway so we don't silently accumulate stale config rows.
 	switch channelType {
-	case 1, 14, 24, 41:
+	case 1, 3, 14, 24, 41:
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unsupported channel type %d", channelType)})
 		return
@@ -2077,6 +2081,11 @@ func handleBatchCreateChannels(c *gin.Context) {
 		Models   string `json:"models"`
 		Other    string `json:"other"`
 		Settings string `json:"settings"`
+		// Azure-only (channel type 3). Each Azure resource has its own endpoint
+		// (e.g. https://<res>.openai.azure.com) that has to land in
+		// channels.base_url; other presets leave this empty and rely on the
+		// default from newapi's ChannelBaseURLs table.
+		BaseUrl string `json:"base_url"`
 		// Default priority + unit price applied to every channel that does not
 		// override them in the per-row entry. Lets the form set a single value
 		// up top instead of repeating it on every key.
@@ -2139,7 +2148,7 @@ func handleBatchCreateChannels(c *gin.Context) {
 		channelType = 14 // Anthropic — legacy default for backward compat.
 	}
 	switch channelType {
-	case 1, 14, 24, 41: // OpenAI, Anthropic, Gemini (AI Studio), Vertex AI
+	case 1, 3, 14, 24, 41: // OpenAI, Azure, Anthropic, Gemini (AI Studio), Vertex AI
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unsupported channel type %d", channelType)})
 		return
@@ -2147,7 +2156,7 @@ func handleBatchCreateChannels(c *gin.Context) {
 	groupName := strings.TrimSpace(payload.Group)
 	if groupName == "" {
 		switch channelType {
-		case 1:
+		case 1, 3:
 			groupName = "openai"
 		case 24, 41:
 			groupName = "gemini"
@@ -2157,16 +2166,32 @@ func handleBatchCreateChannels(c *gin.Context) {
 	}
 	settings := strings.TrimSpace(payload.Settings)
 	other := strings.TrimSpace(payload.Other)
+	baseUrl := strings.TrimSpace(payload.BaseUrl)
 	if channelType == 41 {
-		// Vertex needs both a region (channel.other) and vertex_key_type
-		// in settings. We enforce region here — settings gets defaulted
+		// Vertex accepts either a bare region string or a JSON model→region
+		// map in channel.other. Empty falls back to "global" (matches
+		// Gemini's multi-region deployment default). Settings gets defaulted
 		// so old clients that don't send it still work.
 		if other == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "region is required for Vertex AI channels"})
-			return
+			other = "global"
 		}
 		if settings == "" {
 			settings = `{"vertex_key_type":"json"}`
+		}
+	}
+	if channelType == 3 {
+		// Azure needs the resource endpoint per-batch (each Azure resource has
+		// its own URL) and an API version in `other`. Deployment names default
+		// to the OpenAI model IDs — override via model_mapping if the operator
+		// named them differently.
+		if baseUrl == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "base_url is required for Azure channels (e.g. https://<resource>.openai.azure.com)"})
+			return
+		}
+		if other == "" {
+			// Match newapi's default so batch-created channels behave the same
+			// as anything created through the admin UI.
+			other = "2025-04-01-preview"
 		}
 	}
 
@@ -2214,10 +2239,10 @@ func handleBatchCreateChannels(c *gin.Context) {
 			(type, key, status, name, weight, created_time, base_url, "group", models,
 			 model_mapping, status_code_mapping, priority, auto_ban, used_quota,
 			 channel_info, tag, other, settings)
-			VALUES ($1, $2, 1, $3, 0, $4, '', $5, $6,
-			        '', '', $7, 1, 0, $8::json, $9, $10, $11)
+			VALUES ($1, $2, 1, $3, 0, $4, $5, $6, $7,
+			        '', '', $8, 1, 0, $9::json, $10, $11, $12)
 			RETURNING id`,
-			channelType, key, name, now, groupName, activeModels,
+			channelType, key, name, now, baseUrl, groupName, activeModels,
 			priority, channelInfoDefault, studio, other, settings,
 		).Scan(&channelID)
 		if err != nil {

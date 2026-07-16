@@ -16,7 +16,7 @@ type Props = {
 // by RemoteChannelsStudio.tsx — same integers, same groups, same fallback
 // model lists — but the two components stay standalone on purpose (remote
 // upload vs local channel insert diverge downstream).
-type PresetID = 'anthropic' | 'openai' | 'gemini' | 'vertex'
+type PresetID = 'anthropic' | 'openai' | 'azure' | 'gemini' | 'vertex'
 type PresetSpec = {
   id: PresetID
   label: string
@@ -53,19 +53,21 @@ const DEFAULT_GEMINI_MODELS = [
   'gemini-3.1-flash-lite',
   'gemini-3.5-flash',
 ].join(',')
-const DEFAULT_VERTEX_MODELS = [
-  'claude-sonnet-4-5@20250929',
-  'claude-opus-4-1@20250805',
-  'claude-3-5-sonnet-v2@20241022',
-  'claude-3-5-haiku@20241022',
-].join(',')
+// Vertex ships Google's Gemini family (Claude-on-Vertex uses a different
+// upload flow), so the default deployment list mirrors DEFAULT_GEMINI_MODELS.
+const DEFAULT_VERTEX_MODELS = DEFAULT_GEMINI_MODELS
 
 const PRESETS: PresetSpec[] = [
   { id: 'anthropic', label: 'Anthropic', kind: 'text',   type: 14, fallbackGroup: 'default', fallbackModels: DEFAULT_ANTHROPIC_MODELS },
   { id: 'openai',    label: 'OpenAI',    kind: 'text',   type: 1,  fallbackGroup: 'openai',  fallbackModels: DEFAULT_OPENAI_MODELS },
+  { id: 'azure',     label: 'Azure',     kind: 'text',   type: 3,  fallbackGroup: 'openai',  fallbackModels: DEFAULT_OPENAI_MODELS },
   { id: 'gemini',    label: 'Gemini',    kind: 'text',   type: 24, fallbackGroup: 'gemini',  fallbackModels: DEFAULT_GEMINI_MODELS },
   { id: 'vertex',    label: 'Vertex AI', kind: 'vertex', type: 41, fallbackGroup: 'gemini',  fallbackModels: DEFAULT_VERTEX_MODELS },
 ]
+
+// Azure only: default API version. Mirrors AZURE_DEFAULT_API_VERSION on the
+// backend so batch-created channels don't drift from admin-UI ones.
+const AZURE_DEFAULT_API_VERSION = '2025-04-01-preview'
 
 // One parsed Service Account JSON in the Vertex upload UI. Files are
 // parsed on selection so JSON validation errors surface before submit.
@@ -96,11 +98,17 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   const [group, setGroup] = useState('default')
   const [modelsDirty, setModelsDirty] = useState(false)
   const [groupDirty, setGroupDirty] = useState(false)
-  // Vertex-only state. Region is the newapi channel.other value; files are
+  // Vertex-only state. Region is the newapi channel.other value — either a
+  // bare region string or a JSON model→region map. Defaults to "global" so
+  // multi-region Gemini deployments work without extra config. Files are
   // pre-parsed on selection to reject invalid JSON before submit and to
   // ship each SA JSON straight to the backend without a re-read.
-  const [region, setRegion] = useState('us-central1')
+  const [region, setRegion] = useState('global')
   const [vertexFiles, setVertexFiles] = useState<VertexFile[]>([])
+  // Azure-only state. base_url is the resource endpoint (channels.base_url)
+  // and apiVersion is channels.other. The whole batch shares one resource.
+  const [azureBaseUrl, setAzureBaseUrl] = useState('')
+  const [azureApiVersion, setAzureApiVersion] = useState(AZURE_DEFAULT_API_VERSION)
 
   // 可配置的默认 model 列表 —— 按预设分开存（rc.154+）。key 是 preset.id，
   // value 是服务端保存的 models 字符串；'' 或缺失表示尚未保存过（前端会
@@ -222,6 +230,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       models?: string
       other?: string
       settings?: string
+      base_url?: string
     } = {
       type: preset.type,
       group: group.trim() || preset.fallbackGroup,
@@ -231,15 +240,20 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       const c = parseFloat(costInput.trim())
       if (!isNaN(c) && c > 0) baseDefaults.unit_price_cny = c
     }
+    if (preset.id === 'azure') {
+      const url = azureBaseUrl.trim()
+      if (!url) return setResult('Azure 需要 base_url (例: https://<resource>.openai.azure.com)')
+      baseDefaults.base_url = url
+      baseDefaults.other = azureApiVersion.trim() || AZURE_DEFAULT_API_VERSION
+    }
 
     // Vertex takes JSON files + a shared region, so it branches to a
     // different input parser here but shares the same batchCreateChannels
     // wire call. `key` becomes the raw SA JSON string; the backend stores
     // it verbatim in channels.key (a TEXT column).
     if (preset.kind === 'vertex') {
-      if (!region.trim()) return setResult('Vertex 需要 Deployment Region')
       if (vertexFiles.length === 0) return setResult('请至少选择一个 Service Account JSON 文件')
-      baseDefaults.other = region.trim()
+      baseDefaults.other = region.trim() || 'global'
       baseDefaults.settings = '{"vertex_key_type":"json"}'
       const channels = vertexFiles.map(f => ({
         key: JSON.stringify(f.json),
@@ -525,11 +539,11 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
             <input
               value={region}
               onChange={e => setRegion(e.target.value)}
-              placeholder="us-central1"
+              placeholder="global"
               className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900"
             />
             <p className="text-[10px] text-gray-400 mt-1">
-              写进 channels.other 字段。本批次所有 JSON 共用此 region。
+              输入部署区域或 JSON 映射：<code className="font-mono">{'{"default": "us-central1", "claude-3-5-sonnet-20240620": "europe-west1"}'}</code>。默认 <code className="font-mono">global</code>。写进 channels.other，本批次所有 JSON 共用。
             </p>
           </div>
           <div>
@@ -570,13 +584,41 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
           </div>
         </div>
       ) : (
-        <textarea
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          rows={8}
-          placeholder={'每行: key 额度（USD）\n\nsk-... 220\nsk-... 500'}
-          className="w-full border border-gray-200 rounded-md p-2.5 text-xs font-mono resize-y bg-gray-50 focus:outline-none focus:border-gray-900"
-        />
+        <>
+          {preset.id === 'azure' && (
+            <div className="mb-2 grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">
+                  Resource Endpoint <span className="text-rose-500">*</span>
+                </label>
+                <input
+                  value={azureBaseUrl}
+                  onChange={e => setAzureBaseUrl(e.target.value)}
+                  placeholder="https://<resource>.openai.azure.com"
+                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
+                />
+                <p className="text-[10px] text-gray-400 mt-1">写进 channels.base_url，本批次共用。</p>
+              </div>
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">API Version</label>
+                <input
+                  value={azureApiVersion}
+                  onChange={e => setAzureApiVersion(e.target.value)}
+                  placeholder={AZURE_DEFAULT_API_VERSION}
+                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
+                />
+                <p className="text-[10px] text-gray-400 mt-1">写进 channels.other，缺省 {AZURE_DEFAULT_API_VERSION}。</p>
+              </div>
+            </div>
+          )}
+          <textarea
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            rows={8}
+            placeholder={'每行: key 额度（USD）\n\nsk-... 220\nsk-... 500'}
+            className="w-full border border-gray-200 rounded-md p-2.5 text-xs font-mono resize-y bg-gray-50 focus:outline-none focus:border-gray-900"
+          />
+        </>
       )}
       <p className="text-[10px] text-gray-400 mt-2 leading-relaxed">
         命名 MMDD-工作室-后缀-容量；上方"默认成本/优先级"会写到所有新建渠道；channels.tag 用作 user 角色可见范围
