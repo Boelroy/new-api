@@ -451,6 +451,9 @@ export type RemoteChannelCreateRequest = {
   tag?: string
   priority?: number
   base_url?: string
+  // Optional channel.other — Azure uses it for api-version; Vertex goes
+  // through /vertex/create so region isn't set here.
+  other?: string
   items: RemoteChannelCreateItem[]
 }
 
@@ -908,6 +911,29 @@ export const api = {
       ok: number
       total: number
     }>('/api/remote-newapi/vertex/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  // Azure OpenAI (channel_type=3) also bypasses the pending queue —
+  // each Azure resource has its own base_url + api_version pair, which
+  // the pending schema doesn't carry. Payload shape mirrors
+  // remoteVertexCreate; the batch shares one resource endpoint.
+  remoteAzureCreate: (payload: {
+    profile_id: number
+    name_prefix: string
+    models: string
+    group?: string
+    base_url: string
+    api_version?: string
+    items: { key: string; quota_usd?: number; note?: string }[]
+  }) =>
+    request<{
+      results: { index: number; ok: boolean; channel_id?: number; error?: string }[]
+      ok: number
+      total: number
+    }>('/api/remote-newapi/azure/create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),

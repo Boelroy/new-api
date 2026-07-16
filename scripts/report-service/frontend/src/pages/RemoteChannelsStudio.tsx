@@ -46,34 +46,51 @@ const DEFAULT_GEMINI_MODELS = [
   'gemini-3.5-flash',
 ].join(',')
 
-// Vertex model naming follows GCP's model-garden IDs (@publisher, or
-// versioned suffixes). Only Anthropic-on-Vertex is common in production
-// use — Gemini-on-Vertex is served via the Gemini channel instead. This
-// list is only a fallback for profiles that haven't set default_vertex_models.
-const DEFAULT_VERTEX_MODELS = [
-  'claude-sonnet-4-5@20250929',
-  'claude-opus-4-1@20250805',
-  'claude-3-5-sonnet-v2@20241022',
-  'claude-3-5-haiku@20241022',
+// Vertex hosts Google's Gemini family (Anthropic-on-Vertex uses a separate
+// pricing/keying flow that hasn't been productised on this page), so the
+// default deployment list mirrors DEFAULT_GEMINI_MODELS. Profiles that need
+// a different set can still override via default_vertex_models.
+const DEFAULT_VERTEX_MODELS = DEFAULT_GEMINI_MODELS
+
+// Azure hosts the OpenAI family. Since RemoteChannelsStudio doesn't have an
+// OpenAI preset (OpenAI keys don't run through the studio pipeline), the
+// list is inlined here rather than promoted to a shared constant.
+const DEFAULT_OPENAI_MODELS = [
+  'gpt-5',
+  'gpt-5-mini',
+  'gpt-5-nano',
+  'gpt-4.1',
+  'gpt-4o',
+  'gpt-4o-mini',
+  'o4-mini',
+  'o3',
 ].join(',')
 
-// Channel type integers from newapi's constant/channel.go — 14 = Anthropic,
-// 24 = Gemini, 41 = Vertex AI. Sent through remotePendingEnqueue.type for
-// the first two; Vertex has its own endpoint (see remoteVertexCreate).
-// Duplicated (intentionally, see file header) from RemoteChannels.tsx to
-// keep this operator surface standalone.
+// Azure default API version, kept in sync with new-api's
+// AZURE_DEFAULT_API_VERSION so uploads created here behave identically to
+// ones created through the admin UI.
+const AZURE_DEFAULT_API_VERSION = '2025-04-01-preview'
+
+// Channel type integers from newapi's constant/channel.go — 3 = Azure,
+// 14 = Anthropic, 24 = Gemini, 41 = Vertex AI. Anthropic/Gemini flow through
+// remotePendingEnqueue; Vertex and Azure each have their own bypass endpoint
+// (remoteVertexCreate / remoteAzureCreate) because per-batch base_url +
+// other + settings don't fit the pending schema.
 const CHANNEL_TYPE_ANTHROPIC = 14
 const CHANNEL_TYPE_GEMINI = 24
 const CHANNEL_TYPE_VERTEX = 41
+const CHANNEL_TYPE_AZURE = 3
 
-type PresetID = 'anthropic' | 'gemini' | 'vertex'
+type PresetID = 'anthropic' | 'gemini' | 'vertex' | 'azure'
 // `kind` gates the modal's form flow: 'text' presets use the per-line
 // key textarea + pending-queue path; 'vertex' presets swap in a JSON
-// file picker + region input and post directly to remoteVertexCreate.
+// file picker + region input and post directly to remoteVertexCreate;
+// 'azure' presets keep the per-line key textarea but add base_url +
+// api_version inputs and post directly to remoteAzureCreate.
 type PresetSpec = {
   id: PresetID
   label: string
-  kind: 'text' | 'vertex'
+  kind: 'text' | 'vertex' | 'azure'
   type: number
   fallbackModels: string
   fallbackGroup: string
@@ -84,6 +101,7 @@ const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
   { id: 'anthropic', label: 'Anthropic (Claude)', kind: 'text',   type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS, fallbackGroup: 'default', profileGroupField: 'default_group',        profileModelsField: 'default_models' },
   { id: 'gemini',    label: 'Gemini',              kind: 'text',   type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,    fallbackGroup: 'gemini',  profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
   { id: 'vertex',    label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,    fallbackGroup: 'gemini',  profileGroupField: 'default_gemini_group', profileModelsField: 'default_vertex_models' },
+  { id: 'azure',     label: 'Azure',               kind: 'azure',  type: CHANNEL_TYPE_AZURE,     fallbackModels: DEFAULT_OPENAI_MODELS,    fallbackGroup: 'openai',  profileGroupField: 'default_group',        profileModelsField: 'default_models' },
 ]
 
 function resolvePresetGroup(preset: PresetSpec, profile: RemoteProfile | undefined): string {
@@ -178,16 +196,16 @@ function VertexInputSection({
     <>
       <div>
         <label className="block text-[11px] text-gray-500 mb-1">
-          Deployment Region <span className="text-rose-500">*</span>
+          Deployment Region
         </label>
         <input
           value={region}
           onChange={e => onRegionChange(e.target.value)}
-          placeholder="us-central1"
+          placeholder="global"
           className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900"
         />
         <p className="text-[10px] text-gray-400 mt-1">
-          写进 newapi 的 channel.other 字段。本批次所有 JSON 共用此 region。
+          输入部署区域或 JSON 映射：<code className="font-mono">{'{"default": "us-central1", "claude-3-5-sonnet-20240620": "europe-west1"}'}</code>。默认 <code className="font-mono">global</code>。写进 channel.other，本批次所有 JSON 共用。
         </p>
       </div>
       <div>
@@ -250,6 +268,49 @@ function VertexInputSection({
   )
 }
 
+// Azure-mode extras. The Azure preset reuses the per-line key textarea,
+// so this section only carries the two per-batch fields (resource
+// endpoint + api version). Rendered inside both the batch and immediate
+// modals — same visual language as VertexInputSection.
+function AzureInputSection({
+  baseUrl,
+  onBaseUrlChange,
+  apiVersion,
+  onApiVersionChange,
+}: {
+  baseUrl: string
+  onBaseUrlChange: (v: string) => void
+  apiVersion: string
+  onApiVersionChange: (v: string) => void
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-2 border border-dashed border-gray-300 rounded-md p-3 bg-gray-50/50">
+      <div>
+        <label className="block text-[11px] text-gray-500 mb-1">
+          Resource Endpoint <span className="text-rose-500">*</span>
+        </label>
+        <input
+          value={baseUrl}
+          onChange={e => onBaseUrlChange(e.target.value)}
+          placeholder="https://<resource>.openai.azure.com"
+          className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
+        />
+        <p className="text-[10px] text-gray-400 mt-1">写进 channel.base_url，本批次共用。</p>
+      </div>
+      <div>
+        <label className="block text-[11px] text-gray-500 mb-1">API Version</label>
+        <input
+          value={apiVersion}
+          onChange={e => onApiVersionChange(e.target.value)}
+          placeholder={AZURE_DEFAULT_API_VERSION}
+          className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
+        />
+        <p className="text-[10px] text-gray-400 mt-1">写进 channel.other，缺省 {AZURE_DEFAULT_API_VERSION}。</p>
+      </div>
+    </div>
+  )
+}
+
 export default function RemoteChannelsStudio() {
   const [profiles, setProfiles] = useState<RemoteProfile[]>([])
   const [selectedID, setSelectedID] = useState<number | null>(null)
@@ -298,10 +359,18 @@ export default function RemoteChannelsStudio() {
   // early, (b) render the filename list back to the operator, and (c)
   // ship the JSON body without a re-read. `perFile` carries the optional
   // quota + note per SA JSON (parallel to text-mode's line syntax).
-  const [batchRegion, setBatchRegion] = useState('us-central1')
+  const [batchRegion, setBatchRegion] = useState('global')
   const [batchVertexFiles, setBatchVertexFiles] = useState<VertexFile[]>([])
-  const [immRegion, setImmRegion] = useState('us-central1')
+  const [immRegion, setImmRegion] = useState('global')
   const [immVertexFiles, setImmVertexFiles] = useState<VertexFile[]>([])
+
+  // Azure-only state. Same rationale as the Vertex block above: the input
+  // shape (per-line api-key + per-batch base_url + api_version) doesn't
+  // reuse either the text or the vertex flow, so it stays sibling to both.
+  const [batchAzureBaseUrl, setBatchAzureBaseUrl] = useState('')
+  const [batchAzureApiVersion, setBatchAzureApiVersion] = useState(AZURE_DEFAULT_API_VERSION)
+  const [immAzureBaseUrl, setImmAzureBaseUrl] = useState('')
+  const [immAzureApiVersion, setImmAzureApiVersion] = useState(AZURE_DEFAULT_API_VERSION)
 
   // Read a FileList → VertexFile[]. On parse failure we skip the bad
   // file and surface a message; partial success is fine and matches how
@@ -414,7 +483,9 @@ export default function RemoteChannelsStudio() {
     setBatchModels(resolvePresetModels(initialPreset, p))
     setBatchInput('')
     setBatchVertexFiles([])
-    setBatchRegion('us-central1')
+    setBatchRegion('global')
+    setBatchAzureBaseUrl('')
+    setBatchAzureApiVersion(AZURE_DEFAULT_API_VERSION)
     setBatchErr(null)
     setBatchOpen(true)
   }
@@ -428,7 +499,6 @@ export default function RemoteChannelsStudio() {
     const fullNamePrefix = todayYYYYMMDD() + '-' + batchPrefix.trim()
 
     if (preset?.kind === 'vertex') {
-      if (!batchRegion.trim()) return setBatchErr('Region 不能为空')
       if (batchVertexFiles.length === 0) return setBatchErr('请至少选择一个 Service Account JSON 文件')
       setBatchBusy(true)
       try {
@@ -437,7 +507,7 @@ export default function RemoteChannelsStudio() {
           name_prefix: fullNamePrefix,
           models: batchModels.trim(),
           group: batchGroup.trim() || 'default',
-          region: batchRegion.trim(),
+          region: batchRegion.trim() || 'global',
           items: batchVertexFiles.map(f => ({
             key_json: f.json,
             quota_usd: f.quotaUSD,
@@ -452,6 +522,51 @@ export default function RemoteChannelsStudio() {
         }
         setBatchOpen(false)
         // Vertex bypasses the pending queue — refresh channels instead.
+        void reloadChannels()
+      } catch (e: any) {
+        setBatchErr(e?.message || String(e))
+      } finally {
+        setBatchBusy(false)
+      }
+      return
+    }
+
+    if (preset?.kind === 'azure') {
+      if (!batchAzureBaseUrl.trim()) return setBatchErr('Azure 需要 Resource Endpoint (例: https://<resource>.openai.azure.com)')
+      const azureItems: { key: string; quota_usd?: number; note?: string }[] = []
+      for (const raw of batchInput.split('\n')) {
+        const t = raw.trim()
+        if (!t || t.startsWith('#')) continue
+        const parts = t.split(/[\s,]+/)
+        const key = parts[0]
+        if (!key) continue
+        const item: { key: string; quota_usd?: number; note?: string } = { key }
+        if (parts[1]) {
+          const q = parseFloat(parts[1])
+          if (!isNaN(q) && q > 0) item.quota_usd = q
+        }
+        if (parts.length > 2) item.note = parts.slice(2).join(' ')
+        azureItems.push(item)
+      }
+      if (azureItems.length === 0) return setBatchErr('未解析到有效行')
+      setBatchBusy(true)
+      try {
+        const res = await api.remoteAzureCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: batchModels.trim(),
+          group: batchGroup.trim() || 'openai',
+          base_url: batchAzureBaseUrl.trim(),
+          api_version: batchAzureApiVersion.trim() || AZURE_DEFAULT_API_VERSION,
+          items: azureItems,
+        })
+        const failed = res.results.filter(r => !r.ok)
+        if (failed.length === 0) {
+          alert(`已上传 ${res.ok} 个 Azure 渠道`)
+        } else {
+          alert(`成功 ${res.ok} / ${res.total}\n失败：\n` + failed.map(r => `#${r.index} ${r.error}`).join('\n'))
+        }
+        setBatchOpen(false)
         void reloadChannels()
       } catch (e: any) {
         setBatchErr(e?.message || String(e))
@@ -514,7 +629,9 @@ export default function RemoteChannelsStudio() {
     setImmModels(resolvePresetModels(initialPreset, p))
     setImmInput('')
     setImmVertexFiles([])
-    setImmRegion('us-central1')
+    setImmRegion('global')
+    setImmAzureBaseUrl('')
+    setImmAzureApiVersion(AZURE_DEFAULT_API_VERSION)
     setImmErr(null)
     setImmOpen(true)
   }
@@ -528,7 +645,6 @@ export default function RemoteChannelsStudio() {
     const fullNamePrefix = todayYYYYMMDD() + '-' + immPrefix.trim()
 
     if (preset?.kind === 'vertex') {
-      if (!immRegion.trim()) return setImmErr('Region 不能为空')
       if (immVertexFiles.length === 0) return setImmErr('请至少选择一个 Service Account JSON 文件')
       setImmBusy(true)
       try {
@@ -537,7 +653,7 @@ export default function RemoteChannelsStudio() {
           name_prefix: fullNamePrefix,
           models: immModels.trim(),
           group: immGroup.trim() || 'default',
-          region: immRegion.trim(),
+          region: immRegion.trim() || 'global',
           items: immVertexFiles.map(f => ({
             key_json: f.json,
             quota_usd: f.quotaUSD,
@@ -547,6 +663,51 @@ export default function RemoteChannelsStudio() {
         const failed = res.results.filter(r => !r.ok)
         if (failed.length === 0) {
           alert(`已上传 ${res.ok} 个 Vertex 渠道`)
+        } else {
+          alert(`成功 ${res.ok} / ${res.total}\n失败：\n` + failed.map(r => `#${r.index} ${r.error}`).join('\n'))
+        }
+        setImmOpen(false)
+        void reloadChannels()
+      } catch (e: any) {
+        setImmErr(e?.message || String(e))
+      } finally {
+        setImmBusy(false)
+      }
+      return
+    }
+
+    if (preset?.kind === 'azure') {
+      if (!immAzureBaseUrl.trim()) return setImmErr('Azure 需要 Resource Endpoint (例: https://<resource>.openai.azure.com)')
+      const azureItems: { key: string; quota_usd?: number; note?: string }[] = []
+      for (const raw of immInput.split('\n')) {
+        const t = raw.trim()
+        if (!t || t.startsWith('#')) continue
+        const parts = t.split(/[\s,]+/)
+        const key = parts[0]
+        if (!key) continue
+        const item: { key: string; quota_usd?: number; note?: string } = { key }
+        if (parts[1]) {
+          const q = parseFloat(parts[1])
+          if (!isNaN(q) && q > 0) item.quota_usd = q
+        }
+        if (parts.length > 2) item.note = parts.slice(2).join(' ')
+        azureItems.push(item)
+      }
+      if (azureItems.length === 0) return setImmErr('未解析到有效行')
+      setImmBusy(true)
+      try {
+        const res = await api.remoteAzureCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: immModels.trim(),
+          group: immGroup.trim() || 'openai',
+          base_url: immAzureBaseUrl.trim(),
+          api_version: immAzureApiVersion.trim() || AZURE_DEFAULT_API_VERSION,
+          items: azureItems,
+        })
+        const failed = res.results.filter(r => !r.ok)
+        if (failed.length === 0) {
+          alert(`已上传 ${res.ok} 个 Azure 渠道`)
         } else {
           alert(`成功 ${res.ok} / ${res.total}\n失败：\n` + failed.map(r => `#${r.index} ${r.error}`).join('\n'))
         }
@@ -922,9 +1083,19 @@ export default function RemoteChannelsStudio() {
                   }}
                 />
               )}
+              {batchPresetID === 'azure' && (
+                <AzureInputSection
+                  baseUrl={batchAzureBaseUrl}
+                  onBaseUrlChange={setBatchAzureBaseUrl}
+                  apiVersion={batchAzureApiVersion}
+                  onApiVersionChange={setBatchAzureApiVersion}
+                />
+              )}
               <p className="text-[11px] text-gray-400">
                 {batchPresetID === 'vertex'
                   ? 'Vertex 走独立通道 —— 上传后不进 Pool 队列，直接创建远端渠道。'
+                  : batchPresetID === 'azure'
+                  ? 'Azure 走独立通道 —— 上传后不进 Pool 队列，直接创建远端渠道。同批 Key 共享同一 base_url + api version。'
                   : '上 Key 后进入 Pool 队列。管理员配置了每次上几个 + 检查间隔。同批 Key 会按 FIFO 依次进池，前一批全部消耗完之前不会开始新一批。'}
               </p>
               {batchErr && <p className="text-xs text-rose-600">{batchErr}</p>}
@@ -1037,6 +1208,14 @@ export default function RemoteChannelsStudio() {
                     setImmVertexFiles(prev => [...prev, ...parsed])
                     if (errors.length) setImmErr(errors.join('; '))
                   }}
+                />
+              )}
+              {immPresetID === 'azure' && (
+                <AzureInputSection
+                  baseUrl={immAzureBaseUrl}
+                  onBaseUrlChange={setImmAzureBaseUrl}
+                  apiVersion={immAzureApiVersion}
+                  onApiVersionChange={setImmAzureApiVersion}
                 />
               )}
               {immErr && <p className="text-xs text-rose-600">{immErr}</p>}

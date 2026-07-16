@@ -2128,6 +2128,188 @@ func handleVertexChannelCreate(c *gin.Context) {
 	})
 }
 
+// handleAzureChannelCreate uploads one or more Azure OpenAI API keys to the
+// remote as newapi channels (channel_type = 3). Runs synchronously, one
+// channel per key — Azure batches are small and serial makes each error
+// attributable.
+//
+// Bypasses remote_pending_key for the same reason as Vertex: Azure needs a
+// per-batch base_url (resource endpoint) plus `other` (api version) that the
+// pending pipeline doesn't carry. Trade-off is identical: uploaded channels
+// don't show up in "上传队列" until the mirror refreshes.
+func handleAzureChannelCreate(c *gin.Context) {
+	var body struct {
+		ProfileID  int64  `json:"profile_id"`
+		NamePrefix string `json:"name_prefix"`
+		Models     string `json:"models"`
+		Group      string `json:"group"`
+		Tag        string `json:"tag"`
+		BaseURL    string `json:"base_url"`
+		APIVersion string `json:"api_version"`
+		Items      []struct {
+			Key      string   `json:"key"`
+			QuotaUSD *float64 `json:"quota_usd,omitempty"`
+			Note     string   `json:"note,omitempty"`
+		} `json:"items"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	body.NamePrefix = strings.TrimSpace(body.NamePrefix)
+	body.Models = strings.TrimSpace(body.Models)
+	body.Group = strings.TrimSpace(body.Group)
+	body.BaseURL = strings.TrimSpace(body.BaseURL)
+	body.APIVersion = strings.TrimSpace(body.APIVersion)
+	if body.ProfileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	if body.NamePrefix == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name_prefix is required"})
+		return
+	}
+	if body.Models == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "models is required"})
+		return
+	}
+	if body.BaseURL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "base_url is required (e.g. https://<resource>.openai.azure.com)"})
+		return
+	}
+	if body.APIVersion == "" {
+		// Match new-api's AZURE_DEFAULT_API_VERSION so batch-created channels
+		// behave identically to admin-UI-created ones.
+		body.APIVersion = "2025-04-01-preview"
+	}
+	if body.Group == "" {
+		body.Group = "openai"
+	}
+	if len(body.Items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no items provided"})
+		return
+	}
+
+	if callerNeedsRemoteStudioLock(c) {
+		studio := callerStudio(c)
+		if studio == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "your account has no studio binding; ask an admin to bind one before uploading keys"})
+			return
+		}
+		accepting, err := studioAccepting(body.ProfileID, studio)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "policy check: " + err.Error()})
+			return
+		}
+		if !accepting {
+			c.JSON(http.StatusForbidden, gin.H{"error": "该 profile 暂不接收本工作室 key，请联系管理员"})
+			return
+		}
+		body.Tag = studio
+	}
+
+	host, userID, token, err := loadRemoteProfileByID(body.ProfileID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	uploadedBy := int64(0)
+	if v, ok := c.Get("user_id"); ok {
+		if uid, ok := v.(int64); ok {
+			uploadedBy = uid
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
+	defer cancel()
+
+	results := make([]gin.H, 0, len(body.Items))
+	okCount := 0
+	for idx, it := range body.Items {
+		keyStr := strings.TrimSpace(it.Key)
+		if keyStr == "" {
+			results = append(results, gin.H{
+				"index": idx,
+				"ok":    false,
+				"error": "empty key",
+			})
+			continue
+		}
+		chID, err := uploadOneKeyToRemote(ctx, uploadOneKeyParams{
+			Host:       host,
+			Token:      token,
+			UserID:     userID,
+			ProfileID:  body.ProfileID,
+			Key:        keyStr,
+			NamePrefix: body.NamePrefix,
+			Type:       3, // constant/channel.go ChannelTypeAzure
+			Models:     body.Models,
+			Group:      body.Group,
+			Tag:        body.Tag,
+			Priority:   0,
+			BaseURL:    body.BaseURL,
+			Other:      body.APIVersion,
+			QuotaUSD:   it.QuotaUSD,
+			Note:       it.Note,
+		})
+		if err != nil {
+			results = append(results, gin.H{
+				"index": idx,
+				"ok":    false,
+				"error": err.Error(),
+			})
+			continue
+		}
+
+		// Attribution row mirrors handleVertexChannelCreate so 我的远程渠道
+		// and 上传队列 render Azure uploads consistently.
+		noteStr := strings.TrimSpace(it.Note)
+		quota := 0.0
+		if it.QuotaUSD != nil {
+			quota = *it.QuotaUSD
+		}
+		enc, encErr := encryptRemoteToken(keyStr)
+		if encErr == nil {
+			nowTS := time.Now().Unix()
+			if _, err := db.Exec(
+				`INSERT INTO remote_pending_key
+				 (profile_id, key_hash, key_encrypted, quota_usd, note, name_prefix,
+				  group_name, tag, models, priority, pool_size, status, channel_type, uploaded_by,
+				  remote_channel_id, activated_at, created_at, updated_at)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0,0,'active',3,$10,$11,$12,$12,$12)
+				 ON CONFLICT (profile_id, key_hash) DO UPDATE SET
+				   remote_channel_id = EXCLUDED.remote_channel_id,
+				   status            = 'active',
+				   activated_at      = EXCLUDED.activated_at,
+				   uploaded_by       = EXCLUDED.uploaded_by,
+				   tag               = EXCLUDED.tag,
+				   updated_at        = EXCLUDED.updated_at,
+				   failed_reason     = ''`,
+				body.ProfileID, pendingKeyHash(keyStr), enc, quota, noteStr, body.NamePrefix,
+				body.Group, body.Tag, body.Models, uploadedBy,
+				chID, nowTS,
+			); err != nil {
+				log.Printf("[azure-create] attribution insert profile=%d channel=%d: %v", body.ProfileID, chID, err)
+			}
+		} else {
+			log.Printf("[azure-create] encrypt key for attribution profile=%d channel=%d: %v", body.ProfileID, chID, encErr)
+		}
+
+		results = append(results, gin.H{
+			"index":      idx,
+			"ok":         true,
+			"channel_id": chID,
+		})
+		okCount++
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"results": results,
+		"ok":      okCount,
+		"total":   len(body.Items),
+	})
+}
+
 // pendingSchedulerNudge lets the enqueue handler skip the tick wait for
 // immediate (pool_size=0) uploads. Buffered=1 so overlapping enqueues
 // coalesce into one wake-up.
@@ -2892,7 +3074,10 @@ func handleRemoteChannelCreate(c *gin.Context) {
 		Tag        string                    `json:"tag,omitempty"`
 		Priority   int64                     `json:"priority,omitempty"`
 		BaseURL    string                    `json:"base_url,omitempty"`
-		Items      []remoteChannelCreateItem `json:"items"`
+		// Optional channel.other override — Azure uses it for api-version,
+		// Vertex bypasses this handler entirely so no vertex region here.
+		Other string                    `json:"other,omitempty"`
+		Items []remoteChannelCreateItem `json:"items"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -2964,6 +3149,7 @@ func handleRemoteChannelCreate(c *gin.Context) {
 			Tag:        body.Tag,
 			Priority:   itemPriority,
 			BaseURL:    body.BaseURL,
+			Other:      body.Other,
 			QuotaUSD:   it.QuotaUSD,
 			Note:       it.Note,
 		})

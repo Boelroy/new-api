@@ -3436,6 +3436,11 @@ func main() {
 	// role gate as the pending endpoints; handleVertexChannelCreate
 	// re-enforces the studio-lock invariants internally.
 	remoteOperatorAPI.POST("/remote-newapi/vertex/create", handleVertexChannelCreate)
+	// Azure OpenAI channel creation. Bypasses the pending queue for the
+	// same reason as Vertex: Azure carries base_url (resource endpoint)
+	// and api version (channels.other) which the pending schema doesn't
+	// have. Same role gate + studio-lock invariants as Vertex.
+	remoteOperatorAPI.POST("/remote-newapi/azure/create", handleAzureChannelCreate)
 
 	// Local pool: KeyCapacity 'Pool 上 Key' tab + studio operator's
 	// /pool-upload slim page. Admin+ (Key Capacity) and studio_operator

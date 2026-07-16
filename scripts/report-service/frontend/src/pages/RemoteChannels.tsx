@@ -54,35 +54,47 @@ const DEFAULT_GEMINI_MODELS = [
   'gemini-3.5-flash',
 ].join(',')
 
-// Vertex-on-Anthropic model naming (used when default_vertex_models is
-// empty on the profile). Duplicated from RemoteChannelsStudio.tsx —
-// keeping the two pages standalone is intentional (see file header of
-// the studio page for why).
-const DEFAULT_VERTEX_MODELS = [
-  'claude-sonnet-4-5@20250929',
-  'claude-opus-4-1@20250805',
-  'claude-3-5-sonnet-v2@20241022',
-  'claude-3-5-haiku@20241022',
+// Vertex hosts Google's Gemini family (Anthropic-on-Vertex isn't wired
+// through this page's batch flow), so the default deployment list
+// mirrors DEFAULT_GEMINI_MODELS. Profiles can still override via
+// default_vertex_models when needed.
+const DEFAULT_VERTEX_MODELS = DEFAULT_GEMINI_MODELS
+
+// Azure hosts the OpenAI family. This surface doesn't otherwise expose
+// OpenAI (no OpenAI preset), so the model list is inlined here rather
+// than promoted to a shared constant.
+const DEFAULT_OPENAI_MODELS = [
+  'gpt-5',
+  'gpt-5-mini',
+  'gpt-5-nano',
+  'gpt-4.1',
+  'gpt-4o',
+  'gpt-4o-mini',
+  'o4-mini',
+  'o3',
 ].join(',')
 
-// Channel type integers from newapi constant/channel.go — 14 = Anthropic,
-// 24 = Gemini, 41 = Vertex AI. Batch upload sends the picked value
-// straight through to handleRemoteChannelCreate (text presets) or into
-// handleVertexChannelCreate (vertex preset).
+const AZURE_DEFAULT_API_VERSION = '2025-04-01-preview'
+
+// Channel type integers from newapi constant/channel.go — 3 = Azure,
+// 14 = Anthropic, 24 = Gemini, 41 = Vertex AI. Anthropic/Gemini flow
+// through handleRemoteChannelCreate (text presets); Vertex hits
+// handleVertexChannelCreate; Azure hits handleAzureChannelCreate.
 const CHANNEL_TYPE_ANTHROPIC = 14
 const CHANNEL_TYPE_GEMINI = 24
 const CHANNEL_TYPE_VERTEX = 41
+const CHANNEL_TYPE_AZURE = 3
 
 // Preset menu items for the batch upload channel-type + models + group
 // combo. Each preset resolves its group from a specific profile field
 // (default_group for anthropic, default_gemini_group for gemini) with a
 // hardcoded fallback so the field still works when a profile hasn't set
 // its own preference.
-type PresetID = 'anthropic' | 'gemini' | 'vertex'
+type PresetID = 'anthropic' | 'gemini' | 'vertex' | 'azure'
 type PresetSpec = {
   id: PresetID
   label: string
-  kind: 'text' | 'vertex'
+  kind: 'text' | 'vertex' | 'azure'
   type: number
   fallbackModels: string
   fallbackGroup: string
@@ -93,7 +105,8 @@ type PresetSpec = {
 const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
   { id: 'anthropic', label: 'Anthropic (Claude)', kind: 'text',   type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS, fallbackGroup: 'default', testModel: 'claude-haiku-4-5-20251001', profileGroupField: 'default_group',        profileModelsField: 'default_models' },
   { id: 'gemini',    label: 'Gemini',              kind: 'text',   type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,    fallbackGroup: 'gemini',  testModel: 'gemini-2.5-flash',              profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
-  { id: 'vertex',    label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,    fallbackGroup: 'gemini',  testModel: 'claude-sonnet-4-5@20250929',    profileGroupField: 'default_gemini_group', profileModelsField: 'default_vertex_models' },
+  { id: 'vertex',    label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,    fallbackGroup: 'gemini',  testModel: 'gemini-2.5-flash',              profileGroupField: 'default_gemini_group', profileModelsField: 'default_vertex_models' },
+  { id: 'azure',     label: 'Azure',               kind: 'azure',  type: CHANNEL_TYPE_AZURE,     fallbackModels: DEFAULT_OPENAI_MODELS,    fallbackGroup: 'openai',  testModel: 'gpt-4o-mini',                   profileGroupField: 'default_group',        profileModelsField: 'default_models' },
 ]
 
 // resolvePresetGroup / resolvePresetModels pick the batch upload group +
@@ -156,16 +169,16 @@ function VertexAdminInputSection({
     <>
       <div>
         <label className="block text-[11px] text-gray-500 mb-1">
-          Deployment Region <span className="text-rose-500">*</span>
+          Deployment Region
         </label>
         <input
           value={region}
           onChange={e => onRegionChange(e.target.value)}
-          placeholder="us-central1"
+          placeholder="global"
           className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900"
         />
         <p className="text-[10px] text-gray-400 mt-1">
-          写进 newapi 的 channel.other 字段。本批次所有 JSON 共用此 region。
+          输入部署区域或 JSON 映射：<code className="font-mono">{'{"default": "us-central1", "claude-3-5-sonnet-20240620": "europe-west1"}'}</code>。默认 <code className="font-mono">global</code>。写进 channel.other，本批次所有 JSON 共用。
         </p>
       </div>
       <div>
@@ -463,8 +476,13 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   // remoteChannelCreate lane — it needs region + settings JSON that the
   // other channel types don't carry). See handleVertexChannelCreate on
   // the backend for the tradeoff.
-  const [batchRegion, setBatchRegion] = useState('us-central1')
+  const [batchRegion, setBatchRegion] = useState('global')
   const [batchVertexFiles, setBatchVertexFiles] = useState<VertexAdminFile[]>([])
+  // Azure preset state. Also bypasses the pending queue (per-batch
+  // base_url + api_version don't fit the pending schema). See
+  // handleAzureChannelCreate on the backend.
+  const [batchAzureBaseUrl, setBatchAzureBaseUrl] = useState('')
+  const [batchAzureApiVersion, setBatchAzureApiVersion] = useState(AZURE_DEFAULT_API_VERSION)
 
   // Row edit modal.
   const [rowOpen, setRowOpen] = useState(false)
@@ -1017,7 +1035,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setBatchErr(null)
     setBatchResults(null)
     setBatchVertexFiles([])
-    setBatchRegion('us-central1')
+    setBatchRegion('global')
+    setBatchAzureBaseUrl('')
+    setBatchAzureApiVersion(AZURE_DEFAULT_API_VERSION)
     setBatchOpen(true)
   }
 
@@ -1043,7 +1063,6 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     // It bypasses both the pending queue and the sync remoteChannelCreate
     // lane, so we branch here before the text-mode line parsing.
     if (preset?.kind === 'vertex') {
-      if (!batchRegion.trim()) return setBatchErr('Region 不能为空')
       if (batchVertexFiles.length === 0) return setBatchErr('请至少选择一个 Service Account JSON 文件')
       setBatchBusy(true)
       try {
@@ -1052,7 +1071,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           name_prefix: fullNamePrefix,
           models: batchModels.trim(),
           group: batchGroup.trim() || 'default',
-          region: batchRegion.trim(),
+          region: batchRegion.trim() || 'global',
           items: batchVertexFiles.map(f => ({
             key_json: f.json,
             quota_usd: f.quotaUSD,
@@ -1071,6 +1090,59 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           }))
         )
         // Refresh remote channel list so newly created rows appear.
+        void fetchChannels()
+      } catch (e: any) {
+        setBatchErr(e?.message || String(e))
+      } finally {
+        setBatchBusy(false)
+      }
+      return
+    }
+
+    // Azure keeps the per-line key textarea (same as text presets) but
+    // needs per-batch base_url + api_version, so it bypasses both the
+    // pending queue and remoteChannelCreate lane like Vertex does.
+    if (preset?.kind === 'azure') {
+      if (!batchAzureBaseUrl.trim()) return setBatchErr('Azure 需要 Resource Endpoint (例: https://<resource>.openai.azure.com)')
+      const azureItems: { key: string; quota_usd?: number; note?: string }[] = []
+      for (const raw of batchInput.split('\n')) {
+        const t = raw.trim()
+        if (!t || t.startsWith('#')) continue
+        const parts = t.split(/[\s,]+/)
+        const key = parts[0]
+        if (!key) continue
+        const item: { key: string; quota_usd?: number; note?: string } = { key }
+        if (parts[1]) {
+          const q = parseFloat(parts[1])
+          if (!isNaN(q) && q > 0) item.quota_usd = q
+        }
+        if (parts.length > 2) item.note = parts.slice(2).join(' ')
+        azureItems.push(item)
+      }
+      if (azureItems.length === 0) return setBatchErr('未解析到有效行')
+      setBatchBusy(true)
+      try {
+        const res = await api.remoteAzureCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: batchModels.trim(),
+          group: batchGroup.trim() || 'openai',
+          base_url: batchAzureBaseUrl.trim(),
+          api_version: batchAzureApiVersion.trim() || AZURE_DEFAULT_API_VERSION,
+          items: azureItems,
+        })
+        setBatchResults(
+          res.results.map((r, idx) => {
+            const raw = azureItems[idx]?.key ?? ''
+            const masked = raw.length > 8 ? `${raw.slice(0, 4)}…${raw.slice(-4)}` : raw
+            return {
+              key: masked,
+              ok: r.ok,
+              channel_id: r.channel_id,
+              error: r.error,
+            }
+          })
+        )
         void fetchChannels()
       } catch (e: any) {
         setBatchErr(e?.message || String(e))
@@ -2223,6 +2295,37 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                     if (errors.length) setBatchErr(errors.join('; '))
                   }}
                 />
+              </div>
+            )}
+            {batchPresetID === 'azure' && (
+              <div className="mt-3 space-y-2 border border-dashed border-gray-300 rounded-md p-3 bg-gray-50/50">
+                <p className="text-[11px] text-gray-500">
+                  Azure 走独立通道，绕过 Pending 队列 —— 直接创建远端渠道。同批 Key 共享同一 base_url + api version。
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] text-gray-500 mb-1">
+                      Resource Endpoint <span className="text-rose-500">*</span>
+                    </label>
+                    <input
+                      value={batchAzureBaseUrl}
+                      onChange={e => setBatchAzureBaseUrl(e.target.value)}
+                      placeholder="https://<resource>.openai.azure.com"
+                      className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
+                    />
+                    <p className="text-[10px] text-gray-400 mt-1">写进 channel.base_url。</p>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-gray-500 mb-1">API Version</label>
+                    <input
+                      value={batchAzureApiVersion}
+                      onChange={e => setBatchAzureApiVersion(e.target.value)}
+                      placeholder={AZURE_DEFAULT_API_VERSION}
+                      className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
+                    />
+                    <p className="text-[10px] text-gray-400 mt-1">写进 channel.other，缺省 {AZURE_DEFAULT_API_VERSION}。</p>
+                  </div>
+                </div>
               </div>
             )}
             {batchErr && <p className="text-xs text-rose-600 mt-2">{batchErr}</p>}
