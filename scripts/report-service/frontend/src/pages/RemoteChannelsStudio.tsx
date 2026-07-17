@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import Layout from '../components/Layout'
 import { api, type PendingKey, type RemoteChannel, type RemoteProfile } from '../api'
+import { readRememberedProfileID, writeRememberedProfileID } from '../lib/rememberProfile'
 
 // Studio-operator slim view of Remote Channels. Deliberately does NOT
 // share code with the super_admin RemoteChannels.tsx — that page has
@@ -313,7 +314,9 @@ function AzureInputSection({
 
 export default function RemoteChannelsStudio() {
   const [profiles, setProfiles] = useState<RemoteProfile[]>([])
-  const [selectedID, setSelectedID] = useState<number | null>(null)
+  // Initialise from localStorage so a page refresh doesn't force operators
+  // back to the first profile. Validated against the loaded list below.
+  const [selectedID, setSelectedID] = useState<number | null>(readRememberedProfileID)
   const [loadingProfiles, setLoadingProfiles] = useState(true)
   const [pending, setPending] = useState<PendingKey[]>([])
   // Live mirror of remote channels the operator uploaded — server-side
@@ -407,13 +410,21 @@ export default function RemoteChannelsStudio() {
     try {
       const res = await api.remoteProfiles()
       setProfiles(res.profiles)
-      setSelectedID(prev => prev ?? (res.profiles[0]?.id ?? null))
+      // Keep the previously remembered profile if it's still in the loaded
+      // list; otherwise fall back to the first available profile.
+      setSelectedID(prev => {
+        if (prev != null && res.profiles.some(p => p.id === prev)) return prev
+        return res.profiles[0]?.id ?? null
+      })
     } catch (e) {
       console.warn('remoteProfiles failed', e)
     } finally {
       setLoadingProfiles(false)
     }
   }, [])
+
+  // Persist selection so a refresh preserves the operator's context.
+  useEffect(() => { writeRememberedProfileID(selectedID) }, [selectedID])
 
   useEffect(() => { void reloadProfiles() }, [reloadProfiles])
 

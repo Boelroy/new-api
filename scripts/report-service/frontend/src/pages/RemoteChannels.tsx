@@ -13,6 +13,7 @@ import {
 } from '../api'
 import { getCachedRole, loadRole } from '../App'
 import RemoteChannelsStudio from './RemoteChannelsStudio'
+import { readRememberedProfileID, writeRememberedProfileID } from '../lib/rememberProfile'
 
 const STATUS_LABEL: Record<number, string> = {
   1: '启用',
@@ -331,7 +332,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   // drive channel-level ops but never see credentials or profile CRUD.
   const isSuperAdmin = role >= ROLE_SUPER_ADMIN
   const [profiles, setProfiles] = useState<RemoteProfile[]>([])
-  const [selectedID, setSelectedID] = useState<number | null>(null)
+  // Restore last-selected profile so a refresh doesn't jump back to the
+  // top of the sidebar list. Validated against loaded profiles below.
+  const [selectedID, setSelectedID] = useState<number | null>(readRememberedProfileID)
   const [loadingProfiles, setLoadingProfiles] = useState(true)
 
   const [channels, setChannels] = useState<RemoteChannel[]>([])
@@ -513,8 +516,12 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     try {
       const res = await api.remoteProfiles()
       setProfiles(res.profiles)
-      // Auto-select the first profile if none picked yet.
-      setSelectedID(prev => prev ?? (res.profiles[0]?.id ?? null))
+      // Keep the remembered profile if it survived; otherwise pick the
+      // first available. Handles deletion + first-time visits both.
+      setSelectedID(prev => {
+        if (prev != null && res.profiles.some(p => p.id === prev)) return prev
+        return res.profiles[0]?.id ?? null
+      })
     } catch (e) {
       console.error(e)
     } finally {
@@ -523,6 +530,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   }, [])
 
   useEffect(() => { void reloadProfiles() }, [reloadProfiles])
+
+  // Persist selection across refreshes.
+  useEffect(() => { writeRememberedProfileID(selectedID) }, [selectedID])
 
   // Load cached channel list from local mirror as soon as a profile is
   // selected (including on page reload). Purely local — no remote hit.
