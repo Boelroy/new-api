@@ -150,24 +150,62 @@ async function readVertexAdminFiles(list: FileList | null): Promise<{ parsed: Ve
   return { parsed, errors }
 }
 
-// VertexAdminInputSection is the region + file-picker block rendered in
-// the admin batch modal when the Vertex preset is active. Same visual
-// language as the studio page's VertexInputSection.
+// VertexAdminInputSection renders the Vertex preset's per-batch inputs
+// in the admin modal. Same visual language as the studio page's
+// VertexInputSection; keyMode toggles the SA-JSON file picker against
+// a per-line API-key textarea (matches newapi's vertex_key_type).
+type VertexAdminKeyMode = 'json' | 'api_key'
 function VertexAdminInputSection({
   region,
   onRegionChange,
+  keyMode,
+  onKeyModeChange,
   files,
   onFilesChange,
   onPickFiles,
+  apiKeysText,
+  onApiKeysTextChange,
 }: {
   region: string
   onRegionChange: (v: string) => void
+  keyMode: VertexAdminKeyMode
+  onKeyModeChange: (v: VertexAdminKeyMode) => void
   files: VertexAdminFile[]
   onFilesChange: (next: VertexAdminFile[]) => void
   onPickFiles: (list: FileList | null) => void
+  apiKeysText: string
+  onApiKeysTextChange: (v: string) => void
 }) {
   return (
     <>
+      <div>
+        <label className="block text-[11px] text-gray-500 mb-1">Auth Mode</label>
+        <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
+          {(
+            [
+              { id: 'json',    label: 'Service Account JSON' },
+              { id: 'api_key', label: 'API Key' },
+            ] as { id: VertexAdminKeyMode; label: string }[]
+          ).map(m => {
+            const active = keyMode === m.id
+            return (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => onKeyModeChange(m.id)}
+                className={`px-3 py-1 text-[11px] border-r border-gray-200 last:border-r-0 transition-colors ${
+                  active ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                {m.label}
+              </button>
+            )
+          })}
+        </div>
+        <p className="text-[10px] text-gray-400 mt-1">
+          JSON 走 Bearer Token 鉴权；API Key 走 <code className="font-mono">?key=</code> URL 鉴权。写进 channel.settings 的 <code className="font-mono">vertex_key_type</code>。
+        </p>
+      </div>
       <div>
         <label className="block text-[11px] text-gray-500 mb-1">
           Deployment Region
@@ -179,64 +217,82 @@ function VertexAdminInputSection({
           className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900"
         />
         <p className="text-[10px] text-gray-400 mt-1">
-          输入部署区域或 JSON 映射：<code className="font-mono">{'{"default": "us-central1", "claude-3-5-sonnet-20240620": "europe-west1"}'}</code>。默认 <code className="font-mono">global</code>。写进 channel.other，本批次所有 JSON 共用。
+          输入部署区域或 JSON 映射：<code className="font-mono">{'{"default": "us-central1", "claude-3-5-sonnet-20240620": "europe-west1"}'}</code>。默认 <code className="font-mono">global</code>。写进 channel.other，本批次共用。
         </p>
       </div>
-      <div>
-        <label className="block text-[11px] text-gray-500 mb-1">
-          Service Account JSON 文件（可多选）
-        </label>
-        <input
-          type="file"
-          accept=".json,application/json"
-          multiple
-          onChange={e => {
-            onPickFiles(e.target.files)
-            e.target.value = ''
-          }}
-          className="block w-full text-[11px] text-gray-700 file:mr-3 file:py-1 file:px-2 file:rounded file:border file:border-gray-300 file:text-[11px] file:bg-gray-50 file:hover:bg-gray-100"
-        />
-        {files.length > 0 && (
-          <ul className="mt-2 divide-y divide-gray-100 border border-gray-200 rounded-md">
-            {files.map((f, i) => (
-              <li key={i} className="px-3 py-2 flex items-center gap-2 text-[11px]">
-                <span className="flex-1 truncate font-mono text-gray-700" title={f.name}>{f.name}</span>
-                <input
-                  type="number"
-                  placeholder="quota"
-                  step="0.01"
-                  value={f.quotaUSD ?? ''}
-                  onChange={e => {
-                    const v = e.target.value === '' ? undefined : parseFloat(e.target.value)
-                    const next = files.slice()
-                    next[i] = { ...f, quotaUSD: v && v > 0 ? v : undefined }
-                    onFilesChange(next)
-                  }}
-                  className="w-20 border border-gray-300 rounded px-1.5 py-0.5 text-[11px] tabular-nums focus:outline-none focus:border-gray-900"
-                />
-                <input
-                  type="text"
-                  placeholder="备注"
-                  value={f.note ?? ''}
-                  onChange={e => {
-                    const next = files.slice()
-                    next[i] = { ...f, note: e.target.value }
-                    onFilesChange(next)
-                  }}
-                  className="w-36 border border-gray-300 rounded px-1.5 py-0.5 text-[11px] focus:outline-none focus:border-gray-900"
-                />
-                <button
-                  type="button"
-                  onClick={() => onFilesChange(files.filter((_, j) => j !== i))}
-                  className="text-rose-600 hover:underline"
-                >
-                  删除
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+      {keyMode === 'json' ? (
+        <div>
+          <label className="block text-[11px] text-gray-500 mb-1">
+            Service Account JSON 文件（可多选）
+          </label>
+          <input
+            type="file"
+            accept=".json,application/json"
+            multiple
+            onChange={e => {
+              onPickFiles(e.target.files)
+              e.target.value = ''
+            }}
+            className="block w-full text-[11px] text-gray-700 file:mr-3 file:py-1 file:px-2 file:rounded file:border file:border-gray-300 file:text-[11px] file:bg-gray-50 file:hover:bg-gray-100"
+          />
+          {files.length > 0 && (
+            <ul className="mt-2 divide-y divide-gray-100 border border-gray-200 rounded-md">
+              {files.map((f, i) => (
+                <li key={i} className="px-3 py-2 flex items-center gap-2 text-[11px]">
+                  <span className="flex-1 truncate font-mono text-gray-700" title={f.name}>{f.name}</span>
+                  <input
+                    type="number"
+                    placeholder="quota"
+                    step="0.01"
+                    value={f.quotaUSD ?? ''}
+                    onChange={e => {
+                      const v = e.target.value === '' ? undefined : parseFloat(e.target.value)
+                      const next = files.slice()
+                      next[i] = { ...f, quotaUSD: v && v > 0 ? v : undefined }
+                      onFilesChange(next)
+                    }}
+                    className="w-20 border border-gray-300 rounded px-1.5 py-0.5 text-[11px] tabular-nums focus:outline-none focus:border-gray-900"
+                  />
+                  <input
+                    type="text"
+                    placeholder="备注"
+                    value={f.note ?? ''}
+                    onChange={e => {
+                      const next = files.slice()
+                      next[i] = { ...f, note: e.target.value }
+                      onFilesChange(next)
+                    }}
+                    className="w-36 border border-gray-300 rounded px-1.5 py-0.5 text-[11px] focus:outline-none focus:border-gray-900"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => onFilesChange(files.filter((_, j) => j !== i))}
+                    className="text-rose-600 hover:underline"
+                  >
+                    删除
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : (
+        <div>
+          <label className="block text-[11px] text-gray-500 mb-1">
+            Vertex API Keys —— 每行 <code className="text-gray-700 bg-gray-100 px-1">key [额度USD] [备注...]</code>
+          </label>
+          <textarea
+            value={apiKeysText}
+            onChange={e => onApiKeysTextChange(e.target.value)}
+            rows={6}
+            placeholder={'AIzaSy... 220\nAIzaSy... 500 备注\n# 井号开头的行会被忽略'}
+            className="w-full border border-gray-300 rounded-md p-2 text-[11px] font-mono resize-y focus:outline-none focus:border-gray-900"
+          />
+          <p className="text-[10px] text-gray-400 mt-1">
+            额度和备注可省。key 明文只走一次 POST，不落本地。
+          </p>
+        </div>
+      )}
     </>
   )
 }
@@ -488,6 +544,8 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   // the backend for the tradeoff.
   const [batchRegion, setBatchRegion] = useState('global')
   const [batchVertexFiles, setBatchVertexFiles] = useState<VertexAdminFile[]>([])
+  const [batchVertexKeyMode, setBatchVertexKeyMode] = useState<VertexAdminKeyMode>('json')
+  const [batchVertexKeysText, setBatchVertexKeysText] = useState('')
   // Azure preset state. Also bypasses the pending queue (per-batch
   // base_url + api_version don't fit the pending schema). See
   // handleAzureChannelCreate on the backend.
@@ -1105,6 +1163,8 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setBatchErr(null)
     setBatchResults(null)
     setBatchVertexFiles([])
+    setBatchVertexKeyMode('json')
+    setBatchVertexKeysText('')
     setBatchRegion('global')
     setBatchAzureBaseUrl('')
     setBatchAzureApiVersion(AZURE_DEFAULT_API_VERSION)
@@ -1129,11 +1189,43 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     const preset = CHANNEL_TYPE_PRESETS.find(p => p.id === batchPresetID)
     const fullNamePrefix = todayYYYYMMDD() + '-' + batchPrefix.trim()
 
-    // Vertex takes a fundamentally different input (JSON files + region).
-    // It bypasses both the pending queue and the sync remoteChannelCreate
-    // lane, so we branch here before the text-mode line parsing.
+    // Vertex takes a fundamentally different input (JSON files or API
+    // keys + region). It bypasses both the pending queue and the sync
+    // remoteChannelCreate lane, so we branch here before the text-mode
+    // line parsing.
     if (preset?.kind === 'vertex') {
-      if (batchVertexFiles.length === 0) return setBatchErr('请至少选择一个 Service Account JSON 文件')
+      const vertexItems: (
+        | { key_json: unknown; quota_usd?: number; note?: string }
+        | { key: string;       quota_usd?: number; note?: string }
+      )[] = []
+      // For the results panel `key` column: filename when JSON, masked
+      // key preview when API key. Precomputed so the res.results loop
+      // below stays a simple index lookup.
+      const displayKeys: string[] = []
+      if (batchVertexKeyMode === 'json') {
+        if (batchVertexFiles.length === 0) return setBatchErr('请至少选择一个 Service Account JSON 文件')
+        for (const f of batchVertexFiles) {
+          vertexItems.push({ key_json: f.json, quota_usd: f.quotaUSD, note: f.note })
+          displayKeys.push(f.name)
+        }
+      } else {
+        for (const raw of batchVertexKeysText.split('\n')) {
+          const t = raw.trim()
+          if (!t || t.startsWith('#')) continue
+          const parts = t.split(/[\s,]+/)
+          const key = parts[0]
+          if (!key) continue
+          const item: { key: string; quota_usd?: number; note?: string } = { key }
+          if (parts[1]) {
+            const q = parseFloat(parts[1])
+            if (!isNaN(q) && q > 0) item.quota_usd = q
+          }
+          if (parts.length > 2) item.note = parts.slice(2).join(' ')
+          vertexItems.push(item)
+          displayKeys.push(key.length > 8 ? `${key.slice(0, 4)}…${key.slice(-4)}` : key)
+        }
+        if (vertexItems.length === 0) return setBatchErr('未解析到有效行')
+      }
       setBatchBusy(true)
       try {
         const res = await api.remoteVertexCreate({
@@ -1142,18 +1234,12 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           models: batchModels.trim(),
           group: batchGroup.trim() || 'default',
           region: batchRegion.trim() || 'global',
-          items: batchVertexFiles.map(f => ({
-            key_json: f.json,
-            quota_usd: f.quotaUSD,
-            note: f.note,
-          })),
+          key_type: batchVertexKeyMode,
+          items: vertexItems,
         })
-        // Adapt the Vertex result shape onto the existing batchResults UI
-        // (key / ok / channel_id / error) so the results panel keeps
-        // working. `key` here is a display-only file name.
         setBatchResults(
           res.results.map((r, idx) => ({
-            key: batchVertexFiles[idx]?.name ?? `item ${r.index}`,
+            key: displayKeys[idx] ?? `item ${r.index}`,
             ok: r.ok,
             channel_id: r.channel_id,
             error: r.error,
@@ -2357,6 +2443,8 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                 <VertexAdminInputSection
                   region={batchRegion}
                   onRegionChange={setBatchRegion}
+                  keyMode={batchVertexKeyMode}
+                  onKeyModeChange={setBatchVertexKeyMode}
                   files={batchVertexFiles}
                   onFilesChange={setBatchVertexFiles}
                   onPickFiles={async list => {
@@ -2364,6 +2452,8 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                     setBatchVertexFiles(prev => [...prev, ...parsed])
                     if (errors.length) setBatchErr(errors.join('; '))
                   }}
+                  apiKeysText={batchVertexKeysText}
+                  onApiKeysTextChange={setBatchVertexKeysText}
                 />
               </div>
             )}

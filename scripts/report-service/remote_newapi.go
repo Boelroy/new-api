@@ -2216,8 +2216,17 @@ func handleVertexChannelCreate(c *gin.Context) {
 		Group      string `json:"group"`
 		Tag        string `json:"tag"`
 		Region     string `json:"region"`
-		Items      []struct {
-			KeyJSON  json.RawMessage `json:"key_json"`
+		// KeyType selects Vertex auth mode: "json" (default) uploads
+		// Service Account JSONs, "api_key" uploads plain Vertex Express
+		// API keys. Written into channel.settings as {"vertex_key_type": ...},
+		// which the Vertex adaptor reads to pick between Bearer-token and
+		// ?key= URL auth (relay/channel/vertex/adaptor.go).
+		KeyType string `json:"key_type"`
+		Items   []struct {
+			// KeyJSON is used when KeyType == "json"; Key is used when
+			// KeyType == "api_key". Exactly one is required per item.
+			KeyJSON  json.RawMessage `json:"key_json,omitempty"`
+			Key      string          `json:"key,omitempty"`
 			QuotaUSD *float64        `json:"quota_usd,omitempty"`
 			Note     string          `json:"note,omitempty"`
 		} `json:"items"`
@@ -2230,6 +2239,14 @@ func handleVertexChannelCreate(c *gin.Context) {
 	body.Models = strings.TrimSpace(body.Models)
 	body.Group = strings.TrimSpace(body.Group)
 	body.Region = strings.TrimSpace(body.Region)
+	body.KeyType = strings.TrimSpace(body.KeyType)
+	if body.KeyType == "" {
+		body.KeyType = "json"
+	}
+	if body.KeyType != "json" && body.KeyType != "api_key" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "key_type must be 'json' or 'api_key'"})
+		return
+	}
 	if body.ProfileID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
 		return
@@ -2291,10 +2308,17 @@ func handleVertexChannelCreate(c *gin.Context) {
 		}
 	}
 
-	// Only JSON mode is supported (matches the "只支持 JSON" product decision).
-	// API-key mode would take a different code path (single key string,
-	// no reverse-lookup complications) and we can add it when actually needed.
-	const settingsJSON = `{"vertex_key_type":"json"}`
+	// settingsJSON is written verbatim into channel.settings on the newapi
+	// side. Vertex adaptor branches on vertex_key_type: "json" expects a
+	// Service Account JSON in channel.key and does Bearer-token auth;
+	// "api_key" expects a plain API key string in channel.key and
+	// appends ?key=<...> to the Google endpoint.
+	var settingsJSON string
+	if body.KeyType == "api_key" {
+		settingsJSON = `{"vertex_key_type":"api_key"}`
+	} else {
+		settingsJSON = `{"vertex_key_type":"json"}`
+	}
 
 	// Cap the whole batch at 90s so a partial success still returns
 	// something useful. Per-upload timeout inside uploadOneKeyToRemote
@@ -2305,23 +2329,44 @@ func handleVertexChannelCreate(c *gin.Context) {
 	results := make([]gin.H, 0, len(body.Items))
 	okCount := 0
 	for idx, it := range body.Items {
-		// Validate the SA JSON parses. We don't require specific fields
-		// (client_email, private_key, etc.) — that's newapi's problem;
-		// we just guard against garbage that would fail the upstream
-		// POST with a confusing error.
-		var probe map[string]any
-		if err := json.Unmarshal(it.KeyJSON, &probe); err != nil {
-			results = append(results, gin.H{
-				"index": idx,
-				"ok":    false,
-				"error": "invalid service account JSON: " + err.Error(),
-			})
-			continue
+		// Resolve the channel.key string. JSON mode ships the SA JSON
+		// verbatim (byte-stable round-trip so downstream tooling can
+		// parse it back); API-key mode ships the plain API key string.
+		var keyStr string
+		if body.KeyType == "api_key" {
+			keyStr = strings.TrimSpace(it.Key)
+			if keyStr == "" {
+				results = append(results, gin.H{
+					"index": idx,
+					"ok":    false,
+					"error": "api_key mode requires non-empty key",
+				})
+				continue
+			}
+		} else {
+			if len(it.KeyJSON) == 0 {
+				results = append(results, gin.H{
+					"index": idx,
+					"ok":    false,
+					"error": "json mode requires key_json",
+				})
+				continue
+			}
+			// Validate the SA JSON parses. We don't require specific
+			// fields (client_email, private_key, etc.) — that's newapi's
+			// problem; we just guard against garbage that would fail
+			// the upstream POST with a confusing error.
+			var probe map[string]any
+			if err := json.Unmarshal(it.KeyJSON, &probe); err != nil {
+				results = append(results, gin.H{
+					"index": idx,
+					"ok":    false,
+					"error": "invalid service account JSON: " + err.Error(),
+				})
+				continue
+			}
+			keyStr = strings.TrimSpace(string(it.KeyJSON))
 		}
-		// newapi's channel.key column is a string; we send the JSON
-		// exactly as uploaded (whitespace-trimmed) so the round-trip is
-		// byte-stable and downstream tools can parse it back.
-		keyStr := strings.TrimSpace(string(it.KeyJSON))
 		chID, err := uploadOneKeyToRemote(ctx, uploadOneKeyParams{
 			Host:       host,
 			Token:      token,

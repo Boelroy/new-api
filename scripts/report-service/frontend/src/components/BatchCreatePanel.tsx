@@ -105,6 +105,12 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   // ship each SA JSON straight to the backend without a re-read.
   const [region, setRegion] = useState('global')
   const [vertexFiles, setVertexFiles] = useState<VertexFile[]>([])
+  // vertexKeyMode selects the Vertex auth flavor written to
+  // channels.settings.vertex_key_type — 'json' (default) uploads Service
+  // Account JSON files, 'api_key' uploads plain Vertex Express API keys
+  // parsed from `vertexKeysText`.
+  const [vertexKeyMode, setVertexKeyMode] = useState<'json' | 'api_key'>('json')
+  const [vertexKeysText, setVertexKeysText] = useState('')
   // Azure-only state. base_url is the resource endpoint (channels.base_url)
   // and apiVersion is channels.other. The whole batch shares one resource.
   const [azureBaseUrl, setAzureBaseUrl] = useState('')
@@ -247,25 +253,47 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       baseDefaults.other = azureApiVersion.trim() || AZURE_DEFAULT_API_VERSION
     }
 
-    // Vertex takes JSON files + a shared region, so it branches to a
-    // different input parser here but shares the same batchCreateChannels
-    // wire call. `key` becomes the raw SA JSON string; the backend stores
-    // it verbatim in channels.key (a TEXT column).
+    // Vertex takes JSON files or plain API keys + a shared region, so it
+    // branches to a different input parser here but shares the same
+    // batchCreateChannels wire call. In JSON mode `key` is the raw SA
+    // JSON string; in API-key mode it's the plain Vertex Express API key.
+    // The backend stores it verbatim in channels.key (a TEXT column) and
+    // stamps channels.settings.vertex_key_type per the mode.
     if (preset.kind === 'vertex') {
-      if (vertexFiles.length === 0) return setResult('请至少选择一个 Service Account JSON 文件')
       baseDefaults.other = region.trim() || 'global'
-      baseDefaults.settings = '{"vertex_key_type":"json"}'
-      const channels = vertexFiles.map(f => ({
-        key: JSON.stringify(f.json),
-        quota_usd: f.quotaUSD > 0 ? f.quotaUSD : 5,
-      }))
+      let channels: { key: string; quota_usd: number }[]
+      if (vertexKeyMode === 'api_key') {
+        baseDefaults.settings = '{"vertex_key_type":"api_key"}'
+        channels = []
+        for (const raw of vertexKeysText.split('\n')) {
+          const t = raw.trim()
+          if (!t || t.startsWith('#')) continue
+          const parts = t.split(/[\s,]+/)
+          if (parts.length < 2) continue
+          const q = parseFloat(parts[1])
+          if (!parts[0] || isNaN(q) || q <= 0) continue
+          channels.push({ key: parts[0], quota_usd: q })
+        }
+        if (channels.length === 0) return setResult('未解析到有效行')
+      } else {
+        baseDefaults.settings = '{"vertex_key_type":"json"}'
+        if (vertexFiles.length === 0) return setResult('请至少选择一个 Service Account JSON 文件')
+        channels = vertexFiles.map(f => ({
+          key: JSON.stringify(f.json),
+          quota_usd: f.quotaUSD > 0 ? f.quotaUSD : 5,
+        }))
+      }
       const basePriority = priorityInput.trim() ? parseInt(priorityInput.trim(), 10) : NaN
       if (!isNaN(basePriority) && basePriority > 0) baseDefaults.priority = basePriority
       setSubmitting(true)
       try {
         const res = await api.batchCreateChannels(studio.trim(), suffix.trim(), channels, baseDefaults)
         setResult(`成功创建 ${res.count} 个 Vertex 渠道`)
-        setVertexFiles([])
+        if (vertexKeyMode === 'api_key') {
+          setVertexKeysText('')
+        } else {
+          setVertexFiles([])
+        }
         onCreated()
       } catch (e: any) {
         setResult(`失败: ${e.message || e}`)
@@ -533,6 +561,34 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       {preset.kind === 'vertex' ? (
         <div className="space-y-2 border border-dashed border-gray-300 rounded-md p-3 bg-gray-50/50">
           <div>
+            <label className="block text-[11px] text-gray-500 mb-1">Auth Mode</label>
+            <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
+              {(
+                [
+                  { id: 'json',    label: 'Service Account JSON' },
+                  { id: 'api_key', label: 'API Key' },
+                ] as { id: 'json' | 'api_key'; label: string }[]
+              ).map(m => {
+                const active = vertexKeyMode === m.id
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => setVertexKeyMode(m.id)}
+                    className={`px-3 py-1 text-[11px] border-r border-gray-200 last:border-r-0 transition-colors ${
+                      active ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                )
+              })}
+            </div>
+            <p className="text-[10px] text-gray-400 mt-1">
+              JSON 走 Bearer Token 鉴权；API Key 走 <code className="font-mono">?key=</code> URL 鉴权。写进 channels.settings 的 <code className="font-mono">vertex_key_type</code>。
+            </p>
+          </div>
+          <div>
             <label className="block text-[11px] text-gray-500 mb-1">
               Deployment Region <span className="text-rose-500">*</span>
             </label>
@@ -543,45 +599,63 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
               className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900"
             />
             <p className="text-[10px] text-gray-400 mt-1">
-              输入部署区域或 JSON 映射：<code className="font-mono">{'{"default": "us-central1", "claude-3-5-sonnet-20240620": "europe-west1"}'}</code>。默认 <code className="font-mono">global</code>。写进 channels.other，本批次所有 JSON 共用。
+              输入部署区域或 JSON 映射：<code className="font-mono">{'{"default": "us-central1", "claude-3-5-sonnet-20240620": "europe-west1"}'}</code>。默认 <code className="font-mono">global</code>。写进 channels.other，本批次共用。
             </p>
           </div>
-          <div>
-            <label className="block text-[11px] text-gray-500 mb-1">Service Account JSON 文件（可多选）</label>
-            <input
-              type="file"
-              accept=".json,application/json"
-              multiple
-              onChange={e => { onPickVertexFiles(e.target.files); e.target.value = '' }}
-              className="block w-full text-[11px] text-gray-700 file:mr-3 file:py-1 file:px-2 file:rounded file:border file:border-gray-300 file:text-[11px] file:bg-gray-50 file:hover:bg-gray-100"
-            />
-            {vertexFiles.length > 0 && (
-              <ul className="mt-2 divide-y divide-gray-100 border border-gray-200 rounded-md bg-white">
-                {vertexFiles.map((f, i) => (
-                  <li key={i} className="px-3 py-2 flex items-center gap-2 text-[11px]">
-                    <span className="flex-1 truncate font-mono text-gray-700" title={f.name}>{f.name}</span>
-                    <label className="text-[10px] text-gray-500">quota</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      value={f.quotaUSD}
-                      onChange={e => {
-                        const v = parseFloat(e.target.value)
-                        setVertexFiles(prev => prev.map((x, j) => j === i ? { ...x, quotaUSD: isNaN(v) ? 0 : v } : x))
-                      }}
-                      className="w-20 border border-gray-300 rounded px-1.5 py-0.5 text-[11px] tabular-nums focus:outline-none focus:border-gray-900"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setVertexFiles(prev => prev.filter((_, j) => j !== i))}
-                      className="text-rose-600 hover:underline"
-                    >删除</button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+          {vertexKeyMode === 'json' ? (
+            <div>
+              <label className="block text-[11px] text-gray-500 mb-1">Service Account JSON 文件（可多选）</label>
+              <input
+                type="file"
+                accept=".json,application/json"
+                multiple
+                onChange={e => { onPickVertexFiles(e.target.files); e.target.value = '' }}
+                className="block w-full text-[11px] text-gray-700 file:mr-3 file:py-1 file:px-2 file:rounded file:border file:border-gray-300 file:text-[11px] file:bg-gray-50 file:hover:bg-gray-100"
+              />
+              {vertexFiles.length > 0 && (
+                <ul className="mt-2 divide-y divide-gray-100 border border-gray-200 rounded-md bg-white">
+                  {vertexFiles.map((f, i) => (
+                    <li key={i} className="px-3 py-2 flex items-center gap-2 text-[11px]">
+                      <span className="flex-1 truncate font-mono text-gray-700" title={f.name}>{f.name}</span>
+                      <label className="text-[10px] text-gray-500">quota</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={f.quotaUSD}
+                        onChange={e => {
+                          const v = parseFloat(e.target.value)
+                          setVertexFiles(prev => prev.map((x, j) => j === i ? { ...x, quotaUSD: isNaN(v) ? 0 : v } : x))
+                        }}
+                        className="w-20 border border-gray-300 rounded px-1.5 py-0.5 text-[11px] tabular-nums focus:outline-none focus:border-gray-900"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setVertexFiles(prev => prev.filter((_, j) => j !== i))}
+                        className="text-rose-600 hover:underline"
+                      >删除</button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ) : (
+            <div>
+              <label className="block text-[11px] text-gray-500 mb-1">
+                Vertex API Keys —— 每行 <code className="text-gray-700 bg-gray-100 px-1">key 额度USD</code>
+              </label>
+              <textarea
+                value={vertexKeysText}
+                onChange={e => setVertexKeysText(e.target.value)}
+                rows={6}
+                placeholder={'AIzaSy... 220\nAIzaSy... 500'}
+                className="w-full border border-gray-300 rounded-md p-2 text-[11px] font-mono resize-y bg-white focus:outline-none focus:border-gray-900"
+              />
+              <p className="text-[10px] text-gray-400 mt-1">
+                额度必填，用作命名与初始额度。key 明文只走一次 POST，不落本地。
+              </p>
+            </div>
+          )}
         </div>
       ) : (
         <>

@@ -898,13 +898,21 @@ export const api = {
   // object); the client serialises with JSON.stringify so the backend
   // sees the object exactly as uploaded. Each result carries `ok`
   // and either `channel_id` or `error` — partial success is normal.
+  // key_type selects Vertex auth mode: 'json' (default, existing) uploads
+  // Service Account JSON blobs via items[].key_json; 'api_key' uploads
+  // plain Vertex Express API keys via items[].key. The backend stamps
+  // channel.settings = {"vertex_key_type": "<key_type>"} either way.
   remoteVertexCreate: (payload: {
     profile_id: number
     name_prefix: string
     models: string
     group?: string
     region: string
-    items: { key_json: unknown; quota_usd?: number; note?: string }[]
+    key_type?: 'json' | 'api_key'
+    items: (
+      | { key_json: unknown; quota_usd?: number; note?: string }
+      | { key: string;       quota_usd?: number; note?: string }
+    )[]
   }) =>
     request<{
       results: { index: number; ok: boolean; channel_id?: number; error?: string }[]
