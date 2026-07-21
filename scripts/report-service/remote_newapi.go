@@ -2428,6 +2428,29 @@ func handleVertexChannelCreate(c *gin.Context) {
 			); err != nil {
 				log.Printf("[vertex-create] attribution insert profile=%d channel=%d: %v", body.ProfileID, chID, err)
 			}
+			// Per-channel credential blob, keyed on (profile_id, remote_channel_id).
+			// Lets an operator/admin trace a specific Vertex channel back to the
+			// exact SA JSON or API key it was uploaded with, without hash-matching
+			// through remote_pending_key. On conflict (same channel re-uploaded)
+			// the newer credential wins — matches the attribution row behaviour.
+			if _, err := db.Exec(
+				`INSERT INTO remote_channel_credential
+				 (profile_id, remote_channel_id, channel_type, key_type, key_encrypted,
+				  region, settings_json, uploaded_by, created_at, updated_at)
+				 VALUES ($1,$2,41,$3,$4,$5,$6,$7,$8,$8)
+				 ON CONFLICT (profile_id, remote_channel_id) DO UPDATE SET
+				   channel_type   = EXCLUDED.channel_type,
+				   key_type       = EXCLUDED.key_type,
+				   key_encrypted  = EXCLUDED.key_encrypted,
+				   region         = EXCLUDED.region,
+				   settings_json  = EXCLUDED.settings_json,
+				   uploaded_by    = EXCLUDED.uploaded_by,
+				   updated_at     = EXCLUDED.updated_at`,
+				body.ProfileID, chID, body.KeyType, enc,
+				body.Region, settingsJSON, uploadedBy, nowTS,
+			); err != nil {
+				log.Printf("[vertex-create] credential insert profile=%d channel=%d: %v", body.ProfileID, chID, err)
+			}
 		} else {
 			log.Printf("[vertex-create] encrypt key for attribution profile=%d channel=%d: %v", body.ProfileID, chID, encErr)
 		}

@@ -3296,6 +3296,28 @@ func main() {
 		// config change doesn't retroactively re-target pending rows.
 		// Empty string → scheduler falls back to 'default' at insert time.
 		`ALTER TABLE local_pending_key ADD COLUMN IF NOT EXISTS group_name TEXT NOT NULL DEFAULT ''`,
+		// Per-channel credential blob for batch-created remote channels
+		// (Vertex SA JSON / Vertex API key / Azure key). remote_pending_key
+		// already carries an encrypted copy inside the shared queue row, but
+		// that table is keyed on (profile_id, key_hash) and mixes attribution
+		// with quota/priority/pool_size/status. This table is keyed on
+		// (profile_id, remote_channel_id) so an operator or admin can trace
+		// a specific remote channel back to its original auth blob without
+		// hash-matching. Encrypted with the same encryptRemoteToken helper
+		// used elsewhere in this file.
+		`CREATE TABLE IF NOT EXISTS remote_channel_credential (
+			profile_id         BIGINT NOT NULL,
+			remote_channel_id  BIGINT NOT NULL,
+			channel_type       INT    NOT NULL DEFAULT 0,
+			key_type           TEXT   NOT NULL DEFAULT '',
+			key_encrypted      TEXT   NOT NULL,
+			region             TEXT   NOT NULL DEFAULT '',
+			settings_json      TEXT   NOT NULL DEFAULT '',
+			uploaded_by        BIGINT NOT NULL DEFAULT 0,
+			created_at         BIGINT NOT NULL,
+			updated_at         BIGINT NOT NULL,
+			PRIMARY KEY (profile_id, remote_channel_id)
+		)`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
