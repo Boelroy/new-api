@@ -86,12 +86,30 @@ const CHANNEL_TYPE_GEMINI = 24
 const CHANNEL_TYPE_VERTEX = 41
 const CHANNEL_TYPE_AZURE = 3
 
+// Anthropic-on-Vertex reuses channel_type=41 + the Vertex file/api_key
+// upload flow, but writes to a distinct upstream group so routing keys
+// can point at the Claude family separately from Gemini. Skips
+// profileGroupField/profileModelsField so its Claude group + Claude
+// model list are always what land upstream regardless of what the
+// profile stashed under default_vertex_models.
+const DEFAULT_VERTEX_CLAUDE_MODELS = [
+  'claude-opus-4-7',
+  'claude-sonnet-4-6',
+  'claude-opus-4-6',
+  'claude-haiku-4-5-20251001',
+  'claude-sonnet-4-5-20250929',
+  'claude-opus-4-5-20251101',
+  'claude-opus-4-8',
+  'claude-fable-5',
+  'claude-sonnet-5',
+].join(',')
+
 // Preset menu items for the batch upload channel-type + models + group
 // combo. Each preset resolves its group from a specific profile field
 // (default_group for anthropic, default_gemini_group for gemini) with a
 // hardcoded fallback so the field still works when a profile hasn't set
 // its own preference.
-type PresetID = 'anthropic' | 'gemini' | 'vertex' | 'azure'
+type PresetID = 'anthropic' | 'gemini' | 'vertex' | 'vertex-claude' | 'azure'
 type PresetSpec = {
   id: PresetID
   label: string
@@ -100,24 +118,30 @@ type PresetSpec = {
   fallbackModels: string
   fallbackGroup: string
   testModel: string
-  profileGroupField: 'default_group' | 'default_gemini_group'
-  profileModelsField: 'default_models' | 'default_gemini_models' | 'default_vertex_models'
+  // Optional: omit to skip profile-level lookup and always use
+  // fallbackGroup / fallbackModels (vertex-claude uses this so the
+  // Claude group isn't shadowed by an unrelated default_vertex_models).
+  profileGroupField?: 'default_group' | 'default_gemini_group'
+  profileModelsField?: 'default_models' | 'default_gemini_models' | 'default_vertex_models'
 }
 const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
-  { id: 'anthropic', label: 'Anthropic (Claude)', kind: 'text',   type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS, fallbackGroup: 'default', testModel: 'claude-haiku-4-5-20251001', profileGroupField: 'default_group',        profileModelsField: 'default_models' },
-  { id: 'gemini',    label: 'Gemini',              kind: 'text',   type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,    fallbackGroup: 'gemini',  testModel: 'gemini-2.5-flash',              profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
-  { id: 'vertex',    label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,    fallbackGroup: 'gemini',  testModel: 'gemini-2.5-flash',              profileGroupField: 'default_gemini_group', profileModelsField: 'default_vertex_models' },
-  { id: 'azure',     label: 'Azure',               kind: 'azure',  type: CHANNEL_TYPE_AZURE,     fallbackModels: DEFAULT_OPENAI_MODELS,    fallbackGroup: 'openai',  testModel: 'gpt-4o-mini',                   profileGroupField: 'default_group',        profileModelsField: 'default_models' },
+  { id: 'anthropic',     label: 'Anthropic (Claude)',  kind: 'text',   type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS,     fallbackGroup: 'default',        testModel: 'claude-haiku-4-5-20251001',    profileGroupField: 'default_group',        profileModelsField: 'default_models' },
+  { id: 'gemini',        label: 'Gemini',              kind: 'text',   type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,        fallbackGroup: 'gemini',         testModel: 'gemini-2.5-flash',             profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
+  { id: 'vertex',        label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,        fallbackGroup: 'gemini',         testModel: 'gemini-2.5-flash',             profileGroupField: 'default_gemini_group', profileModelsField: 'default_vertex_models' },
+  { id: 'vertex-claude', label: 'Vertex AI (Claude)',  kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_CLAUDE_MODELS, fallbackGroup: 'claude-vertex', testModel: 'claude-sonnet-4-5-20250929' },
+  { id: 'azure',         label: 'Azure',               kind: 'azure',  type: CHANNEL_TYPE_AZURE,     fallbackModels: DEFAULT_OPENAI_MODELS,        fallbackGroup: 'openai',         testModel: 'gpt-4o-mini',                  profileGroupField: 'default_group',        profileModelsField: 'default_models' },
 ]
 
 // resolvePresetGroup / resolvePresetModels pick the batch upload group +
 // models for a preset. Priority: profile-saved value → preset fallback
 // baked into the frontend so the field is never empty.
 function resolvePresetGroup(preset: PresetSpec, profile: RemoteProfile | undefined): string {
+  if (!preset.profileGroupField) return preset.fallbackGroup
   const fromProfile = (profile?.[preset.profileGroupField] || '').trim()
   return fromProfile || preset.fallbackGroup
 }
 function resolvePresetModels(preset: PresetSpec, profile: RemoteProfile | undefined): string {
+  if (!preset.profileModelsField) return preset.fallbackModels
   const fromProfile = (profile?.[preset.profileModelsField] || '').trim()
   return fromProfile || preset.fallbackModels
 }
@@ -2429,13 +2453,13 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                 rows={8}
                 placeholder={'sk-ant-api03-xxxx 220\nsk-ant-api03-yyyy 500 备注文字\n# 井号开头的行会被忽略'}
                 className="w-full border border-gray-300 rounded-md p-2 text-[11px] font-mono resize-y focus:outline-none focus:border-gray-900"
-                disabled={batchPresetID === 'vertex'}
+                disabled={batchPresetID === 'vertex' || batchPresetID === 'vertex-claude'}
               />
               <p className="text-[10px] text-gray-400 mt-1">
                 额度和备注可省。额度写在本地 remote_channel_meta；key 明文只走一次 POST，不落本地。
               </p>
             </div>
-            {batchPresetID === 'vertex' && (
+            {(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude') && (
               <div className="mt-3 space-y-3 border border-dashed border-gray-300 rounded-md p-3 bg-gray-50/50">
                 <p className="text-[11px] text-gray-500">
                   Vertex 走独立通道，绕过 Pending 队列 —— 不会出现在下方"上传队列"，直接创建远端渠道。

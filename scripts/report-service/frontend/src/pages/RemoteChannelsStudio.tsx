@@ -82,7 +82,25 @@ const CHANNEL_TYPE_GEMINI = 24
 const CHANNEL_TYPE_VERTEX = 41
 const CHANNEL_TYPE_AZURE = 3
 
-type PresetID = 'anthropic' | 'gemini' | 'vertex' | 'azure'
+// Anthropic-on-Vertex reuses the same channel_type=41 + SA JSON / API-key
+// flow as regular Vertex, but lands in a distinct upstream group so
+// routing keys point at the Claude family separately from Gemini. It
+// deliberately skips profileGroupField/profileModelsField so the fixed
+// 'claude-vertex' group + Claude model list always apply, regardless of
+// whatever the profile stashes under default_vertex_models.
+const DEFAULT_VERTEX_CLAUDE_MODELS = [
+  'claude-opus-4-7',
+  'claude-sonnet-4-6',
+  'claude-opus-4-6',
+  'claude-haiku-4-5-20251001',
+  'claude-sonnet-4-5-20250929',
+  'claude-opus-4-5-20251101',
+  'claude-opus-4-8',
+  'claude-fable-5',
+  'claude-sonnet-5',
+].join(',')
+
+type PresetID = 'anthropic' | 'gemini' | 'vertex' | 'vertex-claude' | 'azure'
 // `kind` gates the modal's form flow: 'text' presets use the per-line
 // key textarea + pending-queue path; 'vertex' presets swap in a JSON
 // file picker + region input and post directly to remoteVertexCreate;
@@ -95,21 +113,28 @@ type PresetSpec = {
   type: number
   fallbackModels: string
   fallbackGroup: string
-  profileGroupField: 'default_group' | 'default_gemini_group'
-  profileModelsField: 'default_models' | 'default_gemini_models' | 'default_vertex_models'
+  // Optional: when omitted the resolver skips the profile-level lookup
+  // and always uses fallbackGroup / fallbackModels. Used by vertex-claude
+  // so its Claude group/model list can't be shadowed by an admin who set
+  // default_vertex_models for the Gemini variant.
+  profileGroupField?: 'default_group' | 'default_gemini_group'
+  profileModelsField?: 'default_models' | 'default_gemini_models' | 'default_vertex_models'
 }
 const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
-  { id: 'anthropic', label: 'Anthropic (Claude)', kind: 'text',   type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS, fallbackGroup: 'default', profileGroupField: 'default_group',        profileModelsField: 'default_models' },
-  { id: 'gemini',    label: 'Gemini',              kind: 'text',   type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,    fallbackGroup: 'gemini',  profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
-  { id: 'vertex',    label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,    fallbackGroup: 'gemini',  profileGroupField: 'default_gemini_group', profileModelsField: 'default_vertex_models' },
-  { id: 'azure',     label: 'Azure',               kind: 'azure',  type: CHANNEL_TYPE_AZURE,     fallbackModels: DEFAULT_OPENAI_MODELS,    fallbackGroup: 'openai',  profileGroupField: 'default_group',        profileModelsField: 'default_models' },
+  { id: 'anthropic',     label: 'Anthropic (Claude)',  kind: 'text',   type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS,     fallbackGroup: 'default',        profileGroupField: 'default_group',        profileModelsField: 'default_models' },
+  { id: 'gemini',        label: 'Gemini',              kind: 'text',   type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,        fallbackGroup: 'gemini',         profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
+  { id: 'vertex',        label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,        fallbackGroup: 'gemini',         profileGroupField: 'default_gemini_group', profileModelsField: 'default_vertex_models' },
+  { id: 'vertex-claude', label: 'Vertex AI (Claude)',  kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_CLAUDE_MODELS, fallbackGroup: 'claude-vertex' },
+  { id: 'azure',         label: 'Azure',               kind: 'azure',  type: CHANNEL_TYPE_AZURE,     fallbackModels: DEFAULT_OPENAI_MODELS,        fallbackGroup: 'openai',         profileGroupField: 'default_group',        profileModelsField: 'default_models' },
 ]
 
 function resolvePresetGroup(preset: PresetSpec, profile: RemoteProfile | undefined): string {
+  if (!preset.profileGroupField) return preset.fallbackGroup
   const fromProfile = (profile?.[preset.profileGroupField] || '').trim()
   return fromProfile || preset.fallbackGroup
 }
 function resolvePresetModels(preset: PresetSpec, profile: RemoteProfile | undefined): string {
+  if (!preset.profileModelsField) return preset.fallbackModels
   const fromProfile = (profile?.[preset.profileModelsField] || '').trim()
   return fromProfile || preset.fallbackModels
 }
@@ -1190,10 +1215,10 @@ export default function RemoteChannelsStudio() {
                   rows={8}
                   placeholder="sk-... 10&#10;sk-... 20 备注"
                   className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
-                  disabled={batchPresetID === 'vertex'}
+                  disabled={batchPresetID === 'vertex' || batchPresetID === 'vertex-claude'}
                 />
               </div>
-              {batchPresetID === 'vertex' && (
+              {(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude') && (
                 <VertexInputSection
                   region={batchRegion}
                   onRegionChange={setBatchRegion}
@@ -1219,7 +1244,7 @@ export default function RemoteChannelsStudio() {
                 />
               )}
               <p className="text-[11px] text-gray-400">
-                {batchPresetID === 'vertex'
+                {(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude')
                   ? 'Vertex 走独立通道 —— 上传后不进 Pool 队列，直接创建远端渠道。'
                   : batchPresetID === 'azure'
                   ? 'Azure 走独立通道 —— 上传后不进 Pool 队列，直接创建远端渠道。同批 Key 共享同一 base_url + api version。'
@@ -1321,10 +1346,10 @@ export default function RemoteChannelsStudio() {
                   rows={8}
                   placeholder="sk-... 10&#10;sk-... 20 备注"
                   className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
-                  disabled={immPresetID === 'vertex'}
+                  disabled={immPresetID === 'vertex' || immPresetID === 'vertex-claude'}
                 />
               </div>
-              {immPresetID === 'vertex' && (
+              {(immPresetID === 'vertex' || immPresetID === 'vertex-claude') && (
                 <VertexInputSection
                   region={immRegion}
                   onRegionChange={setImmRegion}

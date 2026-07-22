@@ -16,7 +16,7 @@ type Props = {
 // by RemoteChannelsStudio.tsx — same integers, same groups, same fallback
 // model lists — but the two components stay standalone on purpose (remote
 // upload vs local channel insert diverge downstream).
-type PresetID = 'anthropic' | 'openai' | 'azure' | 'gemini' | 'vertex'
+type PresetID = 'anthropic' | 'openai' | 'azure' | 'gemini' | 'vertex' | 'vertex-claude'
 type PresetSpec = {
   id: PresetID
   label: string
@@ -57,12 +57,28 @@ const DEFAULT_GEMINI_MODELS = [
 // upload flow), so the default deployment list mirrors DEFAULT_GEMINI_MODELS.
 const DEFAULT_VERTEX_MODELS = DEFAULT_GEMINI_MODELS
 
+// Anthropic-on-Vertex uses the same channel_type=41 + SA JSON / API-key
+// flow as regular Vertex, but lands in a distinct upstream group so
+// routing keys can point at the Claude family separately from Gemini.
+const DEFAULT_VERTEX_CLAUDE_MODELS = [
+  'claude-opus-4-7',
+  'claude-sonnet-4-6',
+  'claude-opus-4-6',
+  'claude-haiku-4-5-20251001',
+  'claude-sonnet-4-5-20250929',
+  'claude-opus-4-5-20251101',
+  'claude-opus-4-8',
+  'claude-fable-5',
+  'claude-sonnet-5',
+].join(',')
+
 const PRESETS: PresetSpec[] = [
-  { id: 'anthropic', label: 'Anthropic', kind: 'text',   type: 14, fallbackGroup: 'default', fallbackModels: DEFAULT_ANTHROPIC_MODELS },
-  { id: 'openai',    label: 'OpenAI',    kind: 'text',   type: 1,  fallbackGroup: 'openai',  fallbackModels: DEFAULT_OPENAI_MODELS },
-  { id: 'azure',     label: 'Azure',     kind: 'text',   type: 3,  fallbackGroup: 'openai',  fallbackModels: DEFAULT_OPENAI_MODELS },
-  { id: 'gemini',    label: 'Gemini',    kind: 'text',   type: 24, fallbackGroup: 'gemini',  fallbackModels: DEFAULT_GEMINI_MODELS },
-  { id: 'vertex',    label: 'Vertex AI', kind: 'vertex', type: 41, fallbackGroup: 'gemini',  fallbackModels: DEFAULT_VERTEX_MODELS },
+  { id: 'anthropic',     label: 'Anthropic',        kind: 'text',   type: 14, fallbackGroup: 'default',        fallbackModels: DEFAULT_ANTHROPIC_MODELS },
+  { id: 'openai',        label: 'OpenAI',           kind: 'text',   type: 1,  fallbackGroup: 'openai',         fallbackModels: DEFAULT_OPENAI_MODELS },
+  { id: 'azure',         label: 'Azure',            kind: 'text',   type: 3,  fallbackGroup: 'openai',         fallbackModels: DEFAULT_OPENAI_MODELS },
+  { id: 'gemini',        label: 'Gemini',           kind: 'text',   type: 24, fallbackGroup: 'gemini',         fallbackModels: DEFAULT_GEMINI_MODELS },
+  { id: 'vertex',        label: 'Vertex AI',        kind: 'vertex', type: 41, fallbackGroup: 'gemini',         fallbackModels: DEFAULT_VERTEX_MODELS },
+  { id: 'vertex-claude', label: 'Vertex AI (Claude)', kind: 'vertex', type: 41, fallbackGroup: 'claude-vertex', fallbackModels: DEFAULT_VERTEX_CLAUDE_MODELS },
 ]
 
 // Azure only: default API version. Mirrors AZURE_DEFAULT_API_VERSION on the
