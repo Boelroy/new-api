@@ -3116,6 +3116,13 @@ func main() {
 		// recorded" from "known to be free". Set in bulk via the
 		// PATCH .../channels/meta/bulk endpoint.
 		`ALTER TABLE remote_channel_meta ADD COLUMN IF NOT EXISTS unit_price_cny DOUBLE PRECISION`,
+		// Per-channel opt-in for the auto-disable-on-quota loop. When TRUE
+		// and quota_usd is set, the loop flips the remote channel to
+		// status=2 once used_usd >= quota_usd - auto_disable_reserve_usd.
+		// FALSE by default so upgrades don't silently start disabling
+		// existing channels.
+		`ALTER TABLE remote_channel_meta ADD COLUMN IF NOT EXISTS auto_disable BOOLEAN NOT NULL DEFAULT FALSE`,
+		`ALTER TABLE remote_channel_meta ADD COLUMN IF NOT EXISTS auto_disable_reserve_usd DOUBLE PRECISION NOT NULL DEFAULT 0`,
 		// Per-day per-channel downstream sell price. Look up rule for the
 		// profit report: for a given (channel, day) take the row with the
 		// max date ≤ that day — i.e. yesterday's rate carries over until
@@ -3340,6 +3347,7 @@ func main() {
 	startRemotePendingScheduler()
 	startLocalPendingScheduler()
 	startRemoteErrorLogSync()
+	startRemoteAutoDisableLoop()
 	if profitEnabled {
 		startPipiSync()
 		startDownstreamDailyCarryForward()
@@ -3537,6 +3545,12 @@ func main() {
 	// the caller filter in handleRemoteCachedChannels; this endpoint just
 	// refreshes what the filter reads from.
 	remoteOperatorAPI.POST("/remote-newapi/channels/refresh", handleRemoteChannelsRefresh)
+	// Auto-disable-on-quota: global on/off + tick interval. Admin+ can
+	// toggle because this only takes down channels operators have
+	// explicitly opted in (per-channel auto_disable=TRUE flag on
+	// remote_channel_meta); credentials aren't touched.
+	adminAPI.GET("/remote-newapi/auto-disable/config", handleRemoteAutoDisableConfigGet)
+	adminAPI.POST("/remote-newapi/auto-disable/config", handleRemoteAutoDisableConfigSet)
 	// Per-(profile, studio) accept/reject flag for studio-operator key
 	// uploads. Admin can flip these because they're operational (which
 	// studios upload to which pool) rather than credential-adjacent.

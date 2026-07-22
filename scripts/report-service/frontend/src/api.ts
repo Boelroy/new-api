@@ -426,6 +426,8 @@ export type RemoteChannel = {
   downstream_cny?: number | null       // 最新配置的下游单价；null = 未配置
   downstream_cny_date?: string         // 上一次配置的日期 YYYY-MM-DD
   note?: string
+  auto_disable?: boolean               // 到额自动禁用开关
+  auto_disable_reserve_usd?: number    // 到额前保留的缓冲额度（$）
 }
 
 export type RemoteChannelListResponse = {
@@ -483,6 +485,8 @@ export type RemoteChannelUpdateRequest = {
   quota_usd?: number | null
   unit_price_cny?: number | null
   note?: string
+  auto_disable?: boolean
+  auto_disable_reserve_usd?: number
 }
 
 export type RemoteChannelLastHourResponse = {
@@ -789,9 +793,22 @@ export const api = {
     quota_usd?: number
     unit_price_cny?: number
     note?: string
+    auto_disable?: boolean
+    auto_disable_reserve_usd?: number
   }) =>
     request<{ updated: number; failed: number[] }>('/api/remote-newapi/channels/meta/bulk', {
       method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  // Global on/off + tick interval for the auto-disable-on-quota loop.
+  // GET returns current state; POST accepts partial updates.
+  remoteAutoDisableConfigGet: () =>
+    request<{ enabled: boolean; interval_sec: number }>('/api/remote-newapi/auto-disable/config'),
+  remoteAutoDisableConfigSet: (payload: { enabled?: boolean; interval_sec?: number }) =>
+    request<{ enabled: boolean; interval_sec: number }>('/api/remote-newapi/auto-disable/config', {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),

@@ -745,30 +745,34 @@ func handleRemoteProfileDelete(c *gin.Context) {
 // is what we mostly care about here. QuotaUSD/Note come from the local
 // remote_channel_meta table and are merged in on read.
 type remoteChannel struct {
-	ID                 int64    `json:"id"`
-	Name               string   `json:"name"`
-	Type               int      `json:"type"`
-	Status             int      `json:"status"`
-	Group              string   `json:"group"`
-	Tag                string   `json:"tag"`
-	Priority           int64    `json:"priority"`
-	Weight             int64    `json:"weight"`
-	Models             string   `json:"models"`
-	UsedQuota          int64    `json:"used_quota"`
-	CreatedTime        int64    `json:"created_time"`
-	QuotaUSD           *float64 `json:"quota_usd,omitempty"`
-	UnitPriceCNY       *float64 `json:"unit_price_cny,omitempty"`
-	DownstreamCNY      *float64 `json:"downstream_cny,omitempty"`      // latest configured
-	DownstreamCNYDate  string   `json:"downstream_cny_date,omitempty"` // date the latest was set for
-	Note               string   `json:"note,omitempty"`
+	ID                    int64    `json:"id"`
+	Name                  string   `json:"name"`
+	Type                  int      `json:"type"`
+	Status                int      `json:"status"`
+	Group                 string   `json:"group"`
+	Tag                   string   `json:"tag"`
+	Priority              int64    `json:"priority"`
+	Weight                int64    `json:"weight"`
+	Models                string   `json:"models"`
+	UsedQuota             int64    `json:"used_quota"`
+	CreatedTime           int64    `json:"created_time"`
+	QuotaUSD              *float64 `json:"quota_usd,omitempty"`
+	UnitPriceCNY          *float64 `json:"unit_price_cny,omitempty"`
+	DownstreamCNY         *float64 `json:"downstream_cny,omitempty"`      // latest configured
+	DownstreamCNYDate     string   `json:"downstream_cny_date,omitempty"` // date the latest was set for
+	Note                  string   `json:"note,omitempty"`
+	AutoDisable           bool     `json:"auto_disable,omitempty"`
+	AutoDisableReserveUSD float64  `json:"auto_disable_reserve_usd,omitempty"`
 }
 
 // remoteChannelMeta is the local operator-only overlay for a remote channel.
 type remoteChannelMeta struct {
-	QuotaUSD     *float64
-	UnitPriceCNY *float64
-	Note         string
-	UpdatedAt    int64
+	QuotaUSD              *float64
+	UnitPriceCNY          *float64
+	Note                  string
+	AutoDisable           bool
+	AutoDisableReserveUSD float64
+	UpdatedAt             int64
 }
 
 // loadMetaMap fetches operator metadata for a set of channels of one profile.
@@ -786,7 +790,7 @@ func loadMetaMap(profileID int64, channelIDs []int64) (map[int64]remoteChannelMe
 		placeholders = append(placeholders, "$"+strconv.Itoa(i+2))
 		args = append(args, id)
 	}
-	q := `SELECT remote_channel_id, quota_usd, unit_price_cny, note, updated_at
+	q := `SELECT remote_channel_id, quota_usd, unit_price_cny, note, auto_disable, auto_disable_reserve_usd, updated_at
 	      FROM remote_channel_meta
 	      WHERE profile_id=$1 AND remote_channel_id IN (` + strings.Join(placeholders, ",") + `)`
 	rows, err := db.Query(q, args...)
@@ -798,11 +802,18 @@ func loadMetaMap(profileID int64, channelIDs []int64) (map[int64]remoteChannelMe
 		var chID int64
 		var quota, price sql.NullFloat64
 		var note string
+		var autoDisable bool
+		var reserve float64
 		var updatedAt int64
-		if err := rows.Scan(&chID, &quota, &price, &note, &updatedAt); err != nil {
+		if err := rows.Scan(&chID, &quota, &price, &note, &autoDisable, &reserve, &updatedAt); err != nil {
 			return nil, err
 		}
-		m := remoteChannelMeta{Note: note, UpdatedAt: updatedAt}
+		m := remoteChannelMeta{
+			Note:                  note,
+			AutoDisable:           autoDisable,
+			AutoDisableReserveUSD: reserve,
+			UpdatedAt:             updatedAt,
+		}
 		if quota.Valid {
 			v := quota.Float64
 			m.QuotaUSD = &v
@@ -867,7 +878,7 @@ func loadLatestDownstream(profileID int64, channelIDs []int64) (map[int64]struct
 // upsertMeta writes only the fields the caller cared about, leaving the
 // others untouched. Pass nil for a pointer field to preserve the existing
 // value; note is likewise only overwritten when non-empty.
-func upsertMeta(profileID, channelID int64, quotaUSD, unitPriceCNY *float64, note string) error {
+func upsertMeta(profileID, channelID int64, quotaUSD, unitPriceCNY *float64, note string, autoDisable *bool, autoDisableReserveUSD *float64) error {
 	now := time.Now().Unix()
 	// Ensure the row exists first — subsequent updates are then column-scoped.
 	if _, err := db.Exec(
@@ -901,6 +912,28 @@ func upsertMeta(profileID, channelID int64, quotaUSD, unitPriceCNY *float64, not
 			`UPDATE remote_channel_meta SET note=$1, updated_at=$2
 			  WHERE profile_id=$3 AND remote_channel_id=$4`,
 			note, now, profileID, channelID,
+		); err != nil {
+			return err
+		}
+	}
+	if autoDisable != nil {
+		if _, err := db.Exec(
+			`UPDATE remote_channel_meta SET auto_disable=$1, updated_at=$2
+			  WHERE profile_id=$3 AND remote_channel_id=$4`,
+			*autoDisable, now, profileID, channelID,
+		); err != nil {
+			return err
+		}
+	}
+	if autoDisableReserveUSD != nil {
+		v := *autoDisableReserveUSD
+		if v < 0 {
+			v = 0
+		}
+		if _, err := db.Exec(
+			`UPDATE remote_channel_meta SET auto_disable_reserve_usd=$1, updated_at=$2
+			  WHERE profile_id=$3 AND remote_channel_id=$4`,
+			v, now, profileID, channelID,
 		); err != nil {
 			return err
 		}
@@ -1200,6 +1233,8 @@ func handleRemoteFetchChannels(c *gin.Context) {
 					all[i].QuotaUSD = m.QuotaUSD
 					all[i].UnitPriceCNY = m.UnitPriceCNY
 					all[i].Note = m.Note
+					all[i].AutoDisable = m.AutoDisable
+					all[i].AutoDisableReserveUSD = m.AutoDisableReserveUSD
 				}
 			}
 		}
@@ -3151,6 +3186,8 @@ func handleRemoteCachedChannels(c *gin.Context) {
 					all[i].QuotaUSD = m.QuotaUSD
 					all[i].UnitPriceCNY = m.UnitPriceCNY
 					all[i].Note = m.Note
+					all[i].AutoDisable = m.AutoDisable
+					all[i].AutoDisableReserveUSD = m.AutoDisableReserveUSD
 				}
 			}
 		}
@@ -3366,6 +3403,8 @@ func handleRemoteChannelGet(c *gin.Context) {
 			ch.QuotaUSD = m.QuotaUSD
 			ch.UnitPriceCNY = m.UnitPriceCNY
 			ch.Note = m.Note
+			ch.AutoDisable = m.AutoDisable
+			ch.AutoDisableReserveUSD = m.AutoDisableReserveUSD
 		}
 	}
 	if dsMap, err := loadLatestDownstream(profileID, []int64{ch.ID}); err == nil {
@@ -3605,7 +3644,7 @@ func uploadOneKeyToRemote(ctx context.Context, p uploadOneKeyParams) (int64, err
 		return 0, fmt.Errorf("created but %v", err)
 	}
 	if p.QuotaUSD != nil || strings.TrimSpace(p.Note) != "" {
-		_ = upsertMeta(p.ProfileID, channelID, p.QuotaUSD, nil, strings.TrimSpace(p.Note))
+		_ = upsertMeta(p.ProfileID, channelID, p.QuotaUSD, nil, strings.TrimSpace(p.Note), nil, nil)
 	}
 	return channelID, nil
 }
@@ -3665,17 +3704,19 @@ func maskKey(k string) string {
 
 func handleRemoteChannelUpdate(c *gin.Context) {
 	var body struct {
-		ProfileID    int64    `json:"profile_id"`
-		ChannelID    int64    `json:"channel_id"`
-		Name         *string  `json:"name,omitempty"`
-		Tag          *string  `json:"tag,omitempty"`
-		Status       *int     `json:"status,omitempty"`
-		Priority     *int64   `json:"priority,omitempty"`
-		Group        *string  `json:"group,omitempty"`
-		Models       *string  `json:"models,omitempty"`
-		QuotaUSD     *float64 `json:"quota_usd,omitempty"`
-		UnitPriceCNY *float64 `json:"unit_price_cny,omitempty"`
-		Note         *string  `json:"note,omitempty"`
+		ProfileID             int64    `json:"profile_id"`
+		ChannelID             int64    `json:"channel_id"`
+		Name                  *string  `json:"name,omitempty"`
+		Tag                   *string  `json:"tag,omitempty"`
+		Status                *int     `json:"status,omitempty"`
+		Priority              *int64   `json:"priority,omitempty"`
+		Group                 *string  `json:"group,omitempty"`
+		Models                *string  `json:"models,omitempty"`
+		QuotaUSD              *float64 `json:"quota_usd,omitempty"`
+		UnitPriceCNY          *float64 `json:"unit_price_cny,omitempty"`
+		Note                  *string  `json:"note,omitempty"`
+		AutoDisable           *bool    `json:"auto_disable,omitempty"`
+		AutoDisableReserveUSD *float64 `json:"auto_disable_reserve_usd,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -3739,12 +3780,13 @@ func handleRemoteChannelUpdate(c *gin.Context) {
 
 	// Local meta. upsertMeta already writes only the fields we pass in, so
 	// no merge is needed — nil pointers preserve existing values.
-	if body.QuotaUSD != nil || body.UnitPriceCNY != nil || body.Note != nil {
+	if body.QuotaUSD != nil || body.UnitPriceCNY != nil || body.Note != nil ||
+		body.AutoDisable != nil || body.AutoDisableReserveUSD != nil {
 		note := ""
 		if body.Note != nil {
 			note = strings.TrimSpace(*body.Note)
 		}
-		if err := upsertMeta(body.ProfileID, body.ChannelID, body.QuotaUSD, body.UnitPriceCNY, note); err != nil {
+		if err := upsertMeta(body.ProfileID, body.ChannelID, body.QuotaUSD, body.UnitPriceCNY, note, body.AutoDisable, body.AutoDisableReserveUSD); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "save meta: " + err.Error()})
 			return
 		}
@@ -3758,11 +3800,13 @@ func handleRemoteChannelUpdate(c *gin.Context) {
 // set their unit_price_cny" flow.
 func handleRemoteMetaBulkUpdate(c *gin.Context) {
 	var body struct {
-		ProfileID    int64    `json:"profile_id"`
-		ChannelIDs   []int64  `json:"channel_ids"`
-		QuotaUSD     *float64 `json:"quota_usd,omitempty"`
-		UnitPriceCNY *float64 `json:"unit_price_cny,omitempty"`
-		Note         *string  `json:"note,omitempty"`
+		ProfileID             int64    `json:"profile_id"`
+		ChannelIDs            []int64  `json:"channel_ids"`
+		QuotaUSD              *float64 `json:"quota_usd,omitempty"`
+		UnitPriceCNY          *float64 `json:"unit_price_cny,omitempty"`
+		Note                  *string  `json:"note,omitempty"`
+		AutoDisable           *bool    `json:"auto_disable,omitempty"`
+		AutoDisableReserveUSD *float64 `json:"auto_disable_reserve_usd,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -3782,7 +3826,8 @@ func handleRemoteMetaBulkUpdate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("too many channel_ids (max %d)", maxIDs)})
 		return
 	}
-	if body.QuotaUSD == nil && body.UnitPriceCNY == nil && body.Note == nil {
+	if body.QuotaUSD == nil && body.UnitPriceCNY == nil && body.Note == nil &&
+		body.AutoDisable == nil && body.AutoDisableReserveUSD == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
 		return
 	}
@@ -3794,7 +3839,7 @@ func handleRemoteMetaBulkUpdate(c *gin.Context) {
 		if body.Note != nil {
 			note = strings.TrimSpace(*body.Note)
 		}
-		if err := upsertMeta(body.ProfileID, id, body.QuotaUSD, body.UnitPriceCNY, note); err != nil {
+		if err := upsertMeta(body.ProfileID, id, body.QuotaUSD, body.UnitPriceCNY, note, body.AutoDisable, body.AutoDisableReserveUSD); err != nil {
 			log.Printf("[meta-bulk] channel %d: %v", id, err)
 			failed = append(failed, id)
 			continue
@@ -5077,4 +5122,229 @@ func pruneRemoteErrorLogs() {
 	if n, _ := res.RowsAffected(); n > 0 {
 		log.Printf("[error-sync] pruned %d rows older than %s", n, errorLogRetention)
 	}
+}
+
+// ---- Auto-disable-on-quota loop ----
+//
+// For each channel where remote_channel_meta.auto_disable=TRUE and
+// meta.quota_usd is set, and the mirrored used_usd (used_quota / 500000)
+// has climbed to at least quota_usd - auto_disable_reserve_usd, this loop
+// PUTs the remote channel with status=2 (manually disabled). Runs on an
+// independent cadence from the 15-min snapshot loop so operators can turn
+// it off / speed it up without disturbing snapshotting. Once a channel is
+// flipped to status=2 the SQL predicate drops it, so the loop is
+// idempotent even before the next mirror sync catches up.
+
+const (
+	cfgRemoteAutoDisableEnabled     = "remote_auto_disable_enabled"
+	cfgRemoteAutoDisableIntervalSec = "remote_auto_disable_interval_sec"
+
+	remoteAutoDisableIntervalDef = 30
+	remoteAutoDisableIntervalMin = 5
+	remoteAutoDisableIntervalMax = 3600
+)
+
+type remoteAutoDisableConfig struct {
+	Enabled     bool `json:"enabled"`
+	IntervalSec int  `json:"interval_sec"`
+}
+
+func loadRemoteAutoDisableConfig() remoteAutoDisableConfig {
+	out := remoteAutoDisableConfig{
+		Enabled:     false,
+		IntervalSec: remoteAutoDisableIntervalDef,
+	}
+	var v string
+	if err := db.QueryRow(`SELECT value FROM report_config WHERE key=$1`, cfgRemoteAutoDisableEnabled).Scan(&v); err == nil {
+		s := strings.TrimSpace(v)
+		out.Enabled = s == "true" || s == "1"
+	}
+	if err := db.QueryRow(`SELECT value FROM report_config WHERE key=$1`, cfgRemoteAutoDisableIntervalSec).Scan(&v); err == nil {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			out.IntervalSec = n
+		}
+	}
+	if out.IntervalSec < remoteAutoDisableIntervalMin {
+		out.IntervalSec = remoteAutoDisableIntervalMin
+	}
+	if out.IntervalSec > remoteAutoDisableIntervalMax {
+		out.IntervalSec = remoteAutoDisableIntervalMax
+	}
+	return out
+}
+
+func writeRemoteAutoDisableConfig(key, value string) error {
+	now := time.Now().Unix()
+	_, err := db.Exec(
+		`INSERT INTO report_config (key, value, updated_at)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (key) DO UPDATE SET value=$2, updated_at=$3`,
+		key, value, now,
+	)
+	return err
+}
+
+func handleRemoteAutoDisableConfigGet(c *gin.Context) {
+	c.JSON(http.StatusOK, loadRemoteAutoDisableConfig())
+}
+
+func handleRemoteAutoDisableConfigSet(c *gin.Context) {
+	var body struct {
+		Enabled     *bool `json:"enabled,omitempty"`
+		IntervalSec *int  `json:"interval_sec,omitempty"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.Enabled != nil {
+		v := "false"
+		if *body.Enabled {
+			v = "true"
+		}
+		if err := writeRemoteAutoDisableConfig(cfgRemoteAutoDisableEnabled, v); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.IntervalSec != nil {
+		n := *body.IntervalSec
+		if n < remoteAutoDisableIntervalMin {
+			n = remoteAutoDisableIntervalMin
+		}
+		if n > remoteAutoDisableIntervalMax {
+			n = remoteAutoDisableIntervalMax
+		}
+		if err := writeRemoteAutoDisableConfig(cfgRemoteAutoDisableIntervalSec, strconv.Itoa(n)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	c.JSON(http.StatusOK, loadRemoteAutoDisableConfig())
+}
+
+// autoDisableCandidate is one (profile, channel) row that crossed the
+// quota - reserve threshold since the last sync. Kept private to this
+// file — the loop assembles it from the join and never returns it.
+type autoDisableCandidate struct {
+	ProfileID int64
+	ChannelID int64
+	Name      string
+	QuotaUSD  float64
+	ReserveUSD float64
+	UsedUSD   float64
+}
+
+// usedQuotaPerUSD mirrors new-api's Channel.UsedQuota unit: 500000 raw
+// units = $1. Matches the ch.used_quota / 500000 conversion the studio
+// UI already uses. Kept as a float64 constant so the SQL predicate below
+// stays type-clean.
+const usedQuotaPerUSD = 500000.0
+
+func startRemoteAutoDisableLoop() {
+	log.Printf("[remote-auto-disable] loop starting")
+	go func() {
+		// Stagger startup so we don't collide with the snapshot loop's
+		// first tick.
+		time.Sleep(45 * time.Second)
+		for {
+			cfg := loadRemoteAutoDisableConfig()
+			if cfg.Enabled {
+				runRemoteAutoDisableOnce()
+			}
+			time.Sleep(time.Duration(cfg.IntervalSec) * time.Second)
+		}
+	}()
+}
+
+// runRemoteAutoDisableOnce reads qualifying rows out of the local mirror
+// and flips each remote channel to status=2. Uses the same GET-then-PUT
+// dance as handleRemoteChannelUpdate so unknown remote fields survive the
+// round trip.
+func runRemoteAutoDisableOnce() {
+	// The `used_quota` on remote_channel_current is raw units. Compare
+	// against (quota_usd - reserve_usd) * 500000 so the math stays in
+	// integer space server-side.
+	rows, err := db.Query(`
+		SELECT m.profile_id, m.remote_channel_id, c.name,
+		       m.quota_usd, m.auto_disable_reserve_usd, c.used_quota
+		  FROM remote_channel_meta m
+		  JOIN remote_channel_current c
+		    ON c.profile_id = m.profile_id
+		   AND c.remote_channel_id = m.remote_channel_id
+		 WHERE m.auto_disable = TRUE
+		   AND m.quota_usd IS NOT NULL
+		   AND m.quota_usd > 0
+		   AND c.status = 1
+		   AND c.used_quota::float8 >= (m.quota_usd - m.auto_disable_reserve_usd) * $1
+	`, usedQuotaPerUSD)
+	if err != nil {
+		log.Printf("[remote-auto-disable] query candidates: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	byProfile := make(map[int64][]autoDisableCandidate)
+	for rows.Next() {
+		var cand autoDisableCandidate
+		var usedRaw int64
+		if err := rows.Scan(&cand.ProfileID, &cand.ChannelID, &cand.Name,
+			&cand.QuotaUSD, &cand.ReserveUSD, &usedRaw); err != nil {
+			log.Printf("[remote-auto-disable] scan: %v", err)
+			continue
+		}
+		cand.UsedUSD = float64(usedRaw) / usedQuotaPerUSD
+		byProfile[cand.ProfileID] = append(byProfile[cand.ProfileID], cand)
+	}
+	if len(byProfile) == 0 {
+		return
+	}
+
+	for profileID, cands := range byProfile {
+		host, userID, token, err := loadRemoteProfileByID(profileID)
+		if err != nil {
+			log.Printf("[remote-auto-disable] load profile %d: %v", profileID, err)
+			continue
+		}
+		for _, cand := range cands {
+			if err := autoDisableRemoteChannel(host, userID, token, cand); err != nil {
+				log.Printf("[remote-auto-disable] profile=%d channel=%d (%s): %v",
+					cand.ProfileID, cand.ChannelID, cand.Name, err)
+				continue
+			}
+			log.Printf("[remote-auto-disable] disabled profile=%d channel=%d (%s) used=$%.4f quota=$%.4f reserve=$%.4f",
+				cand.ProfileID, cand.ChannelID, cand.Name,
+				cand.UsedUSD, cand.QuotaUSD, cand.ReserveUSD)
+			// Reflect the flip in the local mirror immediately so a
+			// second tick before the next snapshot doesn't re-target
+			// the same row.
+			if _, err := db.Exec(
+				`UPDATE remote_channel_current SET status=2, updated_at=$1
+				  WHERE profile_id=$2 AND remote_channel_id=$3`,
+				time.Now().Unix(), cand.ProfileID, cand.ChannelID,
+			); err != nil {
+				log.Printf("[remote-auto-disable] mirror update: %v", err)
+			}
+		}
+	}
+}
+
+func autoDisableRemoteChannel(host string, userID int64, token string, cand autoDisableCandidate) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	data, err := remoteDoJSON(ctx, http.MethodGet, host,
+		"/api/channel/"+strconv.FormatInt(cand.ChannelID, 10),
+		token, userID, nil, nil)
+	if err != nil {
+		return fmt.Errorf("fetch current: %w", err)
+	}
+	var current map[string]any
+	if err := json.Unmarshal(data, &current); err != nil {
+		return fmt.Errorf("decode current: %w", err)
+	}
+	current["status"] = 2
+	if _, err := remoteDoJSON(ctx, http.MethodPut, host, "/api/channel/", token, userID, nil, current); err != nil {
+		return fmt.Errorf("put: %w", err)
+	}
+	return nil
 }

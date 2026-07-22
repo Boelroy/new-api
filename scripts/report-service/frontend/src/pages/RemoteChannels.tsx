@@ -586,12 +586,51 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   const [rowPriority, setRowPriority] = useState('')
   const [rowQuotaUSD, setRowQuotaUSD] = useState('')
   const [rowNote, setRowNote] = useState('')
+  // Per-channel auto-disable toggle + buffer. Only meaningful when
+  // quota_usd is set; the loop skips rows with quota_usd IS NULL.
+  const [rowAutoDisable, setRowAutoDisable] = useState(false)
+  const [rowAutoDisableReserveUSD, setRowAutoDisableReserveUSD] = useState('')
   const [rowBusy, setRowBusy] = useState(false)
   const [rowErr, setRowErr] = useState<string | null>(null)
 
   // Per-row test result (channel_id -> pretty message).
   const [testMsg, setTestMsg] = useState<Record<number, string>>({})
   const [testingID, setTestingID] = useState<number | null>(null)
+
+  // Global on/off for the auto-disable-on-quota loop (scoped to admin+
+  // by the backend). Per-channel opt-in still lives on the row edit
+  // modal — this just gates whether the loop runs at all.
+  const [autoDisableEnabled, setAutoDisableEnabled] = useState(false)
+  const [autoDisableIntervalSec, setAutoDisableIntervalSec] = useState('30')
+  const [autoDisableSaving, setAutoDisableSaving] = useState(false)
+  const [autoDisableMsg, setAutoDisableMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  const loadAutoDisableConfig = useCallback(async () => {
+    try {
+      const res = await api.remoteAutoDisableConfigGet()
+      setAutoDisableEnabled(!!res.enabled)
+      setAutoDisableIntervalSec(String(res.interval_sec))
+    } catch (e) {
+      console.warn('auto-disable config load failed', e)
+    }
+  }, [])
+
+  useEffect(() => { void loadAutoDisableConfig() }, [loadAutoDisableConfig])
+
+  const saveAutoDisableConfig = async (patch: { enabled?: boolean; interval_sec?: number }) => {
+    setAutoDisableSaving(true)
+    setAutoDisableMsg(null)
+    try {
+      const res = await api.remoteAutoDisableConfigSet(patch)
+      setAutoDisableEnabled(!!res.enabled)
+      setAutoDisableIntervalSec(String(res.interval_sec))
+      setAutoDisableMsg({ ok: true, text: '已保存' })
+    } catch (e: any) {
+      setAutoDisableMsg({ ok: false, text: e?.message || String(e) })
+    } finally {
+      setAutoDisableSaving(false)
+    }
+  }
 
   const reloadProfiles = useCallback(async () => {
     setLoadingProfiles(true)
@@ -1424,6 +1463,12 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setRowPriority(String(ch.priority ?? ''))
     setRowQuotaUSD(ch.quota_usd != null ? String(ch.quota_usd) : '')
     setRowNote(ch.note ?? '')
+    setRowAutoDisable(!!ch.auto_disable)
+    setRowAutoDisableReserveUSD(
+      ch.auto_disable_reserve_usd != null && ch.auto_disable_reserve_usd > 0
+        ? String(ch.auto_disable_reserve_usd)
+        : ''
+    )
     setRowErr(null)
     setRowOpen(true)
   }
@@ -1450,6 +1495,16 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     }
     if ((rowNote ?? '') !== (rowChannel.note ?? '')) {
       patch.note = rowNote
+    }
+    if (rowAutoDisable !== !!rowChannel.auto_disable) {
+      patch.auto_disable = rowAutoDisable
+    }
+    const reserveNum = rowAutoDisableReserveUSD.trim()
+      ? parseFloat(rowAutoDisableReserveUSD.trim())
+      : 0
+    const prevReserve = rowChannel.auto_disable_reserve_usd ?? 0
+    if (!isNaN(reserveNum) && reserveNum >= 0 && reserveNum !== prevReserve) {
+      patch.auto_disable_reserve_usd = reserveNum
     }
     setRowBusy(true)
     try {
@@ -1740,7 +1795,59 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           )}
         </section>
 
-        {/* Fetch result */}
+        {/* 到额自动禁用循环：全局开关 + 频率。仅 admin+ 可见/可改
+            （后端路由挂在 adminAPI 上）。开关是全局的；具体是否作用
+            到某个 channel 还要看这个 channel 的 auto_disable 勾选 +
+            额度是否设置。 */}
+        <section className="bg-white border border-gray-200 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">
+              到额自动禁用（全局）
+            </h2>
+            {autoDisableMsg && (
+              <span className={`text-[11px] ${autoDisableMsg.ok ? 'text-emerald-600' : 'text-rose-600'}`}>
+                {autoDisableMsg.text}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center flex-wrap gap-4 text-sm">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={autoDisableEnabled}
+                disabled={autoDisableSaving}
+                onChange={e => void saveAutoDisableConfig({ enabled: e.target.checked })}
+                className="rounded border-gray-300"
+              />
+              <span className="text-gray-800">启用循环</span>
+            </label>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-gray-500">检查间隔</span>
+              <input
+                type="number"
+                min={5}
+                max={3600}
+                step={5}
+                value={autoDisableIntervalSec}
+                onChange={e => setAutoDisableIntervalSec(e.target.value)}
+                onBlur={() => {
+                  const n = parseInt(autoDisableIntervalSec.trim(), 10)
+                  if (!isNaN(n) && n >= 5 && n <= 3600) {
+                    void saveAutoDisableConfig({ interval_sec: n })
+                  }
+                }}
+                disabled={autoDisableSaving}
+                className="w-24 border border-gray-300 rounded-md px-2 py-1 text-sm tabular-nums focus:outline-none focus:border-gray-900"
+              />
+              <span className="text-[11px] text-gray-400">秒（5–3600）</span>
+            </div>
+          </div>
+          <p className="text-[10px] text-gray-400 mt-2 leading-relaxed">
+            仅对勾选了「到额自动禁用」<em>且</em>已设置额度的渠道生效。
+            触发条件：<code className="font-mono">已用 ≥ 额度 − 保留额</code>，命中后把远端 status 置为 2（手动禁用）。
+            循环独立于 15 分钟快照，可随时开关。
+          </p>
+        </section>
         {fetchErr && (
           <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
             {fetchErr}
@@ -2636,6 +2743,33 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                   className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
                 />
               </Field>
+              <div className="border-t border-gray-100 pt-3">
+                <label className="flex items-center gap-2 text-sm text-gray-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={rowAutoDisable}
+                    onChange={e => setRowAutoDisable(e.target.checked)}
+                    className="rounded border-gray-300"
+                  />
+                  <span>到额自动禁用（本地存储）</span>
+                </label>
+                <p className="text-[10px] text-gray-400 mt-1 leading-relaxed">
+                  勾选后，后台自动循环会在 <code className="font-mono">used_usd ≥ 额度 − 保留额</code> 时把远端 status 改为 2。
+                  额度未设置时本行不生效。
+                </p>
+                <Field label="保留额 USD（缓冲；到 额度 − 保留额 就下）">
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={rowAutoDisableReserveUSD}
+                    onChange={e => setRowAutoDisableReserveUSD(e.target.value)}
+                    placeholder="0"
+                    disabled={!rowAutoDisable}
+                    className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-gray-900 disabled:bg-gray-50 disabled:text-gray-400"
+                  />
+                </Field>
+              </div>
               {rowErr && <p className="text-xs text-rose-600">{rowErr}</p>}
             </div>
             <div className="mt-5 flex justify-end gap-2">
