@@ -3546,6 +3546,11 @@ func main() {
 	// the caller filter in handleRemoteCachedChannels; this endpoint just
 	// refreshes what the filter reads from.
 	remoteOperatorAPI.POST("/remote-newapi/channels/refresh", handleRemoteChannelsRefresh)
+	// Per-channel usage over an arbitrary time range. Studio operators
+	// are server-side scoped to their own channels (tag + uploaded_by),
+	// so a caller can't peek into other studios by passing arbitrary
+	// channel_ids. Admin+ callers see the full profile.
+	remoteOperatorAPI.POST("/remote-newapi/channels/usage-range", handleRemoteChannelUsageRange)
 	// Auto-disable-on-quota: global on/off + tick interval. Admin+ can
 	// toggle because this only takes down channels operators have
 	// explicitly opted in (per-channel auto_disable=TRUE flag on

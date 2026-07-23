@@ -496,6 +496,16 @@ export type RemoteChannelLastHourResponse = {
   err_rpm?: Record<string, number> // channel_id -> ERROR requests / min (60s window, LogTypeError=5)
 }
 
+// Per-channel usage over an arbitrary [start, end] window. `data` is
+// channel_id -> quota (raw units, 500000 = $1). `total_used_usd` is the
+// sum already converted to USD so the UI doesn't have to.
+export type RemoteChannelUsageRangeResponse = {
+  data: Record<string, number>
+  total_used_usd: number
+  start_timestamp: number
+  end_timestamp: number
+}
+
 // Row in the scheduled-upload queue. `key_masked` is "…" + last 8 chars;
 // the plaintext key never leaves the server.
 export type PendingKey = {
@@ -989,6 +999,21 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ profile_id: profileID, channel_ids: channelIDs }),
+    }),
+
+  // Per-channel usage over an arbitrary window. Omit channel_ids to have
+  // the backend resolve the caller's owned set (studio operator only
+  // sees their own uploads; admin sees the whole profile).
+  remoteChannelUsageRange: (payload: {
+    profile_id: number
+    start_timestamp: number
+    end_timestamp: number
+    channel_ids?: number[]
+  }) =>
+    request<RemoteChannelUsageRangeResponse>('/api/remote-newapi/channels/usage-range', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     }),
 
   // Categorised error breakdown for one channel over the past N seconds

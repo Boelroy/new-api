@@ -469,6 +469,24 @@ export default function RemoteChannelsStudio() {
   const [immAzureBaseUrl, setImmAzureBaseUrl] = useState('')
   const [immAzureApiVersion, setImmAzureApiVersion] = useState(AZURE_DEFAULT_API_VERSION)
 
+  // Key usage list. Two YYYY-MM-DD date inputs (interpreted in local
+  // time, so "2026-07-23" = local 00:00 that day). Default range = today
+  // 00:00 → now. Empty end input keeps end = "now" and updates on refresh.
+  const todayLocalYMD = () => {
+    const d = new Date()
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const dd = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${dd}`
+  }
+  const [usageStart, setUsageStart] = useState<string>(todayLocalYMD())
+  const [usageEnd, setUsageEnd] = useState<string>(todayLocalYMD())
+  const [usageData, setUsageData] = useState<Record<string, number>>({}) // channel_id → raw quota
+  const [usageTotal, setUsageTotal] = useState<number>(0)
+  const [usageLoading, setUsageLoading] = useState(false)
+  const [usageErr, setUsageErr] = useState<string | null>(null)
+  const [usageFetchedAt, setUsageFetchedAt] = useState<number>(0)
+
   // Read a FileList → VertexFile[]. On parse failure we skip the bad
   // file and surface a message; partial success is fine and matches how
   // the backend treats the batch (per-item error results).
@@ -561,6 +579,68 @@ export default function RemoteChannelsStudio() {
       setRefreshingRemote(false)
     }
   }, [selectedID, refreshingRemote, reloadChannels])
+
+  // Convert YYYY-MM-DD (local) → epoch seconds at 00:00 local. For the
+  // end field we push to 24:00 (start of next day) so the window
+  // includes activity all through the end date.
+  const ymdToLocalEpoch = (ymd: string, endOfDay: boolean): number | null => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null
+    const [y, m, d] = ymd.split('-').map(n => parseInt(n, 10))
+    const base = new Date(y, m - 1, d, 0, 0, 0, 0)
+    if (isNaN(base.getTime())) return null
+    return Math.floor(base.getTime() / 1000) + (endOfDay ? 86400 : 0)
+  }
+
+  const loadUsage = useCallback(async () => {
+    if (!selectedID) {
+      setUsageData({})
+      setUsageTotal(0)
+      return
+    }
+    const startEpoch = ymdToLocalEpoch(usageStart, false)
+    if (startEpoch == null) {
+      setUsageErr('起始日期格式错误')
+      return
+    }
+    // End = min(next-day-00:00 of usageEnd, now). Selecting today means
+    // "up to this moment", which is what operators expect.
+    const endEpochRaw = ymdToLocalEpoch(usageEnd, true)
+    if (endEpochRaw == null) {
+      setUsageErr('结束日期格式错误')
+      return
+    }
+    const nowEpoch = Math.floor(Date.now() / 1000)
+    const endEpoch = Math.min(endEpochRaw, nowEpoch)
+    if (endEpoch <= startEpoch) {
+      setUsageErr('结束日期必须不早于起始日期')
+      return
+    }
+    setUsageErr(null)
+    setUsageLoading(true)
+    try {
+      const res = await api.remoteChannelUsageRange({
+        profile_id: selectedID,
+        start_timestamp: startEpoch,
+        end_timestamp: endEpoch,
+      })
+      setUsageData(res.data || {})
+      setUsageTotal(res.total_used_usd || 0)
+      setUsageFetchedAt(Date.now())
+    } catch (e: any) {
+      setUsageErr(e?.message || String(e))
+    } finally {
+      setUsageLoading(false)
+    }
+  }, [selectedID, usageStart, usageEnd])
+
+  // First load per profile + when date inputs change. Wait until the
+  // channel list has been fetched so the table renders channel names
+  // alongside the usage numbers.
+  useEffect(() => {
+    if (!selectedID) return
+    void loadUsage()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedID, usageStart, usageEnd])
 
   useEffect(() => {
     void reloadPending()
@@ -1056,6 +1136,128 @@ export default function RemoteChannelsStudio() {
                     )
                   })
                 )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Key 用量统计（按时间窗口）。数据源是远端 /api/log/stat?type=2
+            的窗口 quota，不是快照差值，所以是精确的实际消耗。默认当天
+            00:00 → 现在，改日期即刻重新拉。 */}
+        <div className="bg-white border border-gray-200 rounded-xl">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 gap-3 flex-wrap">
+            <div>
+              <div className="text-sm font-medium text-gray-900">Key 用量统计</div>
+              <div className="text-[11px] text-gray-400 mt-0.5">
+                窗口内实际消耗（USD）。默认当天。
+                {usageFetchedAt > 0 && (
+                  <span> · 更新于 {new Date(usageFetchedAt).toLocaleTimeString()}</span>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <label className="flex items-center gap-1 text-[11px] text-gray-500">
+                起
+                <input
+                  type="date"
+                  value={usageStart}
+                  onChange={e => setUsageStart(e.target.value)}
+                  className="border border-gray-300 rounded-md px-2 py-1 text-xs focus:outline-none focus:border-gray-900"
+                />
+              </label>
+              <label className="flex items-center gap-1 text-[11px] text-gray-500">
+                止
+                <input
+                  type="date"
+                  value={usageEnd}
+                  onChange={e => setUsageEnd(e.target.value)}
+                  className="border border-gray-300 rounded-md px-2 py-1 text-xs focus:outline-none focus:border-gray-900"
+                />
+              </label>
+              <button
+                onClick={() => {
+                  const t = todayLocalYMD()
+                  setUsageStart(t)
+                  setUsageEnd(t)
+                }}
+                className="text-[11px] text-gray-600 border border-gray-300 rounded-md px-2 py-1 hover:bg-gray-50"
+              >
+                今天
+              </button>
+              <button
+                onClick={() => void loadUsage()}
+                disabled={usageLoading}
+                className="text-xs text-white bg-gray-900 rounded-md px-2 py-1 hover:opacity-85 disabled:opacity-50"
+              >
+                {usageLoading ? '拉取中…' : '刷新'}
+              </button>
+            </div>
+          </div>
+          {usageErr && (
+            <div className="px-4 py-2 text-[11px] text-rose-600 border-b border-gray-100 bg-rose-50/40">
+              {usageErr}
+            </div>
+          )}
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500">
+                <tr>
+                  <th className="text-left px-4 py-2 font-medium">名称</th>
+                  <th className="text-left px-4 py-2 font-medium">Group</th>
+                  <th className="text-right px-4 py-2 font-medium">窗口内消耗 (USD)</th>
+                  <th className="text-right px-4 py-2 font-medium" title="上传时设置的额度上限">额度</th>
+                  <th className="text-right px-4 py-2 font-medium" title="窗口内消耗 / 额度">占比</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(() => {
+                  // Rows are driven by the channel list (so operators see
+                  // all their channels even if usage is 0), sorted by
+                  // window usage desc, with a total row at the bottom.
+                  const rows = channels.map(ch => {
+                    const raw = usageData[String(ch.id)] || 0
+                    const usedUSD = raw / 500000
+                    const quotaUSD = ch.quota_usd ?? 0
+                    const pct = quotaUSD > 0 ? Math.min(100, (usedUSD / quotaUSD) * 100) : null
+                    return { ch, usedUSD, quotaUSD, pct }
+                  })
+                  rows.sort((a, b) => b.usedUSD - a.usedUSD)
+                  if (rows.length === 0) {
+                    return (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-6 text-center text-xs text-gray-400">
+                          {usageLoading ? '加载中…' : '暂无渠道'}
+                        </td>
+                      </tr>
+                    )
+                  }
+                  return (
+                    <>
+                      {rows.map(r => (
+                        <tr key={r.ch.id} className="border-t border-gray-100">
+                          <td className="px-4 py-2 font-mono text-[11px]">{r.ch.name}</td>
+                          <td className="px-4 py-2 text-[11px] text-gray-600">{r.ch.group || '—'}</td>
+                          <td className="px-4 py-2 text-right tabular-nums text-[11px]">
+                            {r.usedUSD > 0 ? `$${r.usedUSD.toFixed(4)}` : <span className="text-gray-300">$0</span>}
+                          </td>
+                          <td className="px-4 py-2 text-right tabular-nums text-[11px]">
+                            {r.quotaUSD > 0 ? `$${r.quotaUSD.toFixed(2)}` : <span className="text-gray-300">—</span>}
+                          </td>
+                          <td className="px-4 py-2 text-right tabular-nums text-[11px]">
+                            {r.pct != null ? `${r.pct.toFixed(1)}%` : <span className="text-gray-300">—</span>}
+                          </td>
+                        </tr>
+                      ))}
+                      <tr className="border-t-2 border-gray-200 bg-gray-50">
+                        <td className="px-4 py-2 text-xs font-medium text-gray-700" colSpan={2}>合计</td>
+                        <td className="px-4 py-2 text-right tabular-nums text-xs font-medium">
+                          ${usageTotal.toFixed(4)}
+                        </td>
+                        <td className="px-4 py-2" colSpan={2}></td>
+                      </tr>
+                    </>
+                  )
+                })()}
               </tbody>
             </table>
           </div>

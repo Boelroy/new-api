@@ -4323,6 +4323,244 @@ func handleRemoteChannelLastHour(c *gin.Context) {
 	})
 }
 
+// ---- Handler: per-channel usage over an arbitrary time range ----
+//
+// Studio-operator-visible list: "what did I spend on each of my keys
+// today?" (with today as the default window). The frontend passes a
+// start_ts + end_ts and optionally an explicit channel_ids list — when
+// omitted we resolve the caller's owned channels the same way
+// handleRemoteCachedChannels does, so we never leak channels outside
+// their studio + uploaded_by scope.
+//
+// Data source is the remote's /api/log/stat?type=2 (matches
+// handleRemoteChannelLastHour), which returns cumulative quota for the
+// requested window. Per-channel result is cached for 60s so back-to-back
+// refreshes don't refire the fanout, and the fanout itself is capped at
+// 8 concurrent /api/log/stat calls so a profile with hundreds of
+// channels doesn't stampede the remote.
+
+type usageRangeEntry struct {
+	quota   int64
+	fetched time.Time
+}
+
+var (
+	usageRangeCache   = make(map[string]usageRangeEntry)
+	usageRangeCacheMu sync.Mutex
+)
+
+const (
+	usageRangeTTL             = 60 * time.Second
+	usageRangeMaxConcurrent   = 8
+	usageRangeMaxChannels     = 500
+	usageRangeMaxWindowSec    = 90 * 24 * 3600 // 90 days
+)
+
+func handleRemoteChannelUsageRange(c *gin.Context) {
+	var body struct {
+		ProfileID  int64   `json:"profile_id"`
+		StartTS    int64   `json:"start_timestamp"`
+		EndTS      int64   `json:"end_timestamp"`
+		ChannelIDs []int64 `json:"channel_ids,omitempty"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.ProfileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	if body.EndTS <= 0 {
+		body.EndTS = time.Now().Unix()
+	}
+	if body.StartTS <= 0 || body.StartTS >= body.EndTS {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "start_timestamp must be > 0 and < end_timestamp"})
+		return
+	}
+	if body.EndTS-body.StartTS > usageRangeMaxWindowSec {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "window too large (max 90 days)"})
+		return
+	}
+
+	// Resolve the caller's channel scope. Studio operators are locked to
+	// their own uploads; admin callers see everything on the profile.
+	scopedIDs, err := resolveUsageRangeChannelIDs(c, body.ProfileID, body.ChannelIDs)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(scopedIDs) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"data":            map[string]int64{},
+			"total_used_usd":  0.0,
+			"start_timestamp": body.StartTS,
+			"end_timestamp":   body.EndTS,
+		})
+		return
+	}
+	if len(scopedIDs) > usageRangeMaxChannels {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("too many channels (max %d)", usageRangeMaxChannels)})
+		return
+	}
+
+	host, userID, token, err := loadRemoteProfileByID(body.ProfileID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
+	defer cancel()
+
+	// Sort so the cache key + response ordering is stable across calls.
+	sort.Slice(scopedIDs, func(i, j int) bool { return scopedIDs[i] < scopedIDs[j] })
+
+	results := make(map[int64]int64, len(scopedIDs))
+	var resultsMu sync.Mutex
+	sem := make(chan struct{}, usageRangeMaxConcurrent)
+	var wg sync.WaitGroup
+
+	now := time.Now()
+	for _, chID := range scopedIDs {
+		cacheKey := fmt.Sprintf("%d:%d:%d:%d", body.ProfileID, chID, body.StartTS, body.EndTS)
+		usageRangeCacheMu.Lock()
+		entry, ok := usageRangeCache[cacheKey]
+		usageRangeCacheMu.Unlock()
+		if ok && now.Sub(entry.fetched) < usageRangeTTL {
+			resultsMu.Lock()
+			results[chID] = entry.quota
+			resultsMu.Unlock()
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(chID int64, cacheKey string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			idStr := strconv.FormatInt(chID, 10)
+			q := url.Values{}
+			q.Set("type", "2")
+			q.Set("channel", idStr)
+			q.Set("start_timestamp", strconv.FormatInt(body.StartTS, 10))
+			q.Set("end_timestamp", strconv.FormatInt(body.EndTS, 10))
+			data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/stat", token, userID, q, nil)
+			if err != nil {
+				// One failure shouldn't blank the whole table; record 0.
+				resultsMu.Lock()
+				results[chID] = 0
+				resultsMu.Unlock()
+				return
+			}
+			var stat struct {
+				Quota int64 `json:"quota"`
+			}
+			if err := json.Unmarshal(data, &stat); err != nil {
+				resultsMu.Lock()
+				results[chID] = 0
+				resultsMu.Unlock()
+				return
+			}
+			resultsMu.Lock()
+			results[chID] = stat.Quota
+			resultsMu.Unlock()
+			usageRangeCacheMu.Lock()
+			usageRangeCache[cacheKey] = usageRangeEntry{quota: stat.Quota, fetched: now}
+			usageRangeCacheMu.Unlock()
+		}(chID, cacheKey)
+	}
+	wg.Wait()
+
+	dataOut := make(map[string]int64, len(results))
+	var totalRaw int64
+	for id, q := range results {
+		dataOut[strconv.FormatInt(id, 10)] = q
+		totalRaw += q
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"data":            dataOut,
+		"total_used_usd":  float64(totalRaw) / usedQuotaPerUSD,
+		"start_timestamp": body.StartTS,
+		"end_timestamp":   body.EndTS,
+	})
+}
+
+// resolveUsageRangeChannelIDs enforces studio-operator scoping. If the
+// caller supplied channel_ids we intersect them with the operator's
+// owned set (same filter as handleRemoteCachedChannels); admin callers
+// get whatever they asked for, or all channels on the profile if they
+// asked for none.
+func resolveUsageRangeChannelIDs(c *gin.Context, profileID int64, requested []int64) ([]int64, error) {
+	if !callerNeedsRemoteStudioLock(c) {
+		if len(requested) > 0 {
+			return requested, nil
+		}
+		rows, err := db.Query(
+			`SELECT remote_channel_id FROM remote_channel_current WHERE profile_id=$1`,
+			profileID,
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		out := make([]int64, 0)
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				return nil, err
+			}
+			out = append(out, id)
+		}
+		return out, nil
+	}
+	studio := callerStudio(c)
+	if studio == "" {
+		return nil, errors.New("your account has no studio binding; ask an admin to bind one before viewing usage")
+	}
+	q := `SELECT DISTINCT c.remote_channel_id
+	        FROM remote_channel_current c
+	        JOIN remote_pending_key p
+	          ON p.profile_id = c.profile_id
+	         AND p.remote_channel_id = c.remote_channel_id
+	       WHERE c.profile_id = $1
+	         AND p.tag = $2
+	         AND p.remote_channel_id > 0`
+	args := []any{profileID, studio}
+	if v, ok := c.Get("user_id"); ok {
+		if uid, ok := v.(int64); ok && uid > 0 {
+			q += " AND (p.uploaded_by = 0 OR p.uploaded_by = $3)"
+			args = append(args, uid)
+		}
+	}
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	owned := make(map[int64]struct{})
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		owned[id] = struct{}{}
+	}
+	if len(requested) == 0 {
+		out := make([]int64, 0, len(owned))
+		for id := range owned {
+			out = append(out, id)
+		}
+		return out, nil
+	}
+	out := make([]int64, 0, len(requested))
+	for _, id := range requested {
+		if _, ok := owned[id]; ok {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
 // ---- Handler: per-channel error breakdown ----
 
 // errorBreakdownTTL — cache the categorised counts a little longer than
