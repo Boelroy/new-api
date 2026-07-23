@@ -418,6 +418,10 @@ export default function RemoteChannelsStudio() {
 
   const [batchOpen, setBatchOpen] = useState(false)
   const [batchPrefix, setBatchPrefix] = useState('')
+  // Date segment prepended to the channel name. Defaults to today when the
+  // modal opens (see openBatch) but is editable — an operator uploading
+  // yesterday's keys can backdate the tag so the batch groups together.
+  const [batchDatePrefix, setBatchDatePrefix] = useState('')
   const [batchGroup, setBatchGroup] = useState('default')
   const [batchModels, setBatchModels] = useState(DEFAULT_ANTHROPIC_MODELS)
   const [batchPresetID, setBatchPresetID] = useState<PresetID>('anthropic')
@@ -431,6 +435,7 @@ export default function RemoteChannelsStudio() {
   // mental model. Keep them side by side and let the operator pick.
   const [immOpen, setImmOpen] = useState(false)
   const [immPrefix, setImmPrefix] = useState('')
+  const [immDatePrefix, setImmDatePrefix] = useState('')
   const [immGroup, setImmGroup] = useState('default')
   const [immModels, setImmModels] = useState(DEFAULT_ANTHROPIC_MODELS)
   const [immPresetID, setImmPresetID] = useState<PresetID>('anthropic')
@@ -577,6 +582,10 @@ export default function RemoteChannelsStudio() {
     // can still edit it (e.g. append -alpha / -beta) but the studio
     // stays visible.
     setBatchPrefix(userStudio)
+    // Seed the date segment with today; operators can still backdate an
+    // upload (e.g. keys they already staged yesterday) so the resulting
+    // channel names group with that day's batch downstream.
+    setBatchDatePrefix(todayYYYYMMDD())
     const initialPreset = CHANNEL_TYPE_PRESETS[0]
     setBatchPresetID(initialPreset.id)
     setBatchGroup(resolvePresetGroup(initialPreset, p))
@@ -598,7 +607,11 @@ export default function RemoteChannelsStudio() {
     if (!batchPrefix.trim()) return setBatchErr('中间段不能为空')
     if (!batchModels.trim()) return setBatchErr('models 不能为空')
     const preset = CHANNEL_TYPE_PRESETS.find(p => p.id === batchPresetID)
-    const fullNamePrefix = todayYYYYMMDD() + '-' + batchPrefix.trim()
+    // Empty date input falls back to today so the field never produces a
+    // dangling leading dash. Anything the operator types is passed
+    // through unchanged — we don't validate YYYYMMDD shape.
+    const datePrefix = batchDatePrefix.trim() || todayYYYYMMDD()
+    const fullNamePrefix = datePrefix + '-' + batchPrefix.trim()
 
     if (preset?.kind === 'vertex') {
       const vertexItems: (
@@ -747,6 +760,7 @@ export default function RemoteChannelsStudio() {
   const openImmediate = () => {
     const p = profiles.find(x => x.id === selectedID)
     setImmPrefix(userStudio)
+    setImmDatePrefix(todayYYYYMMDD())
     const initialPreset = CHANNEL_TYPE_PRESETS[0]
     setImmPresetID(initialPreset.id)
     setImmGroup(resolvePresetGroup(initialPreset, p))
@@ -768,7 +782,8 @@ export default function RemoteChannelsStudio() {
     if (!immPrefix.trim()) return setImmErr('中间段不能为空')
     if (!immModels.trim()) return setImmErr('models 不能为空')
     const preset = CHANNEL_TYPE_PRESETS.find(p => p.id === immPresetID)
-    const fullNamePrefix = todayYYYYMMDD() + '-' + immPrefix.trim()
+    const immDate = immDatePrefix.trim() || todayYYYYMMDD()
+    const fullNamePrefix = immDate + '-' + immPrefix.trim()
 
     if (preset?.kind === 'vertex') {
       const vertexItems: (
@@ -1147,10 +1162,16 @@ export default function RemoteChannelsStudio() {
             <div className="space-y-3">
               <div>
                 <label className="block text-[11px] text-gray-500 mb-1">
-                  名字中间段（最终 = {todayYYYYMMDD()}-&lt;你填&gt;-&lt;key末8&gt;-&lt;hash8&gt;）
+                  名字中间段（最终 = &lt;日期&gt;-&lt;你填&gt;-&lt;key末8&gt;-&lt;hash8&gt;）
                 </label>
                 <div className="flex items-center gap-1">
-                  <span className="text-[11px] text-gray-400 font-mono whitespace-nowrap">{todayYYYYMMDD()}-</span>
+                  <input
+                    value={batchDatePrefix}
+                    onChange={e => setBatchDatePrefix(e.target.value)}
+                    placeholder={todayYYYYMMDD()}
+                    className="w-24 border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900 tabular-nums"
+                  />
+                  <span className="text-[11px] text-gray-400 font-mono">-</span>
                   <input
                     value={batchPrefix}
                     onChange={e => setBatchPrefix(e.target.value)}
@@ -1282,10 +1303,16 @@ export default function RemoteChannelsStudio() {
             <div className="space-y-3">
               <div>
                 <label className="block text-[11px] text-gray-500 mb-1">
-                  名字中间段（最终 = {todayYYYYMMDD()}-&lt;你填&gt;-&lt;key末8&gt;-&lt;hash8&gt;）
+                  名字中间段（最终 = &lt;日期&gt;-&lt;你填&gt;-&lt;key末8&gt;-&lt;hash8&gt;）
                 </label>
                 <div className="flex items-center gap-1">
-                  <span className="text-[11px] text-gray-400 font-mono whitespace-nowrap">{todayYYYYMMDD()}-</span>
+                  <input
+                    value={immDatePrefix}
+                    onChange={e => setImmDatePrefix(e.target.value)}
+                    placeholder={todayYYYYMMDD()}
+                    className="w-24 border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900 tabular-nums"
+                  />
+                  <span className="text-[11px] text-gray-400 font-mono">-</span>
                   <input
                     value={immPrefix}
                     onChange={e => setImmPrefix(e.target.value)}

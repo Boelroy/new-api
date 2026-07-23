@@ -532,6 +532,10 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   // Batch upload keys modal.
   const [batchOpen, setBatchOpen] = useState(false)
   const [batchPrefix, setBatchPrefix] = useState('')
+  // Editable date segment prepended to the channel name. Seeded to
+  // today in openBatch; operators can backdate an upload without
+  // reaching for the DB.
+  const [batchDatePrefix, setBatchDatePrefix] = useState('')
   const [batchGroup, setBatchGroup] = useState('default')
   const [batchTag, setBatchTag] = useState('')
   const [batchPriority, setBatchPriority] = useState('')
@@ -1213,7 +1217,11 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     // types the "middle" segment of the name — the final channel name
     // becomes  YYYYMMDD-<middle>-<key-tail>-<hash>.
     const p = profiles.find(x => x.id === selectedID)
-    setBatchPrefix('')  // "middle" segment only; date auto-prepended before submit
+    setBatchPrefix('')  // "middle" segment only; date is a separate field
+    // Seed the date segment with today so most uploads just accept the
+    // default; the operator can still backdate an upload from the
+    // adjacent input.
+    setBatchDatePrefix(todayYYYYMMDD())
     // Reset preset selector to Anthropic; the user picks Gemini
     // manually after opening if they want it.
     const initialPreset = CHANNEL_TYPE_PRESETS[0]
@@ -1250,7 +1258,10 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     if (!batchPrefix.trim()) return setBatchErr('name_prefix is required')
     if (!batchModels.trim()) return setBatchErr('models is required')
     const preset = CHANNEL_TYPE_PRESETS.find(p => p.id === batchPresetID)
-    const fullNamePrefix = todayYYYYMMDD() + '-' + batchPrefix.trim()
+    // Empty date falls back to today. Anything the operator types is
+    // passed through as-is — no shape validation on the string.
+    const datePrefix = batchDatePrefix.trim() || todayYYYYMMDD()
+    const fullNamePrefix = datePrefix + '-' + batchPrefix.trim()
 
     // Vertex takes a fundamentally different input (JSON files or API
     // keys + region). It bypasses both the pending queue and the sync
@@ -2430,9 +2441,15 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           >
             <h3 className="text-sm font-semibold text-gray-900 mb-3">批量上 key 到远端 new-api</h3>
             <div className="grid grid-cols-2 gap-3 mb-3">
-              <Field label={`名字中间段（最终 = ${todayYYYYMMDD()}-<你填>-<key末8>-<hash8>）`}>
+              <Field label="名字中间段（最终 = <日期>-<你填>-<key末8>-<hash8>）">
                 <div className="flex items-center gap-1.5">
-                  <span className="text-[11px] text-gray-400 font-mono whitespace-nowrap">{todayYYYYMMDD()}-</span>
+                  <input
+                    value={batchDatePrefix}
+                    onChange={e => setBatchDatePrefix(e.target.value)}
+                    placeholder={todayYYYYMMDD()}
+                    className="w-24 border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900 tabular-nums"
+                  />
+                  <span className="text-[11px] text-gray-400 font-mono">-</span>
                   <input
                     value={batchPrefix}
                     onChange={e => setBatchPrefix(e.target.value)}
