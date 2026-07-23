@@ -17,11 +17,14 @@ import (
 // report_config['default_fx_rate'] has been configured.
 const defaultFXRate = 6.79
 
-// anthropicChannelTypesSQL filters the profit report to channels that serve
-// Claude in newapi's constants:
-//   14 = Anthropic direct
-//   33 = AWS Bedrock (serving Claude)
-const anthropicChannelTypesSQL = "(14, 33)"
+// Profit is scoped by *downstream pricing configuration*, not by channel
+// type. Any (channel, group) row whose group has an entry in
+// report_downstream_pricing (or a per-day override in
+// report_downstream_daily) contributes to profit; groups with no
+// configured discount are silently skipped in the step1/step2 loops. This
+// used to be a hardcoded channel-type filter for Claude only; expanding
+// it to cover OpenAI Official, Gemini, etc. is handled purely by
+// configuring downstream pricing for the relevant token groups.
 
 // getDefaultFXRate reads the configurable default from report_config and
 // returns the hardcoded fallback if unset or malformed.
@@ -550,7 +553,6 @@ func handleProfitDaily(c *gin.Context) {
 	}
 
 	missingChIDs := map[int]bool{}
-	missingGroups := map[string]bool{}
 
 	daily := map[string]*ProfitDaily{}
 	byKey := map[int]*ProfitByKey{}
@@ -598,11 +600,15 @@ func handleProfitDaily(c *gin.Context) {
 		return v
 	}
 
-	// Step 1 — non-pipi: revenue + cost both anchored on System 1's used_usd
+	// Step 1 — non-pipi: revenue + cost both anchored on System 1's used_usd.
+	// Groups without a configured downstream price are silently dropped: the
+	// profit report is scoped to what has been priced, not to what has
+	// traffic. Missing per-channel upstream prices (unit_price_cny) still
+	// surface via MissingPricing.ChannelIDs so operators can fix them.
 	for _, r := range step1 {
 		dis, dok := getDiscount(r.tokenGroup, r.date)
 		if !dok {
-			missingGroups[r.tokenGroup] = true
+			continue
 		}
 		var upP float64
 		if r.upPrice.Valid {
@@ -639,11 +645,12 @@ func handleProfitDaily(c *gin.Context) {
 		bumpTagBucket(tb, r.channelID)
 	}
 
-	// Step 2 — pipi revenue side (downstream group lives in System 1's logs)
+	// Step 2 — pipi revenue side (downstream group lives in System 1's logs).
+	// Same scoping rule as step 1: unpriced groups are dropped.
 	for _, r := range step2 {
 		dis, dok := getDiscount(r.tokenGroup, r.date)
 		if !dok {
-			missingGroups[r.tokenGroup] = true
+			continue
 		}
 		revUSD := r.revenueUSD * dis
 
@@ -829,9 +836,9 @@ func handleProfitDaily(c *gin.Context) {
 	for id := range missingChIDs {
 		summary.MissingPricing.ChannelIDs = append(summary.MissingPricing.ChannelIDs, id)
 	}
-	for g := range missingGroups {
-		summary.MissingPricing.Groups = append(summary.MissingPricing.Groups, g)
-	}
+	// MissingPricing.Groups is retained on the response struct for wire
+	// compatibility but is no longer populated: unpriced groups are dropped
+	// upstream in the step1/step2 loops rather than surfaced as "misconfigured".
 
 	c.JSON(http.StatusOK, summary)
 }
@@ -1171,7 +1178,6 @@ func loadStep1(startDate, endDate string) ([]step1Row, error) {
 		LEFT JOIN report_key_quotas q ON q.channel_id = r.channel_id
 		WHERE LEFT(r.hour,10) BETWEEN $1 AND $2
 		  AND COALESCE(c.tag,'') <> 'pipi'
-		  AND c.type IN ` + anthropicChannelTypesSQL + `
 		GROUP BY LEFT(r.hour,10), r.channel_id, COALESCE(r.channel_name,''),
 		         COALESCE(c.tag,''), COALESCE(r."group",''), q.unit_price_cny
 	`
@@ -1198,7 +1204,6 @@ func loadStep2(startDate, endDate string) ([]step2Row, error) {
 		JOIN channels c ON c.id = r.channel_id
 		WHERE LEFT(r.hour,10) BETWEEN $1 AND $2
 		  AND COALESCE(c.tag,'') = 'pipi'
-		  AND c.type IN ` + anthropicChannelTypesSQL + `
 		GROUP BY LEFT(r.hour,10), COALESCE(r."group",'')
 	`
 	rows, err := db.Query(q, startDate, endDate)
