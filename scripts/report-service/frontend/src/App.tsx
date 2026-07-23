@@ -84,7 +84,7 @@ export default function App() {
         <Route path="/profit" element={<RoleGate min={ROLE_SUPER_ADMIN}><Profit /></RoleGate>} />
         <Route path="/keys" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_PROJECT_ADMIN}><KeyCapacity /></RoleGate>} />
         <Route path="/allkeys" element={<AllKeys />} />
-        <Route path="/tester" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_TESTER || r === ROLE_STUDIO_OPERATOR || r === ROLE_PROJECT_ADMIN}><KeyTester /></RoleGate>} />
+        <Route path="/tester" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_TESTER || r === ROLE_STUDIO_OPERATOR || r === ROLE_REMOTE_STUDIO_OPERATOR || r === ROLE_PROJECT_ADMIN}><KeyTester /></RoleGate>} />
         <Route path="/cache" element={<RoleGate min={ROLE_ADMIN}><CacheReport /></RoleGate>} />
         <Route path="/testing" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
         <Route path="/testing/:projectId" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />

@@ -3426,15 +3426,16 @@ func main() {
 	adminAPI.POST("/keys/pricing", handleSaveKeyPricing)
 	adminAPI.POST("/keys/pricing/bulk", handleBulkSaveKeyPricing)
 	adminAPI.GET("/detect/models", handleDetectModels)
-	// Key Tester: admin+, tester (role=5), studio_operator (role=2), and
-	// project_admin (role=7). Tester is scoped to Key Tester + Provider
-	// Testing (see the testingAPI group below); studio_operator additionally
-	// gets Key Tester as a horizontal utility for the batch-upload flow they
-	// own; project_admin owns the Key Capacity + Key Tester surfaces.
+	// Key Tester: admin+, tester (role=5), studio_operator (role=2),
+	// remote_studio_operator (role=3), and project_admin (role=7). Tester
+	// is scoped to Key Tester + Provider Testing (see the testingAPI group
+	// below); both studio-operator flavors get Key Tester as a horizontal
+	// utility for the batch-upload flow they own; project_admin owns the
+	// Key Capacity + Key Tester surfaces.
 	api.POST("/keys/test", func(c *gin.Context) {
 		roleAny, _ := c.Get("role")
 		role, _ := roleAny.(int)
-		if role >= minAdminRole || role == minTesterRole || role == minStudioOperatorRole || role == minProjectAdminRole {
+		if role >= minAdminRole || role == minTesterRole || role == minStudioOperatorRole || role == minRemoteStudioOperatorRole || role == minProjectAdminRole {
 			c.Next()
 			return
 		}
