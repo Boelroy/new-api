@@ -51,6 +51,7 @@ export default function Profit() {
   const [ddsNewDiscount, setDdsNewDiscount] = useState('')
   const [ddsNewNote, setDdsNewNote] = useState('')
   const [ddsSaving, setDdsSaving] = useState(false)
+  const [ddsExpanded, setDdsExpanded] = useState(false)
 
   // Remote per-profile per-day downstream discounts.
   const [rdsRows, setRdsRows] = useState<{ profile_id: number; date: string; discount: number; note: string }[]>([])
@@ -959,14 +960,23 @@ export default function Profit() {
           changes with a fixed effective date so historical profit stays
           consistent instead of re-costing after every price bump. */}
       <div className="bg-white border border-gray-200 rounded-xl mt-4">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+        <button
+          type="button"
+          onClick={() => setDdsExpanded(v => !v)}
+          className={`w-full flex items-center justify-between px-4 py-3 text-left ${ddsExpanded ? 'border-b border-gray-100' : ''}`}
+        >
           <div>
             <div className="text-sm font-semibold">下游分段价格历史</div>
             <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">
               Per-group per-day discount · 每天自动从前一日 carry-forward · 手动改此表覆盖当日
             </div>
           </div>
-        </div>
+          <span className={`text-xs ${ddsExpanded ? 'text-emerald-600' : 'text-gray-400'}`}>
+            {ddsExpanded ? '▾' : '▸'}
+          </span>
+        </button>
+        {ddsExpanded && (
+          <>
         <div className="p-4 border-b border-gray-100 flex flex-wrap items-end gap-3">
           <div>
             <label className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">Group</label>
@@ -1053,6 +1063,8 @@ export default function Profit() {
             </tbody>
           </table>
         </div>
+          </>
+        )}
       </div>
 
       {/* Remote per-profile per-day downstream discount. Rows are looked
