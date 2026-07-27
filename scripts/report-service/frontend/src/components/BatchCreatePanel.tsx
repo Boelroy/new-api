@@ -26,7 +26,6 @@ type PresetSpec = {
   fallbackModels: string
 }
 const DEFAULT_ANTHROPIC_MODELS = [
-  'claude-sonnet-5',
   'claude-opus-4-8',
   'claude-opus-4-7',
   'claude-sonnet-4-6',
@@ -34,6 +33,9 @@ const DEFAULT_ANTHROPIC_MODELS = [
   'claude-haiku-4-5-20251001',
   'claude-sonnet-4-5-20250929',
   'claude-opus-4-5-20251101',
+  'claude-fable-5',
+  'claude-sonnet-5',
+  'claude-opus-5',
 ].join(',')
 const DEFAULT_OPENAI_MODELS = [
   'gpt-5',
@@ -85,6 +87,11 @@ const PRESETS: PresetSpec[] = [
 // backend so batch-created channels don't drift from admin-UI ones.
 const AZURE_DEFAULT_API_VERSION = '2025-04-01-preview'
 
+// Default value for the Vertex Deployment Region input. Written to
+// channels.other; the JSON-map form works for both the Gemini and
+// Anthropic-on-Vertex adaptors so we don't split per preset.
+const VERTEX_REGION_DEFAULT = '{"default":"global"}'
+
 // One parsed Service Account JSON in the Vertex upload UI. Files are
 // parsed on selection so JSON validation errors surface before submit.
 type VertexFile = { name: string; json: unknown; quotaUSD: number }
@@ -115,11 +122,14 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   const [modelsDirty, setModelsDirty] = useState(false)
   const [groupDirty, setGroupDirty] = useState(false)
   // Vertex-only state. Region is the newapi channel.other value — either a
-  // bare region string or a JSON model→region map. Defaults to "global" so
-  // multi-region Gemini deployments work without extra config. Files are
-  // pre-parsed on selection to reject invalid JSON before submit and to
-  // ship each SA JSON straight to the backend without a re-read.
-  const [region, setRegion] = useState('global')
+  // bare region string or a JSON model→region map. Every vertex preset
+  // defaults to the JSON map form '{"default":"global"}' because the
+  // Anthropic-on-Vertex adaptor upstream expects a map keyed by model,
+  // and the Gemini adaptor tolerates the same shape. Files are pre-parsed
+  // on selection to reject invalid JSON before submit and to ship each
+  // SA JSON straight to the backend without a re-read.
+  const [region, setRegion] = useState(VERTEX_REGION_DEFAULT)
+  const [regionDirty, setRegionDirty] = useState(false)
   const [vertexFiles, setVertexFiles] = useState<VertexFile[]>([])
   // vertexKeyMode selects the Vertex auth flavor written to
   // channels.settings.vertex_key_type — 'json' (default) uploads Service
@@ -187,6 +197,9 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
     }
     if (!groupDirty) {
       setGroup(preset.fallbackGroup)
+    }
+    if (!regionDirty) {
+      setRegion(VERTEX_REGION_DEFAULT)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [presetID, modelsCfg])
@@ -276,7 +289,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
     // The backend stores it verbatim in channels.key (a TEXT column) and
     // stamps channels.settings.vertex_key_type per the mode.
     if (preset.kind === 'vertex') {
-      baseDefaults.other = region.trim() || 'global'
+      baseDefaults.other = region.trim() || VERTEX_REGION_DEFAULT
       let channels: { key: string; quota_usd: number }[]
       if (vertexKeyMode === 'api_key') {
         baseDefaults.settings = '{"vertex_key_type":"api_key"}'
@@ -610,12 +623,12 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
             </label>
             <input
               value={region}
-              onChange={e => setRegion(e.target.value)}
-              placeholder="global"
+              onChange={e => { setRegion(e.target.value); setRegionDirty(true) }}
+              placeholder={VERTEX_REGION_DEFAULT}
               className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900"
             />
             <p className="text-[10px] text-gray-400 mt-1">
-              输入部署区域或 JSON 映射：<code className="font-mono">{'{"default": "us-central1", "claude-3-5-sonnet-20240620": "europe-west1"}'}</code>。默认 <code className="font-mono">global</code>。写进 channels.other，本批次共用。
+              输入部署区域或 JSON 映射：<code className="font-mono">{'{"default": "us-central1", "claude-3-5-sonnet-20240620": "europe-west1"}'}</code>。默认 <code className="font-mono">{VERTEX_REGION_DEFAULT}</code>。写进 channels.other，本批次共用。
             </p>
           </div>
           {vertexKeyMode === 'json' ? (
