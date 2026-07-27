@@ -19,7 +19,6 @@ import { readRememberedProfileID, writeRememberedProfileID } from '../lib/rememb
 // contract for the operator, not the security boundary.
 
 const DEFAULT_ANTHROPIC_MODELS = [
-  'claude-sonnet-5',
   'claude-opus-4-8',
   'claude-opus-4-7',
   'claude-sonnet-4-6',
@@ -28,6 +27,8 @@ const DEFAULT_ANTHROPIC_MODELS = [
   'claude-sonnet-4-5-20250929',
   'claude-opus-4-5-20251101',
   'claude-fable-5',
+  'claude-sonnet-5',
+  'claude-opus-5',
 ].join(',')
 
 const DEFAULT_GEMINI_MODELS = [
@@ -53,9 +54,10 @@ const DEFAULT_GEMINI_MODELS = [
 // a different set can still override via default_vertex_models.
 const DEFAULT_VERTEX_MODELS = DEFAULT_GEMINI_MODELS
 
-// Azure hosts the OpenAI family. Since RemoteChannelsStudio doesn't have an
-// OpenAI preset (OpenAI keys don't run through the studio pipeline), the
-// list is inlined here rather than promoted to a shared constant.
+// Fallback model list for the native OpenAI preset (channel_type=1) AND
+// the Azure preset (channel_type=3), which hosts the same model family.
+// Profiles can override per-preset via default_openai_models /
+// default_models.
 const DEFAULT_OPENAI_MODELS = [
   'gpt-5',
   'gpt-5-mini',
@@ -72,11 +74,13 @@ const DEFAULT_OPENAI_MODELS = [
 // ones created through the admin UI.
 const AZURE_DEFAULT_API_VERSION = '2025-04-01-preview'
 
-// Channel type integers from newapi's constant/channel.go — 3 = Azure,
-// 14 = Anthropic, 24 = Gemini, 41 = Vertex AI. Anthropic/Gemini flow through
-// remotePendingEnqueue; Vertex and Azure each have their own bypass endpoint
-// (remoteVertexCreate / remoteAzureCreate) because per-batch base_url +
-// other + settings don't fit the pending schema.
+// Channel type integers from newapi's constant/channel.go — 1 = OpenAI,
+// 3 = Azure, 14 = Anthropic, 24 = Gemini, 41 = Vertex AI. OpenAI /
+// Anthropic / Gemini flow through remotePendingEnqueue; Vertex and Azure
+// each have their own bypass endpoint (remoteVertexCreate /
+// remoteAzureCreate) because per-batch base_url + other + settings don't
+// fit the pending schema.
+const CHANNEL_TYPE_OPENAI = 1
 const CHANNEL_TYPE_ANTHROPIC = 14
 const CHANNEL_TYPE_GEMINI = 24
 const CHANNEL_TYPE_VERTEX = 41
@@ -100,7 +104,7 @@ const DEFAULT_VERTEX_CLAUDE_MODELS = [
   'claude-sonnet-5',
 ].join(',')
 
-type PresetID = 'anthropic' | 'gemini' | 'vertex' | 'vertex-claude' | 'azure'
+type PresetID = 'anthropic' | 'openai' | 'gemini' | 'vertex' | 'vertex-claude' | 'azure'
 // `kind` gates the modal's form flow: 'text' presets use the per-line
 // key textarea + pending-queue path; 'vertex' presets swap in a JSON
 // file picker + region input and post directly to remoteVertexCreate;
@@ -117,11 +121,12 @@ type PresetSpec = {
   // and always uses fallbackGroup / fallbackModels. Used by vertex-claude
   // so its Claude group/model list can't be shadowed by an admin who set
   // default_vertex_models for the Gemini variant.
-  profileGroupField?: 'default_group' | 'default_gemini_group'
-  profileModelsField?: 'default_models' | 'default_gemini_models' | 'default_vertex_models'
+  profileGroupField?: 'default_group' | 'default_gemini_group' | 'default_openai_group'
+  profileModelsField?: 'default_models' | 'default_gemini_models' | 'default_vertex_models' | 'default_openai_models'
 }
 const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
   { id: 'anthropic',     label: 'Anthropic (Claude)',  kind: 'text',   type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS,     fallbackGroup: 'default',        profileGroupField: 'default_group',        profileModelsField: 'default_models' },
+  { id: 'openai',        label: 'OpenAI',              kind: 'text',   type: CHANNEL_TYPE_OPENAI,    fallbackModels: DEFAULT_OPENAI_MODELS,        fallbackGroup: 'openai',         profileGroupField: 'default_openai_group', profileModelsField: 'default_openai_models' },
   { id: 'gemini',        label: 'Gemini',              kind: 'text',   type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,        fallbackGroup: 'gemini',         profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
   { id: 'vertex',        label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,        fallbackGroup: 'gemini',         profileGroupField: 'default_gemini_group', profileModelsField: 'default_vertex_models' },
   { id: 'vertex-claude', label: 'Vertex AI (Claude)',  kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_CLAUDE_MODELS, fallbackGroup: 'claude-vertex' },

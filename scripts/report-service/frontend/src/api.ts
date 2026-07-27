@@ -392,6 +392,11 @@ export type RemoteProfile = {
   // suffix), so a separate default list is cleaner than reusing the
   // Gemini one. Empty ⇒ frontend falls back to a hard-coded default.
   default_vertex_models?: string
+  // Preloaded into the batch-upload group + models fields when the OpenAI
+  // preset (channel_type=1) is active. Empty ⇒ frontend falls back to the
+  // built-in 'openai' group / DEFAULT_OPENAI_MODELS.
+  default_openai_group?: string
+  default_openai_models?: string
   pool_interval_sec?: number  // pool refill cadence (seconds)
   pool_batch_size?: number    // ceiling for how many keys the pool refill uploads per tick
   auto_mode?: boolean         // when true scheduler sizes batch against live RPM
@@ -696,6 +701,8 @@ export const api = {
     default_group?: string
     default_gemini_group?: string
     default_gemini_models?: string
+    default_openai_group?: string
+    default_openai_models?: string
     pool_interval_sec?: number
     pool_batch_size?: number
     auto_mode?: boolean
@@ -719,6 +726,8 @@ export const api = {
       default_group?: string
       default_gemini_group?: string
       default_gemini_models?: string
+      default_openai_group?: string
+      default_openai_models?: string
       pool_interval_sec?: number
       pool_batch_size?: number
       auto_mode?: boolean

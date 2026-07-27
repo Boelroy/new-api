@@ -27,7 +27,6 @@ const STATUS_CLS: Record<number, string> = {
 }
 
 const DEFAULT_ANTHROPIC_MODELS = [
-  'claude-sonnet-5',
   'claude-opus-4-8',
   'claude-opus-4-7',
   'claude-sonnet-4-6',
@@ -36,6 +35,8 @@ const DEFAULT_ANTHROPIC_MODELS = [
   'claude-sonnet-4-5-20250929',
   'claude-opus-4-5-20251101',
   'claude-fable-5',
+  'claude-sonnet-5',
+  'claude-opus-5',
 ].join(',')
 
 const DEFAULT_GEMINI_MODELS = [
@@ -61,9 +62,9 @@ const DEFAULT_GEMINI_MODELS = [
 // default_vertex_models when needed.
 const DEFAULT_VERTEX_MODELS = DEFAULT_GEMINI_MODELS
 
-// Azure hosts the OpenAI family. This surface doesn't otherwise expose
-// OpenAI (no OpenAI preset), so the model list is inlined here rather
-// than promoted to a shared constant.
+// OpenAI native channel (channel_type=1) + Azure (which hosts the same
+// model family) share the same fallback model list. Profiles may still
+// override per-preset via default_openai_models / default_models.
 const DEFAULT_OPENAI_MODELS = [
   'gpt-5',
   'gpt-5-mini',
@@ -77,10 +78,12 @@ const DEFAULT_OPENAI_MODELS = [
 
 const AZURE_DEFAULT_API_VERSION = '2025-04-01-preview'
 
-// Channel type integers from newapi constant/channel.go — 3 = Azure,
-// 14 = Anthropic, 24 = Gemini, 41 = Vertex AI. Anthropic/Gemini flow
-// through handleRemoteChannelCreate (text presets); Vertex hits
-// handleVertexChannelCreate; Azure hits handleAzureChannelCreate.
+// Channel type integers from newapi constant/channel.go — 1 = OpenAI,
+// 3 = Azure, 14 = Anthropic, 24 = Gemini, 41 = Vertex AI. OpenAI /
+// Anthropic / Gemini flow through handleRemoteChannelCreate (text
+// presets); Vertex hits handleVertexChannelCreate; Azure hits
+// handleAzureChannelCreate.
+const CHANNEL_TYPE_OPENAI = 1
 const CHANNEL_TYPE_ANTHROPIC = 14
 const CHANNEL_TYPE_GEMINI = 24
 const CHANNEL_TYPE_VERTEX = 41
@@ -109,7 +112,7 @@ const DEFAULT_VERTEX_CLAUDE_MODELS = [
 // (default_group for anthropic, default_gemini_group for gemini) with a
 // hardcoded fallback so the field still works when a profile hasn't set
 // its own preference.
-type PresetID = 'anthropic' | 'gemini' | 'vertex' | 'vertex-claude' | 'azure'
+type PresetID = 'anthropic' | 'openai' | 'gemini' | 'vertex' | 'vertex-claude' | 'azure'
 type PresetSpec = {
   id: PresetID
   label: string
@@ -121,11 +124,12 @@ type PresetSpec = {
   // Optional: omit to skip profile-level lookup and always use
   // fallbackGroup / fallbackModels (vertex-claude uses this so the
   // Claude group isn't shadowed by an unrelated default_vertex_models).
-  profileGroupField?: 'default_group' | 'default_gemini_group'
-  profileModelsField?: 'default_models' | 'default_gemini_models' | 'default_vertex_models'
+  profileGroupField?: 'default_group' | 'default_gemini_group' | 'default_openai_group'
+  profileModelsField?: 'default_models' | 'default_gemini_models' | 'default_vertex_models' | 'default_openai_models'
 }
 const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
   { id: 'anthropic',     label: 'Anthropic (Claude)',  kind: 'text',   type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS,     fallbackGroup: 'default',        testModel: 'claude-haiku-4-5-20251001',    profileGroupField: 'default_group',        profileModelsField: 'default_models' },
+  { id: 'openai',        label: 'OpenAI',              kind: 'text',   type: CHANNEL_TYPE_OPENAI,    fallbackModels: DEFAULT_OPENAI_MODELS,        fallbackGroup: 'openai',         testModel: 'gpt-4o-mini',                  profileGroupField: 'default_openai_group', profileModelsField: 'default_openai_models' },
   { id: 'gemini',        label: 'Gemini',              kind: 'text',   type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,        fallbackGroup: 'gemini',         testModel: 'gemini-2.5-flash',             profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
   { id: 'vertex',        label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,        fallbackGroup: 'gemini',         testModel: 'gemini-2.5-flash',             profileGroupField: 'default_gemini_group', profileModelsField: 'default_vertex_models' },
   { id: 'vertex-claude', label: 'Vertex AI (Claude)',  kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_CLAUDE_MODELS, fallbackGroup: 'claude-vertex', testModel: 'claude-sonnet-4-5-20250929' },
@@ -499,6 +503,8 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   const [formDefaultGroup, setFormDefaultGroup] = useState('')
   const [formDefaultGeminiGroup, setFormDefaultGeminiGroup] = useState('')
   const [formDefaultGeminiModels, setFormDefaultGeminiModels] = useState('')
+  const [formDefaultOpenAIGroup, setFormDefaultOpenAIGroup] = useState('')
+  const [formDefaultOpenAIModels, setFormDefaultOpenAIModels] = useState('')
   // Pool throttle lives on the profile but is edited from the upload
   // queue panel (right where the operator watches keys stream through).
   // `pool_dirty` guards against clobbering an unsaved edit if the
@@ -702,6 +708,8 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setFormDefaultGroup('default')
     setFormDefaultGeminiGroup('')
     setFormDefaultGeminiModels('')
+    setFormDefaultOpenAIGroup('openai')
+    setFormDefaultOpenAIModels('')
     setVisAllowlist(new Set())
     setVisOperators([])
     setFormErr(null)
@@ -744,6 +752,8 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setFormDefaultGroup(p.default_group || '')
     setFormDefaultGeminiGroup(p.default_gemini_group || '')
     setFormDefaultGeminiModels(p.default_gemini_models || '')
+    setFormDefaultOpenAIGroup(p.default_openai_group || '')
+    setFormDefaultOpenAIModels(p.default_openai_models || '')
     setVisAllowlist(new Set())
     setVisOperators([])
     setFormErr(null)
@@ -785,6 +795,8 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           default_group: formDefaultGroup.trim(),
           default_gemini_group: formDefaultGeminiGroup.trim(),
           default_gemini_models: formDefaultGeminiModels.trim(),
+          default_openai_group: formDefaultOpenAIGroup.trim(),
+          default_openai_models: formDefaultOpenAIModels.trim(),
         })
         targetID = created.id
         await reloadProfiles()
@@ -797,6 +809,8 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           default_group: formDefaultGroup.trim(),
           default_gemini_group: formDefaultGeminiGroup.trim(),
           default_gemini_models: formDefaultGeminiModels.trim(),
+          default_openai_group: formDefaultOpenAIGroup.trim(),
+          default_openai_models: formDefaultOpenAIModels.trim(),
         }
         if (formHost.trim()) patch.host = formHost.trim()
         if (formToken.trim()) patch.access_token = formToken.trim()
@@ -2882,6 +2896,14 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                     className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
                   />
                 </Field>
+                <Field label="默认 Group (OpenAI)">
+                  <input
+                    value={formDefaultOpenAIGroup}
+                    onChange={e => setFormDefaultOpenAIGroup(e.target.value)}
+                    placeholder="例如 openai（留空则用 'openai'）"
+                    className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
+                  />
+                </Field>
                 <Field label="默认 Models (Anthropic, 逗号分隔)">
                   <textarea
                     value={formDefaultModels}
@@ -2897,6 +2919,15 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                     onChange={e => setFormDefaultGeminiModels(e.target.value)}
                     rows={3}
                     placeholder="gemini-2.5-flash,gemini-2.5-pro,...（留空则用内置默认）"
+                    className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
+                  />
+                </Field>
+                <Field label="默认 Models (OpenAI, 逗号分隔)">
+                  <textarea
+                    value={formDefaultOpenAIModels}
+                    onChange={e => setFormDefaultOpenAIModels(e.target.value)}
+                    rows={3}
+                    placeholder="gpt-4o,gpt-4o-mini,gpt-5,...（留空则用内置默认）"
                     className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
                   />
                 </Field>

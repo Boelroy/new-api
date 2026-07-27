@@ -103,6 +103,8 @@ type remoteProfile struct {
 	DefaultGeminiGroup  string `json:"default_gemini_group"`
 	DefaultGeminiModels string `json:"default_gemini_models"`
 	DefaultVertexModels string `json:"default_vertex_models"`
+	DefaultOpenAIGroup  string `json:"default_openai_group"`
+	DefaultOpenAIModels string `json:"default_openai_models"`
 	PoolIntervalSec     int    `json:"pool_interval_sec"`
 	PoolBatchSize       int    `json:"pool_batch_size"`
 	AutoMode            bool   `json:"auto_mode"`
@@ -126,6 +128,8 @@ type remoteProfilePublic struct {
 	DefaultGeminiGroup  string `json:"default_gemini_group"`
 	DefaultGeminiModels string `json:"default_gemini_models"`
 	DefaultVertexModels string `json:"default_vertex_models"`
+	DefaultOpenAIGroup  string `json:"default_openai_group"`
+	DefaultOpenAIModels string `json:"default_openai_models"`
 	PoolIntervalSec     int    `json:"pool_interval_sec"`
 	PoolBatchSize       int    `json:"pool_batch_size"`
 	AutoMode            bool   `json:"auto_mode"`
@@ -397,6 +401,7 @@ func handleRemoteProfileList(c *gin.Context) {
 	rows, err := db.Query(
 		`SELECT id, name, host, user_id, access_token_enc,
 		        default_models, default_group, default_gemini_group, default_gemini_models, default_vertex_models,
+		        default_openai_group, default_openai_models,
 		        pool_interval_sec, pool_batch_size,
 		        auto_mode, rpm_base, rpm_min,
 		        created_at, updated_at
@@ -433,6 +438,7 @@ func handleRemoteProfileList(c *gin.Context) {
 		var enc string
 		if err := rows.Scan(&p.ID, &p.Name, &p.Host, &p.UserID, &enc,
 			&p.DefaultModels, &p.DefaultGroup, &p.DefaultGeminiGroup, &p.DefaultGeminiModels, &p.DefaultVertexModels,
+			&p.DefaultOpenAIGroup, &p.DefaultOpenAIModels,
 			&p.PoolIntervalSec, &p.PoolBatchSize,
 			&p.AutoMode, &p.RPMBase, &p.RPMMin,
 			&p.CreatedAt, &p.UpdatedAt); err != nil {
@@ -458,6 +464,8 @@ func handleRemoteProfileList(c *gin.Context) {
 				DefaultGeminiGroup:  p.DefaultGeminiGroup,
 				DefaultGeminiModels: p.DefaultGeminiModels,
 				DefaultVertexModels: p.DefaultVertexModels,
+				DefaultOpenAIGroup:  p.DefaultOpenAIGroup,
+				DefaultOpenAIModels: p.DefaultOpenAIModels,
 				PoolIntervalSec:     p.PoolIntervalSec,
 				PoolBatchSize:       p.PoolBatchSize,
 				AutoMode:            p.AutoMode,
@@ -488,6 +496,8 @@ func handleRemoteProfileCreate(c *gin.Context) {
 		DefaultGeminiGroup  string `json:"default_gemini_group"`
 		DefaultGeminiModels string `json:"default_gemini_models"`
 		DefaultVertexModels string `json:"default_vertex_models"`
+		DefaultOpenAIGroup  string `json:"default_openai_group"`
+		DefaultOpenAIModels string `json:"default_openai_models"`
 		PoolIntervalSec     int    `json:"pool_interval_sec"`
 		PoolBatchSize       int    `json:"pool_batch_size"`
 		AutoMode            *bool  `json:"auto_mode,omitempty"`
@@ -505,6 +515,8 @@ func handleRemoteProfileCreate(c *gin.Context) {
 	body.DefaultGeminiGroup = strings.TrimSpace(body.DefaultGeminiGroup)
 	body.DefaultGeminiModels = strings.TrimSpace(body.DefaultGeminiModels)
 	body.DefaultVertexModels = strings.TrimSpace(body.DefaultVertexModels)
+	body.DefaultOpenAIGroup = strings.TrimSpace(body.DefaultOpenAIGroup)
+	body.DefaultOpenAIModels = strings.TrimSpace(body.DefaultOpenAIModels)
 	if body.Name == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
 		return
@@ -543,11 +555,13 @@ func handleRemoteProfileCreate(c *gin.Context) {
 	err = db.QueryRow(
 		`INSERT INTO remote_newapi_profile
 		 (name, host, user_id, access_token_enc, default_models, default_group, default_gemini_group, default_gemini_models, default_vertex_models,
+		  default_openai_group, default_openai_models,
 		  pool_interval_sec, pool_batch_size,
 		  auto_mode, rpm_base, rpm_min,
 		  created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15) RETURNING id`,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $17) RETURNING id`,
 		body.Name, host, body.UserID, enc, body.DefaultModels, body.DefaultGroup, body.DefaultGeminiGroup, body.DefaultGeminiModels, body.DefaultVertexModels,
+		body.DefaultOpenAIGroup, body.DefaultOpenAIModels,
 		poolInterval, poolBatch,
 		autoMode, rpmBase, rpmMin, now,
 	).Scan(&id)
@@ -561,6 +575,8 @@ func handleRemoteProfileCreate(c *gin.Context) {
 		DefaultGeminiGroup:  body.DefaultGeminiGroup,
 		DefaultGeminiModels: body.DefaultGeminiModels,
 		DefaultVertexModels: body.DefaultVertexModels,
+		DefaultOpenAIGroup:  body.DefaultOpenAIGroup,
+		DefaultOpenAIModels: body.DefaultOpenAIModels,
 		PoolIntervalSec:     poolInterval, PoolBatchSize: poolBatch,
 		AutoMode: autoMode, RPMBase: rpmBase, RPMMin: rpmMin,
 		CreatedAt: now, UpdatedAt: now,
@@ -584,6 +600,8 @@ func handleRemoteProfileUpdate(c *gin.Context) {
 		DefaultGeminiGroup  *string `json:"default_gemini_group,omitempty"`
 		DefaultGeminiModels *string `json:"default_gemini_models,omitempty"`
 		DefaultVertexModels *string `json:"default_vertex_models,omitempty"`
+		DefaultOpenAIGroup  *string `json:"default_openai_group,omitempty"`
+		DefaultOpenAIModels *string `json:"default_openai_models,omitempty"`
 		PoolIntervalSec     *int    `json:"pool_interval_sec,omitempty"`
 		PoolBatchSize       *int    `json:"pool_batch_size,omitempty"`
 		AutoMode            *bool   `json:"auto_mode,omitempty"`
@@ -635,6 +653,24 @@ func handleRemoteProfileUpdate(c *gin.Context) {
 		if _, err := db.Exec(
 			`UPDATE remote_newapi_profile SET default_vertex_models=$1, updated_at=$2 WHERE id=$3`,
 			strings.TrimSpace(*body.DefaultVertexModels), now, id,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.DefaultOpenAIGroup != nil {
+		if _, err := db.Exec(
+			`UPDATE remote_newapi_profile SET default_openai_group=$1, updated_at=$2 WHERE id=$3`,
+			strings.TrimSpace(*body.DefaultOpenAIGroup), now, id,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.DefaultOpenAIModels != nil {
+		if _, err := db.Exec(
+			`UPDATE remote_newapi_profile SET default_openai_models=$1, updated_at=$2 WHERE id=$3`,
+			strings.TrimSpace(*body.DefaultOpenAIModels), now, id,
 		); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

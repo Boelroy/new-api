@@ -1905,15 +1905,16 @@ func handleSaveQuotas(c *gin.Context) {
 // sync with the set of models the org currently sells so a fresh deployment
 // gets sensible defaults on batch create for each preset.
 var defaultAnthropicModels = strings.Join([]string{
+	"claude-opus-4-8",
 	"claude-opus-4-7",
 	"claude-sonnet-4-6",
 	"claude-opus-4-6",
 	"claude-haiku-4-5-20251001",
 	"claude-sonnet-4-5-20250929",
 	"claude-opus-4-5-20251101",
-	"claude-opus-4-8",
 	"claude-fable-5",
 	"claude-sonnet-5",
+	"claude-opus-5",
 }, ",")
 
 var defaultOpenAIModels = strings.Join([]string{
@@ -3058,6 +3059,11 @@ func main() {
 		// separate list is cleaner than reusing default_gemini_models.
 		// Empty string ⇒ frontend falls back to DEFAULT_VERTEX_MODELS.
 		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS default_vertex_models TEXT NOT NULL DEFAULT ''`,
+		// Per-channel-type group + models overrides for OpenAI (channel_type=1)
+		// uploads. Empty ⇒ frontend falls back to 'openai' group /
+		// DEFAULT_OPENAI_MODELS baked into the batch upload page.
+		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS default_openai_group  TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS default_openai_models TEXT NOT NULL DEFAULT ''`,
 		// Global-FIFO pool throttle knobs. `pool_interval_sec` is the tick
 		// interval for uploading queued pending_key rows; `pool_batch_size`
 		// is how many keys the tick uploads at once. The tick skips if any
