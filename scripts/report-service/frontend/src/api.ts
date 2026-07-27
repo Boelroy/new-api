@@ -32,6 +32,9 @@ export type ChannelRow = {
   status: number
   type: number
   tag: string
+  // Raw channels."group" value — comma-separated when the channel serves
+  // several groups.
+  group: string
   priority: number
   used_usd: number
   last_hour_usd: number

@@ -479,6 +479,111 @@ func fmtHours(h float64) string {
 	return fmt.Sprintf("%.1f小时", h)
 }
 
+// groupThreshold is the per-group alert configuration stored in
+// report_notify_group_threshold. A nil USD/Hours value means "inherit the
+// global NOTIFY_*_THRESHOLD env default".
+type groupThreshold struct {
+	Group     string   `json:"group"`
+	USD       *float64 `json:"usd_threshold"`
+	Hours     *float64 `json:"hours_threshold"`
+	Enabled   bool     `json:"enabled"`
+	Note      string   `json:"note"`
+	UpdatedAt int64    `json:"updated_at"`
+}
+
+// resolve returns the effective thresholds after applying the env fallbacks.
+func (t groupThreshold) resolve() (usd, hours float64) {
+	usd, hours = notifyUSDThreshold, notifyHoursThreshold
+	if t.USD != nil {
+		usd = *t.USD
+	}
+	if t.Hours != nil {
+		hours = *t.Hours
+	}
+	return
+}
+
+func loadGroupThresholds() (map[string]groupThreshold, error) {
+	rows, err := db.Query(`SELECT "group", usd_threshold, hours_threshold, enabled, COALESCE(note,''), updated_at
+	                         FROM report_notify_group_threshold`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]groupThreshold{}
+	for rows.Next() {
+		var t groupThreshold
+		var usd, hours sql.NullFloat64
+		if err := rows.Scan(&t.Group, &usd, &hours, &t.Enabled, &t.Note, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if usd.Valid {
+			v := usd.Float64
+			t.USD = &v
+		}
+		if hours.Valid {
+			v := hours.Float64
+			t.Hours = &v
+		}
+		out[t.Group] = t
+	}
+	return out, rows.Err()
+}
+
+type groupBalance struct {
+	Group             string   `json:"group"`
+	Channels          int      `json:"channels"`
+	ChannelsWithQuota int      `json:"channels_with_quota"`
+	TotalQuotaUSD     float64  `json:"total_quota_usd"`
+	TotalUsedUSD      float64  `json:"total_used_usd"`
+	TotalRemainingUSD float64  `json:"total_remaining_usd"`
+	LastHourUSD       float64  `json:"last_hour_usd"`
+	ETAHours          *float64 `json:"eta_hours"`
+}
+
+// aggregateGroupBalances buckets enabled channels by channels."group". A
+// channel that serves several comma-separated groups is counted in each one,
+// so the group totals deliberately overlap — a shared key running dry must
+// alert every group that depends on it.
+//
+// Quota/used only count channels with a configured quota row (mixing in
+// unmetered keys produced nonsensical negative remainders), while the burn
+// rate counts every enabled channel in the group so the eta stays pessimistic.
+func aggregateGroupBalances(channels []ChannelRow) []groupBalance {
+	byGroup := map[string]*groupBalance{}
+	for _, ch := range channels {
+		for _, g := range strings.Split(ch.Group, ",") {
+			g = strings.TrimSpace(g)
+			if g == "" {
+				g = "default"
+			}
+			b := byGroup[g]
+			if b == nil {
+				b = &groupBalance{Group: g}
+				byGroup[g] = b
+			}
+			b.Channels++
+			b.LastHourUSD += ch.LastHourUSD
+			if ch.QuotaUSD != nil {
+				b.ChannelsWithQuota++
+				b.TotalQuotaUSD += *ch.QuotaUSD
+				b.TotalUsedUSD += ch.UsedUSD
+			}
+		}
+	}
+	out := make([]groupBalance, 0, len(byGroup))
+	for _, b := range byGroup {
+		b.TotalRemainingUSD = b.TotalQuotaUSD - b.TotalUsedUSD
+		if b.LastHourUSD > 0 {
+			eta := b.TotalRemainingUSD / b.LastHourUSD
+			b.ETAHours = &eta
+		}
+		out = append(out, *b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Group < out[j].Group })
+	return out
+}
+
 func checkAndNotify() {
 	if larkWebhook == "" {
 		return
@@ -488,62 +593,37 @@ func checkAndNotify() {
 		log.Printf("checkAndNotify query error: %v", err)
 		return
 	}
+	thresholds, err := loadGroupThresholds()
+	if err != nil {
+		log.Printf("checkAndNotify threshold error: %v", err)
+		return
+	}
 
-	// Only consider channels that have an explicit quota configured. Mixing
-	// usage from unmetered channels with the configured-quota sum produced
-	// nonsensical negative remainders in the notification text.
-	var totalUsed, totalQuota float64
-	hasQuota := false
-	for _, ch := range channels {
-		if ch.QuotaUSD == nil {
+	for _, b := range aggregateGroupBalances(channels) {
+		if b.ChannelsWithQuota == 0 {
 			continue
 		}
-		totalUsed += ch.UsedUSD
-		totalQuota += *ch.QuotaUSD
-		hasQuota = true
-	}
-	if !hasQuota {
-		return
-	}
+		th, configured := thresholds[b.Group]
+		if configured && !th.Enabled {
+			continue
+		}
+		usdThreshold, hoursThreshold := th.resolve()
 
-	// Burn rate covers ALL channels — including unquota'd / disabled ones —
-	// so the eta matches what users see in the "最近1小时消耗" card on the
-	// Key Capacity page (which uses queryTotalLastHour). Pessimistic-but-
-	// consistent: real Anthropic-side spend is included even when a key
-	// hasn't been mapped to a quota row yet.
-	totalLastHour, err := queryTotalLastHour()
-	if err != nil {
-		log.Printf("checkAndNotify last-hour error: %v", err)
-		return
-	}
-
-	totalRemaining := totalQuota - totalUsed
-	var etaHours float64
-	hasETA := totalLastHour > 0
-	if hasETA {
-		etaHours = totalRemaining / totalLastHour
-	}
-
-	if notifyHoursThreshold > 0 && hasETA && etaHours < notifyHoursThreshold {
-		if canNotify("hours") {
+		if hoursThreshold > 0 && b.ETAHours != nil && *b.ETAHours < hoursThreshold && canNotify("hours:"+b.Group) {
 			sendLark(fmt.Sprintf(
-				"⚠️ Key 余量预警\n剩余额度：$%.2f / $%.2f\n最近1小时消耗：$%.4f\n预计剩余时长：%s（低于阈值 %.0f 小时）",
-				totalRemaining, totalQuota, totalLastHour, fmtHours(etaHours), notifyHoursThreshold,
+				"⚠️ 分组 %s Key 余量预警\n剩余额度：$%.2f / $%.2f\n最近1小时消耗：$%.4f\n预计剩余时长：%s（低于阈值 %.0f 小时）",
+				b.Group, b.TotalRemainingUSD, b.TotalQuotaUSD, b.LastHourUSD, fmtHours(*b.ETAHours), hoursThreshold,
 			))
 		}
-	}
 
-	if notifyUSDThreshold > 0 && totalRemaining < notifyUSDThreshold {
-		if canNotify("usd") {
+		if usdThreshold > 0 && b.TotalRemainingUSD < usdThreshold && canNotify("usd:"+b.Group) {
+			eta := "未知"
+			if b.ETAHours != nil {
+				eta = fmtHours(*b.ETAHours)
+			}
 			sendLark(fmt.Sprintf(
-				"🚨 Key 余额不足\n剩余额度：$%.2f（低于阈值 $%.2f）\n最近1小时消耗：$%.4f\n预计剩余时长：%s",
-				totalRemaining, notifyUSDThreshold, totalLastHour,
-				func() string {
-					if hasETA {
-						return fmtHours(etaHours)
-					}
-					return "未知"
-				}(),
+				"🚨 分组 %s Key 余额不足\n剩余额度：$%.2f（低于阈值 $%.2f）\n最近1小时消耗：$%.4f\n预计剩余时长：%s",
+				b.Group, b.TotalRemainingUSD, usdThreshold, b.LastHourUSD, eta,
 			))
 		}
 	}
@@ -561,64 +641,148 @@ func startNotifyLoop() {
 	}()
 }
 
-// computeNotifyState mirrors the calculation in checkAndNotify but returns the
-// state without sending. Used by /api/notify/status for diagnosis.
+// notifyGroupState mirrors the per-group calculation in checkAndNotify but
+// reports the outcome without sending. Used by /api/notify/status.
+type notifyGroupState struct {
+	groupBalance
+	Configured     bool            `json:"configured"`
+	Muted          bool            `json:"muted"`
+	USDThreshold   float64         `json:"usd_threshold"`
+	HoursThreshold float64         `json:"hours_threshold"`
+	WouldAlert     map[string]bool `json:"would_alert"`
+}
+
 type notifyState struct {
-	ChannelsWithQuota int                  `json:"channels_with_quota"`
-	TotalQuotaUSD     float64              `json:"total_quota_usd"`
-	TotalUsedUSD      float64              `json:"total_used_usd"`
-	TotalRemainingUSD float64              `json:"total_remaining_usd"`
-	TotalLastHourUSD  float64              `json:"total_last_hour_usd"`
-	ETAHours          float64              `json:"eta_hours"`
 	LarkConfigured    bool                 `json:"lark_configured"`
-	Thresholds        map[string]float64   `json:"thresholds"`
-	WouldAlert        map[string]bool      `json:"would_alert"`
+	DefaultThresholds map[string]float64   `json:"default_thresholds"`
+	Groups            []notifyGroupState   `json:"groups"`
 	LastNotified      map[string]time.Time `json:"last_notified"`
 }
 
 func snapshotNotify() notifyState {
 	st := notifyState{
 		LarkConfigured: larkWebhook != "",
-		Thresholds: map[string]float64{
+		DefaultThresholds: map[string]float64{
 			"hours": notifyHoursThreshold,
 			"usd":   notifyUSDThreshold,
 		},
-		WouldAlert:   map[string]bool{},
+		Groups:       []notifyGroupState{},
 		LastNotified: map[string]time.Time{},
 	}
-	channels, err := queryKeyData()
-	if err != nil {
-		return st
-	}
-	for _, ch := range channels {
-		if ch.QuotaUSD == nil {
-			continue
-		}
-		st.ChannelsWithQuota++
-		st.TotalUsedUSD += ch.UsedUSD
-		st.TotalQuotaUSD += *ch.QuotaUSD
-	}
-	st.TotalRemainingUSD = st.TotalQuotaUSD - st.TotalUsedUSD
-	// Burn rate sourced globally so it matches the UI's 最近1小时消耗 card.
-	if lh, err := queryTotalLastHour(); err == nil {
-		st.TotalLastHourUSD = lh
-	}
-	if st.TotalLastHourUSD > 0 {
-		st.ETAHours = st.TotalRemainingUSD / st.TotalLastHourUSD
-		st.WouldAlert["hours"] = notifyHoursThreshold > 0 && st.ETAHours < notifyHoursThreshold
-	}
-	st.WouldAlert["usd"] = notifyUSDThreshold > 0 && st.TotalRemainingUSD < notifyUSDThreshold
-
 	notifyMu.Lock()
 	for k, v := range lastNotified {
 		st.LastNotified[k] = v
 	}
 	notifyMu.Unlock()
+
+	channels, err := queryKeyData()
+	if err != nil {
+		return st
+	}
+	thresholds, err := loadGroupThresholds()
+	if err != nil {
+		return st
+	}
+	for _, b := range aggregateGroupBalances(channels) {
+		th, configured := thresholds[b.Group]
+		usdThreshold, hoursThreshold := th.resolve()
+		g := notifyGroupState{
+			groupBalance:   b,
+			Configured:     configured,
+			Muted:          configured && !th.Enabled,
+			USDThreshold:   usdThreshold,
+			HoursThreshold: hoursThreshold,
+			WouldAlert:     map[string]bool{},
+		}
+		if !g.Muted && b.ChannelsWithQuota > 0 {
+			g.WouldAlert["hours"] = hoursThreshold > 0 && b.ETAHours != nil && *b.ETAHours < hoursThreshold
+			g.WouldAlert["usd"] = usdThreshold > 0 && b.TotalRemainingUSD < usdThreshold
+		}
+		st.Groups = append(st.Groups, g)
+	}
 	return st
 }
 
 func handleNotifyStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, snapshotNotify())
+}
+
+func handleNotifyThresholdsList(c *gin.Context) {
+	thresholds, err := loadGroupThresholds()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	out := make([]groupThreshold, 0, len(thresholds))
+	for _, t := range thresholds {
+		out = append(out, t)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Group < out[j].Group })
+	c.JSON(http.StatusOK, gin.H{
+		"thresholds": out,
+		"defaults":   map[string]float64{"hours": notifyHoursThreshold, "usd": notifyUSDThreshold},
+	})
+}
+
+func handleNotifyThresholdsSave(c *gin.Context) {
+	var payload []struct {
+		Group   string   `json:"group"`
+		USD     *float64 `json:"usd_threshold"`
+		Hours   *float64 `json:"hours_threshold"`
+		Enabled *bool    `json:"enabled"`
+		Note    string   `json:"note"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(payload) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "empty payload"})
+		return
+	}
+	now := time.Now().Unix()
+	saved := 0
+	for _, p := range payload {
+		g := strings.TrimSpace(p.Group)
+		if g == "" {
+			continue
+		}
+		if (p.USD != nil && *p.USD < 0) || (p.Hours != nil && *p.Hours < 0) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "thresholds must be >= 0 (omit to inherit the default)"})
+			return
+		}
+		enabled := true
+		if p.Enabled != nil {
+			enabled = *p.Enabled
+		}
+		if _, err := db.Exec(`
+			INSERT INTO report_notify_group_threshold ("group", usd_threshold, hours_threshold, enabled, note, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6)
+			ON CONFLICT ("group") DO UPDATE
+			   SET usd_threshold=$2, hours_threshold=$3, enabled=$4, note=$5, updated_at=$6`,
+			g, p.USD, p.Hours, enabled, p.Note, now); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		saved++
+	}
+	c.JSON(http.StatusOK, gin.H{"saved": saved})
+}
+
+// handleNotifyThresholdsDelete drops a group override so it falls back to the
+// env defaults. Group comes from the query string because group names may
+// contain slashes.
+func handleNotifyThresholdsDelete(c *gin.Context) {
+	group := strings.TrimSpace(c.Query("group"))
+	if group == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "group required"})
+		return
+	}
+	if _, err := db.Exec(`DELETE FROM report_notify_group_threshold WHERE "group"=$1`, group); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 // handleNotifyCheck runs the standard alert check (still respects canNotify).
@@ -913,11 +1077,14 @@ type ChannelRow struct {
 	// (auto-disabled), so the AllKeys export can surface dead keys for
 	// rotation/inspection. Enabled (status=1) and manually-disabled
 	// (status=2) keys must stay masked — never populate FullKey for them.
-	FullKey     string `json:"full_key,omitempty"`
-	Status      int    `json:"status"`
-	Type        int    `json:"type"`
-	Tag         string `json:"tag"`
-	Priority    int    `json:"priority"`
+	FullKey string `json:"full_key,omitempty"`
+	Status  int    `json:"status"`
+	Type    int    `json:"type"`
+	Tag     string `json:"tag"`
+	// Group is the raw channels."group" value — a comma-separated list when
+	// the channel serves several groups.
+	Group       string  `json:"group"`
+	Priority    int     `json:"priority"`
 	UsedUSD     float64 `json:"used_usd"`
 	LastHourUSD float64 `json:"last_hour_usd"`
 	// Rpm mirrors newapi's usage-log RPM (count of type=2 rows in the last
@@ -937,7 +1104,7 @@ type KeySummary struct {
 func queryKeyData() ([]ChannelRow, error) {
 	rows, err := db.Query(`
 		SELECT c.id, COALESCE(c.name,''), c.key, COALESCE(c.status,1), COALESCE(c.type,0), COALESCE(c.tag,''),
-		       COALESCE(c.priority,0),
+		       COALESCE(c."group",''), COALESCE(c.priority,0),
 		       COALESCE(c.used_quota,0), q.quota_usd, q.unit_price_cny, COALESCE(q.note,'')
 		FROM channels c
 		LEFT JOIN report_key_quotas q ON q.channel_id = c.id
@@ -954,7 +1121,7 @@ func queryKeyData() ([]ChannelRow, error) {
 		var r ChannelRow
 		var usedQuota int64
 		var quotaUSD, unitPrice sql.NullFloat64
-		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &r.Type, &r.Tag, &r.Priority, &usedQuota, &quotaUSD, &unitPrice, &r.Note); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &r.Type, &r.Tag, &r.Group, &r.Priority, &usedQuota, &quotaUSD, &unitPrice, &r.Note); err != nil {
 			return nil, err
 		}
 		r.UsedUSD = roundTo(float64(usedQuota)/quotaPerUnit, 4)
@@ -1007,7 +1174,7 @@ func queryTotalLastHour() (float64, error) {
 func queryAllKeys(startTS, endTS int64, studio string) ([]ChannelRow, error) {
 	query := `
 		SELECT c.id, COALESCE(c.name,''), c.key, COALESCE(c.status,1), COALESCE(c.type,0), COALESCE(c.tag,''),
-		       COALESCE(c.priority,0),
+		       COALESCE(c."group",''), COALESCE(c.priority,0),
 		       COALESCE(c.used_quota,0), q.quota_usd, q.unit_price_cny, COALESCE(q.note,'')
 		FROM channels c
 		LEFT JOIN report_key_quotas q ON q.channel_id = c.id`
@@ -1041,7 +1208,7 @@ func queryAllKeys(startTS, endTS int64, studio string) ([]ChannelRow, error) {
 		var r ChannelRow
 		var usedQuota int64
 		var quotaUSD, unitPrice sql.NullFloat64
-		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &r.Type, &r.Tag, &r.Priority, &usedQuota, &quotaUSD, &unitPrice, &r.Note); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &r.Type, &r.Tag, &r.Group, &r.Priority, &usedQuota, &quotaUSD, &unitPrice, &r.Note); err != nil {
 			return nil, err
 		}
 		r.UsedUSD = roundTo(float64(usedQuota)/quotaPerUnit, 4)
@@ -2928,6 +3095,18 @@ func main() {
 			rate        NUMERIC(8,4) NOT NULL,
 			updated_at  BIGINT NOT NULL
 		)`,
+		// per-group Lark balance alert thresholds, keyed by channels."group".
+		// NULL usd/hours means "inherit NOTIFY_USD_THRESHOLD /
+		// NOTIFY_HOURS_THRESHOLD"; enabled=false mutes the group entirely.
+		// Groups with no row here are alerted on with the env defaults.
+		`CREATE TABLE IF NOT EXISTS report_notify_group_threshold (
+			"group"         TEXT PRIMARY KEY,
+			usd_threshold   NUMERIC(12,4),
+			hours_threshold NUMERIC(10,2),
+			enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+			note            TEXT NOT NULL DEFAULT '',
+			updated_at      BIGINT NOT NULL
+		)`,
 		// generic key-value config (currently: default_fx_rate)
 		`CREATE TABLE IF NOT EXISTS report_config (
 			key         TEXT PRIMARY KEY,
@@ -3427,6 +3606,9 @@ func main() {
 	adminAPI.GET("/notify/status", handleNotifyStatus)
 	adminAPI.POST("/notify/check", handleNotifyCheck)
 	adminAPI.POST("/notify/test", handleNotifyTest)
+	adminAPI.GET("/notify/thresholds", handleNotifyThresholdsList)
+	adminAPI.POST("/notify/thresholds", handleNotifyThresholdsSave)
+	adminAPI.DELETE("/notify/thresholds", handleNotifyThresholdsDelete)
 	// Per-key upstream pricing edit. Lives outside /profit/* so the All Keys
 	// page can manage it even on deployments where the profit report is off.
 	adminAPI.POST("/keys/pricing", handleSaveKeyPricing)
