@@ -2616,36 +2616,30 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
               )}
             </div>
             <Field label="渠道类型">
-              <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
-                {CHANNEL_TYPE_PRESETS.map(p => {
-                  const active = batchPresetID === p.id
-                  return (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => {
-                        setBatchPresetID(p.id)
-                        // Rewrite both models and group. Each resolver
-                        // picks profile-saved value first, then preset
-                        // fallback — field is never empty.
-                        const prof = profiles.find(x => x.id === selectedID)
-                        setBatchModels(resolvePresetModels(p, prof))
-                        setBatchGroup(resolvePresetGroup(p, prof))
-                        // Region default per preset: AWS needs a real region
-                        // (baked into the key + model mapping), Vertex uses
-                        // the "global" sentinel.
-                        if (p.kind === 'aws') setBatchRegion('us-east-1')
-                        else if (p.kind === 'vertex') setBatchRegion('global')
-                      }}
-                      className={`px-3 py-1.5 text-xs border-r border-gray-200 last:border-r-0 transition-colors ${
-                        active ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
-                      }`}
-                    >
-                      {p.label}
-                    </button>
-                  )
-                })}
-              </div>
+              <select
+                value={batchPresetID}
+                onChange={e => {
+                  const p = CHANNEL_TYPE_PRESETS.find(x => x.id === (e.target.value as PresetID))
+                  if (!p) return
+                  setBatchPresetID(p.id)
+                  // Rewrite both models and group. Each resolver picks the
+                  // profile-saved value first, then preset fallback — field
+                  // is never empty.
+                  const prof = profiles.find(x => x.id === selectedID)
+                  setBatchModels(resolvePresetModels(p, prof))
+                  setBatchGroup(resolvePresetGroup(p, prof))
+                  // Region default per preset: AWS needs a real region (baked
+                  // into the key + model mapping), Vertex uses the "global"
+                  // sentinel.
+                  if (p.kind === 'aws') setBatchRegion('us-east-1')
+                  else if (p.kind === 'vertex') setBatchRegion('global')
+                }}
+                className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm bg-white focus:outline-none focus:border-gray-900"
+              >
+                {CHANNEL_TYPE_PRESETS.map(p => (
+                  <option key={p.id} value={p.id}>{p.label}</option>
+                ))}
+              </select>
               <p className="text-[10px] text-gray-400 mt-1">
                 切换预设会同步重写下方的 <span className="font-mono">Models</span> 和 <span className="font-mono">Group</span>。Gemini 用站点上配置的 <span className="font-mono">default_gemini_group</span> / <span className="font-mono">default_gemini_models</span>；未设置则回退到内置默认。
               </p>

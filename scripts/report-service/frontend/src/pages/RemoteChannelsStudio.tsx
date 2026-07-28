@@ -1569,32 +1569,26 @@ export default function RemoteChannelsStudio() {
 
               <div>
                 <label className="block text-[11px] text-gray-500 mb-1">渠道类型</label>
-                <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
-                  {CHANNEL_TYPE_PRESETS.map(p => {
-                    const active = batchPresetID === p.id
-                    return (
-                      <button
-                        key={p.id}
-                        type="button"
-                        onClick={() => {
-                          setBatchPresetID(p.id)
-                          const prof = profiles.find(x => x.id === selectedID)
-                          setBatchGroup(resolvePresetGroup(p, prof))
-                          setBatchModels(resolvePresetModels(p, prof))
-                          // AWS needs a real region (baked into the key +
-                          // model mapping); Vertex uses the "global" sentinel.
-                          if (p.kind === 'aws') setBatchRegion('us-east-1')
-                          else if (p.kind === 'vertex') setBatchRegion('global')
-                        }}
-                        className={`px-3 py-1 text-xs border-r border-gray-200 last:border-r-0 transition-colors ${
-                          active ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
-                        }`}
-                      >
-                        {p.label}
-                      </button>
-                    )
-                  })}
-                </div>
+                <select
+                  value={batchPresetID}
+                  onChange={e => {
+                    const p = CHANNEL_TYPE_PRESETS.find(x => x.id === (e.target.value as PresetID))
+                    if (!p) return
+                    setBatchPresetID(p.id)
+                    const prof = profiles.find(x => x.id === selectedID)
+                    setBatchGroup(resolvePresetGroup(p, prof))
+                    setBatchModels(resolvePresetModels(p, prof))
+                    // AWS needs a real region (baked into the key + model
+                    // mapping); Vertex uses the "global" sentinel.
+                    if (p.kind === 'aws') setBatchRegion('us-east-1')
+                    else if (p.kind === 'vertex') setBatchRegion('global')
+                  }}
+                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm bg-white focus:outline-none focus:border-gray-900"
+                >
+                  {CHANNEL_TYPE_PRESETS.map(p => (
+                    <option key={p.id} value={p.id}>{p.label}</option>
+                  ))}
+                </select>
               </div>
 
               <div>
@@ -1723,30 +1717,24 @@ export default function RemoteChannelsStudio() {
               </div>
               <div>
                 <label className="block text-[11px] text-gray-500 mb-1">渠道类型</label>
-                <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
-                  {CHANNEL_TYPE_PRESETS.map(p => {
-                    const active = immPresetID === p.id
-                    return (
-                      <button
-                        key={p.id}
-                        type="button"
-                        onClick={() => {
-                          setImmPresetID(p.id)
-                          const prof = profiles.find(x => x.id === selectedID)
-                          setImmGroup(resolvePresetGroup(p, prof))
-                          setImmModels(resolvePresetModels(p, prof))
-                          if (p.kind === 'aws') setImmRegion('us-east-1')
-                          else if (p.kind === 'vertex') setImmRegion('global')
-                        }}
-                        className={`px-3 py-1 text-xs border-r border-gray-200 last:border-r-0 transition-colors ${
-                          active ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
-                        }`}
-                      >
-                        {p.label}
-                      </button>
-                    )
-                  })}
-                </div>
+                <select
+                  value={immPresetID}
+                  onChange={e => {
+                    const p = CHANNEL_TYPE_PRESETS.find(x => x.id === (e.target.value as PresetID))
+                    if (!p) return
+                    setImmPresetID(p.id)
+                    const prof = profiles.find(x => x.id === selectedID)
+                    setImmGroup(resolvePresetGroup(p, prof))
+                    setImmModels(resolvePresetModels(p, prof))
+                    if (p.kind === 'aws') setImmRegion('us-east-1')
+                    else if (p.kind === 'vertex') setImmRegion('global')
+                  }}
+                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm bg-white focus:outline-none focus:border-gray-900"
+                >
+                  {CHANNEL_TYPE_PRESETS.map(p => (
+                    <option key={p.id} value={p.id}>{p.label}</option>
+                  ))}
+                </select>
               </div>
               <div>
                 <label className="block text-[11px] text-gray-500 mb-1">Group</label>
