@@ -16,11 +16,11 @@ type Props = {
 // by RemoteChannelsStudio.tsx — same integers, same groups, same fallback
 // model lists — but the two components stay standalone on purpose (remote
 // upload vs local channel insert diverge downstream).
-type PresetID = 'anthropic' | 'openai' | 'azure' | 'gemini' | 'vertex' | 'vertex-claude'
+type PresetID = 'anthropic' | 'openai' | 'azure' | 'gemini' | 'vertex' | 'vertex-claude' | 'aws'
 type PresetSpec = {
   id: PresetID
   label: string
-  kind: 'text' | 'vertex'
+  kind: 'text' | 'vertex' | 'aws'
   type: number
   fallbackGroup: string
   fallbackModels: string
@@ -74,6 +74,18 @@ const DEFAULT_VERTEX_CLAUDE_MODELS = [
   'claude-sonnet-5',
 ].join(',')
 
+// Claude-on-Bedrock model list advertised by the AWS preset. The backend
+// pairs each name with a region-prefixed Bedrock model id in
+// channel.model_mapping (e.g. region us-east-1 → "us.anthropic.…"), so the
+// operator only picks the region — no mapping editing here.
+const DEFAULT_AWS_CLAUDE_MODELS = [
+  'claude-opus-4-6',
+  'claude-opus-4-5-20251101',
+  'claude-sonnet-4-6',
+  'claude-sonnet-4-5-20250929',
+  'claude-haiku-4-5-20251001',
+].join(',')
+
 const PRESETS: PresetSpec[] = [
   { id: 'anthropic',     label: 'Anthropic',        kind: 'text',   type: 14, fallbackGroup: 'default',        fallbackModels: DEFAULT_ANTHROPIC_MODELS },
   { id: 'openai',        label: 'OpenAI',           kind: 'text',   type: 1,  fallbackGroup: 'openai',         fallbackModels: DEFAULT_OPENAI_MODELS },
@@ -81,6 +93,7 @@ const PRESETS: PresetSpec[] = [
   { id: 'gemini',        label: 'Gemini',           kind: 'text',   type: 24, fallbackGroup: 'gemini',         fallbackModels: DEFAULT_GEMINI_MODELS },
   { id: 'vertex',        label: 'Vertex AI',        kind: 'vertex', type: 41, fallbackGroup: 'gemini',         fallbackModels: DEFAULT_VERTEX_MODELS },
   { id: 'vertex-claude', label: 'Vertex AI (Claude)', kind: 'vertex', type: 41, fallbackGroup: 'claude-vertex', fallbackModels: DEFAULT_VERTEX_CLAUDE_MODELS },
+  { id: 'aws',           label: 'AWS (Bedrock)',    kind: 'aws',    type: 33, fallbackGroup: 'claude-aws',     fallbackModels: DEFAULT_AWS_CLAUDE_MODELS },
 ]
 
 // Azure only: default API version. Mirrors AZURE_DEFAULT_API_VERSION on the
@@ -141,6 +154,11 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   // and apiVersion is channels.other. The whole batch shares one resource.
   const [azureBaseUrl, setAzureBaseUrl] = useState('')
   const [azureApiVersion, setAzureApiVersion] = useState(AZURE_DEFAULT_API_VERSION)
+  // AWS Bedrock-only state. awsRegion is appended to each key by the backend
+  // and drives the region-prefixed Claude model_mapping; awsKeyMode selects
+  // the auth flavour (ak_sk default / api_key).
+  const [awsRegion, setAwsRegion] = useState('us-east-1')
+  const [awsKeyMode, setAwsKeyMode] = useState<'ak_sk' | 'api_key'>('ak_sk')
 
   // 可配置的默认 model 列表 —— 按预设分开存（rc.154+）。key 是 preset.id，
   // value 是服务端保存的 models 字符串；'' 或缺失表示尚未保存过（前端会
@@ -266,6 +284,8 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       other?: string
       settings?: string
       base_url?: string
+      region?: string
+      key_type?: 'ak_sk' | 'api_key'
     } = {
       type: preset.type,
       group: group.trim() || preset.fallbackGroup,
@@ -280,6 +300,16 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       if (!url) return setResult('Azure 需要 base_url (例: https://<resource>.openai.azure.com)')
       baseDefaults.base_url = url
       baseDefaults.other = azureApiVersion.trim() || AZURE_DEFAULT_API_VERSION
+    }
+    // AWS Bedrock uses the plain per-line key textarea (same as text presets):
+    // each row is a credential (ak|sk or apikey) + quota. The backend appends
+    // the region to the key and builds the region-prefixed Claude model
+    // mapping + aws_key_type settings, so we only pass region + key_type here.
+    if (preset.kind === 'aws') {
+      const region = awsRegion.trim()
+      if (!region) return setResult('AWS 需要填写 Region (例: us-east-1)')
+      baseDefaults.region = region
+      baseDefaults.key_type = awsKeyMode
     }
 
     // Vertex takes JSON files or plain API keys + a shared region, so it
@@ -382,31 +412,22 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       <h2 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">批量创建渠道</h2>
       <div className="mb-3">
         <label className="block text-[11px] text-gray-500 mb-1">渠道类型</label>
-        <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
-          {PRESETS.map(p => {
-            const active = presetID === p.id
-            return (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => {
-                  setPresetID(p.id)
-                  // Reset dirty flags on switch so the new preset's
-                  // fallback models/group re-seed; the user can still
-                  // edit after the seed and it'll stick until they
-                  // switch presets again.
-                  setModelsDirty(false)
-                  setGroupDirty(false)
-                }}
-                className={`px-3 py-1 text-xs border-r border-gray-200 last:border-r-0 transition-colors ${
-                  active ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
-                }`}
-              >
-                {p.label}
-              </button>
-            )
-          })}
-        </div>
+        <select
+          value={presetID}
+          onChange={e => {
+            setPresetID(e.target.value as PresetID)
+            // Reset dirty flags on switch so the new preset's fallback
+            // models/group re-seed; the user can still edit after the seed
+            // and it'll stick until they switch presets again.
+            setModelsDirty(false)
+            setGroupDirty(false)
+          }}
+          className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm bg-white focus:outline-none focus:border-gray-900"
+        >
+          {PRESETS.map(p => (
+            <option key={p.id} value={p.id}>{p.label}</option>
+          ))}
+        </select>
       </div>
       <div className="grid grid-cols-2 gap-2 mb-2">
         <div>
@@ -714,11 +735,55 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
               </div>
             </div>
           )}
+          {preset.id === 'aws' && (
+            <div className="mb-2 grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">
+                  Region <span className="text-rose-500">*</span>
+                </label>
+                <input
+                  value={awsRegion}
+                  onChange={e => setAwsRegion(e.target.value)}
+                  placeholder="us-east-1"
+                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
+                />
+                <p className="text-[10px] text-gray-400 mt-1">拼进 channels.key 并按区域生成 Claude 模型映射（us→us、eu→eu、ap→apac）。</p>
+              </div>
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">认证方式</label>
+                <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setAwsKeyMode('ak_sk')}
+                    className={`px-3 py-1.5 text-xs border-r border-gray-200 transition-colors ${
+                      awsKeyMode === 'ak_sk' ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    AK/SK
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAwsKeyMode('api_key')}
+                    className={`px-3 py-1.5 text-xs transition-colors ${
+                      awsKeyMode === 'api_key' ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    API Key
+                  </button>
+                </div>
+                <p className="text-[10px] text-gray-400 mt-1">
+                  {awsKeyMode === 'ak_sk' ? '每行填 ak|sk 额度（Region 自动追加）。' : '每行填 apikey 额度（Region 自动追加）。'}
+                </p>
+              </div>
+            </div>
+          )}
           <textarea
             value={input}
             onChange={e => setInput(e.target.value)}
             rows={8}
-            placeholder={'每行: key 额度（USD）\n\nsk-... 220\nsk-... 500'}
+            placeholder={preset.id === 'aws'
+              ? (awsKeyMode === 'ak_sk' ? '每行: ak|sk 额度（USD）\n\nAKIA...|wJalr... 220' : '每行: apikey 额度（USD）\n\nBedrockAPIKey... 220')
+              : '每行: key 额度（USD）\n\nsk-... 220\nsk-... 500'}
             className="w-full border border-gray-200 rounded-md p-2.5 text-xs font-mono resize-y bg-gray-50 focus:outline-none focus:border-gray-900"
           />
         </>

@@ -2254,6 +2254,13 @@ func handleBatchCreateChannels(c *gin.Context) {
 		// channels.base_url; other presets leave this empty and rely on the
 		// default from newapi's ChannelBaseURLs table.
 		BaseUrl string `json:"base_url"`
+		// AWS Bedrock-only (channel type 33). Region is baked into channel.key
+		// (ak|sk|region or apikey|region) and drives a region-prefixed Claude
+		// model_mapping; KeyType selects the auth flavour (ak_sk default /
+		// api_key) written to channel.settings.aws_key_type. Other presets
+		// leave these empty.
+		Region  string `json:"region"`
+		KeyType string `json:"key_type"`
 		// Default priority + unit price applied to every channel that does not
 		// override them in the per-row entry. Lets the form set a single value
 		// up top instead of repeating it on every key.
@@ -2316,7 +2323,7 @@ func handleBatchCreateChannels(c *gin.Context) {
 		channelType = 14 // Anthropic — legacy default for backward compat.
 	}
 	switch channelType {
-	case 1, 3, 14, 24, 41: // OpenAI, Azure, Anthropic, Gemini (AI Studio), Vertex AI
+	case 1, 3, 14, 24, 33, 41: // OpenAI, Azure, Anthropic, Gemini (AI Studio), AWS Bedrock, Vertex AI
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unsupported channel type %d", channelType)})
 		return
@@ -2328,6 +2335,8 @@ func handleBatchCreateChannels(c *gin.Context) {
 			groupName = "openai"
 		case 24, 41:
 			groupName = "gemini"
+		case 33:
+			groupName = "claude-aws"
 		default:
 			groupName = "default"
 		}
@@ -2335,6 +2344,14 @@ func handleBatchCreateChannels(c *gin.Context) {
 	settings := strings.TrimSpace(payload.Settings)
 	other := strings.TrimSpace(payload.Other)
 	baseUrl := strings.TrimSpace(payload.BaseUrl)
+	// modelMapping is bound into the INSERT below. Empty for every preset
+	// except AWS Bedrock, which maps its advertised Claude names onto
+	// region-prefixed Bedrock model ids.
+	modelMapping := ""
+	// awsRegion / awsKeyType are only meaningful for channel type 33; used
+	// in the channel loop to bake the region into each key.
+	awsRegion := ""
+	awsKeyType := ""
 	if channelType == 41 {
 		// Vertex accepts either a bare region string or a JSON model→region
 		// map in channel.other. Empty falls back to "global" (matches
@@ -2361,6 +2378,35 @@ func handleBatchCreateChannels(c *gin.Context) {
 			// as anything created through the admin UI.
 			other = "2025-04-01-preview"
 		}
+	}
+	if channelType == 33 {
+		// AWS Bedrock: region is required (baked into the key + model mapping).
+		// KeyType picks the auth flavour written to channel.settings; the
+		// region-prefixed Claude model_mapping is built server-side (reusing
+		// the same helpers as the remote AWS upload) unless the caller sent
+		// an explicit mapping.
+		awsRegion = strings.TrimSpace(payload.Region)
+		if awsRegion == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "region is required for AWS channels (e.g. us-east-1)"})
+			return
+		}
+		awsKeyType = strings.TrimSpace(payload.KeyType)
+		if awsKeyType == "" {
+			awsKeyType = "ak_sk"
+		}
+		if awsKeyType != "ak_sk" && awsKeyType != "api_key" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "key_type must be 'ak_sk' or 'api_key'"})
+			return
+		}
+		if settings == "" {
+			settings = fmt.Sprintf(`{"aws_key_type":"%s"}`, awsKeyType)
+		}
+		mm, err := buildAwsBedrockModelMapping(awsRegion)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "build model mapping: " + err.Error()})
+			return
+		}
+		modelMapping = mm
 	}
 
 	dateStr := time.Now().UTC().Format("0102")
@@ -2389,6 +2435,21 @@ func handleBatchCreateChannels(c *gin.Context) {
 		if key == "" || ch.QuotaUSD <= 0 {
 			continue
 		}
+		// AWS Bedrock: the operator enters the credential (ak|sk or apikey);
+		// the region is appended here so channel.key matches the format
+		// new-api's AWS adaptor splits on "|" (ak|sk|region → 3 parts;
+		// apikey|region → 2 parts). Malformed rows are skipped, mirroring
+		// the empty-key skip above.
+		if channelType == 33 {
+			wantParts := 3
+			if awsKeyType == "api_key" {
+				wantParts = 2
+			}
+			key = key + "|" + awsRegion
+			if len(strings.Split(key, "|")) != wantParts {
+				continue
+			}
+		}
 		quotaInt := int(ch.QuotaUSD)
 		name := fmt.Sprintf("%s-%s-%s-%d", dateStr, studio, suffix, quotaInt)
 		priority := defaultPriority
@@ -2408,10 +2469,10 @@ func handleBatchCreateChannels(c *gin.Context) {
 			 model_mapping, status_code_mapping, priority, auto_ban, used_quota,
 			 channel_info, tag, other, settings)
 			VALUES ($1, $2, 1, $3, 0, $4, $5, $6, $7,
-			        '', '', $8, 1, 0, $9::json, $10, $11, $12)
+			        $13, '', $8, 1, 0, $9::json, $10, $11, $12)
 			RETURNING id`,
 			channelType, key, name, now, baseUrl, groupName, activeModels,
-			priority, channelInfoDefault, studio, other, settings,
+			priority, channelInfoDefault, studio, other, settings, modelMapping,
 		).Scan(&channelID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("insert channel: %v", err)})

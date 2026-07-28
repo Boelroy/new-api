@@ -617,12 +617,16 @@ export const api = {
       unit_price_cny?: number
       // Preset extensions (rc.150+). Older calls omit them and the
       // backend falls back to Anthropic (type=14, group='default').
-      type?: number           // 1=OpenAI, 3=Azure, 14=Anthropic (default), 24=Gemini, 41=Vertex
+      type?: number           // 1=OpenAI, 3=Azure, 14=Anthropic (default), 24=Gemini, 33=AWS, 41=Vertex
       group?: string          // e.g. 'default' | 'gemini'
       models?: string         // comma-separated; empty → server default
       other?: string          // Vertex region / Azure api-version
       settings?: string       // pre-serialised JSON string, e.g. '{"vertex_key_type":"json"}'
       base_url?: string       // Azure resource endpoint (https://<res>.openai.azure.com)
+      // AWS Bedrock (type=33): region is baked into the key + drives the
+      // server-built Claude model_mapping; key_type selects the auth mode.
+      region?: string
+      key_type?: 'ak_sk' | 'api_key'
     },
   ) =>
     request<{ created: { id: number; name: string }[]; count: number }>('/api/channels/batch-create', {
