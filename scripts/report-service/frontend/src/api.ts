@@ -1006,6 +1006,30 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  // AWS Bedrock (channel_type=33) also bypasses the pending queue — the
+  // batch shares one region, which the backend bakes into channel.key
+  // ("<ak>|<sk>|<region>" for ak_sk, "<apikey>|<region>" for api_key) and
+  // into a region-prefixed Claude model_mapping. key_type selects the auth
+  // mode; items[].key carries the credential without the region.
+  remoteAwsCreate: (payload: {
+    profile_id: number
+    name_prefix: string
+    models: string
+    group?: string
+    region: string
+    key_type?: 'ak_sk' | 'api_key'
+    items: { key: string; quota_usd?: number; note?: string }[]
+  }) =>
+    request<{
+      results: { index: number; ok: boolean; channel_id?: number; error?: string }[]
+      ok: number
+      total: number
+    }>('/api/remote-newapi/aws/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
   remoteChannelLastHour: (profileID: number, channelIDs: number[]) =>
     request<RemoteChannelLastHourResponse>('/api/remote-newapi/channels/last-hour', {
       method: 'POST',

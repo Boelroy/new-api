@@ -88,6 +88,19 @@ const CHANNEL_TYPE_ANTHROPIC = 14
 const CHANNEL_TYPE_GEMINI = 24
 const CHANNEL_TYPE_VERTEX = 41
 const CHANNEL_TYPE_AZURE = 3
+const CHANNEL_TYPE_AWS = 33
+
+// Claude-on-Bedrock model list advertised by the AWS preset. The backend
+// pairs each name with a region-prefixed Bedrock model id in
+// channel.model_mapping (e.g. region us-east-1 → "us.anthropic.…"), so the
+// operator never edits the mapping directly — they just pick the region.
+const DEFAULT_AWS_CLAUDE_MODELS = [
+  'claude-opus-4-6',
+  'claude-opus-4-5-20251101',
+  'claude-sonnet-4-6',
+  'claude-sonnet-4-5-20250929',
+  'claude-haiku-4-5-20251001',
+].join(',')
 
 // Anthropic-on-Vertex reuses channel_type=41 + the Vertex file/api_key
 // upload flow, but writes to a distinct upstream group so routing keys
@@ -112,11 +125,11 @@ const DEFAULT_VERTEX_CLAUDE_MODELS = [
 // (default_group for anthropic, default_gemini_group for gemini) with a
 // hardcoded fallback so the field still works when a profile hasn't set
 // its own preference.
-type PresetID = 'anthropic' | 'openai' | 'gemini' | 'vertex' | 'vertex-claude' | 'azure'
+type PresetID = 'anthropic' | 'openai' | 'gemini' | 'vertex' | 'vertex-claude' | 'azure' | 'aws'
 type PresetSpec = {
   id: PresetID
   label: string
-  kind: 'text' | 'vertex' | 'azure'
+  kind: 'text' | 'vertex' | 'azure' | 'aws'
   type: number
   fallbackModels: string
   fallbackGroup: string
@@ -134,6 +147,7 @@ const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
   { id: 'vertex',        label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,        fallbackGroup: 'gemini',         testModel: 'gemini-2.5-flash',             profileGroupField: 'default_gemini_group', profileModelsField: 'default_vertex_models' },
   { id: 'vertex-claude', label: 'Vertex AI (Claude)',  kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_CLAUDE_MODELS, fallbackGroup: 'claude-vertex', testModel: 'claude-sonnet-4-5-20250929' },
   { id: 'azure',         label: 'Azure',               kind: 'azure',  type: CHANNEL_TYPE_AZURE,     fallbackModels: DEFAULT_OPENAI_MODELS,        fallbackGroup: 'openai',         testModel: 'gpt-4o-mini',                  profileGroupField: 'default_group',        profileModelsField: 'default_models' },
+  { id: 'aws',           label: 'AWS (Bedrock)',       kind: 'aws',    type: CHANNEL_TYPE_AWS,       fallbackModels: DEFAULT_AWS_CLAUDE_MODELS,    fallbackGroup: 'claude-aws',     testModel: 'claude-haiku-4-5-20251001' },
 ]
 
 // resolvePresetGroup / resolvePresetModels pick the batch upload group +
@@ -585,6 +599,10 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   // handleAzureChannelCreate on the backend.
   const [batchAzureBaseUrl, setBatchAzureBaseUrl] = useState('')
   const [batchAzureApiVersion, setBatchAzureApiVersion] = useState(AZURE_DEFAULT_API_VERSION)
+  // AWS Bedrock preset state. Bypasses the pending queue too (per-batch
+  // region drives channel.key + model_mapping, plus aws_key_type settings).
+  // Region reuses batchRegion. batchAwsKeyMode selects the auth flavour.
+  const [batchAwsKeyMode, setBatchAwsKeyMode] = useState<'ak_sk' | 'api_key'>('ak_sk')
 
   // Row edit modal.
   const [rowOpen, setRowOpen] = useState(false)
@@ -1253,6 +1271,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setBatchRegion('global')
     setBatchAzureBaseUrl('')
     setBatchAzureApiVersion(AZURE_DEFAULT_API_VERSION)
+    setBatchAwsKeyMode('ak_sk')
     setBatchOpen(true)
   }
 
@@ -1334,6 +1353,59 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           }))
         )
         // Refresh remote channel list so newly created rows appear.
+        void fetchChannels()
+      } catch (e: any) {
+        setBatchErr(e?.message || String(e))
+      } finally {
+        setBatchBusy(false)
+      }
+      return
+    }
+
+    // AWS Bedrock keeps the per-line credential textarea but needs a
+    // per-batch region (baked into the key + model_mapping) and an
+    // aws_key_type setting, so it bypasses the pending queue like Vertex.
+    if (preset?.kind === 'aws') {
+      if (!batchRegion.trim()) return setBatchErr('AWS 需要填写 Region (例: us-east-1)')
+      const awsItems: { key: string; quota_usd?: number; note?: string }[] = []
+      for (const raw of batchInput.split('\n')) {
+        const t = raw.trim()
+        if (!t || t.startsWith('#')) continue
+        const parts = t.split(/[\s,]+/)
+        const key = parts[0]
+        if (!key) continue
+        const item: { key: string; quota_usd?: number; note?: string } = { key }
+        if (parts[1]) {
+          const q = parseFloat(parts[1])
+          if (!isNaN(q) && q > 0) item.quota_usd = q
+        }
+        if (parts.length > 2) item.note = parts.slice(2).join(' ')
+        awsItems.push(item)
+      }
+      if (awsItems.length === 0) return setBatchErr('未解析到有效行')
+      setBatchBusy(true)
+      try {
+        const res = await api.remoteAwsCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: batchModels.trim(),
+          group: batchGroup.trim() || 'claude-aws',
+          region: batchRegion.trim(),
+          key_type: batchAwsKeyMode,
+          items: awsItems,
+        })
+        setBatchResults(
+          res.results.map((r, idx) => {
+            const raw = awsItems[idx]?.key ?? ''
+            const masked = raw.length > 8 ? `${raw.slice(0, 4)}…${raw.slice(-4)}` : raw
+            return {
+              key: masked,
+              ok: r.ok,
+              channel_id: r.channel_id,
+              error: r.error,
+            }
+          })
+        )
         void fetchChannels()
       } catch (e: any) {
         setBatchErr(e?.message || String(e))
@@ -2559,6 +2631,11 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                         const prof = profiles.find(x => x.id === selectedID)
                         setBatchModels(resolvePresetModels(p, prof))
                         setBatchGroup(resolvePresetGroup(p, prof))
+                        // Region default per preset: AWS needs a real region
+                        // (baked into the key + model mapping), Vertex uses
+                        // the "global" sentinel.
+                        if (p.kind === 'aws') setBatchRegion('us-east-1')
+                        else if (p.kind === 'vertex') setBatchRegion('global')
                       }}
                       className={`px-3 py-1.5 text-xs border-r border-gray-200 last:border-r-0 transition-colors ${
                         active ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
@@ -2583,7 +2660,11 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
             </Field>
             <div className="mt-3">
               <label className="block text-[11px] text-gray-500 mb-1">
-                Keys —— 每行 <code className="text-gray-700 bg-gray-100 px-1">key [额度USD] [备注...]</code>
+                {batchPresetID === 'aws' ? (
+                  <>Keys —— 每行 <code className="text-gray-700 bg-gray-100 px-1">{batchAwsKeyMode === 'ak_sk' ? 'ak|sk' : 'apikey'} [额度USD] [备注...]</code></>
+                ) : (
+                  <>Keys —— 每行 <code className="text-gray-700 bg-gray-100 px-1">key [额度USD] [备注...]</code></>
+                )}
               </label>
               <textarea
                 value={batchInput}
@@ -2646,6 +2727,55 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                       className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
                     />
                     <p className="text-[10px] text-gray-400 mt-1">写进 channel.other，缺省 {AZURE_DEFAULT_API_VERSION}。</p>
+                  </div>
+                </div>
+              </div>
+            )}
+            {batchPresetID === 'aws' && (
+              <div className="mt-3 space-y-2 border border-dashed border-gray-300 rounded-md p-3 bg-gray-50/50">
+                <p className="text-[11px] text-gray-500">
+                  AWS Bedrock 走独立通道，绕过 Pending 队列 —— 直接创建远端渠道。同批凭证共享同一 Region；Region 会拼进 channel.key 并按区域生成 Claude 模型映射（例: us-east-1 → <span className="font-mono">us.anthropic.*</span>）。
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] text-gray-500 mb-1">
+                      Region <span className="text-rose-500">*</span>
+                    </label>
+                    <input
+                      value={batchRegion}
+                      onChange={e => setBatchRegion(e.target.value)}
+                      placeholder="us-east-1"
+                      className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
+                    />
+                    <p className="text-[10px] text-gray-400 mt-1">前缀自动推导：us→us、eu→eu、ap→apac。</p>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-gray-500 mb-1">认证方式</label>
+                    <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setBatchAwsKeyMode('ak_sk')}
+                        className={`px-3 py-1.5 text-xs border-r border-gray-200 transition-colors ${
+                          batchAwsKeyMode === 'ak_sk' ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                        }`}
+                      >
+                        AK/SK
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setBatchAwsKeyMode('api_key')}
+                        className={`px-3 py-1.5 text-xs transition-colors ${
+                          batchAwsKeyMode === 'api_key' ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                        }`}
+                      >
+                        API Key
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-gray-400 mt-1">
+                      {batchAwsKeyMode === 'ak_sk'
+                        ? '每行填 ak|sk（Region 自动追加）。'
+                        : '每行填 apikey（Region 自动追加）。'}
+                    </p>
                   </div>
                 </div>
               </div>

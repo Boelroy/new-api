@@ -2722,6 +2722,308 @@ func handleAzureChannelCreate(c *gin.Context) {
 	})
 }
 
+// awsBedrockClaudeModelBase maps the friendly model names advertised on the
+// channel to their region-agnostic Bedrock model ids. buildAwsBedrockModelMapping
+// prepends the region's cross-region inference prefix (us./eu./apac.) to each id.
+// Kept as an ordered slice so the generated mapping is deterministic. The exact
+// suffixes (-v1, -v1:0, none) are the real Bedrock model ids and intentionally
+// inconsistent across models.
+var awsBedrockClaudeModelBase = []struct{ Name, ID string }{
+	{"claude-opus-4-6", "anthropic.claude-opus-4-6-v1"},
+	{"claude-opus-4-5-20251101", "anthropic.claude-opus-4-5-20251101-v1:0"},
+	{"claude-sonnet-4-6", "anthropic.claude-sonnet-4-6"},
+	{"claude-sonnet-4-5-20250929", "anthropic.claude-sonnet-4-5-20250929-v1:0"},
+	{"claude-haiku-4-5-20251001", "anthropic.claude-haiku-4-5-20251001-v1:0"},
+}
+
+// awsBedrockRegionPrefix derives the Bedrock cross-region inference prefix from
+// an AWS region id. Mirrors new-api's awsRegionCrossModelPrefixMap
+// (relay/channel/aws/constants.go): us→us, eu→eu, ap→apac. Unknown leading
+// segments pass through verbatim so uncommon regions still get a best-effort
+// prefix rather than an empty one.
+func awsBedrockRegionPrefix(region string) string {
+	seg := region
+	if i := strings.Index(region, "-"); i > 0 {
+		seg = region[:i]
+	}
+	switch seg {
+	case "us":
+		return "us"
+	case "eu":
+		return "eu"
+	case "ap":
+		return "apac"
+	default:
+		return seg
+	}
+}
+
+// buildAwsBedrockModelMapping returns the channel.model_mapping JSON string for
+// the given region, e.g. region "us-east-1" →
+// {"claude-opus-4-6":"us.anthropic.claude-opus-4-6-v1", ...}.
+func buildAwsBedrockModelMapping(region string) (string, error) {
+	prefix := awsBedrockRegionPrefix(strings.TrimSpace(region))
+	mapping := make(map[string]string, len(awsBedrockClaudeModelBase))
+	for _, m := range awsBedrockClaudeModelBase {
+		mapping[m.Name] = prefix + "." + m.ID
+	}
+	b, err := json.Marshal(mapping)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// handleAwsChannelCreate uploads one or more AWS Bedrock credentials to the
+// remote as newapi channels (channel_type = 33). Runs synchronously, one
+// channel per credential — AWS batches are small and serial makes each error
+// attributable.
+//
+// Bypasses remote_pending_key for the same reason as Vertex/Azure: AWS carries
+// a per-batch region (baked into channel.key + channel.model_mapping) plus
+// channel.settings (aws_key_type) that the pending schema doesn't carry.
+//
+// Two auth modes, selected by KeyType and mirrored into
+// channel.settings.aws_key_type so new-api's AWS adaptor picks the right client
+// (relay/channel/aws/relay-aws.go splits channel.key on "|"):
+//   - "ak_sk"   (default): each item's Key is "<ak>|<sk>"; the region is
+//     appended to form "<ak>|<sk>|<region>" (3 parts).
+//   - "api_key":           each item's Key is "<apikey>"; the region is
+//     appended to form "<apikey>|<region>" (2 parts).
+func handleAwsChannelCreate(c *gin.Context) {
+	var body struct {
+		ProfileID  int64  `json:"profile_id"`
+		NamePrefix string `json:"name_prefix"`
+		Models     string `json:"models"`
+		Group      string `json:"group"`
+		Tag        string `json:"tag"`
+		Region     string `json:"region"`
+		// KeyType selects AWS auth mode: "ak_sk" (default) or "api_key".
+		KeyType string `json:"key_type"`
+		Items   []struct {
+			Key      string   `json:"key"`
+			QuotaUSD *float64 `json:"quota_usd,omitempty"`
+			Note     string   `json:"note,omitempty"`
+		} `json:"items"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	body.NamePrefix = strings.TrimSpace(body.NamePrefix)
+	body.Models = strings.TrimSpace(body.Models)
+	body.Group = strings.TrimSpace(body.Group)
+	body.Region = strings.TrimSpace(body.Region)
+	body.KeyType = strings.TrimSpace(body.KeyType)
+	if body.KeyType == "" {
+		body.KeyType = "ak_sk"
+	}
+	if body.KeyType != "ak_sk" && body.KeyType != "api_key" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "key_type must be 'ak_sk' or 'api_key'"})
+		return
+	}
+	if body.ProfileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
+		return
+	}
+	if body.NamePrefix == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name_prefix is required"})
+		return
+	}
+	if body.Models == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "models is required"})
+		return
+	}
+	if body.Region == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "region is required (e.g. us-east-1)"})
+		return
+	}
+	if body.Group == "" {
+		body.Group = "claude-aws"
+	}
+	if len(body.Items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no items provided"})
+		return
+	}
+
+	// Same studio-lock as handleVertexChannelCreate/handleAzureChannelCreate —
+	// tag is fixed to the caller's studio, accept-policy blocks upload.
+	if callerNeedsRemoteStudioLock(c) {
+		studio := callerStudio(c)
+		if studio == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "your account has no studio binding; ask an admin to bind one before uploading keys"})
+			return
+		}
+		accepting, err := studioAccepting(body.ProfileID, studio)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "policy check: " + err.Error()})
+			return
+		}
+		if !accepting {
+			c.JSON(http.StatusForbidden, gin.H{"error": "该 profile 暂不接收本工作室 key，请联系管理员"})
+			return
+		}
+		body.Tag = studio
+	}
+
+	host, userID, token, err := loadRemoteProfileByID(body.ProfileID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	uploadedBy := int64(0)
+	if v, ok := c.Get("user_id"); ok {
+		if uid, ok := v.(int64); ok {
+			uploadedBy = uid
+		}
+	}
+
+	// settings.aws_key_type drives new-api's AWS adaptor client selection.
+	var settingsJSON string
+	if body.KeyType == "api_key" {
+		settingsJSON = `{"aws_key_type":"api_key"}`
+	} else {
+		settingsJSON = `{"aws_key_type":"ak_sk"}`
+	}
+
+	// model_mapping is region-derived: friendly Claude names → region-prefixed
+	// Bedrock model ids. Built once per batch (region is per-batch).
+	modelMapping, err := buildAwsBedrockModelMapping(body.Region)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "build model mapping: " + err.Error()})
+		return
+	}
+
+	// wantParts is the exact "|"-separated part count the final channel.key
+	// must have for this mode, so a malformed credential fails loud instead of
+	// producing a channel new-api can't authenticate with.
+	wantParts := 3 // ak_sk → ak|sk|region
+	if body.KeyType == "api_key" {
+		wantParts = 2 // api_key → apikey|region
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
+	defer cancel()
+
+	results := make([]gin.H, 0, len(body.Items))
+	okCount := 0
+	for idx, it := range body.Items {
+		cred := strings.TrimSpace(it.Key)
+		if cred == "" {
+			results = append(results, gin.H{
+				"index": idx,
+				"ok":    false,
+				"error": "empty credential",
+			})
+			continue
+		}
+		// Region is appended here so the operator only enters it once per batch.
+		fullKey := cred + "|" + body.Region
+		if len(strings.Split(fullKey, "|")) != wantParts {
+			msg := "ak_sk mode expects '<ak>|<sk>' per line"
+			if body.KeyType == "api_key" {
+				msg = "api_key mode expects a single '<apikey>' per line"
+			}
+			results = append(results, gin.H{
+				"index": idx,
+				"ok":    false,
+				"error": msg,
+			})
+			continue
+		}
+		chID, err := uploadOneKeyToRemote(ctx, uploadOneKeyParams{
+			Host:         host,
+			Token:        token,
+			UserID:       userID,
+			ProfileID:    body.ProfileID,
+			Key:          fullKey,
+			NamePrefix:   body.NamePrefix,
+			Type:         33, // constant/channel.go ChannelTypeAws
+			Models:       body.Models,
+			Group:        body.Group,
+			Tag:          body.Tag,
+			Priority:     0,
+			Settings:     settingsJSON,
+			ModelMapping: modelMapping,
+			QuotaUSD:     it.QuotaUSD,
+			Note:         it.Note,
+		})
+		if err != nil {
+			results = append(results, gin.H{
+				"index": idx,
+				"ok":    false,
+				"error": err.Error(),
+			})
+			continue
+		}
+
+		// Attribution + credential rows mirror handleVertexChannelCreate so
+		// 我的远程渠道 and 上传队列 render AWS uploads consistently.
+		noteStr := strings.TrimSpace(it.Note)
+		quota := 0.0
+		if it.QuotaUSD != nil {
+			quota = *it.QuotaUSD
+		}
+		enc, encErr := encryptRemoteToken(fullKey)
+		if encErr == nil {
+			nowTS := time.Now().Unix()
+			if _, err := db.Exec(
+				`INSERT INTO remote_pending_key
+				 (profile_id, key_hash, key_encrypted, quota_usd, note, name_prefix,
+				  group_name, tag, models, priority, pool_size, status, channel_type, uploaded_by,
+				  remote_channel_id, activated_at, created_at, updated_at)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0,0,'active',33,$10,$11,$12,$12,$12)
+				 ON CONFLICT (profile_id, key_hash) DO UPDATE SET
+				   remote_channel_id = EXCLUDED.remote_channel_id,
+				   status            = 'active',
+				   activated_at      = EXCLUDED.activated_at,
+				   uploaded_by       = EXCLUDED.uploaded_by,
+				   tag               = EXCLUDED.tag,
+				   updated_at        = EXCLUDED.updated_at,
+				   failed_reason     = ''`,
+				body.ProfileID, pendingKeyHash(fullKey), enc, quota, noteStr, body.NamePrefix,
+				body.Group, body.Tag, body.Models, uploadedBy,
+				chID, nowTS,
+			); err != nil {
+				log.Printf("[aws-create] attribution insert profile=%d channel=%d: %v", body.ProfileID, chID, err)
+			}
+			if _, err := db.Exec(
+				`INSERT INTO remote_channel_credential
+				 (profile_id, remote_channel_id, channel_type, key_type, key_encrypted,
+				  region, settings_json, uploaded_by, created_at, updated_at)
+				 VALUES ($1,$2,33,$3,$4,$5,$6,$7,$8,$8)
+				 ON CONFLICT (profile_id, remote_channel_id) DO UPDATE SET
+				   channel_type   = EXCLUDED.channel_type,
+				   key_type       = EXCLUDED.key_type,
+				   key_encrypted  = EXCLUDED.key_encrypted,
+				   region         = EXCLUDED.region,
+				   settings_json  = EXCLUDED.settings_json,
+				   uploaded_by    = EXCLUDED.uploaded_by,
+				   updated_at     = EXCLUDED.updated_at`,
+				body.ProfileID, chID, body.KeyType, enc,
+				body.Region, settingsJSON, uploadedBy, nowTS,
+			); err != nil {
+				log.Printf("[aws-create] credential insert profile=%d channel=%d: %v", body.ProfileID, chID, err)
+			}
+		} else {
+			log.Printf("[aws-create] encrypt key for attribution profile=%d channel=%d: %v", body.ProfileID, chID, encErr)
+		}
+
+		results = append(results, gin.H{
+			"index":      idx,
+			"ok":         true,
+			"channel_id": chID,
+		})
+		okCount++
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"results": results,
+		"ok":      okCount,
+		"total":   len(body.Items),
+	})
+}
+
 // pendingSchedulerNudge lets the enqueue handler skip the tick wait for
 // immediate (pool_size=0) uploads. Buffered=1 so overlapping enqueues
 // coalesce into one wake-up.
@@ -3612,6 +3914,11 @@ type uploadOneKeyParams struct {
 	//              this column as TEXT, so we pass it through unchanged.
 	Other    string
 	Settings string
+	// ModelMapping is a pre-serialised channel.model_mapping JSON string
+	// (friendly model name → upstream model id). Left blank for channel
+	// types that don't need a mapping; AWS Bedrock uses it to map the
+	// advertised Claude names onto region-prefixed Bedrock model ids.
+	ModelMapping string
 }
 
 // uploadOneKeyToRemote creates one channel on the remote and returns the
@@ -3667,6 +3974,11 @@ func uploadOneKeyToRemote(ctx context.Context, p uploadOneKeyParams) (int64, err
 		// *string* (it lands in a TEXT column). Callers already prepared
 		// the payload — do not re-marshal or wrap.
 		channelBody["settings"] = p.Settings
+	}
+	if p.ModelMapping != "" {
+		// model_mapping is likewise a serialised JSON *string* on a TEXT
+		// column (model/channel.go: ModelMapping *string). Pass through.
+		channelBody["model_mapping"] = p.ModelMapping
 	}
 	payload := gin.H{"mode": "single", "channel": channelBody}
 	if _, err := remoteDoJSON(ctx, http.MethodPost, p.Host, "/api/channel/", p.Token, p.UserID, nil, payload); err != nil {

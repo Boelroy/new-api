@@ -85,6 +85,19 @@ const CHANNEL_TYPE_ANTHROPIC = 14
 const CHANNEL_TYPE_GEMINI = 24
 const CHANNEL_TYPE_VERTEX = 41
 const CHANNEL_TYPE_AZURE = 3
+const CHANNEL_TYPE_AWS = 33
+
+// Claude-on-Bedrock model list advertised by the AWS preset. The backend
+// pairs each name with a region-prefixed Bedrock model id in
+// channel.model_mapping (e.g. region us-east-1 → "us.anthropic.…"), so the
+// operator never edits the mapping directly — they just pick the region.
+const DEFAULT_AWS_CLAUDE_MODELS = [
+  'claude-opus-4-6',
+  'claude-opus-4-5-20251101',
+  'claude-sonnet-4-6',
+  'claude-sonnet-4-5-20250929',
+  'claude-haiku-4-5-20251001',
+].join(',')
 
 // Anthropic-on-Vertex reuses the same channel_type=41 + SA JSON / API-key
 // flow as regular Vertex, but lands in a distinct upstream group so
@@ -104,16 +117,18 @@ const DEFAULT_VERTEX_CLAUDE_MODELS = [
   'claude-sonnet-5',
 ].join(',')
 
-type PresetID = 'anthropic' | 'openai' | 'gemini' | 'vertex' | 'vertex-claude' | 'azure'
+type PresetID = 'anthropic' | 'openai' | 'gemini' | 'vertex' | 'vertex-claude' | 'azure' | 'aws'
 // `kind` gates the modal's form flow: 'text' presets use the per-line
 // key textarea + pending-queue path; 'vertex' presets swap in a JSON
 // file picker + region input and post directly to remoteVertexCreate;
 // 'azure' presets keep the per-line key textarea but add base_url +
-// api_version inputs and post directly to remoteAzureCreate.
+// api_version inputs and post directly to remoteAzureCreate; 'aws' presets
+// keep the per-line key textarea but add a region + key-mode selector and
+// post directly to remoteAwsCreate.
 type PresetSpec = {
   id: PresetID
   label: string
-  kind: 'text' | 'vertex' | 'azure'
+  kind: 'text' | 'vertex' | 'azure' | 'aws'
   type: number
   fallbackModels: string
   fallbackGroup: string
@@ -131,6 +146,7 @@ const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
   { id: 'vertex',        label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,        fallbackGroup: 'gemini',         profileGroupField: 'default_gemini_group', profileModelsField: 'default_vertex_models' },
   { id: 'vertex-claude', label: 'Vertex AI (Claude)',  kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_CLAUDE_MODELS, fallbackGroup: 'claude-vertex' },
   { id: 'azure',         label: 'Azure',               kind: 'azure',  type: CHANNEL_TYPE_AZURE,     fallbackModels: DEFAULT_OPENAI_MODELS,        fallbackGroup: 'openai',         profileGroupField: 'default_group',        profileModelsField: 'default_models' },
+  { id: 'aws',           label: 'AWS (Bedrock)',       kind: 'aws',    type: CHANNEL_TYPE_AWS,       fallbackModels: DEFAULT_AWS_CLAUDE_MODELS,    fallbackGroup: 'claude-aws' },
 ]
 
 function resolvePresetGroup(preset: PresetSpec, profile: RemoteProfile | undefined): string {
@@ -402,6 +418,71 @@ function AzureInputSection({
   )
 }
 
+// AwsInputSection is the region + auth-mode selector for the AWS (Bedrock)
+// preset. The per-line key textarea stays outside this block (shared with the
+// text/azure flows); here the operator only picks the region (baked into
+// channel.key + model_mapping by the backend) and the auth flavour.
+type AwsKeyMode = 'ak_sk' | 'api_key'
+function AwsInputSection({
+  region,
+  onRegionChange,
+  keyMode,
+  onKeyModeChange,
+}: {
+  region: string
+  onRegionChange: (v: string) => void
+  keyMode: AwsKeyMode
+  onKeyModeChange: (v: AwsKeyMode) => void
+}) {
+  return (
+    <div className="space-y-2 border border-dashed border-gray-300 rounded-md p-3 bg-gray-50/50">
+      <p className="text-[11px] text-gray-500">
+        本批次共用一个 Region；Region 会拼进 channel.key 并按区域生成 Claude 模型映射（例: us-east-1 → <span className="font-mono">us.anthropic.*</span>）。
+      </p>
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <label className="block text-[11px] text-gray-500 mb-1">
+            Region <span className="text-rose-500">*</span>
+          </label>
+          <input
+            value={region}
+            onChange={e => onRegionChange(e.target.value)}
+            placeholder="us-east-1"
+            className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
+          />
+          <p className="text-[10px] text-gray-400 mt-1">前缀自动推导：us→us、eu→eu、ap→apac。</p>
+        </div>
+        <div>
+          <label className="block text-[11px] text-gray-500 mb-1">认证方式</label>
+          <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
+            <button
+              type="button"
+              onClick={() => onKeyModeChange('ak_sk')}
+              className={`px-3 py-1.5 text-xs border-r border-gray-200 transition-colors ${
+                keyMode === 'ak_sk' ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+              }`}
+            >
+              AK/SK
+            </button>
+            <button
+              type="button"
+              onClick={() => onKeyModeChange('api_key')}
+              className={`px-3 py-1.5 text-xs transition-colors ${
+                keyMode === 'api_key' ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+              }`}
+            >
+              API Key
+            </button>
+          </div>
+          <p className="text-[10px] text-gray-400 mt-1">
+            {keyMode === 'ak_sk' ? '每行填 ak|sk（Region 自动追加）。' : '每行填 apikey（Region 自动追加）。'}
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function RemoteChannelsStudio() {
   const [profiles, setProfiles] = useState<RemoteProfile[]>([])
   // Initialise from localStorage so a page refresh doesn't force operators
@@ -473,6 +554,12 @@ export default function RemoteChannelsStudio() {
   const [batchAzureApiVersion, setBatchAzureApiVersion] = useState(AZURE_DEFAULT_API_VERSION)
   const [immAzureBaseUrl, setImmAzureBaseUrl] = useState('')
   const [immAzureApiVersion, setImmAzureApiVersion] = useState(AZURE_DEFAULT_API_VERSION)
+
+  // AWS Bedrock preset state. Region reuses batchRegion/immRegion (same
+  // sentinel-vs-real handling as Vertex); the key-mode selector picks the
+  // auth flavour (ak_sk default / api_key) posted to remoteAwsCreate.
+  const [batchAwsKeyMode, setBatchAwsKeyMode] = useState<AwsKeyMode>('ak_sk')
+  const [immAwsKeyMode, setImmAwsKeyMode] = useState<AwsKeyMode>('ak_sk')
 
   // Key usage list. Two YYYY-MM-DD date inputs (interpreted in local
   // time, so "2026-07-23" = local 00:00 that day). Default range = today
@@ -682,6 +769,7 @@ export default function RemoteChannelsStudio() {
     setBatchRegion('global')
     setBatchAzureBaseUrl('')
     setBatchAzureApiVersion(AZURE_DEFAULT_API_VERSION)
+    setBatchAwsKeyMode('ak_sk')
     setBatchErr(null)
     setBatchOpen(true)
   }
@@ -798,6 +886,51 @@ export default function RemoteChannelsStudio() {
       return
     }
 
+    if (preset?.kind === 'aws') {
+      if (!batchRegion.trim()) return setBatchErr('AWS 需要填写 Region (例: us-east-1)')
+      const awsItems: { key: string; quota_usd?: number; note?: string }[] = []
+      for (const raw of batchInput.split('\n')) {
+        const t = raw.trim()
+        if (!t || t.startsWith('#')) continue
+        const parts = t.split(/[\s,]+/)
+        const key = parts[0]
+        if (!key) continue
+        const item: { key: string; quota_usd?: number; note?: string } = { key }
+        if (parts[1]) {
+          const q = parseFloat(parts[1])
+          if (!isNaN(q) && q > 0) item.quota_usd = q
+        }
+        if (parts.length > 2) item.note = parts.slice(2).join(' ')
+        awsItems.push(item)
+      }
+      if (awsItems.length === 0) return setBatchErr('未解析到有效行')
+      setBatchBusy(true)
+      try {
+        const res = await api.remoteAwsCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: batchModels.trim(),
+          group: batchGroup.trim() || 'claude-aws',
+          region: batchRegion.trim(),
+          key_type: batchAwsKeyMode,
+          items: awsItems,
+        })
+        const failed = res.results.filter(r => !r.ok)
+        if (failed.length === 0) {
+          alert(`已上传 ${res.ok} 个 AWS 渠道`)
+        } else {
+          alert(`成功 ${res.ok} / ${res.total}\n失败：\n` + failed.map(r => `#${r.index} ${r.error}`).join('\n'))
+        }
+        setBatchOpen(false)
+        void reloadChannels()
+      } catch (e: any) {
+        setBatchErr(e?.message || String(e))
+      } finally {
+        setBatchBusy(false)
+      }
+      return
+    }
+
     const items: { key: string; quota_usd?: number; note?: string }[] = []
     for (const raw of batchInput.split('\n')) {
       const t = raw.trim()
@@ -857,6 +990,7 @@ export default function RemoteChannelsStudio() {
     setImmRegion('global')
     setImmAzureBaseUrl('')
     setImmAzureApiVersion(AZURE_DEFAULT_API_VERSION)
+    setImmAwsKeyMode('ak_sk')
     setImmErr(null)
     setImmOpen(true)
   }
@@ -956,6 +1090,51 @@ export default function RemoteChannelsStudio() {
         const failed = res.results.filter(r => !r.ok)
         if (failed.length === 0) {
           alert(`已上传 ${res.ok} 个 Azure 渠道`)
+        } else {
+          alert(`成功 ${res.ok} / ${res.total}\n失败：\n` + failed.map(r => `#${r.index} ${r.error}`).join('\n'))
+        }
+        setImmOpen(false)
+        void reloadChannels()
+      } catch (e: any) {
+        setImmErr(e?.message || String(e))
+      } finally {
+        setImmBusy(false)
+      }
+      return
+    }
+
+    if (preset?.kind === 'aws') {
+      if (!immRegion.trim()) return setImmErr('AWS 需要填写 Region (例: us-east-1)')
+      const awsItems: { key: string; quota_usd?: number; note?: string }[] = []
+      for (const raw of immInput.split('\n')) {
+        const t = raw.trim()
+        if (!t || t.startsWith('#')) continue
+        const parts = t.split(/[\s,]+/)
+        const key = parts[0]
+        if (!key) continue
+        const item: { key: string; quota_usd?: number; note?: string } = { key }
+        if (parts[1]) {
+          const q = parseFloat(parts[1])
+          if (!isNaN(q) && q > 0) item.quota_usd = q
+        }
+        if (parts.length > 2) item.note = parts.slice(2).join(' ')
+        awsItems.push(item)
+      }
+      if (awsItems.length === 0) return setImmErr('未解析到有效行')
+      setImmBusy(true)
+      try {
+        const res = await api.remoteAwsCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: immModels.trim(),
+          group: immGroup.trim() || 'claude-aws',
+          region: immRegion.trim(),
+          key_type: immAwsKeyMode,
+          items: awsItems,
+        })
+        const failed = res.results.filter(r => !r.ok)
+        if (failed.length === 0) {
+          alert(`已上传 ${res.ok} 个 AWS 渠道`)
         } else {
           alert(`成功 ${res.ok} / ${res.total}\n失败：\n` + failed.map(r => `#${r.index} ${r.error}`).join('\n'))
         }
@@ -1402,6 +1581,10 @@ export default function RemoteChannelsStudio() {
                           const prof = profiles.find(x => x.id === selectedID)
                           setBatchGroup(resolvePresetGroup(p, prof))
                           setBatchModels(resolvePresetModels(p, prof))
+                          // AWS needs a real region (baked into the key +
+                          // model mapping); Vertex uses the "global" sentinel.
+                          if (p.kind === 'aws') setBatchRegion('us-east-1')
+                          else if (p.kind === 'vertex') setBatchRegion('global')
                         }}
                         className={`px-3 py-1 text-xs border-r border-gray-200 last:border-r-0 transition-colors ${
                           active ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
@@ -1471,11 +1654,21 @@ export default function RemoteChannelsStudio() {
                   onApiVersionChange={setBatchAzureApiVersion}
                 />
               )}
+              {batchPresetID === 'aws' && (
+                <AwsInputSection
+                  region={batchRegion}
+                  onRegionChange={setBatchRegion}
+                  keyMode={batchAwsKeyMode}
+                  onKeyModeChange={setBatchAwsKeyMode}
+                />
+              )}
               <p className="text-[11px] text-gray-400">
                 {(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude')
                   ? 'Vertex 走独立通道 —— 上传后不进 Pool 队列，直接创建远端渠道。'
                   : batchPresetID === 'azure'
                   ? 'Azure 走独立通道 —— 上传后不进 Pool 队列，直接创建远端渠道。同批 Key 共享同一 base_url + api version。'
+                  : batchPresetID === 'aws'
+                  ? 'AWS 走独立通道 —— 上传后不进 Pool 队列，直接创建远端渠道。同批凭证共享同一 Region；每行填 ' + (batchAwsKeyMode === 'ak_sk' ? 'ak|sk' : 'apikey') + '。'
                   : '上 Key 后进入 Pool 队列。管理员配置了每次上几个 + 检查间隔。同批 Key 会按 FIFO 依次进池，前一批全部消耗完之前不会开始新一批。'}
               </p>
               {batchErr && <p className="text-xs text-rose-600">{batchErr}</p>}
@@ -1542,6 +1735,8 @@ export default function RemoteChannelsStudio() {
                           const prof = profiles.find(x => x.id === selectedID)
                           setImmGroup(resolvePresetGroup(p, prof))
                           setImmModels(resolvePresetModels(p, prof))
+                          if (p.kind === 'aws') setImmRegion('us-east-1')
+                          else if (p.kind === 'vertex') setImmRegion('global')
                         }}
                         className={`px-3 py-1 text-xs border-r border-gray-200 last:border-r-0 transition-colors ${
                           active ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
@@ -1606,6 +1801,14 @@ export default function RemoteChannelsStudio() {
                   onBaseUrlChange={setImmAzureBaseUrl}
                   apiVersion={immAzureApiVersion}
                   onApiVersionChange={setImmAzureApiVersion}
+                />
+              )}
+              {immPresetID === 'aws' && (
+                <AwsInputSection
+                  region={immRegion}
+                  onRegionChange={setImmRegion}
+                  keyMode={immAwsKeyMode}
+                  onKeyModeChange={setImmAwsKeyMode}
                 />
               )}
               {immErr && <p className="text-xs text-rose-600">{immErr}</p>}
