@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactElement } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BASE_PATH } from './basePath'
 import Login from './pages/Login'
 import Report from './pages/Report'
 import KeyCapacity from './pages/KeyCapacity'
@@ -77,7 +78,7 @@ function RoleGate({ min, allow, children }: GateProps) {
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={BASE_PATH || undefined}>
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<RoleGate min={ROLE_ADMIN}><Report /></RoleGate>} />

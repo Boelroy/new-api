@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_TESTER } from '../api'
+import { withBase } from '../basePath'
 
 type Item = {
   to: string
@@ -169,7 +170,7 @@ async function loadSidebarBoot(): Promise<SidebarBoot> {
   if (inflightBoot) return inflightBoot
   inflightBoot = (async () => {
     const [cfgRes, meRes] = await Promise.allSettled([
-      fetch('/api/auth/config').then(r => r.json()),
+      fetch(withBase('/api/auth/config')).then(r => r.json()),
       api.getAuthMe(),
     ])
     const cfg = cfgRes.status === 'fulfilled' ? cfgRes.value : {}
@@ -244,7 +245,7 @@ export default function Sidebar({ open, onClose }: Props) {
 
   const handleLogout = async () => {
     await api.logout()
-    window.location.href = '/login'
+    window.location.href = withBase('/login')
   }
 
   return (

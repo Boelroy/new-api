@@ -2,6 +2,12 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <!-- Base path is injected by the Go server at serve time (REPORT_BASE_PATH).
+         Empty prefix renders as href="/". With base:'./' in vite.config.ts the
+         hashed assets are emitted relative (./assets/...) and resolve against
+         this <base> at any route depth. -->
+    <base href="__BASE_PATH__/" />
+    <script>window.__BASE_PATH__ = "__BASE_PATH__";</script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Report Service</title>
   </head>

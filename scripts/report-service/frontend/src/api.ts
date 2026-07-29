@@ -1,3 +1,5 @@
+import { withBase } from './basePath'
+
 export type LogRow = {
   hour: string
   user_id: number
@@ -298,11 +300,11 @@ async function request<T>(url: string, opts?: RequestInit): Promise<T> {
   if (apiKey && !headers.has('X-API-Key') && url.startsWith('/api/profit/')) {
     headers.set('X-API-Key', apiKey)
   }
-  const res = await fetch(url, { ...(opts ?? {}), headers })
+  const res = await fetch(withBase(url), { ...(opts ?? {}), headers })
   if (res.status === 401) {
     // /profit handles its own auth via the gate; other pages bounce to /login.
-    if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/profit')) {
-      window.location.href = '/login'
+    if (typeof window !== 'undefined' && !window.location.pathname.startsWith(withBase('/profit'))) {
+      window.location.href = withBase('/login')
     }
     throw new Error('Unauthorized')
   }
@@ -546,13 +548,13 @@ export type PendingKey = {
 
 export const api = {
   login: (username: string, password: string) =>
-    fetch('/api/login', {
+    fetch(withBase('/api/login'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
     }),
 
-  logout: () => fetch('/api/logout', { method: 'POST' }),
+  logout: () => fetch(withBase('/api/logout'), { method: 'POST' }),
 
   getAuthMe: () => request<AuthMe>('/api/auth/me'),
 
@@ -679,7 +681,7 @@ export const api = {
   getAllKeysRpm: () => request<{ rpm: number }>('/api/allkeys/rpm'),
 
   exportCSV: (start: string, end: string) => {
-    window.location.href = `/api/export/csv?start=${start}&end=${end}`
+    window.location.href = withBase(`/api/export/csv?start=${start}&end=${end}`)
   },
 
   testKeys: (keys: string[], model: string) =>

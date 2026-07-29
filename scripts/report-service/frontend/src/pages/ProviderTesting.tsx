@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { withBase } from '../basePath'
 import Layout from '../components/Layout'
 import RunDetailPanels from '../components/RunDetailPanels'
 import { api, TestProject, TestRun } from '../api'
@@ -95,7 +96,7 @@ export default function ProviderTesting() {
   useEffect(() => {
     void (async () => {
       try {
-        const cfg = await fetch('/api/auth/config').then(r => r.json())
+        const cfg = await fetch(withBase('/api/auth/config')).then(r => r.json())
         setR2Available(cfg.r2_configured === true)
       } catch {
         setR2Available(false)

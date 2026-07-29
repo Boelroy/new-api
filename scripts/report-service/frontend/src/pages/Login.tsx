@@ -1,4 +1,5 @@
 import { useState, useEffect, FormEvent } from 'react'
+import { withBase } from '../basePath'
 
 export default function Login() {
   const [username, setUsername] = useState('')
@@ -9,10 +10,10 @@ export default function Login() {
   const [configLoaded, setConfigLoaded] = useState(false)
 
   const params = new URLSearchParams(window.location.search)
-  const next = params.get('next') || '/'
+  const next = params.get('next') || withBase('/')
 
   useEffect(() => {
-    fetch('/api/auth/config')
+    fetch(withBase('/api/auth/config'))
       .then(r => r.json())
       .then(d => { setSsoUrl(d.sso_url || null) })
       .catch(() => {})
@@ -24,7 +25,7 @@ export default function Login() {
     setLoading(true)
     setError('')
     try {
-      const res = await fetch('/api/login', {
+      const res = await fetch(withBase('/api/login'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
@@ -51,7 +52,7 @@ export default function Login() {
         {ssoUrl && (
           <>
             <a
-              href={ssoUrl + `?redirect=${encodeURIComponent(window.location.origin + '/api/auth/callback')}`}
+              href={ssoUrl + `?redirect=${encodeURIComponent(window.location.origin + withBase('/api/auth/callback'))}`}
               className="flex items-center justify-center w-full bg-gray-900 text-white rounded-md py-2 text-sm font-medium hover:opacity-85 mb-4"
             >
               使用主服务账号登录

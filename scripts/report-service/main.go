@@ -32,6 +32,12 @@ const quotaPerUnit = 500000.0
 
 var db *sql.DB
 
+// reportBasePath is the URL prefix this service is mounted under (e.g.
+// "/dashboard" on a shared domain). Empty = mounted at root. Set from
+// REPORT_BASE_PATH in main(); trailing slash trimmed. Drives both the
+// prefix-strip middleware and the <base href> injected into the SPA shell.
+var reportBasePath string
+
 // ---- Auth ----
 
 var (
@@ -2901,6 +2907,22 @@ func spaHandler() gin.HandlerFunc {
 		log.Fatalf("failed to sub frontend/dist: %v", err)
 	}
 	fileServer := http.FileServer(http.FS(distFS))
+
+	// Read index.html once and bake in the base path. The template ships
+	// with `__BASE_PATH__` placeholders (in <base href> and window.__BASE_PATH__);
+	// replace them with reportBasePath so the SPA resolves assets and
+	// client-side routes under the mount prefix. Empty prefix → `<base href="/">`.
+	rawIndex, err := fs.ReadFile(distFS, "index.html")
+	if err != nil {
+		log.Fatalf("failed to read frontend/dist/index.html: %v (did the frontend build run?)", err)
+	}
+	indexBytes := bytes.ReplaceAll(rawIndex, []byte("__BASE_PATH__"), []byte(reportBasePath))
+	indexModTime := time.Now()
+	serveIndex := func(c *gin.Context) {
+		c.Header("Cache-Control", "no-cache")
+		http.ServeContent(c.Writer, c.Request, "index.html", indexModTime, bytes.NewReader(indexBytes))
+	}
+
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
 		// Unknown /api/* routes (e.g. disabled features) must surface as 404,
@@ -2909,16 +2931,21 @@ func spaHandler() gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
 		}
-		// Try to serve exact file; fall back to index.html for SPA routing
-		f, err := distFS.Open(strings.TrimPrefix(path, "/"))
-		if err == nil {
+		// The SPA shell is served from the rewritten in-memory copy (with the
+		// base path injected), never from FileServer — that also avoids
+		// FileServer's /index.html → ./ canonicalization redirect.
+		if path == "/" || path == "/index.html" {
+			serveIndex(c)
+			return
+		}
+		// Try to serve an exact static file (hashed JS/CSS/favicon).
+		if f, err := distFS.Open(strings.TrimPrefix(path, "/")); err == nil {
 			f.Close()
 			fileServer.ServeHTTP(c.Writer, c.Request)
 			return
 		}
-		// Serve index.html for all unknown paths (client-side routing)
-		c.Request.URL.Path = "/"
-		fileServer.ServeHTTP(c.Writer, c.Request)
+		// Unknown path → client-side route → serve the SPA shell.
+		serveIndex(c)
 	}
 }
 
@@ -3633,8 +3660,32 @@ func main() {
 		startDownstreamDailyCarryForward()
 	}
 
+	reportBasePath = strings.TrimRight(os.Getenv("REPORT_BASE_PATH"), "/")
+	if reportBasePath != "" {
+		log.Printf("[base-path] serving under prefix %q", reportBasePath)
+	}
+
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
+
+	// Base-path prefix stripping. When REPORT_BASE_PATH is set (e.g.
+	// "/dashboard" on a shared domain where the root belongs to another
+	// service), the LB forwards "/dashboard/*" through as-is. Strip that
+	// prefix here — before any route is registered — so every existing
+	// root route (API + SPA + assets) serves the prefixed request
+	// transparently. Empty prefix (default) is a no-op, so prefix-less
+	// consumers (direct /api/*, local tools) are unaffected.
+	if reportBasePath != "" {
+		r.Use(func(c *gin.Context) {
+			p := c.Request.URL.Path
+			if p == reportBasePath {
+				c.Request.URL.Path = "/"
+			} else if strings.HasPrefix(p, reportBasePath+"/") {
+				c.Request.URL.Path = strings.TrimPrefix(p, reportBasePath)
+			}
+			c.Next()
+		})
+	}
 
 	// Leader/liveness (no auth) — reports which node currently owns the
 	// singleton-scheduler lease. Useful for verifying multi-node deploys.

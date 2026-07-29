@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
+import { withBase } from '../basePath'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from 'recharts'
 import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
@@ -210,7 +211,7 @@ export default function Profit() {
 
     void (async () => {
       try {
-        const cfg = await fetch('/api/auth/config').then(r => r.json())
+        const cfg = await fetch(withBase('/api/auth/config')).then(r => r.json())
         setFeatureEnabled(cfg.profit_enabled === true)
       } catch { /* default off */ }
       setConfigChecked(true)
@@ -837,7 +838,7 @@ export default function Profit() {
       </div>
 
       <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 mb-4 text-xs text-amber-900">
-        💡 上游 key 的单价配置已移至 <a href="/allkeys" className="underline hover:text-amber-700">All Keys</a> 页面
+        💡 上游 key 的单价配置已移至 <a href={withBase('/allkeys')} className="underline hover:text-amber-700">All Keys</a> 页面
       </div>
 
       <div className="bg-white border border-gray-200 rounded-xl">
