@@ -1514,10 +1514,15 @@ func startRemoteSnapshotSync() {
 		// Small stagger on startup so we don't slam every remote in the same
 		// second the process comes up.
 		time.Sleep(20 * time.Second)
-		syncAllRemoteProfilesOnce()
+		if IsLeader() {
+			syncAllRemoteProfilesOnce()
+		}
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for range t.C {
+			if !IsLeader() {
+				continue
+			}
 			syncAllRemoteProfilesOnce()
 		}
 	}()
@@ -1605,12 +1610,14 @@ func startRemoteSnapshotPrune() {
 		// Delay first prune so schema init has clearly finished.
 		time.Sleep(2 * time.Minute)
 		for {
-			cutoff := time.Now().Add(-retention).Unix()
-			res, err := db.Exec(`DELETE FROM remote_channel_snapshot WHERE captured_at < $1`, cutoff)
-			if err != nil {
-				log.Printf("[remote-snapshot] prune: %v", err)
-			} else if n, _ := res.RowsAffected(); n > 0 {
-				log.Printf("[remote-snapshot] pruned %d rows older than %s", n, time.Unix(cutoff, 0).UTC().Format(time.RFC3339))
+			if IsLeader() {
+				cutoff := time.Now().Add(-retention).Unix()
+				res, err := db.Exec(`DELETE FROM remote_channel_snapshot WHERE captured_at < $1`, cutoff)
+				if err != nil {
+					log.Printf("[remote-snapshot] prune: %v", err)
+				} else if n, _ := res.RowsAffected(); n > 0 {
+					log.Printf("[remote-snapshot] pruned %d rows older than %s", n, time.Unix(cutoff, 0).UTC().Format(time.RFC3339))
+				}
 			}
 			time.Sleep(6 * time.Hour)
 		}
@@ -3071,16 +3078,20 @@ func startRemotePendingScheduler() {
 		// Modest stagger so the process doesn't hammer the remote in the
 		// very second it boots.
 		time.Sleep(15 * time.Second)
-		runPendingTickAllProfiles()
+		if IsLeader() {
+			runPendingTickAllProfiles()
+		}
 		t := time.NewTicker(20 * time.Second)
 		defer t.Stop()
 		for {
 			select {
 			case <-t.C:
-				runPendingTickAllProfiles()
 			case <-pendingSchedulerNudge:
-				runPendingTickAllProfiles()
 			}
+			if !IsLeader() {
+				continue
+			}
+			runPendingTickAllProfiles()
 		}
 	}()
 }
@@ -5457,16 +5468,26 @@ func startRemoteErrorLogSync() {
 		time.Sleep(3 * time.Second) // let the schema settle
 		tick := time.NewTicker(errorLogSyncInterval)
 		defer tick.Stop()
-		syncAllProfilesErrorLogs()
+		if IsLeader() {
+			syncAllProfilesErrorLogs()
+		}
 		for range tick.C {
+			if !IsLeader() {
+				continue
+			}
 			syncAllProfilesErrorLogs()
 		}
 	}()
 	go func() {
 		tick := time.NewTicker(errorLogRetentionInterval)
 		defer tick.Stop()
-		pruneRemoteErrorLogs()
+		if IsLeader() {
+			pruneRemoteErrorLogs()
+		}
 		for range tick.C {
+			if !IsLeader() {
+				continue
+			}
 			pruneRemoteErrorLogs()
 		}
 	}()
@@ -5835,7 +5856,7 @@ func startRemoteAutoDisableLoop() {
 		time.Sleep(45 * time.Second)
 		for {
 			cfg := loadRemoteAutoDisableConfig()
-			if cfg.Enabled {
+			if cfg.Enabled && IsLeader() {
 				runRemoteAutoDisableOnce()
 			}
 			time.Sleep(time.Duration(cfg.IntervalSec) * time.Second)

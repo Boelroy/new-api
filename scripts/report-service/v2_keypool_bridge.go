@@ -44,6 +44,9 @@ func keyPoolBridgeLoop() {
 	tick := time.NewTicker(keyPoolBridgeInterval)
 	defer tick.Stop()
 	for range tick.C {
+		if !IsLeader() {
+			continue
+		}
 		if err := reconcileKeyPool(); err != nil {
 			log.Printf("[v2 keypool bridge] reconcile: %v", sanitizeUpstreamMessage(err.Error()))
 		}

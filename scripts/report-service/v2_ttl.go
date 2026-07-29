@@ -27,6 +27,9 @@ func awaitingAssignmentTTLLoop() {
 	tick := time.NewTicker(awaitingAssignmentTTLInterval)
 	defer tick.Stop()
 	for range tick.C {
+		if !IsLeader() {
+			continue
+		}
 		cutoff := time.Now().Add(-time.Duration(ttlDays) * 24 * time.Hour).Unix()
 		res, err := db.Exec(
 			`DELETE FROM rs_key_pool WHERE status='awaiting_assignment' AND created_at < $1`,

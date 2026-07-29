@@ -1386,11 +1386,16 @@ func handleDeleteDownstreamDaily(c *gin.Context) {
 func startDownstreamDailyCarryForward() {
 	go func() {
 		time.Sleep(15 * time.Second)
-		if err := runDownstreamDailyCarryForward(); err != nil {
-			log.Printf("[profit] downstream carry-forward initial: %v", err)
+		if IsLeader() {
+			if err := runDownstreamDailyCarryForward(); err != nil {
+				log.Printf("[profit] downstream carry-forward initial: %v", err)
+			}
 		}
 		t := time.NewTicker(6 * time.Hour)
 		for range t.C {
+			if !IsLeader() {
+				continue
+			}
 			if err := runDownstreamDailyCarryForward(); err != nil {
 				log.Printf("[profit] downstream carry-forward: %v", err)
 			}

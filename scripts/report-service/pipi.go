@@ -243,9 +243,14 @@ func startPipiSync() {
 	go func() {
 		// Initial run after a short delay to let the service settle.
 		time.Sleep(10 * time.Second)
-		runPipiSync()
+		if IsLeader() {
+			runPipiSync()
+		}
 		ticker := time.NewTicker(time.Hour)
 		for range ticker.C {
+			if !IsLeader() {
+				continue
+			}
 			runPipiSync()
 		}
 	}()

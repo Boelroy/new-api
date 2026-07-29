@@ -482,16 +482,20 @@ func startLocalPendingScheduler() {
 	log.Printf("[local-pool] starting, tick=20s, retries=3")
 	go func() {
 		time.Sleep(15 * time.Second)
-		runLocalPoolTick()
+		if IsLeader() {
+			runLocalPoolTick()
+		}
 		t := time.NewTicker(20 * time.Second)
 		defer t.Stop()
 		for {
 			select {
 			case <-t.C:
-				runLocalPoolTick()
 			case <-localPoolNudge:
-				runLocalPoolTick()
 			}
+			if !IsLeader() {
+				continue
+			}
+			runLocalPoolTick()
 		}
 	}()
 }

@@ -636,6 +636,9 @@ func startNotifyLoop() {
 	ticker := time.NewTicker(10 * time.Minute)
 	go func() {
 		for range ticker.C {
+			if !IsLeader() {
+				continue
+			}
 			checkAndNotify()
 		}
 	}()
@@ -1055,10 +1058,17 @@ func backfillMissingDays() {
 }
 
 func startDailyRefresh() {
-	go backfillMissingDays()
+	go func() {
+		if IsLeader() {
+			backfillMissingDays()
+		}
+	}()
 	ticker := time.NewTicker(time.Hour)
 	go func() {
 		for range ticker.C {
+			if !IsLeader() {
+				continue
+			}
 			today := time.Now().UTC().Format("2006-01-02")
 			if err := aggregateDay(today); err != nil {
 				log.Printf("daily refresh error: %v", err)
@@ -1411,11 +1421,13 @@ func startPruneLoginAttempts() {
 		t := time.NewTicker(time.Hour)
 		defer t.Stop()
 		for {
-			cutoff := time.Now().Unix() - loginAttemptRetentionSec
-			if _, err := db.Exec(
-				`DELETE FROM rs_login_attempt WHERE attempted_at < $1`, cutoff,
-			); err != nil {
-				log.Printf("[login] prune error: %v", err)
+			if IsLeader() {
+				cutoff := time.Now().Unix() - loginAttemptRetentionSec
+				if _, err := db.Exec(
+					`DELETE FROM rs_login_attempt WHERE attempted_at < $1`, cutoff,
+				); err != nil {
+					log.Printf("[login] prune error: %v", err)
+				}
 			}
 			<-t.C
 		}
@@ -3571,6 +3583,18 @@ func main() {
 			updated_at         BIGINT NOT NULL,
 			PRIMARY KEY (profile_id, remote_channel_id)
 		)`,
+		// Single-row leader-election lease. Whoever holds a non-expired
+		// lease is the leader and runs the singleton background schedulers
+		// (see leader.go). Heartbeat renews expires_at; on leader death the
+		// lease expires and a follower takes over. Postgres server clock
+		// (now()) is the single source of truth for both nodes.
+		`CREATE TABLE IF NOT EXISTS report_leader (
+			id          INT PRIMARY KEY DEFAULT 1,
+			leader_id   TEXT NOT NULL,
+			expires_at  TIMESTAMPTZ NOT NULL,
+			updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+			CONSTRAINT report_leader_singleton CHECK (id = 1)
+		)`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
@@ -3581,9 +3605,19 @@ func main() {
 	// V2 schema + RBAC seed. Idempotent; safe to run on every startup.
 	initV2Schema()
 	seedV2RBAC()
+
+	// Leader election must settle before the singleton schedulers start so a
+	// follower never fires an initial run. Synchronous first tick inside.
+	startLeaderElection()
+
 	startAwaitingAssignmentTTL()
 
-	resetRunningTestRuns()
+	// Boot-time reset of stuck 'running' test runs is a shared-DB write —
+	// only the leader should do it, or a booting follower would clobber the
+	// leader's in-flight tests.
+	if IsLeader() {
+		resetRunningTestRuns()
+	}
 	startDailyRefresh()
 	startNotifyLoop()
 	startTestJobReaper()
@@ -3601,6 +3635,18 @@ func main() {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
+
+	// Leader/liveness (no auth) — reports which node currently owns the
+	// singleton-scheduler lease. Useful for verifying multi-node deploys.
+	r.GET("/api/leader", func(c *gin.Context) {
+		leaderID, expired := currentLeaderID()
+		c.JSON(http.StatusOK, gin.H{
+			"node_id":     NodeID(),
+			"is_leader":   IsLeader(),
+			"leader_id":   leaderID,
+			"lease_stale": expired,
+		})
+	})
 
 	// Auth (no middleware)
 	r.POST("/api/login", handleLogin)
