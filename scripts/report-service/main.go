@@ -3668,25 +3668,6 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 
-	// Base-path prefix stripping. When REPORT_BASE_PATH is set (e.g.
-	// "/dashboard" on a shared domain where the root belongs to another
-	// service), the LB forwards "/dashboard/*" through as-is. Strip that
-	// prefix here — before any route is registered — so every existing
-	// root route (API + SPA + assets) serves the prefixed request
-	// transparently. Empty prefix (default) is a no-op, so prefix-less
-	// consumers (direct /api/*, local tools) are unaffected.
-	if reportBasePath != "" {
-		r.Use(func(c *gin.Context) {
-			p := c.Request.URL.Path
-			if p == reportBasePath {
-				c.Request.URL.Path = "/"
-			} else if strings.HasPrefix(p, reportBasePath+"/") {
-				c.Request.URL.Path = strings.TrimPrefix(p, reportBasePath)
-			}
-			c.Next()
-		})
-	}
-
 	// Leader/liveness (no auth) — reports which node currently owns the
 	// singleton-scheduler lease. Useful for verifying multi-node deploys.
 	r.GET("/api/leader", func(c *gin.Context) {
@@ -3956,7 +3937,30 @@ func main() {
 	r.NoRoute(spaHandler())
 
 	log.Printf("Report service listening on :%s", port)
-	if err := r.Run(":" + port); err != nil {
+	// Strip REPORT_BASE_PATH at the HTTP layer, BEFORE Gin's router runs, so
+	// the router matches the un-prefixed path (a gin middleware would run
+	// after route matching — too late to reroute /dashboard/api/* to the
+	// /api/* handler). Empty prefix → serve the engine directly.
+	handler := basePathStripper(r)
+	if err := http.ListenAndServe(":"+port, handler); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+}
+
+// basePathStripper wraps the Gin engine so requests under reportBasePath
+// (e.g. "/dashboard/api/x", "/dashboard/assets/y") are rewritten to root
+// ("/api/x", "/assets/y") before routing. No-op when reportBasePath is empty.
+func basePathStripper(next http.Handler) http.Handler {
+	if reportBasePath == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		p := req.URL.Path
+		if p == reportBasePath {
+			req.URL.Path = "/"
+		} else if strings.HasPrefix(p, reportBasePath+"/") {
+			req.URL.Path = strings.TrimPrefix(p, reportBasePath)
+		}
+		next.ServeHTTP(w, req)
+	})
 }
