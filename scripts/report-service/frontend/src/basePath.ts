@@ -1,22 +1,30 @@
-// Runtime base path for the SPA. The Go server injects the configured
-// REPORT_BASE_PATH into `window.__BASE_PATH__` (via index.html) when it serves
-// the shell. Empty (or the un-replaced placeholder in dev) means "mounted at
-// root". BASE_PATH never has a trailing slash: "" or "/dashboard".
+// Runtime base path for the SPA.
 //
-// Use withBase() for any URL that bypasses react-router — raw
-// window.location assignments, <a href>, and fetch() targets. Router-driven
-// navigation (<Link>, navigate()) already accounts for the router basename, so
-// do NOT wrap those.
+// The Go server injects the configured REPORT_BASE_PATH into the <base href>
+// element when it serves index.html (e.g. `<base href="/dashboard/">`, or
+// `<base href="/">` at root). We read the prefix from that element rather than
+// from an inline script: Vite's HTML transform (npm build in the Docker image)
+// strips plain inline <script> tags, but the <base> tag survives — so <base>
+// is the reliable source of truth.
+//
+// BASE_PATH never has a trailing slash: "" (root) or "/dashboard".
+//
+// Use withBase() for any URL that bypasses react-router — raw window.location
+// assignments, <a href>, and fetch() targets. Router-driven navigation
+// (<Link>, navigate()) already accounts for the router basename, so do NOT
+// wrap those.
 
-declare global {
-  interface Window {
-    __BASE_PATH__?: string;
-  }
+function readBasePath(): string {
+  if (typeof document === 'undefined') return '';
+  // getAttribute returns the raw attribute (e.g. "/dashboard/" or "/"), not a
+  // resolved absolute URL like `.href` would.
+  const href = document.querySelector('base')?.getAttribute('href') ?? '/';
+  // Un-replaced placeholder (e.g. `vite dev` without the server injection).
+  if (href.includes('__BASE_PATH__')) return '';
+  return href.replace(/\/+$/, ''); // "/dashboard/" -> "/dashboard", "/" -> ""
 }
 
-const raw = typeof window !== 'undefined' ? window.__BASE_PATH__ : '';
-export const BASE_PATH =
-  raw && raw !== '__BASE_PATH__' ? raw.replace(/\/$/, '') : '';
+export const BASE_PATH = readBasePath();
 
 export function withBase(path: string): string {
   if (!path.startsWith('/')) return path;
