@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"sort"
@@ -200,21 +201,28 @@ func noteQuotaClamp(relayInfo *relaycommon.RelayInfo, clamp *common.QuotaClamp) 
 	}
 }
 
-// recordCacheControlAnomaly persists a row when a Claude request that did NOT
-// send cache_control still triggered upstream cache creation. The flag is set
-// only on the Claude relay path, so a missing context key means the request did
-// not go through that path and is skipped. Writing is best-effort and async so
-// it never blocks or fails settlement.
+// recordCacheControlAnomaly persists a row when an upstream Claude model wrote
+// prompt cache (cache_creation_tokens > 0) even though the client request never
+// sent a cache_control field. Only Claude upstreams populate cache creation
+// tokens, so the positive count is what scopes this to Claude. The raw client
+// body is scanned instead of relying on a per-format flag, so it works for every
+// relay format that reaches settlement: Claude Messages (/v1/messages), OpenAI
+// Responses (/v1/responses), and OpenAI Chat Completions (/v1/chat/completions).
+// Writing is best-effort and async so it never blocks or fails settlement.
 func recordCacheControlAnomaly(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, summary textQuotaSummary) {
-	if ctx == nil || relayInfo == nil {
+	if ctx == nil || relayInfo == nil || summary.CacheCreationTokens <= 0 {
 		return
 	}
-	val, ok := common.GetContextKey(ctx, constant.ContextKeyClaudeRequestHasCacheControl)
-	if !ok {
+	storage, err := common.GetBodyStorage(ctx)
+	if err != nil {
 		return
 	}
-	hasCacheControl, _ := val.(bool)
-	if hasCacheControl || summary.CacheCreationTokens <= 0 {
+	body, err := storage.Bytes()
+	if err != nil {
+		return
+	}
+	if bytes.Contains(body, []byte(`"cache_control"`)) {
+		// Client explicitly requested prompt caching; not an anomaly.
 		return
 	}
 	record := &model.CacheControlAnomaly{

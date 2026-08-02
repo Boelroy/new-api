@@ -7,11 +7,6 @@ const (
 	ContextKeyPromptTokens    ContextKey = "prompt_tokens"
 	ContextKeyEstimatedTokens ContextKey = "estimated_tokens"
 
-	// ContextKeyClaudeRequestHasCacheControl records whether the incoming Claude
-	// Messages request carried a cache_control field. Set only on the Claude
-	// relay path; used to flag unexpected upstream cache creation.
-	ContextKeyClaudeRequestHasCacheControl ContextKey = "claude_request_has_cache_control"
-
 	ContextKeyOriginalModel    ContextKey = "original_model"
 	ContextKeyRequestStartTime ContextKey = "request_start_time"
 
