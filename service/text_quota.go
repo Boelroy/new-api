@@ -200,6 +200,44 @@ func noteQuotaClamp(relayInfo *relaycommon.RelayInfo, clamp *common.QuotaClamp) 
 	}
 }
 
+// recordCacheControlAnomaly persists a row when a Claude request that did NOT
+// send cache_control still triggered upstream cache creation. The flag is set
+// only on the Claude relay path, so a missing context key means the request did
+// not go through that path and is skipped. Writing is best-effort and async so
+// it never blocks or fails settlement.
+func recordCacheControlAnomaly(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, summary textQuotaSummary) {
+	if ctx == nil || relayInfo == nil {
+		return
+	}
+	val, ok := common.GetContextKey(ctx, constant.ContextKeyClaudeRequestHasCacheControl)
+	if !ok {
+		return
+	}
+	hasCacheControl, _ := val.(bool)
+	if hasCacheControl || summary.CacheCreationTokens <= 0 {
+		return
+	}
+	record := &model.CacheControlAnomaly{
+		CreatedAt:           time.Now().Unix(),
+		RequestId:           ctx.GetString(common.RequestIdKey),
+		UserId:              relayInfo.UserId,
+		TokenId:             relayInfo.TokenId,
+		TokenName:           summary.TokenName,
+		ChannelId:           relayInfo.ChannelId,
+		ModelName:           summary.ModelName,
+		Group:               relayInfo.UsingGroup,
+		CacheCreationTokens: summary.CacheCreationTokens,
+		CacheReadTokens:     summary.CacheTokens,
+	}
+	// Do not capture the gin.Context in the goroutine; it may be recycled once
+	// the request completes. Carry only the request id for correlation.
+	gopool.Go(func() {
+		if err := model.RecordCacheControlAnomaly(record); err != nil {
+			common.SysError(fmt.Sprintf("failed to record cache_control anomaly (request_id=%s): %s", record.RequestId, err.Error()))
+		}
+	})
+}
+
 func composeTieredTextQuota(relayInfo *relaycommon.RelayInfo, summary textQuotaSummary, tieredQuota int, tieredResult *billingexpr.TieredResult) int {
 	if summary.ToolCallSurchargeQuota.IsZero() {
 		return tieredQuota
@@ -522,6 +560,8 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	}
 
 	attachQuotaSaturation(ctx, relayInfo, other)
+
+	recordCacheControlAnomaly(ctx, relayInfo, summary)
 
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,

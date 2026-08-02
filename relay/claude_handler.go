@@ -31,6 +31,16 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		return types.NewErrorWithStatusCode(fmt.Errorf("invalid request type, expected *dto.ClaudeRequest, got %T", info.Request), types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 	}
 
+	// Record whether the client request carried a cache_control field anywhere
+	// (system / messages / tools blocks). Used at settlement to flag unexpected
+	// upstream cache creation. Re-marshaling the parsed request preserves
+	// cache_control because nested content is kept as generic JSON.
+	hasCacheControl := false
+	if raw, mErr := common.Marshal(claudeReq); mErr == nil {
+		hasCacheControl = strings.Contains(string(raw), `"cache_control"`)
+	}
+	common.SetContextKey(c, constant.ContextKeyClaudeRequestHasCacheControl, hasCacheControl)
+
 	request, err := common.DeepCopy(claudeReq)
 	if err != nil {
 		return types.NewError(fmt.Errorf("failed to copy request to ClaudeRequest: %w", err), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
