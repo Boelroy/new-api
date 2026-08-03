@@ -4517,7 +4517,7 @@ func handleRemoteTestKey(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported model"})
 		return
 	}
-	res := testSingleKey(key, model)
+	res := testSingleKey(key, "claude", model)
 	// The mask matches other endpoints; never echo the raw key back.
 	res.Key = maskKey(key)
 	c.JSON(http.StatusOK, res)

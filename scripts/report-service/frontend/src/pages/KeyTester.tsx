@@ -3,19 +3,42 @@ import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
 import { api, KeyTestResult } from '../api'
 
-const DEFAULT_MODEL = 'claude-sonnet-4-6'
+type Provider = 'claude' | 'openai'
 
-const MODELS = [
-  'claude-sonnet-5',
-  'claude-opus-4-8',
-  'claude-sonnet-4-6',
-  'claude-opus-4-7',
-  'claude-opus-4-6',
-  'claude-haiku-4-5-20251001',
-  'claude-sonnet-4-5-20250929',
-  'claude-opus-4-5-20251101',
-  'claude-fable-5',
-]
+const MODELS_BY_PROVIDER: Record<Provider, string[]> = {
+  claude: [
+    'claude-sonnet-5',
+    'claude-opus-4-8',
+    'claude-sonnet-4-6',
+    'claude-opus-4-7',
+    'claude-opus-4-6',
+    'claude-haiku-4-5-20251001',
+    'claude-sonnet-4-5-20250929',
+    'claude-opus-4-5-20251101',
+    'claude-fable-5',
+  ],
+  openai: [
+    'gpt-5.6',
+    'gpt-5',
+    'gpt-5-mini',
+    'gpt-4.1',
+    'gpt-4.1-mini',
+    'gpt-4o',
+    'gpt-4o-mini',
+    'o4-mini',
+    'o3',
+  ],
+}
+
+const DEFAULT_MODEL: Record<Provider, string> = {
+  claude: 'claude-sonnet-4-6',
+  openai: 'gpt-4o-mini',
+}
+
+const KEY_PLACEHOLDER: Record<Provider, string> = {
+  claude: 'sk-ant-api03-xxxxx\nsk-ant-api03-yyyyy\nsk-ant-api03-zzzzz\n\n# 井号开头为注释',
+  openai: 'sk-xxxxx\nsk-proj-xxxxx\n\n# 井号开头为注释',
+}
 
 function maskKey(k: string) {
   if (k.length <= 12) return k
@@ -23,7 +46,8 @@ function maskKey(k: string) {
 }
 
 export default function KeyTester() {
-  const [model, setModel] = useState(DEFAULT_MODEL)
+  const [provider, setProvider] = useState<Provider>('claude')
+  const [model, setModel] = useState(DEFAULT_MODEL.claude)
   const [input, setInput] = useState('')
   const [running, setRunning] = useState(false)
   const [results, setResults] = useState<KeyTestResult[]>([])
@@ -57,7 +81,7 @@ export default function KeyTester() {
         if (cancelRef.current) break
         const k = parsedKeys[i]
         try {
-          const res = await api.testKeys([k], model)
+          const res = await api.testKeys([k], model, provider)
           const r = res.results[0]
           if (r) setResults(prev => [...prev, r])
         } catch (e: any) {
@@ -76,6 +100,15 @@ export default function KeyTester() {
 
   const handleCancel = () => {
     cancelRef.current = true
+  }
+
+  const switchProvider = (p: Provider) => {
+    if (p === provider) return
+    setProvider(p)
+    setModel(DEFAULT_MODEL[p])
+    setResults([])
+    setProgress({ done: 0, total: 0 })
+    setError(null)
   }
 
   const handleClear = () => {
@@ -126,7 +159,7 @@ export default function KeyTester() {
   return (
     <Layout
       title="Key Tester"
-      subtitle="批量检测 Claude API Key 可用性"
+      subtitle={`批量检测 ${provider === 'openai' ? 'OpenAI' : 'Claude'} API Key 可用性`}
       actions={actions}
     >
       <SummaryCards cards={[
@@ -139,13 +172,31 @@ export default function KeyTester() {
       <div className="grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-6 items-start">
         <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
           <div>
+            <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">服务商</label>
+            <div className="grid grid-cols-2 gap-1 bg-gray-100 rounded-md p-0.5">
+              {(['claude', 'openai'] as Provider[]).map(p => (
+                <button
+                  key={p}
+                  onClick={() => switchProvider(p)}
+                  disabled={running}
+                  className={`rounded px-2.5 py-1.5 text-xs font-medium transition disabled:opacity-50 ${
+                    provider === p ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  {p === 'openai' ? 'OpenAI' : 'Claude'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
             <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">模型</label>
             <select
               value={model}
               onChange={e => setModel(e.target.value)}
               className="w-full border border-gray-200 rounded-md px-2.5 py-2 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
             >
-              {MODELS.map(m => (
+              {MODELS_BY_PROVIDER[provider].map(m => (
                 <option key={m} value={m}>{m}</option>
               ))}
             </select>
@@ -159,7 +210,7 @@ export default function KeyTester() {
               value={input}
               onChange={e => setInput(e.target.value)}
               rows={16}
-              placeholder={'sk-ant-api03-xxxxx\nsk-ant-api03-yyyyy\nsk-ant-api03-zzzzz\n\n# 井号开头为注释'}
+              placeholder={KEY_PLACEHOLDER[provider]}
               className="w-full border border-gray-200 rounded-md p-2.5 text-xs font-mono resize-y bg-gray-50 focus:outline-none focus:border-gray-900"
             />
             <p className="text-[10px] text-gray-400 mt-2 leading-relaxed">

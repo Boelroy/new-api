@@ -811,6 +811,49 @@ func handleNotifyTest(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+// handleNotifyDigest pushes every group's current balance to Lark on demand.
+// Unlike checkAndNotify it ignores thresholds, mute flags and the suppression
+// window — an operator asking for the digest wants the full picture now.
+func handleNotifyDigest(c *gin.Context) {
+	if larkWebhook == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "LARK_WEBHOOK not configured"})
+		return
+	}
+	channels, err := queryKeyData()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	balances := aggregateGroupBalances(channels)
+	if len(balances) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no enabled channels to report"})
+		return
+	}
+
+	var msg strings.Builder
+	fmt.Fprintf(&msg, "📊 分组余额播报 @ %s", time.Now().Format("2006-01-02 15:04:05"))
+	for _, g := range balances {
+		if g.ChannelsWithQuota == 0 {
+			fmt.Fprintf(&msg, "\n\n【%s】%d 个 Key，未配置额度\n最近1小时消耗：$%.4f",
+				g.Group, g.Channels, g.LastHourUSD)
+			continue
+		}
+		pct := 0.0
+		if g.TotalQuotaUSD > 0 {
+			pct = g.TotalRemainingUSD / g.TotalQuotaUSD * 100
+		}
+		eta := "未知"
+		if g.ETAHours != nil {
+			eta = fmtHours(*g.ETAHours)
+		}
+		fmt.Fprintf(&msg, "\n\n【%s】%d 个 Key（%d 个已配额度）\n剩余额度：$%.2f / $%.2f（%.1f%%）\n最近1小时消耗：$%.4f\n预计剩余时长：%s",
+			g.Group, g.Channels, g.ChannelsWithQuota,
+			g.TotalRemainingUSD, g.TotalQuotaUSD, pct, g.LastHourUSD, eta)
+	}
+	sendLark(msg.String())
+	c.JSON(http.StatusOK, gin.H{"ok": true, "groups": len(balances)})
+}
+
 // ---- Daily Cache ----
 
 type DailyRow struct {
@@ -2732,6 +2775,7 @@ var supportedTestModels = map[string]bool{
 }
 
 const anthropicTestEndpoint = "https://api.anthropic.com/v1/messages"
+const openaiTestEndpoint = "https://api.openai.com/v1/chat/completions"
 
 type keyTestResult struct {
 	Key       string `json:"key"`
@@ -2742,26 +2786,57 @@ type keyTestResult struct {
 	Message   string `json:"message,omitempty"`
 }
 
-func testSingleKey(key, model string) keyTestResult {
+func testSingleKey(key, provider, model string) keyTestResult {
 	res := keyTestResult{Key: key}
-	body := map[string]any{
-		"model":      model,
-		"max_tokens": 1,
-		"messages": []map[string]any{
-			{"role": "user", "content": "hi"},
-		},
+
+	var (
+		endpoint string
+		headers  map[string]string
+		body     map[string]any
+	)
+	switch provider {
+	case "openai":
+		endpoint = openaiTestEndpoint
+		headers = map[string]string{
+			"Content-Type":  "application/json",
+			"Authorization": "Bearer " + key,
+		}
+		// Newer OpenAI models (o-series, gpt-5) reject max_tokens in favor of
+		// max_completion_tokens; the latter is accepted by every current chat
+		// model, so use it uniformly.
+		body = map[string]any{
+			"model":                 model,
+			"max_completion_tokens": 1,
+			"messages": []map[string]any{
+				{"role": "user", "content": "hi"},
+			},
+		}
+	default: // claude
+		endpoint = anthropicTestEndpoint
+		headers = map[string]string{
+			"Content-Type":      "application/json",
+			"x-api-key":         key,
+			"anthropic-version": "2023-06-01",
+		}
+		body = map[string]any{
+			"model":      model,
+			"max_tokens": 1,
+			"messages": []map[string]any{
+				{"role": "user", "content": "hi"},
+			},
+		}
 	}
 	buf, _ := json.Marshal(body)
 
 	start := time.Now()
-	req, err := http.NewRequest("POST", anthropicTestEndpoint, bytes.NewReader(buf))
+	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(buf))
 	if err != nil {
 		res.Error = err.Error()
 		return res
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", key)
-	req.Header.Set("anthropic-version", "2023-06-01")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 
 	client := &http.Client{Timeout: 25 * time.Second}
 	resp, err := client.Do(req)
@@ -2783,7 +2858,8 @@ func testSingleKey(key, model string) keyTestResult {
 		return res
 	}
 
-	// Extract a friendlier message from common Anthropic error shape.
+	// Extract a friendlier message from the common error shape shared by
+	// Anthropic and OpenAI: {"error":{"type":...,"message":...}}.
 	var errEnv struct {
 		Error struct {
 			Type    string `json:"type"`
@@ -2807,16 +2883,34 @@ func testSingleKey(key, model string) keyTestResult {
 
 func handleTestKeys(c *gin.Context) {
 	var payload struct {
-		Keys  []string `json:"keys"`
-		Model string   `json:"model"`
+		Keys     []string `json:"keys"`
+		Model    string   `json:"model"`
+		Provider string   `json:"provider"`
 	}
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	provider := strings.TrimSpace(payload.Provider)
+	if provider == "" {
+		provider = "claude"
+	}
 	model := strings.TrimSpace(payload.Model)
-	if !supportedTestModels[model] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported model"})
+	switch provider {
+	case "claude":
+		if !supportedTestModels[model] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported model"})
+			return
+		}
+	case "openai":
+		// OpenAI's catalog churns frequently, so accept any non-empty model
+		// and let upstream report an unknown-model error inline.
+		if model == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "model required"})
+			return
+		}
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported provider"})
 		return
 	}
 
@@ -2843,7 +2937,7 @@ func handleTestKeys(c *gin.Context) {
 
 	results := make([]keyTestResult, len(keys))
 	for i, k := range keys {
-		results[i] = testSingleKey(k, model)
+		results[i] = testSingleKey(k, provider, model)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"results": results})
@@ -3745,6 +3839,7 @@ func main() {
 	adminAPI.GET("/notify/status", handleNotifyStatus)
 	adminAPI.POST("/notify/check", handleNotifyCheck)
 	adminAPI.POST("/notify/test", handleNotifyTest)
+	adminAPI.POST("/notify/digest", handleNotifyDigest)
 	adminAPI.GET("/notify/thresholds", handleNotifyThresholdsList)
 	adminAPI.POST("/notify/thresholds", handleNotifyThresholdsSave)
 	adminAPI.DELETE("/notify/thresholds", handleNotifyThresholdsDelete)

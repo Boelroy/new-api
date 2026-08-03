@@ -3,6 +3,7 @@ import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
 import BatchCreatePanel from '../components/BatchCreatePanel'
 import LocalPoolPanel from '../components/LocalPoolPanel'
+import BalanceAlertPanel from '../components/BalanceAlertPanel'
 import { api, ChannelRow, ROLE_PROJECT_ADMIN, ROLE_SUPER_ADMIN } from '../api'
 import { getCachedRole, loadRole } from '../App'
 
@@ -32,13 +33,13 @@ export default function KeyCapacity() {
   const [channels, setChannels] = useState<ChannelRow[]>([])
   const [totalLastHour, setTotalLastHour] = useState(0)
   const [refreshedAt, setRefreshedAt] = useState('')
-  // Tab switcher between the classic capacity/batch-create view and
-  // the new "Pool 上 Key" panel. Storing in state (not URL) is fine —
-  // both views are cheap to unmount / remount.
-  const [tab, setTab] = useState<'capacity' | 'pool'>('capacity')
+  // Tab switcher between the classic capacity/batch-create view, the
+  // "Pool 上 Key" panel and the per-group Lark alert config. Storing in
+  // state (not URL) is fine — all views are cheap to unmount / remount.
+  const [tab, setTab] = useState<'capacity' | 'pool' | 'alerts'>('capacity')
   // Project admin (role=7) can only see the classic capacity view — the
-  // Pool 上 Key panel calls super-admin-scoped local-pool endpoints that
-  // would 403 for them.
+  // Pool 上 Key panel calls super-admin-scoped local-pool endpoints and
+  // the alert panel calls admin-scoped /api/notify/*, both 403 for them.
   const [role, setRole] = useState<number | null>(getCachedRole())
   useEffect(() => {
     if (getCachedRole() !== null) return
@@ -119,6 +120,7 @@ export default function KeyCapacity() {
     : [
         { id: 'capacity' as const, label: '额度与批量创建' },
         { id: 'pool' as const, label: 'Pool 上 Key（本地）' },
+        { id: 'alerts' as const, label: '余额报警（分组）' },
       ]
 
   const tabBar = (
@@ -147,6 +149,7 @@ export default function KeyCapacity() {
     >
       {tabBar}
       {tab === 'pool' && <LocalPoolPanel configEditable={role !== null && role >= ROLE_SUPER_ADMIN} />}
+      {tab === 'alerts' && <BalanceAlertPanel />}
       {tab === 'capacity' && (<>
       <SummaryCards cards={[
         { label: '启用 Key 数', value: String(channels.length), color: 'text-blue-600' },

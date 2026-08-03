@@ -160,6 +160,49 @@ export type KeyTestResult = {
   message?: string
 }
 
+// ---- Lark balance alerts, per channel group ----
+
+// One row of /api/notify/status: the group's live balance plus the effective
+// thresholds it would be judged against. `configured` is false when the group
+// has no override row and is inheriting the server defaults.
+export type NotifyGroupState = {
+  group: string
+  channels: number
+  channels_with_quota: number
+  total_quota_usd: number
+  total_used_usd: number
+  total_remaining_usd: number
+  last_hour_usd: number
+  eta_hours: number | null
+  configured: boolean
+  muted: boolean
+  usd_threshold: number
+  hours_threshold: number
+  would_alert: { hours?: boolean; usd?: boolean }
+}
+
+export type NotifyStatus = {
+  lark_configured: boolean
+  default_thresholds: { hours: number; usd: number }
+  groups: NotifyGroupState[]
+  last_notified: Record<string, string>
+}
+
+// A stored override. null usd/hours means "inherit the server default".
+export type NotifyThreshold = {
+  group: string
+  usd_threshold: number | null
+  hours_threshold: number | null
+  enabled: boolean
+  note: string
+  updated_at: number
+}
+
+export type NotifyThresholdsResponse = {
+  thresholds: NotifyThreshold[]
+  defaults: { hours: number; usd: number }
+}
+
 export type DetectProbe = {
   label: string
   intent: string
@@ -644,6 +687,35 @@ export const api = {
       body: JSON.stringify({ channel_ids, priority }),
     }),
 
+  getNotifyStatus: () => request<NotifyStatus>('/api/notify/status'),
+
+  getNotifyThresholds: () => request<NotifyThresholdsResponse>('/api/notify/thresholds'),
+
+  saveNotifyThresholds: (
+    payload: {
+      group: string
+      usd_threshold: number | null
+      hours_threshold: number | null
+      enabled: boolean
+      note?: string
+    }[],
+  ) =>
+    request<{ saved: number }>('/api/notify/thresholds', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  deleteNotifyThreshold: (group: string) =>
+    request<{ ok: boolean }>(`/api/notify/thresholds?group=${encodeURIComponent(group)}`, {
+      method: 'DELETE',
+    }),
+
+  pushNotifyDigest: () =>
+    request<{ ok: boolean; groups: number }>('/api/notify/digest', { method: 'POST' }),
+
+  testNotify: () => request<{ ok: boolean }>('/api/notify/test', { method: 'POST' }),
+
   getCacheStats: (params: { start?: string; end?: string; bucket?: 'hour' | 'day'; model?: string }) => {
     const qs = new URLSearchParams()
     if (params.start) qs.set('start', params.start)
@@ -684,11 +756,11 @@ export const api = {
     window.location.href = withBase(`/api/export/csv?start=${start}&end=${end}`)
   },
 
-  testKeys: (keys: string[], model: string) =>
+  testKeys: (keys: string[], model: string, provider: 'claude' | 'openai' = 'claude') =>
     request<{ results: KeyTestResult[] }>('/api/keys/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ keys, model }),
+      body: JSON.stringify({ keys, model, provider }),
     }),
 
   detectModels: (url: string, key: string) => {
