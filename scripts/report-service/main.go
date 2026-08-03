@@ -2803,10 +2803,14 @@ func testSingleKey(key, provider, model string) keyTestResult {
 		}
 		// Newer OpenAI models (o-series, gpt-5) reject max_tokens in favor of
 		// max_completion_tokens; the latter is accepted by every current chat
-		// model, so use it uniformly.
+		// model, so use it uniformly. Reasoning models spend this budget on
+		// hidden reasoning tokens before emitting any content, so a tiny value
+		// (e.g. 1) gets exhausted mid-reasoning and returns an output-limit
+		// error instead of a clean 2xx — give a minimal reasoning pass enough
+		// headroom to finish.
 		body = map[string]any{
 			"model":                 model,
-			"max_completion_tokens": 1,
+			"max_completion_tokens": 2048,
 			"messages": []map[string]any{
 				{"role": "user", "content": "hi"},
 			},
