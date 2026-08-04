@@ -1427,10 +1427,10 @@ func handleAuthConfig(c *gin.Context) {
 // username was targeted. Both windows are computed against rs_login_attempt
 // which startPruneLoginAttempts trims down to ~24h.
 const (
-	loginLockoutWindowSec   = 15 * 60
-	loginLockoutMaxFails    = 5
-	loginIPRateWindowSec    = 5 * 60
-	loginIPRateMaxFails     = 10
+	loginLockoutWindowSec    = 15 * 60
+	loginLockoutMaxFails     = 5
+	loginIPRateWindowSec     = 5 * 60
+	loginIPRateMaxFails      = 10
 	loginAttemptRetentionSec = 24 * 60 * 60
 )
 
@@ -2293,8 +2293,8 @@ const channelInfoDefault = `{"is_multi_key":false,"multi_key_size":0,"multi_key_
 
 func handleBatchCreateChannels(c *gin.Context) {
 	var payload struct {
-		Studio   string `json:"studio"`
-		Suffix   string `json:"suffix"`
+		Studio string `json:"studio"`
+		Suffix string `json:"suffix"`
 		// Channel-shape fields. Type + Group are per-preset (Anthropic
 		// stays the compat default; OpenAI/Gemini/Vertex land in the
 		// same panel but with different provider integers + upstream
@@ -2589,14 +2589,14 @@ func handleBatchCreateChannels(c *gin.Context) {
 // ---- Cache stats report ----
 
 type cacheStatsBucket struct {
-	Bucket             string  `json:"bucket"`
-	Requests           int64   `json:"requests"`
-	PromptTokens       int64   `json:"prompt_tokens"`
-	CacheReadTokens    int64   `json:"cache_read_tokens"`
-	CacheWriteTokens   int64   `json:"cache_write_tokens"`
-	CompletionTokens   int64   `json:"completion_tokens"`
-	HitPct             float64 `json:"hit_pct"`
-	ReuseX             float64 `json:"reuse_x"`
+	Bucket           string  `json:"bucket"`
+	Requests         int64   `json:"requests"`
+	PromptTokens     int64   `json:"prompt_tokens"`
+	CacheReadTokens  int64   `json:"cache_read_tokens"`
+	CacheWriteTokens int64   `json:"cache_write_tokens"`
+	CompletionTokens int64   `json:"completion_tokens"`
+	HitPct           float64 `json:"hit_pct"`
+	ReuseX           float64 `json:"reuse_x"`
 }
 
 // handleCacheStats returns time-bucketed Anthropic cache metrics for the
@@ -2690,13 +2690,13 @@ func handleCacheStats(c *gin.Context) {
 		totCompletion += b.CompletionTokens
 	}
 	summary := gin.H{
-		"requests":            totRequests,
-		"prompt_tokens":       totInput,
-		"completion_tokens":   totCompletion,
-		"cache_read_tokens":   totCacheRead,
-		"cache_write_tokens":  totCacheWrite,
-		"hit_pct":             0.0,
-		"reuse_x":             0.0,
+		"requests":           totRequests,
+		"prompt_tokens":      totInput,
+		"completion_tokens":  totCompletion,
+		"cache_read_tokens":  totCacheRead,
+		"cache_write_tokens": totCacheWrite,
+		"hit_pct":            0.0,
+		"reuse_x":            0.0,
 	}
 	if totInput+totCacheRead > 0 {
 		summary["hit_pct"] = roundTo(100.0*float64(totCacheRead)/float64(totInput+totCacheRead), 2)
@@ -2995,6 +2995,270 @@ func handleAllKeysRPM(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"rpm": rpm})
+}
+
+// ---- Error Center: list + filter local error logs (type=5) ----
+//
+// Errors live in the local `logs` table with type=5. `group` is a top-level
+// column; status_code / error_code / error_type / request_path live inside the
+// `other` JSON text. The table is huge (tens of millions of rows), so every
+// query is bounded by created_at (idx_created_at_type) and the code fields are
+// pulled with regex substring() rather than a JSON cast — robust against any
+// malformed `other` and index-friendly on the top-level columns.
+
+const (
+	errorListDefaultWindow = int64(3600)
+	errorListMaxWindow     = int64(7 * 24 * 3600)
+	errorListMaxPageSize   = 200
+	errorContentMaxLen     = 600
+)
+
+type errorRow struct {
+	ID          int64  `json:"id"`
+	CreatedAt   int64  `json:"created_at"`
+	ChannelID   int64  `json:"channel_id"`
+	ChannelName string `json:"channel_name"`
+	Group       string `json:"group"`
+	ModelName   string `json:"model_name"`
+	TokenName   string `json:"token_name"`
+	StatusCode  string `json:"status_code"`
+	ErrorCode   string `json:"error_code"`
+	ErrorType   string `json:"error_type"`
+	RequestPath string `json:"request_path"`
+	Content     string `json:"content"`
+}
+
+type errorFacet struct {
+	Value string `json:"value"`
+	Count int64  `json:"count"`
+}
+
+// errorLogFilters is the parsed, validated query surface shared by the list
+// and facet handlers.
+type errorLogFilters struct {
+	start, end int64
+	group      string
+	model      string
+	channelID  int64
+	statusCode string
+	errorCode  string
+	search     string
+}
+
+func parseErrorLogFilters(c *gin.Context) errorLogFilters {
+	now := time.Now().Unix()
+	f := errorLogFilters{start: now - errorListDefaultWindow, end: now}
+	if w, err := strconv.ParseInt(c.Query("window_sec"), 10, 64); err == nil && w > 0 {
+		if w > errorListMaxWindow {
+			w = errorListMaxWindow
+		}
+		f.start, f.end = now-w, now
+	} else {
+		if v, err := strconv.ParseInt(c.Query("start"), 10, 64); err == nil && v > 0 {
+			f.start = v
+		}
+		if v, err := strconv.ParseInt(c.Query("end"), 10, 64); err == nil && v > 0 {
+			f.end = v
+		}
+	}
+	f.group = strings.TrimSpace(c.Query("group"))
+	f.model = strings.TrimSpace(c.Query("model"))
+	if id, err := strconv.ParseInt(c.Query("channel_id"), 10, 64); err == nil && id > 0 {
+		f.channelID = id
+	}
+	f.statusCode = strings.TrimSpace(c.Query("status_code"))
+	f.errorCode = strings.TrimSpace(c.Query("error_code"))
+	f.search = strings.TrimSpace(c.Query("q"))
+	return f
+}
+
+// whereClause builds the shared WHERE fragment + args (starting at $1). LIKE
+// patterns are passed as args, so no user text is interpolated into SQL.
+func (f errorLogFilters) whereClause() (string, []any) {
+	conds := []string{"type = 5", "created_at >= $1", "created_at <= $2"}
+	args := []any{f.start, f.end}
+	add := func(condFmt string, val any) {
+		args = append(args, val)
+		conds = append(conds, fmt.Sprintf(condFmt, len(args)))
+	}
+	if f.group != "" {
+		add(`"group" = $%d`, f.group)
+	}
+	if f.model != "" {
+		add(`model_name = $%d`, f.model)
+	}
+	if f.channelID > 0 {
+		add(`channel_id = $%d`, f.channelID)
+	}
+	if f.statusCode != "" {
+		// Error content is emitted as "status_code=NNN, <message>".
+		add(`content LIKE $%d`, "status_code="+f.statusCode+",%")
+	}
+	if f.errorCode != "" {
+		add(`other LIKE $%d`, `%"error_code":"`+f.errorCode+`"%`)
+	}
+	if f.search != "" {
+		add(`content ILIKE $%d`, "%"+f.search+"%")
+	}
+	return strings.Join(conds, " AND "), args
+}
+
+func handleErrorList(c *gin.Context) {
+	f := parseErrorLogFilters(c)
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
+	}
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+	if pageSize < 1 {
+		pageSize = 50
+	}
+	if pageSize > errorListMaxPageSize {
+		pageSize = errorListMaxPageSize
+	}
+
+	where, args := f.whereClause()
+
+	var total int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM logs WHERE `+where, args...).Scan(&total); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	q := `SELECT id, created_at, channel_id,
+	         COALESCE(NULLIF(channel_name,''), substring(other from '"channel_name":"([^"]*)"'), '') AS channel_name,
+	         COALESCE("group",''), COALESCE(model_name,''), COALESCE(token_name,''),
+	         COALESCE(substring(content from 'status_code=([0-9]+)'), substring(other from '"status_code":([0-9]+)'), '') AS status_code,
+	         COALESCE(substring(other from '"error_code":"([^"]*)"'), '') AS error_code,
+	         COALESCE(substring(other from '"error_type":"([^"]*)"'), '') AS error_type,
+	         COALESCE(substring(other from '"request_path":"([^"]*)"'), '') AS request_path,
+	         COALESCE(content,'') AS content
+	      FROM logs WHERE ` + where + `
+	      ORDER BY created_at DESC
+	      LIMIT $` + strconv.Itoa(len(args)+1) + ` OFFSET $` + strconv.Itoa(len(args)+2)
+	listArgs := append(append([]any{}, args...), pageSize, (page-1)*pageSize)
+	rows, err := db.Query(q, listArgs...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	out := make([]errorRow, 0, pageSize)
+	for rows.Next() {
+		var r errorRow
+		if err := rows.Scan(&r.ID, &r.CreatedAt, &r.ChannelID, &r.ChannelName, &r.Group,
+			&r.ModelName, &r.TokenName, &r.StatusCode, &r.ErrorCode, &r.ErrorType,
+			&r.RequestPath, &r.Content); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if len(r.Content) > errorContentMaxLen {
+			r.Content = r.Content[:errorContentMaxLen] + "…"
+		}
+		out = append(out, r)
+	}
+	c.JSON(http.StatusOK, gin.H{"rows": out, "total": total, "page": page, "page_size": pageSize})
+}
+
+type errorFacetsResult struct {
+	Total       int64        `json:"total"`
+	Groups      []errorFacet `json:"groups"`
+	StatusCodes []errorFacet `json:"status_codes"`
+	ErrorCodes  []errorFacet `json:"error_codes"`
+	WindowSec   int64        `json:"window_sec"`
+}
+
+const errorFacetsTTL = 30 * time.Second
+
+var (
+	errorFacetsCache = map[string]struct {
+		res     errorFacetsResult
+		fetched time.Time
+	}{}
+	errorFacetsCacheMu sync.Mutex
+)
+
+// handleErrorFacets returns the filter option lists (groups, status codes,
+// error codes) + total over the window. Groups are scoped to the window only
+// so the operator can switch between them; the code lists are scoped to the
+// current group/model/channel so they narrow with the structural filters.
+// status_code/error_code/search are intentionally ignored here.
+func handleErrorFacets(c *gin.Context) {
+	f := parseErrorLogFilters(c)
+	f.statusCode, f.errorCode, f.search = "", "", ""
+
+	windowSec := f.end - f.start
+	cacheKey := fmt.Sprintf("%d|%d|%s|%s|%d", f.start/30, f.end/30, f.group, f.model, f.channelID)
+	now := time.Now()
+	errorFacetsCacheMu.Lock()
+	entry, ok := errorFacetsCache[cacheKey]
+	errorFacetsCacheMu.Unlock()
+	if ok && now.Sub(entry.fetched) < errorFacetsTTL {
+		c.JSON(http.StatusOK, entry.res)
+		return
+	}
+
+	// aggregate groups the window by an expression, returning the top buckets.
+	aggregate := func(expr, where string, args []any) ([]errorFacet, error) {
+		rows, err := db.Query(`SELECT COALESCE(`+expr+`,'') AS v, COUNT(*) FROM logs WHERE `+where+
+			` GROUP BY v ORDER BY COUNT(*) DESC, v ASC LIMIT 50`, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		facets := make([]errorFacet, 0)
+		for rows.Next() {
+			var fc errorFacet
+			if err := rows.Scan(&fc.Value, &fc.Count); err != nil {
+				return nil, err
+			}
+			if fc.Value == "" {
+				continue
+			}
+			facets = append(facets, fc)
+		}
+		return facets, rows.Err()
+	}
+
+	scopeWhere, scopeArgs := f.whereClause()
+	var total int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM logs WHERE `+scopeWhere, scopeArgs...).Scan(&total); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	statusCodes, err := aggregate(`substring(content from 'status_code=([0-9]+)')`, scopeWhere, scopeArgs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	errorCodes, err := aggregate(`substring(other from '"error_code":"([^"]*)"')`, scopeWhere, scopeArgs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	// Groups list is window-only so it stays a stable switcher.
+	groupWhere, groupArgs := errorLogFilters{start: f.start, end: f.end}.whereClause()
+	groups, err := aggregate(`"group"`, groupWhere, groupArgs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	res := errorFacetsResult{
+		Total:       total,
+		Groups:      groups,
+		StatusCodes: statusCodes,
+		ErrorCodes:  errorCodes,
+		WindowSec:   windowSec,
+	}
+	errorFacetsCacheMu.Lock()
+	errorFacetsCache[cacheKey] = struct {
+		res     errorFacetsResult
+		fetched time.Time
+	}{res: res, fetched: now}
+	errorFacetsCacheMu.Unlock()
+
+	c.JSON(http.StatusOK, res)
 }
 
 // ---- SPA static file serving ----
@@ -3838,6 +4102,8 @@ func main() {
 	adminAPI.GET("/export/html", handleExportHTML)
 	adminAPI.POST("/config/batch-models", handleSetBatchModels)
 	adminAPI.GET("/cache-stats", handleCacheStats)
+	adminAPI.GET("/errors", handleErrorList)
+	adminAPI.GET("/errors/facets", handleErrorFacets)
 	adminAPI.POST("/refresh", handleRefresh)
 	adminAPI.GET("/refresh/status", handleRefreshStatus)
 	adminAPI.GET("/notify/status", handleNotifyStatus)

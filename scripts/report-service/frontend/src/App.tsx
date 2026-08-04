@@ -10,6 +10,7 @@ import ProviderTesting from './pages/ProviderTesting'
 import Profit from './pages/Profit'
 import Users from './pages/Users'
 import CacheReport from './pages/CacheReport'
+import ErrorCenter from './pages/ErrorCenter'
 import RemoteChannels from './pages/RemoteChannels'
 import PoolUploadStudio from './pages/PoolUploadStudio'
 import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_TESTER } from './api'
@@ -87,6 +88,7 @@ export default function App() {
         <Route path="/allkeys" element={<AllKeys />} />
         <Route path="/tester" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_TESTER || r === ROLE_STUDIO_OPERATOR || r === ROLE_REMOTE_STUDIO_OPERATOR || r === ROLE_PROJECT_ADMIN}><KeyTester /></RoleGate>} />
         <Route path="/cache" element={<RoleGate min={ROLE_ADMIN}><CacheReport /></RoleGate>} />
+        <Route path="/errors" element={<RoleGate min={ROLE_ADMIN}><ErrorCenter /></RoleGate>} />
         <Route path="/testing" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
         <Route path="/testing/:projectId" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
         <Route path="/users" element={<RoleGate min={ROLE_ADMIN}><Users /></RoleGate>} />

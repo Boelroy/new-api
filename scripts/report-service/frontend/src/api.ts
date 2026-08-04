@@ -160,6 +160,60 @@ export type KeyTestResult = {
   message?: string
 }
 
+// ---- Error Center ----
+
+export type ErrorRow = {
+  id: number
+  created_at: number
+  channel_id: number
+  channel_name: string
+  group: string
+  model_name: string
+  token_name: string
+  status_code: string
+  error_code: string
+  error_type: string
+  request_path: string
+  content: string
+}
+
+export type ErrorFacet = { value: string; count: number }
+
+export type ErrorFacets = {
+  total: number
+  groups: ErrorFacet[]
+  status_codes: ErrorFacet[]
+  error_codes: ErrorFacet[]
+  window_sec: number
+}
+
+export type ErrorListResponse = {
+  rows: ErrorRow[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export type ErrorQuery = {
+  window_sec?: number
+  group?: string
+  model?: string
+  channel_id?: number
+  status_code?: string
+  error_code?: string
+  q?: string
+  page?: number
+  page_size?: number
+}
+
+export function errorQueryString(params: ErrorQuery): string {
+  const qs = new URLSearchParams()
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && v !== '') qs.set(k, String(v))
+  })
+  return qs.toString()
+}
+
 // ---- Lark balance alerts, per channel group ----
 
 // One row of /api/notify/status: the group's live balance plus the effective
@@ -767,6 +821,14 @@ export const api = {
     const qs = new URLSearchParams({ url, key }).toString()
     return request<DetectModelsResponse>(`/api/detect/models?${qs}`)
   },
+
+  // ---- Error Center (local logs, type=5) ----
+
+  listErrors: (params: ErrorQuery) =>
+    request<ErrorListResponse>(`/api/errors?${errorQueryString(params)}`),
+
+  errorFacets: (params: ErrorQuery) =>
+    request<ErrorFacets>(`/api/errors/facets?${errorQueryString(params)}`),
 
   // ---- Remote New-API inspector ----
 
