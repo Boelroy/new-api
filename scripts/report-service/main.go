@@ -555,6 +555,11 @@ type groupBalance struct {
 // Quota/used only count channels with a configured quota row (mixing in
 // unmetered keys produced nonsensical negative remainders), while the burn
 // rate counts every enabled channel in the group so the eta stays pessimistic.
+//
+// Remaining is summed per channel and clamped at 0, because an exhausted key
+// contributes no spendable balance — subtracting group totals instead let an
+// over-used key silently cancel out a healthy key's remaining balance and
+// suppress the alert.
 func aggregateGroupBalances(channels []ChannelRow) []groupBalance {
 	byGroup := map[string]*groupBalance{}
 	for _, ch := range channels {
@@ -574,12 +579,12 @@ func aggregateGroupBalances(channels []ChannelRow) []groupBalance {
 				b.ChannelsWithQuota++
 				b.TotalQuotaUSD += *ch.QuotaUSD
 				b.TotalUsedUSD += ch.UsedUSD
+				b.TotalRemainingUSD += math.Max(0, *ch.QuotaUSD-ch.UsedUSD)
 			}
 		}
 	}
 	out := make([]groupBalance, 0, len(byGroup))
 	for _, b := range byGroup {
-		b.TotalRemainingUSD = b.TotalQuotaUSD - b.TotalUsedUSD
 		if b.LastHourUSD > 0 {
 			eta := b.TotalRemainingUSD / b.LastHourUSD
 			b.ETAHours = &eta
