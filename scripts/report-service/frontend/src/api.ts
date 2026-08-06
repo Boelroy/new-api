@@ -1488,6 +1488,226 @@ export const api = {
 
   localPoolDelete: (id: number) =>
     request<{ deleted: number }>(`/api/local-pool/pending/${id}`, { method: 'DELETE' }),
+
+  // ---- Local model health scheduler (Model Health page) ----
+
+  localHealthGetConfig: () => request<LocalHealthConfig>('/api/local-health/config'),
+
+  localHealthSetConfig: (payload: Partial<LocalHealthConfig>) =>
+    request<LocalHealthConfig>('/api/local-health/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  localHealthListRules: () => request<{ rules: LocalHealthRule[] }>('/api/local-health/rules'),
+
+  localHealthCreateRule: (payload: Partial<LocalHealthRule>) =>
+    request<LocalHealthRule>('/api/local-health/rules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  localHealthUpdateRule: (id: number, payload: Partial<LocalHealthRule>) =>
+    request<LocalHealthRule>(`/api/local-health/rules/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  localHealthDeleteRule: (id: number) =>
+    request<{ ok: boolean }>(`/api/local-health/rules/${id}`, { method: 'DELETE' }),
+
+  localHealthPreviewRule: (id: number) =>
+    request<LocalHealthPreview>(`/api/local-health/rules/${id}/preview`),
+
+  localHealthStatus: (params?: { state?: string; tag?: string; channel_id?: number; limit?: number }) => {
+    const qs = new URLSearchParams()
+    if (params?.state) qs.set('state', params.state)
+    if (params?.tag) qs.set('tag', params.tag)
+    if (params?.channel_id != null) qs.set('channel_id', String(params.channel_id))
+    if (params?.limit != null) qs.set('limit', String(params.limit))
+    const suffix = qs.toString()
+    return request<LocalHealthStatus>(`/api/local-health/status${suffix ? '?' + suffix : ''}`)
+  },
+
+  localHealthEvents: (params?: { channel_id?: number; kind?: string; limit?: number }) => {
+    const qs = new URLSearchParams()
+    if (params?.channel_id != null) qs.set('channel_id', String(params.channel_id))
+    if (params?.kind) qs.set('kind', params.kind)
+    if (params?.limit != null) qs.set('limit', String(params.limit))
+    const suffix = qs.toString()
+    return request<{ events: LocalHealthEvent[] }>(`/api/local-health/events${suffix ? '?' + suffix : ''}`)
+  },
+
+  localHealthProbe: (payload: { channel_id: number; model: string }) =>
+    request<{ class: string; message: string; error_code: string; seconds: number; http_code: number }>(
+      '/api/local-health/probe',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+    ),
+
+  // Local Channel Sync: list stored credentials that can be stood up as
+  // local channels, and sync a batch of them. Admin+ only (server gate).
+  localSyncList: () =>
+    request<{ items: SyncableCredential[] }>('/api/remote-newapi/local-sync/syncable'),
+
+  localSync: (items: { profile_id: number; remote_channel_id: number }[]) =>
+    request<{ results: LocalSyncResult[]; ok: number; total: number }>(
+      '/api/remote-newapi/local-sync',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items }),
+      },
+    ),
+}
+
+// One stored credential and its resolved local-channel target. Mirrors the
+// backend syncableCredential struct (local_channel_sync.go). key_masked is
+// "…" + last 8 chars; plaintext never leaves the server.
+export type SyncableCredential = {
+  profile_id: number
+  profile_name: string
+  remote_channel_id: number
+  channel_type: number
+  channel_type_name: string
+  key_type: string
+  region: string
+  key_masked: string
+  resolved_models: string
+  resolved_group: string
+  channel_name: string
+  already_synced: boolean
+  local_channel_id: number
+  created_at: number
+}
+
+export type LocalSyncResult = {
+  profile_id: number
+  remote_channel_id: number
+  ok: boolean
+  skipped: boolean
+  channel_id?: number
+  error?: string
+}
+
+export type LocalHealthConfig = {
+  enabled: boolean
+  tick_sec: number
+  probe_batch: number
+  bootstrap_batch: number
+  probe_timeout_sec: number
+  concurrency: number
+  max_actions_per_tick: number
+  // False when MAIN_SERVICE_URL / MAIN_SERVICE_TOKEN are missing — the
+  // scheduler cannot run at all in that case.
+  token_configured: boolean
+}
+
+export type LocalHealthRule = {
+  id: number
+  name: string
+  match_tag: string
+  // -1 means "any channel type".
+  match_type: number
+  match_group: string
+  match_channel_ids: string
+  // Empty falls back to the configured batch-create model list for the
+  // channel's type.
+  candidate_models: string
+  enabled: boolean
+  // enforce=false is observe-only: transitions are recorded but new-api is
+  // never modified.
+  enforce: boolean
+  probe_interval_sec: number
+  down_window_sec: number
+  down_fail_min: number
+  recover_ok_min: number
+  created_at: number
+  updated_at: number
+}
+
+export type LocalHealthPreview = {
+  rule: LocalHealthRule
+  channel_count: number
+  pair_count: number
+  // Every probe is a real billed upstream call — this is the number an
+  // operator needs before enabling a rule.
+  probes_per_day: number
+  sample_channels: {
+    channel_id: number
+    name: string
+    type: number
+    status: number
+    group: string
+    tag: string
+    current_models: string
+    candidate_models: string
+  }[]
+  token_configured: boolean
+}
+
+export type LocalHealthItem = {
+  channel_id: number
+  model: string
+  rule_id: number
+  state: 'unknown' | 'up' | 'down' | 'unsupported'
+  consecutive_ok: number
+  consecutive_fail: number
+  last_ok_at: number
+  last_checked_at: number
+  next_check_at: number
+  last_class: string
+  last_error: string
+  last_latency_ms: number
+  channel_name: string
+  tag: string
+  group: string
+  channel_status: number
+  channel_type: number
+  in_models: boolean
+  disabled_by_us: boolean
+}
+
+export type LocalHealthTick = {
+  at: number
+  probed: number
+  ok: number
+  model_down: number
+  channel_down: number
+  throttled: number
+  neutral: number
+  unsupported: number
+  actions: number
+  breaker_open: boolean
+  duration_ms: number
+}
+
+export type LocalHealthStatus = {
+  config: LocalHealthConfig
+  items: LocalHealthItem[]
+  state_counts: Record<string, number>
+  // How far behind the due-queue is. A growing lag silently stretches the
+  // configured down window.
+  queue_lag_sec: number
+  channels_disabled: number
+  last_tick: LocalHealthTick
+}
+
+export type LocalHealthEvent = {
+  id: number
+  channel_id: number
+  model: string
+  rule_id: number
+  kind: string
+  detail: string
+  dry_run: boolean
+  created_at: number
 }
 
 export type LocalPoolConfig = {

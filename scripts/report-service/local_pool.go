@@ -230,7 +230,7 @@ func computeLocalRPM() (int64, error) {
 	since := time.Now().Add(-5 * time.Minute).Unix()
 	var count int64
 	err := db.QueryRow(
-		`SELECT COUNT(*) FROM logs WHERE type=2 AND created_at >= $1`,
+		`SELECT COUNT(*) FROM logs WHERE type=2 AND created_at >= $1`+excludeChannelTestLogs,
 		since,
 	).Scan(&count)
 	if err != nil {
@@ -555,9 +555,10 @@ func runLocalPoolTick() {
 func reconcileLocalActive() {
 	now := time.Now().Unix()
 	rows, err := db.Query(
-		`SELECT p.id, p.channel_id, COALESCE(c.status, 0)
+		`SELECT p.id, p.channel_id, COALESCE(c.status, 0), COALESCE(h.disabled_by_us, FALSE)
 		   FROM local_pending_key p
 		   LEFT JOIN channels c ON c.id = p.channel_id
+		   LEFT JOIN local_model_health_channel h ON h.channel_id = p.channel_id
 		  WHERE p.status = 'active'`,
 	)
 	if err != nil {
@@ -568,7 +569,15 @@ func reconcileLocalActive() {
 	for rows.Next() {
 		var pID, chID int64
 		var chStatus int
-		if err := rows.Scan(&pID, &chID, &chStatus); err != nil {
+		var disabledByHealth bool
+		if err := rows.Scan(&pID, &chID, &chStatus, &disabledByHealth); err != nil {
+			continue
+		}
+		// A channel the model health scheduler turned off is not a spent key —
+		// it's a channel whose models all went dark, and it may come back on
+		// the next recovery probe. Retiring the pending row here would make
+		// the pool drip in a replacement key that we then don't need.
+		if disabledByHealth {
 			continue
 		}
 		// channels.status = 1 → enabled, anything else = disabled/banned.

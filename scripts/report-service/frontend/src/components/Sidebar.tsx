@@ -82,6 +82,16 @@ const ERROR_CENTER_ITEM: Item = {
   ),
 }
 
+const MODEL_HEALTH_ITEM: Item = {
+  to: '/model-health',
+  label: 'Model Health',
+  icon: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 12h4l2 6 4-14 2 8h6" />
+    </svg>
+  ),
+}
+
 // Visible to all admins (role >= 10). Super-admin-only items are appended
 // below in the render path when the user's role and config flags allow.
 const ADMIN_NAV_ITEMS: Item[] = [
@@ -89,6 +99,7 @@ const ADMIN_NAV_ITEMS: Item[] = [
   KEY_CAPACITY_ITEM,
   ALL_KEYS_ITEM,
   KEY_TESTER_ITEM,
+  MODEL_HEALTH_ITEM,
   CACHE_REPORT_ITEM,
   ERROR_CENTER_ITEM,
 ]
@@ -135,6 +146,21 @@ const REMOTE_CHANNELS_ITEM: Item = {
       <circle cx="20" cy="6" r="2" fill="currentColor" />
       <circle cx="4" cy="12" r="2" fill="currentColor" />
       <circle cx="20" cy="18" r="2" fill="currentColor" />
+    </svg>
+  ),
+}
+
+// Local Channel Sync: admin+ only. Sits right after Remote Channels in the
+// admin render path below.
+const LOCAL_SYNC_ITEM: Item = {
+  to: '/local-sync',
+  label: 'Local Sync',
+  icon: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 2v6h-6" />
+      <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+      <path d="M3 22v-6h6" />
+      <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
     </svg>
   ),
 }
@@ -226,7 +252,7 @@ export default function Sidebar({ open, onClose }: Props) {
     // Users + Remote Channels are available to admin+ (Remote Channels
     // in a read-only-for-profile mode; profile CRUD is still super
     // admin only). Super admin gets extras: Profit, Provider Testing.
-    items = [...items, REMOTE_CHANNELS_ITEM, USERS_ITEM]
+    items = [...items, REMOTE_CHANNELS_ITEM, LOCAL_SYNC_ITEM, USERS_ITEM]
     if (role >= ROLE_SUPER_ADMIN) {
       if (showProfit) items = [items[0], PROFIT_ITEM, ...items.slice(1)]
       if (showTesting) items = [...items, TESTING_ITEM]

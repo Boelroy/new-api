@@ -11,7 +11,9 @@ import Profit from './pages/Profit'
 import Users from './pages/Users'
 import CacheReport from './pages/CacheReport'
 import ErrorCenter from './pages/ErrorCenter'
+import ModelHealth from './pages/ModelHealth'
 import RemoteChannels from './pages/RemoteChannels'
+import LocalChannelSync from './pages/LocalChannelSync'
 import PoolUploadStudio from './pages/PoolUploadStudio'
 import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_TESTER } from './api'
 
@@ -89,10 +91,12 @@ export default function App() {
         <Route path="/tester" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_TESTER || r === ROLE_STUDIO_OPERATOR || r === ROLE_REMOTE_STUDIO_OPERATOR || r === ROLE_PROJECT_ADMIN}><KeyTester /></RoleGate>} />
         <Route path="/cache" element={<RoleGate min={ROLE_ADMIN}><CacheReport /></RoleGate>} />
         <Route path="/errors" element={<RoleGate min={ROLE_ADMIN}><ErrorCenter /></RoleGate>} />
+        <Route path="/model-health" element={<RoleGate min={ROLE_ADMIN}><ModelHealth /></RoleGate>} />
         <Route path="/testing" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
         <Route path="/testing/:projectId" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
         <Route path="/users" element={<RoleGate min={ROLE_ADMIN}><Users /></RoleGate>} />
         <Route path="/remote-channels" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_REMOTE_STUDIO_OPERATOR}><RemoteChannels /></RoleGate>} />
+        <Route path="/local-sync" element={<RoleGate min={ROLE_ADMIN}><LocalChannelSync /></RoleGate>} />
         <Route path="/pool-upload" element={<RoleGate allow={r => r === ROLE_STUDIO_OPERATOR}><PoolUploadStudio /></RoleGate>} />
         <Route path="/detect" element={<Navigate to="/testing" replace />} />
         <Route path="/eval" element={<Navigate to="/testing" replace />} />

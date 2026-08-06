@@ -902,7 +902,7 @@ SELECT
   l.prompt_tokens, l.completion_tokens, l.quota, COALESCE(l.other, '{}') as other_json
 FROM logs l
 LEFT JOIN channels c ON l.channel_id = c.id
-WHERE l.type = 2 AND l.created_at >= $1 AND l.created_at < $2`
+WHERE l.type = 2 AND l.created_at >= $1 AND l.created_at < $2` + excludeChannelTestLogsQualified
 
 	rows, err := db.Query(query, startTS, endTS)
 	if err != nil {
@@ -1044,7 +1044,7 @@ func backfillMissingDays() {
 	cutoff := time.Now().UTC().AddDate(0, 0, -90).Unix()
 	rows, err := db.Query(`
 		SELECT DISTINCT to_char(to_timestamp(created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD') as d
-		FROM logs WHERE type=2 AND created_at >= $1
+		FROM logs WHERE type=2 AND created_at >= $1`+excludeChannelTestLogs+`
 		ORDER BY d`, cutoff)
 	if err != nil {
 		log.Printf("backfill query error: %v", err)
@@ -1206,7 +1206,7 @@ func queryKeyData() ([]ChannelRow, error) {
 
 	now := time.Now().Unix()
 	oneHourAgo := now - 3600
-	lhRows, err := db.Query(`SELECT channel_id, COALESCE(SUM(quota),0) FROM logs WHERE type=2 AND created_at>=$1 AND created_at<$2 GROUP BY channel_id`, oneHourAgo, now)
+	lhRows, err := db.Query(`SELECT channel_id, COALESCE(SUM(quota),0) FROM logs WHERE type=2 AND created_at>=$1 AND created_at<$2`+excludeChannelTestLogs+` GROUP BY channel_id`, oneHourAgo, now)
 	if err != nil {
 		return nil, err
 	}
@@ -1228,7 +1228,7 @@ func queryTotalLastHour() (float64, error) {
 	now := time.Now().Unix()
 	oneHourAgo := now - 3600
 	var total int64
-	err := db.QueryRow(`SELECT COALESCE(SUM(quota),0) FROM logs WHERE type=2 AND created_at>=$1 AND created_at<$2`, oneHourAgo, now).Scan(&total)
+	err := db.QueryRow(`SELECT COALESCE(SUM(quota),0) FROM logs WHERE type=2 AND created_at>=$1 AND created_at<$2`+excludeChannelTestLogs, oneHourAgo, now).Scan(&total)
 	if err != nil {
 		return 0, err
 	}
@@ -1301,7 +1301,7 @@ func queryAllKeys(startTS, endTS int64, studio string) ([]ChannelRow, error) {
 	// channel_id. Frontend sums these into a system-wide RPM. Same window
 	// newapi's usage-log page uses.
 	rpmSince := time.Now().Add(-60 * time.Second).Unix()
-	rpmRows, err := db.Query(`SELECT channel_id, COUNT(*) FROM logs WHERE type=2 AND created_at >= $1 GROUP BY channel_id`, rpmSince)
+	rpmRows, err := db.Query(`SELECT channel_id, COUNT(*) FROM logs WHERE type=2 AND created_at >= $1`+excludeChannelTestLogs+` GROUP BY channel_id`, rpmSince)
 	if err != nil {
 		return nil, err
 	}
@@ -2995,7 +2995,7 @@ func handleAllKeysData(c *gin.Context) {
 func handleAllKeysRPM(c *gin.Context) {
 	since := time.Now().Add(-60 * time.Second).Unix()
 	var rpm int64
-	if err := db.QueryRow(`SELECT COUNT(*) FROM logs WHERE type=2 AND created_at >= $1`, since).Scan(&rpm); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM logs WHERE type=2 AND created_at >= $1`+excludeChannelTestLogs, since).Scan(&rpm); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -3413,6 +3413,10 @@ func main() {
 	if mainServiceUID == "" {
 		mainServiceUID = "1"
 	}
+	// Admin access token on the local new-api, used by the model health
+	// scheduler to probe channels and edit their models/status. Optional:
+	// without it the scheduler stays off and says so on its status endpoint.
+	mainServiceToken = strings.TrimSpace(os.Getenv("MAIN_SERVICE_TOKEN"))
 	if s := os.Getenv("SSO_SECRET"); s != "" {
 		ssoSecret = []byte(s)
 	}
@@ -3977,6 +3981,19 @@ func main() {
 			updated_at         BIGINT NOT NULL,
 			PRIMARY KEY (profile_id, remote_channel_id)
 		)`,
+		// Maps a stored credential (profile_id, remote_channel_id) to the
+		// LOCAL new-api channel a "sync to local" created from it. Lets the
+		// syncable list show synced state and makes re-syncing idempotent.
+		// channel_id points into the shared new-api channels table.
+		`CREATE TABLE IF NOT EXISTS remote_local_sync (
+			profile_id         BIGINT NOT NULL,
+			remote_channel_id  BIGINT NOT NULL,
+			channel_id         BIGINT NOT NULL,
+			key_hash           TEXT   NOT NULL DEFAULT '',
+			created_by         BIGINT NOT NULL DEFAULT 0,
+			created_at         BIGINT NOT NULL,
+			PRIMARY KEY (profile_id, remote_channel_id)
+		)`,
 		// Single-row leader-election lease. Whoever holds a non-expired
 		// lease is the leader and runs the singleton background schedulers
 		// (see leader.go). Heartbeat renews expires_at; on leader death the
@@ -3989,6 +4006,81 @@ func main() {
 			updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
 			CONSTRAINT report_leader_singleton CHECK (id = 1)
 		)`,
+		// ---- Local model health (local_health*.go) ----
+		// Which local channels the scheduler manages, and how aggressively.
+		// Rules union: a channel matched by several rules gets the union of
+		// their candidate models and the strictest thresholds. No priority
+		// ordering — first-match rules are a support burden for no gain.
+		`CREATE TABLE IF NOT EXISTS local_model_health_rule (
+			id                 BIGSERIAL PRIMARY KEY,
+			name               TEXT   NOT NULL DEFAULT '',
+			match_tag          TEXT   NOT NULL DEFAULT '',
+			match_type         INT    NOT NULL DEFAULT -1,
+			match_group        TEXT   NOT NULL DEFAULT '',
+			match_channel_ids  TEXT   NOT NULL DEFAULT '',
+			candidate_models   TEXT   NOT NULL DEFAULT '',
+			enabled            BOOLEAN NOT NULL DEFAULT FALSE,
+			enforce            BOOLEAN NOT NULL DEFAULT FALSE,
+			probe_interval_sec INT    NOT NULL DEFAULT 3600,
+			down_window_sec    INT    NOT NULL DEFAULT 1800,
+			down_fail_min      INT    NOT NULL DEFAULT 3,
+			recover_ok_min     INT    NOT NULL DEFAULT 2,
+			created_at         BIGINT NOT NULL,
+			updated_at         BIGINT NOT NULL
+		)`,
+		// Per (channel, model) health. last_ok_at is the only demotion clock;
+		// see applyProbe. Rows are seeded with last_ok_at = now so a freshly
+		// covered pair can't satisfy the down window on its first failure.
+		`CREATE TABLE IF NOT EXISTS local_model_health (
+			channel_id       BIGINT NOT NULL,
+			model            TEXT   NOT NULL,
+			rule_id          BIGINT NOT NULL DEFAULT 0,
+			state            TEXT   NOT NULL DEFAULT 'unknown',
+			consecutive_ok   INT    NOT NULL DEFAULT 0,
+			consecutive_fail INT    NOT NULL DEFAULT 0,
+			last_ok_at       BIGINT NOT NULL DEFAULT 0,
+			last_checked_at  BIGINT NOT NULL DEFAULT 0,
+			next_check_at    BIGINT NOT NULL DEFAULT 0,
+			last_class       TEXT   NOT NULL DEFAULT '',
+			last_error       TEXT   NOT NULL DEFAULT '',
+			last_latency_ms  BIGINT NOT NULL DEFAULT 0,
+			updated_at       BIGINT NOT NULL,
+			PRIMARY KEY (channel_id, model)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_local_model_health_due
+		   ON local_model_health(next_check_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_local_model_health_state
+		   ON local_model_health(state)`,
+		// Channel-level ledger. Because disables are written as status=2
+		// (status=3 has no HTTP path and new-api auto-re-enables it), this is
+		// the only way to tell our disables apart from an operator's.
+		`CREATE TABLE IF NOT EXISTS local_model_health_channel (
+			channel_id      BIGINT PRIMARY KEY,
+			probe_supported BOOLEAN NOT NULL DEFAULT TRUE,
+			disabled_by_us  BOOLEAN NOT NULL DEFAULT FALSE,
+			disabled_at     BIGINT NOT NULL DEFAULT 0,
+			removed_models  TEXT   NOT NULL DEFAULT '',
+			last_action_at  BIGINT NOT NULL DEFAULT 0,
+			last_error      TEXT   NOT NULL DEFAULT '',
+			updated_at      BIGINT NOT NULL
+		)`,
+		// Append-only audit of transitions and actions only — never one row
+		// per probe. When the scheduler strips a model from a production
+		// channel at 3am this is the record that survives log rotation.
+		`CREATE TABLE IF NOT EXISTS local_model_health_event (
+			id         BIGSERIAL PRIMARY KEY,
+			channel_id BIGINT NOT NULL DEFAULT 0,
+			model      TEXT   NOT NULL DEFAULT '',
+			rule_id    BIGINT NOT NULL DEFAULT 0,
+			kind       TEXT   NOT NULL,
+			detail     TEXT   NOT NULL DEFAULT '',
+			dry_run    BOOLEAN NOT NULL DEFAULT FALSE,
+			created_at BIGINT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_local_model_health_event_time
+		   ON local_model_health_event(created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_local_model_health_event_channel
+		   ON local_model_health_event(channel_id, id DESC)`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
@@ -4020,6 +4112,7 @@ func main() {
 	startRemoteSnapshotPrune()
 	startRemotePendingScheduler()
 	startLocalPendingScheduler()
+	startLocalHealthLoop()
 	startRemoteErrorLogSync()
 	startRemoteAutoDisableLoop()
 	if profitEnabled {
@@ -4123,6 +4216,20 @@ func main() {
 	adminAPI.POST("/keys/pricing", handleSaveKeyPricing)
 	adminAPI.POST("/keys/pricing/bulk", handleBulkSaveKeyPricing)
 	adminAPI.GET("/detect/models", handleDetectModels)
+	// Local model health scheduler. Admin-only: it edits the models list and
+	// status of local channels, so it sits at the same tier as the other
+	// channel-mutating surfaces. Rules ship disabled and in dry-run, and the
+	// preview endpoint reports probe cost before an operator enables one.
+	adminAPI.GET("/local-health/config", handleLocalHealthConfigGet)
+	adminAPI.POST("/local-health/config", handleLocalHealthConfigSet)
+	adminAPI.GET("/local-health/rules", handleLocalHealthRuleList)
+	adminAPI.POST("/local-health/rules", handleLocalHealthRuleCreate)
+	adminAPI.PATCH("/local-health/rules/:id", handleLocalHealthRuleUpdate)
+	adminAPI.DELETE("/local-health/rules/:id", handleLocalHealthRuleDelete)
+	adminAPI.GET("/local-health/rules/:id/preview", handleLocalHealthRulePreview)
+	adminAPI.GET("/local-health/status", handleLocalHealthStatus)
+	adminAPI.GET("/local-health/events", handleLocalHealthEvents)
+	adminAPI.POST("/local-health/probe", handleLocalHealthProbeNow)
 	// Key Tester: admin+, tester (role=5), studio_operator (role=2),
 	// remote_studio_operator (role=3), and project_admin (role=7). Tester
 	// is scoped to Key Tester + Provider Testing (see the testingAPI group
@@ -4221,6 +4328,11 @@ func main() {
 	// same tier already owns the profile list surface.
 	adminAPI.GET("/remote-newapi/profiles/:id/visibility", handleProfileVisibilityList)
 	adminAPI.PUT("/remote-newapi/profiles/:id/visibility", handleProfileVisibilitySet)
+	// Sync stored credentials into LOCAL channels. Admin+ only (this group).
+	// syncable lists every remote_channel_credential with its resolved target
+	// and synced state; local-sync creates the local channel(s).
+	adminAPI.GET("/remote-newapi/local-sync/syncable", handleLocalSyncList)
+	adminAPI.POST("/remote-newapi/local-sync", handleLocalSyncCreate)
 	adminAPI.POST("/remote-newapi/channels", handleRemoteFetchChannels)
 	adminAPI.GET("/remote-newapi/channels/:id", handleRemoteChannelGet)
 	adminAPI.POST("/remote-newapi/channels/create", handleRemoteChannelCreate)
