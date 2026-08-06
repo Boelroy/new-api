@@ -81,12 +81,15 @@ type profileDefaults struct {
 	openaiModels string
 }
 
-// resolveTypeDefaults returns the (models, group) a sync should use for a
-// channel of the given type, sourced from the profile's per-type defaults.
-// currentModels / currentGroup are the live mirror values when the remote
-// channel still exists; they win over the profile defaults so a sync
-// reproduces the channel as it was configured upstream.
-func resolveTypeDefaults(channelType int, currentModels, currentGroup string, d profileDefaults) (models, group string) {
+// resolveModelsGroup returns the (models, group) a sync should use, in
+// precedence order: the live remote_channel_current mirror (what the channel
+// is configured with right now) → the remote_pending_key row it was created
+// from (the original upload config, still present after the channel is
+// deleted) → the profile's per-type defaults. This is why a credential whose
+// live mirror row is gone still resolves the models/group the operator
+// originally set — the pending-key row carries them.
+func resolveModelsGroup(channelType int, currentModels, currentGroup, pendingModels, pendingGroup string, d profileDefaults) (models, group string) {
+	// Base: profile default for this channel type.
 	switch channelType {
 	case 41: // Vertex AI — Vertex model names differ from AI Studio.
 		models, group = d.vertexModels, d.group
@@ -97,6 +100,14 @@ func resolveTypeDefaults(channelType int, currentModels, currentGroup string, d 
 	default: // 14 Anthropic and everything else
 		models, group = d.models, d.group
 	}
+	// Original upload config overrides the profile default.
+	if strings.TrimSpace(pendingModels) != "" {
+		models = pendingModels
+	}
+	if strings.TrimSpace(pendingGroup) != "" {
+		group = pendingGroup
+	}
+	// Live mirror wins over everything when the channel still exists.
 	if strings.TrimSpace(currentModels) != "" {
 		models = currentModels
 	}
@@ -119,11 +130,19 @@ const syncableSelect = `
 	       p.default_gemini_models, p.default_vertex_models,
 	       p.default_openai_group, p.default_openai_models,
 	       COALESCE(cc.name, ''), COALESCE(cc.models, ''), COALESCE(cc."group", ''),
+	       COALESCE(pk.models, ''), COALESCE(pk.group_name, ''),
 	       COALESCE(ls.channel_id, 0)
 	  FROM remote_channel_credential cr
 	  JOIN remote_newapi_profile p ON p.id = cr.profile_id
 	  LEFT JOIN remote_channel_current cc
 	         ON cc.profile_id = cr.profile_id AND cc.remote_channel_id = cr.remote_channel_id
+	  LEFT JOIN LATERAL (
+	         SELECT models, group_name
+	           FROM remote_pending_key pk
+	          WHERE pk.profile_id = cr.profile_id AND pk.remote_channel_id = cr.remote_channel_id
+	          ORDER BY pk.id DESC
+	          LIMIT 1
+	       ) pk ON true
 	  LEFT JOIN remote_local_sync ls
 	         ON ls.profile_id = cr.profile_id AND ls.remote_channel_id = cr.remote_channel_id`
 
@@ -141,6 +160,8 @@ type credentialRow struct {
 	currentName     string
 	currentModels   string
 	currentGroup    string
+	pendingModels   string
+	pendingGroup    string
 	syncedChannelID int64
 	defaults        profileDefaults
 }
@@ -155,6 +176,7 @@ func scanCredentialRow(scan func(dest ...any) error) (credentialRow, error) {
 		&r.defaults.geminiModels, &r.defaults.vertexModels,
 		&r.defaults.openaiGroup, &r.defaults.openaiModels,
 		&r.currentName, &r.currentModels, &r.currentGroup,
+		&r.pendingModels, &r.pendingGroup,
 		&r.syncedChannelID,
 	)
 	return r, err
@@ -177,7 +199,7 @@ func handleLocalSyncList(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		models, group := resolveTypeDefaults(r.channelType, r.currentModels, r.currentGroup, r.defaults)
+		models, group := resolveModelsGroup(r.channelType, r.currentModels, r.currentGroup, r.pendingModels, r.pendingGroup, r.defaults)
 		masked := ""
 		if plain, derr := decryptRemoteToken(r.keyEncrypted); derr == nil {
 			masked = "…" + channelKeyTail(plain, 8)
@@ -279,10 +301,10 @@ func syncCredentialToLocalChannel(profileID, remoteChannelID, callerID int64) (c
 		return 0, false, fmt.Errorf("stored credential is empty")
 	}
 
-	models, group := resolveTypeDefaults(cred.channelType, cred.currentModels, cred.currentGroup, cred.defaults)
+	models, group := resolveModelsGroup(cred.channelType, cred.currentModels, cred.currentGroup, cred.pendingModels, cred.pendingGroup, cred.defaults)
 	if models == "" {
-		return 0, false, fmt.Errorf("no models: set the profile's default models for %s (type %d) first",
-			channelTypeLabel(cred.channelType), cred.channelType)
+		return 0, false, fmt.Errorf("no models: remote channel %d has no live/original models and the profile has no default for %s (type %d)",
+			remoteChannelID, channelTypeLabel(cred.channelType), cred.channelType)
 	}
 	channelType := cred.channelType
 	if channelType == 0 {
