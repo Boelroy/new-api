@@ -71,6 +71,29 @@ var v2SchemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_key_pool_studio ON rs_key_pool(studio)`,
 	`CREATE INDEX IF NOT EXISTS idx_key_pool_uploaded_by ON rs_key_pool(uploaded_by)`,
 	`CREATE INDEX IF NOT EXISTS idx_key_pool_assigned_profile ON rs_key_pool(assigned_profile_id)`,
+
+	// -- Supplier Account portal -------------------------------------------
+	// One row per key uploaded to the third-party API Account Portal. Owner
+	// (uploaded_by) scopes visibility: suppliers see only their own rows,
+	// admin+ see all. remote_account_id is the portal-side account id used
+	// for metrics queries.
+	`CREATE TABLE IF NOT EXISTS rs_supplier_account (
+		id                BIGSERIAL PRIMARY KEY,
+		uploaded_by       BIGINT NOT NULL,
+		studio            TEXT   NOT NULL DEFAULT '',
+		provider          TEXT   NOT NULL,
+		models            TEXT   NOT NULL DEFAULT '',
+		remote_account_id BIGINT NOT NULL,
+		alias             TEXT   NOT NULL DEFAULT '',
+		account_type      INT    NOT NULL DEFAULT 0,
+		remark            TEXT   NOT NULL DEFAULT '',
+		key_last8         TEXT   NOT NULL DEFAULT '',
+		key_hash          TEXT   NOT NULL DEFAULT '',
+		created_at        BIGINT NOT NULL,
+		updated_at        BIGINT NOT NULL
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS ux_supplier_account_remote_id ON rs_supplier_account(remote_account_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_supplier_account_uploaded_by ON rs_supplier_account(uploaded_by)`,
 }
 
 // initV2Schema applies all V2 DDLs. Panics on failure — startup should not

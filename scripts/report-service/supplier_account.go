@@ -1,0 +1,429 @@
+package main
+
+// Supplier Account portal integration.
+//
+// A third-party "账号资源录入系统" (API Account Portal) exposes an OpenAPI
+// (Bearer token) for batch-uploading API keys and querying per-account
+// realtime metrics. This module lets report-service act as a scoped proxy:
+//
+//   - supplier_01 studios upload keys and see ONLY their own accounts + usage.
+//   - admin / super_admin see every account and its usage, and can upload too.
+//
+// Ownership is tracked locally in rs_supplier_account (uploaded_by). All
+// upstream calls use a single server-side admin token (SUPPLIER_ACCOUNT_TOKEN)
+// so the scoping is enforced here, not by the upstream token.
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+)
+
+var (
+	// supplierAccountBaseURL is the third-party portal origin, e.g.
+	// "https://120.233.254.152:8000". Empty disables the feature.
+	supplierAccountBaseURL string
+	// supplierAccountToken is the single server-side admin OpenAPI token.
+	supplierAccountToken string
+)
+
+// supplierAccountEnabled reports whether the portal integration is wired up.
+func supplierAccountEnabled() bool {
+	return supplierAccountBaseURL != "" && supplierAccountToken != ""
+}
+
+// supplierHTTPClient talks to a portal that serves a self-signed cert (every
+// sample curl uses --insecure), so TLS verification is intentionally skipped.
+var supplierHTTPClient = &http.Client{
+	Timeout: 20 * time.Second,
+	Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	},
+}
+
+// supplierProxy issues a request to the portal with the server admin token and
+// returns the raw status code + body. jsonBody may be nil for GETs.
+func supplierProxy(method, path string, jsonBody []byte) (int, []byte, error) {
+	var reader io.Reader
+	if jsonBody != nil {
+		reader = bytes.NewReader(jsonBody)
+	}
+	req, err := http.NewRequest(method, supplierAccountBaseURL+path, reader)
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+supplierAccountToken)
+	req.Header.Set("Accept", "application/json")
+	if jsonBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := supplierHTTPClient.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return resp.StatusCode, nil, err
+	}
+	return resp.StatusCode, body, nil
+}
+
+// supplierErr extracts the portal's {"detail": "..."} error, falling back to
+// the raw body.
+func supplierErr(body []byte) string {
+	var e struct {
+		Detail string `json:"detail"`
+	}
+	if json.Unmarshal(body, &e) == nil && e.Detail != "" {
+		return e.Detail
+	}
+	s := strings.TrimSpace(string(body))
+	if s == "" {
+		return "upstream error"
+	}
+	return s
+}
+
+// callerIsSupplierAdmin returns true when the caller may see every studio's
+// accounts (admin and above). Suppliers see only their own uploads.
+func callerIsSupplierAdmin(c *gin.Context) bool {
+	roleAny, _ := c.Get("role")
+	role, _ := roleAny.(int)
+	return role >= minAdminRole
+}
+
+// ---- Proxy passthrough (providers / models) ----
+
+func handleSupplierProviders(c *gin.Context) {
+	if !supplierAccountEnabled() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier account portal not configured"})
+		return
+	}
+	status, body, err := supplierProxy(http.MethodGet, "/supplier-account/api/providers", nil)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	if status != http.StatusOK {
+		c.JSON(http.StatusBadGateway, gin.H{"error": supplierErr(body)})
+		return
+	}
+	c.Data(http.StatusOK, "application/json", body)
+}
+
+func handleSupplierModels(c *gin.Context) {
+	if !supplierAccountEnabled() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier account portal not configured"})
+		return
+	}
+	status, body, err := supplierProxy(http.MethodGet, "/supplier-account/api/models", nil)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	if status != http.StatusOK {
+		c.JSON(http.StatusBadGateway, gin.H{"error": supplierErr(body)})
+		return
+	}
+	c.Data(http.StatusOK, "application/json", body)
+}
+
+// ---- Upload (create account) ----
+
+func handleSupplierAccountCreate(c *gin.Context) {
+	if !supplierAccountEnabled() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier account portal not configured"})
+		return
+	}
+	var body struct {
+		Provider    string `json:"provider"`
+		Model       string `json:"model"`
+		APIKey      string `json:"api_key"`
+		AccountID   string `json:"account_id"`
+		AccountType int    `json:"account_type"`
+		Remark      string `json:"remark"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	body.Provider = strings.TrimSpace(body.Provider)
+	body.Model = strings.TrimSpace(body.Model)
+	body.APIKey = strings.TrimSpace(body.APIKey)
+	if body.Provider == "" || body.Model == "" || body.APIKey == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider, model and api_key are required"})
+		return
+	}
+	if body.AccountType != 0 && body.AccountType != 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "account_type must be 0 or 1"})
+		return
+	}
+
+	upstreamReq := map[string]any{
+		"provider":     body.Provider,
+		"model":        body.Model,
+		"api_key":      body.APIKey,
+		"account_type": body.AccountType,
+	}
+	if body.AccountID != "" {
+		upstreamReq["account_id"] = body.AccountID
+	}
+	if body.Remark != "" {
+		upstreamReq["remark"] = body.Remark
+	}
+	reqBytes, _ := json.Marshal(upstreamReq)
+
+	status, respBody, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/accounts", reqBytes)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	if status < 200 || status >= 300 {
+		c.JSON(http.StatusBadGateway, gin.H{"error": supplierErr(respBody)})
+		return
+	}
+	var upstream struct {
+		ID    int64  `json:"id"`
+		Alias string `json:"alias"`
+		Msg   string `json:"msg"`
+	}
+	if err := json.Unmarshal(respBody, &upstream); err != nil || upstream.ID == 0 {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "unexpected upstream response: " + strings.TrimSpace(string(respBody))})
+		return
+	}
+
+	uidAny, _ := c.Get("user_id")
+	uid, _ := uidAny.(int64)
+	studioAny, _ := c.Get("studio")
+	studio, _ := studioAny.(string)
+
+	now := time.Now().Unix()
+	sum := sha256.Sum256([]byte(body.APIKey))
+	keyHash := hex.EncodeToString(sum[:])
+	last8 := body.APIKey
+	if len(last8) > 8 {
+		last8 = last8[len(last8)-8:]
+	}
+
+	// Upsert on remote_account_id so re-submitting the same account (portal
+	// dedupes by key) refreshes ownership/metadata instead of erroring.
+	if _, err := db.Exec(
+		`INSERT INTO rs_supplier_account
+		   (uploaded_by, studio, provider, models, remote_account_id, alias,
+		    account_type, remark, key_last8, key_hash, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
+		 ON CONFLICT (remote_account_id) DO UPDATE SET
+		    uploaded_by=EXCLUDED.uploaded_by, studio=EXCLUDED.studio,
+		    provider=EXCLUDED.provider, models=EXCLUDED.models,
+		    alias=EXCLUDED.alias, account_type=EXCLUDED.account_type,
+		    remark=EXCLUDED.remark, key_last8=EXCLUDED.key_last8,
+		    key_hash=EXCLUDED.key_hash, updated_at=EXCLUDED.updated_at`,
+		uid, studio, body.Provider, body.Model, upstream.ID, upstream.Alias,
+		body.AccountType, body.Remark, last8, keyHash, now,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record account: " + err.Error()})
+		return
+	}
+
+	msg := upstream.Msg
+	if msg == "" {
+		msg = "提交成功"
+	}
+	c.JSON(http.StatusOK, gin.H{"id": upstream.ID, "alias": upstream.Alias, "msg": msg})
+}
+
+// ---- List local accounts (scoped by role) ----
+
+type supplierAccountRow struct {
+	ID              int64  `json:"id"`
+	RemoteAccountID int64  `json:"remote_account_id"`
+	Provider        string `json:"provider"`
+	Models          string `json:"models"`
+	Alias           string `json:"alias"`
+	AccountType     int    `json:"account_type"`
+	Remark          string `json:"remark"`
+	KeyLast8        string `json:"key_last8"`
+	Studio          string `json:"studio"`
+	UploadedBy      int64  `json:"uploaded_by"`
+	Username        string `json:"username,omitempty"`
+	CreatedAt       int64  `json:"created_at"`
+}
+
+func handleSupplierAccountList(c *gin.Context) {
+	isAdmin := callerIsSupplierAdmin(c)
+
+	query := `SELECT a.id, a.remote_account_id, a.provider, a.models, a.alias,
+	                 a.account_type, a.remark, a.key_last8, a.studio,
+	                 a.uploaded_by, COALESCE(u.username, ''), a.created_at
+	            FROM rs_supplier_account a
+	            LEFT JOIN rs_auth_user u ON u.id = a.uploaded_by`
+	var (
+		rows interface {
+			Next() bool
+			Scan(...any) error
+			Close() error
+		}
+		err error
+	)
+	if isAdmin {
+		r, e := db.Query(query+` ORDER BY a.id DESC`)
+		rows, err = r, e
+	} else {
+		uidAny, _ := c.Get("user_id")
+		uid, _ := uidAny.(int64)
+		r, e := db.Query(query+` WHERE a.uploaded_by=$1 ORDER BY a.id DESC`, uid)
+		rows, err = r, e
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	out := make([]supplierAccountRow, 0)
+	for rows.Next() {
+		var row supplierAccountRow
+		if err := rows.Scan(
+			&row.ID, &row.RemoteAccountID, &row.Provider, &row.Models, &row.Alias,
+			&row.AccountType, &row.Remark, &row.KeyLast8, &row.Studio,
+			&row.UploadedBy, &row.Username, &row.CreatedAt,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		// Non-admins never learn who else uploaded — strip owner identity.
+		if !isAdmin {
+			row.Username = ""
+		}
+		out = append(out, row)
+	}
+	c.JSON(http.StatusOK, gin.H{"accounts": out})
+}
+
+// ---- Realtime metrics (scoped by role) ----
+
+// supplierMetric mirrors one entry of the portal metrics response. Cost is a
+// pointer so it can be omitted for non-admin callers.
+type supplierMetric struct {
+	AID              int64    `json:"aid"`
+	AccountAlias     string   `json:"account_alias"`
+	Status           string   `json:"status"`
+	Requests         *int64   `json:"requests"`
+	Cost             *float64 `json:"cost,omitempty"`
+	SuccessRate      *float64 `json:"success_rate"`
+	PromptTokens     *int64   `json:"prompt_tokens"`
+	CompletionTokens *int64   `json:"completion_tokens"`
+}
+
+func handleSupplierMetrics(c *gin.Context) {
+	if !supplierAccountEnabled() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier account portal not configured"})
+		return
+	}
+	var body struct {
+		BeginTime string `json:"begin_time"`
+		EndTime   string `json:"end_time"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	body.BeginTime = strings.TrimSpace(body.BeginTime)
+	body.EndTime = strings.TrimSpace(body.EndTime)
+	if body.BeginTime == "" || body.EndTime == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "begin_time and end_time are required"})
+		return
+	}
+
+	isAdmin := callerIsSupplierAdmin(c)
+
+	// Resolve the account id set this caller is allowed to query.
+	var (
+		idRows interface {
+			Next() bool
+			Scan(...any) error
+			Close() error
+		}
+		err error
+	)
+	if isAdmin {
+		r, e := db.Query(`SELECT remote_account_id FROM rs_supplier_account ORDER BY id DESC`)
+		idRows, err = r, e
+	} else {
+		uidAny, _ := c.Get("user_id")
+		uid, _ := uidAny.(int64)
+		r, e := db.Query(`SELECT remote_account_id FROM rs_supplier_account WHERE uploaded_by=$1 ORDER BY id DESC`, uid)
+		idRows, err = r, e
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	ids := make([]int64, 0)
+	for idRows.Next() {
+		var id int64
+		if err := idRows.Scan(&id); err != nil {
+			idRows.Close()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		ids = append(ids, id)
+	}
+	idRows.Close()
+
+	if len(ids) == 0 {
+		c.JSON(http.StatusOK, gin.H{"accounts": []supplierMetric{}})
+		return
+	}
+
+	// The portal caps a query at 100 account ids; batch and merge.
+	merged := make([]supplierMetric, 0, len(ids))
+	for start := 0; start < len(ids); start += 100 {
+		end := start + 100
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		reqBytes, _ := json.Marshal(map[string]any{
+			"account_ids": chunk,
+			"begin_time":  body.BeginTime,
+			"end_time":    body.EndTime,
+			"aggregate":   false,
+		})
+		status, respBody, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/metrics/query", reqBytes)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		if status < 200 || status >= 300 {
+			c.JSON(http.StatusBadGateway, gin.H{"error": supplierErr(respBody)})
+			return
+		}
+		var parsed struct {
+			Accounts []supplierMetric `json:"accounts"`
+		}
+		if err := json.Unmarshal(respBody, &parsed); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "unexpected upstream response"})
+			return
+		}
+		merged = append(merged, parsed.Accounts...)
+	}
+
+	// Suppliers must not see cost — strip it before serializing.
+	if !isAdmin {
+		for i := range merged {
+			merged[i].Cost = nil
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"accounts": merged})
+}

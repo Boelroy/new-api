@@ -15,7 +15,8 @@ import ModelHealth from './pages/ModelHealth'
 import RemoteChannels from './pages/RemoteChannels'
 import LocalChannelSync from './pages/LocalChannelSync'
 import PoolUploadStudio from './pages/PoolUploadStudio'
-import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_TESTER } from './api'
+import SupplierAccounts from './pages/SupplierAccounts'
+import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_01, ROLE_TESTER } from './api'
 
 // RoleGate guards a page against unauthorized roles. While the role is being
 // fetched it renders null so we don't flash protected content; on denial it
@@ -48,6 +49,8 @@ export function getCachedRole(): number | null {
 
 function landingFor(role: number): string {
   if (role >= ROLE_ADMIN) return '/'
+  // Supplier lands on their only surface — the account portal.
+  if (role === ROLE_SUPPLIER_01) return '/supplier-accounts'
   // Project admin lands on Key Capacity — it's their primary surface.
   if (role === ROLE_PROJECT_ADMIN) return '/keys'
   // Tester lands on Key Tester because it's always available (Provider
@@ -98,6 +101,7 @@ export default function App() {
         <Route path="/remote-channels" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_REMOTE_STUDIO_OPERATOR}><RemoteChannels /></RoleGate>} />
         <Route path="/local-sync" element={<RoleGate min={ROLE_ADMIN}><LocalChannelSync /></RoleGate>} />
         <Route path="/pool-upload" element={<RoleGate allow={r => r === ROLE_STUDIO_OPERATOR}><PoolUploadStudio /></RoleGate>} />
+        <Route path="/supplier-accounts" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_01}><SupplierAccounts /></RoleGate>} />
         <Route path="/detect" element={<Navigate to="/testing" replace />} />
         <Route path="/eval" element={<Navigate to="/testing" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />

@@ -450,6 +450,7 @@ export type CacheStatsResponse = {
 export const ROLE_USER = 1
 export const ROLE_STUDIO_OPERATOR = 2
 export const ROLE_REMOTE_STUDIO_OPERATOR = 3
+export const ROLE_SUPPLIER_01 = 4
 export const ROLE_TESTER = 5
 export const ROLE_PROJECT_ADMIN = 7
 export const ROLE_ADMIN = 10
@@ -471,6 +472,54 @@ export type AuthUser = {
   disabled_at: number  // last time disabled; 0 = never
   created_at: number
   updated_at: number
+}
+
+// Supplier Account portal shapes. Providers/models mirror the third-party
+// portal payloads; accounts/metrics are the report-service scoped views.
+export type SupplierProvider = {
+  name: string
+  shape: string
+  need_region: boolean
+  exclusive_model: boolean
+  auto_select_all: boolean
+  key_min_len: number
+}
+
+export type SupplierModel = {
+  id: number
+  label: string
+  value: string
+  model_name: string
+  provider: string
+  bill_name: string
+  tip: string
+}
+
+export type SupplierAccount = {
+  id: number
+  remote_account_id: number
+  provider: string
+  models: string
+  alias: string
+  account_type: number
+  remark: string
+  key_last8: string
+  studio: string
+  uploaded_by: number
+  username?: string
+  created_at: number
+}
+
+export type SupplierMetric = {
+  aid: number
+  account_alias: string
+  status: string
+  requests: number | null
+  // Present only for admin+ callers; suppliers never receive cost.
+  cost?: number | null
+  success_rate: number | null
+  prompt_tokens: number | null
+  completion_tokens: number | null
 }
 
 export type RemoteProfile = {
@@ -1565,6 +1614,39 @@ export const api = {
         body: JSON.stringify({ items }),
       },
     ),
+
+  // Supplier Account portal. providers/models proxy the third-party portal;
+  // accounts/metrics are scoped by role on the server (suppliers see only
+  // their own uploads, admin+ see all; cost is stripped for suppliers).
+  supplierProviders: () =>
+    request<{ list: SupplierProvider[] }>('/api/supplier-account/providers'),
+
+  supplierModels: () =>
+    request<{ list: SupplierModel[] }>('/api/supplier-account/models'),
+
+  supplierAccounts: () =>
+    request<{ accounts: SupplierAccount[] }>('/api/supplier-account/accounts'),
+
+  supplierUploadAccount: (payload: {
+    provider: string
+    model: string
+    api_key: string
+    account_id?: string
+    account_type?: number
+    remark?: string
+  }) =>
+    request<{ id: number; alias: string; msg: string }>('/api/supplier-account/accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  supplierMetrics: (payload: { begin_time: string; end_time: string }) =>
+    request<{ accounts: SupplierMetric[] }>('/api/supplier-account/metrics', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
 }
 
 // One stored credential and its resolved local-channel target. Mirrors the

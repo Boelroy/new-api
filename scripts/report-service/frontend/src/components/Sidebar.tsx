@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_TESTER } from '../api'
+import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_01, ROLE_TESTER } from '../api'
 import { withBase } from '../basePath'
 
 type Item = {
@@ -133,6 +133,20 @@ const POOL_UPLOAD_ITEM: Item = {
   ),
 }
 
+// Supplier Account portal: admin+ (see all) and supplier_01 (own only).
+// Shown only when the server reports supplier_account_enabled=true.
+const SUPPLIER_ACCOUNTS_ITEM: Item = {
+  to: '/supplier-accounts',
+  label: '账号上号',
+  icon: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="M3 10h18" />
+      <path d="M7 15h4" />
+    </svg>
+  ),
+}
+
 // Remote New-API inspector: super admin only. Lives right after the
 // admin nav items in the super-admin render path below.
 const REMOTE_CHANNELS_ITEM: Item = {
@@ -200,7 +214,7 @@ type Props = {
 // Module-level cache so route changes (which remount Layout → Sidebar) reuse
 // the already-fetched values instead of flashing an empty nav for the ~50ms
 // each /api/auth/me + /api/auth/config round trip takes.
-type SidebarBoot = { role: number; showProfit: boolean; showTesting: boolean }
+type SidebarBoot = { role: number; showProfit: boolean; showTesting: boolean; showSupplier: boolean }
 let cachedBoot: SidebarBoot | null = null
 let inflightBoot: Promise<SidebarBoot> | null = null
 
@@ -218,6 +232,7 @@ async function loadSidebarBoot(): Promise<SidebarBoot> {
       role: typeof me?.role === 'number' ? me.role : 0,
       showProfit: cfg?.profit_enabled === true,
       showTesting: cfg?.r2_configured === true,
+      showSupplier: cfg?.supplier_account_enabled === true,
     }
     cachedBoot = boot
     return boot
@@ -230,6 +245,7 @@ async function loadSidebarBoot(): Promise<SidebarBoot> {
 export default function Sidebar({ open, onClose }: Props) {
   const [showProfit, setShowProfit] = useState(cachedBoot?.showProfit ?? false)
   const [showTesting, setShowTesting] = useState(cachedBoot?.showTesting ?? false)
+  const [showSupplier, setShowSupplier] = useState(cachedBoot?.showSupplier ?? false)
   const [role, setRole] = useState<number | null>(cachedBoot ? cachedBoot.role : null)
 
   useEffect(() => {
@@ -239,6 +255,7 @@ export default function Sidebar({ open, onClose }: Props) {
       setRole(boot.role)
       setShowProfit(boot.showProfit)
       setShowTesting(boot.showTesting)
+      setShowSupplier(boot.showSupplier)
     })()
   }, [])
 
@@ -253,10 +270,14 @@ export default function Sidebar({ open, onClose }: Props) {
     // in a read-only-for-profile mode; profile CRUD is still super
     // admin only). Super admin gets extras: Profit, Provider Testing.
     items = [...items, REMOTE_CHANNELS_ITEM, LOCAL_SYNC_ITEM, USERS_ITEM]
+    if (showSupplier) items = [...items, SUPPLIER_ACCOUNTS_ITEM]
     if (role >= ROLE_SUPER_ADMIN) {
       if (showProfit) items = [items[0], PROFIT_ITEM, ...items.slice(1)]
       if (showTesting) items = [...items, TESTING_ITEM]
     }
+  } else if (role === ROLE_SUPPLIER_01) {
+    // Supplier: only the account portal upload/usage page.
+    items = [SUPPLIER_ACCOUNTS_ITEM]
   } else if (role === ROLE_TESTER) {
     // Tester is scoped to Key Tester (always) and Provider Testing
     // (only when R2 is wired up, since Provider Testing needs it).

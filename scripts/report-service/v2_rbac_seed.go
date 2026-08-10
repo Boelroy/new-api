@@ -71,6 +71,7 @@ var builtinRoleSeeds = []builtinRoleSeed{
 			{ActionRolesManage, ScopeGlobal},
 			{ActionTestingKeyTester, ScopeGlobal},
 			{ActionTestingProviderTesting, ScopeGlobal},
+			{ActionSupplierAccountManage, ScopeAnyStudio},
 			{ActionSystemConfig, ScopeGlobal},
 		},
 	},
@@ -105,6 +106,18 @@ var builtinRoleSeeds = []builtinRoleSeed{
 			{ActionKeysNewapiView, ScopeOwnStudio},
 			{ActionUsageView, ScopeOwnStudio},
 			{ActionTestingKeyTester, ScopeGlobal},
+		},
+	},
+	{
+		// Supplier 01: uploads keys to the third-party account portal and
+		// sees only its own accounts + usage. The supplier-account routes
+		// gate on the V1 numeric tier (minSupplierRole); this V2 grant keeps
+		// the RBAC catalog coherent for the roles UI.
+		Name:        RoleSupplier01,
+		DisplayName: "Supplier 01",
+		Level:       LevelSupplier01,
+		Permissions: []Permission{
+			{ActionSupplierAccountManage, ScopeOwnStudio},
 		},
 	},
 	{
@@ -257,6 +270,8 @@ func builtinRoleNameForLegacy(v1Role int) string {
 		return RoleProjectAdmin
 	case minRemoteStudioOperatorRole:
 		return RoleRemoteStudioOperator
+	case minSupplierRole:
+		return RoleSupplier01
 	case minStudioOperatorRole:
 		return RoleStudioOperator
 	case minTesterRole:

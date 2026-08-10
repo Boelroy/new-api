@@ -53,6 +53,9 @@ var (
 	profitEnabled = false
 )
 
+// Supplier Account portal config lives in supplier_account.go
+// (supplierAccountBaseURL / supplierAccountToken).
+
 // Role tiers mirror common.RoleCommonUser / RoleAdminUser / RoleRootUser in
 // the main service. Routes are gated against these via requireRole.
 //
@@ -66,6 +69,7 @@ const (
 	minUserRole                 = 1   // any authenticated main-service user
 	minStudioOperatorRole       = 2   // batch-create LOCAL channels, scoped to bound studio
 	minRemoteStudioOperatorRole = 3   // batch-upload REMOTE channels, scoped to bound studio
+	minSupplierRole             = 4   // supplier_01: upload keys to the account portal, own usage only
 	minTesterRole               = 5   // Key Tester + Provider Testing only
 	minProjectAdminRole         = 7   // Key Capacity + Key Tester only
 	minAdminRole                = 10  // common.RoleAdminUser
@@ -315,6 +319,23 @@ func requireRoleOrStudioOperator(min int) gin.HandlerFunc {
 		roleAny, _ := c.Get("role")
 		role, _ := roleAny.(int)
 		if role >= min || role == minStudioOperatorRole {
+			c.Next()
+			return
+		}
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		c.Abort()
+	}
+}
+
+// requireRoleOrSupplier grants access to callers at min tier OR the
+// supplier role. Supplier (role=4) is a horizontal specialization: they can
+// upload keys to the account portal and see only their own accounts/usage.
+// The supplier-account handlers enforce the ownership scoping internally.
+func requireRoleOrSupplier(min int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		roleAny, _ := c.Get("role")
+		role, _ := roleAny.(int)
+		if role >= min || role == minSupplierRole {
 			c.Next()
 			return
 		}
@@ -1414,9 +1435,10 @@ func handleSSOCallback(c *gin.Context) {
 
 func handleAuthConfig(c *gin.Context) {
 	resp := gin.H{
-		"profit_enabled":    profitEnabled,
-		"grader_configured": graderConfigured(),
-		"r2_configured":     r2Configured(),
+		"profit_enabled":           profitEnabled,
+		"grader_configured":        graderConfigured(),
+		"r2_configured":            r2Configured(),
+		"supplier_account_enabled": supplierAccountEnabled(),
 	}
 	if mainServiceURL != "" {
 		resp["sso_url"] = mainServiceURL + "/sign-in"
@@ -1554,7 +1576,7 @@ func handleLogout(c *gin.Context) {
 func isValidRoleTier(role int) bool {
 	switch role {
 	case minUserRole, minStudioOperatorRole, minRemoteStudioOperatorRole,
-		minTesterRole, minProjectAdminRole, minAdminRole, minSuperAdminRole:
+		minSupplierRole, minTesterRole, minProjectAdminRole, minAdminRole, minSuperAdminRole:
 		return true
 	}
 	return false
@@ -1600,7 +1622,7 @@ func handleUserCreate(c *gin.Context) {
 		return
 	}
 	if !isValidRoleTier(body.Role) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 5, 7, 10, or 100"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 4, 5, 7, 10, or 100"})
 		return
 	}
 	// Anti-escalation on create: an admin (non-super) can only mint accounts
@@ -1665,7 +1687,7 @@ func handleUserUpdate(c *gin.Context) {
 	// out, and cannot demote the last remaining super admin via this handler.
 	if body.Role != nil {
 		if !isValidRoleTier(*body.Role) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 5, 7, 10, or 100"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 4, 5, 7, 10, or 100"})
 			return
 		}
 		if target.Role >= minSuperAdminRole && *body.Role < minSuperAdminRole {
@@ -3427,6 +3449,8 @@ func main() {
 			profitEnabled = true
 		}
 	}
+	supplierAccountBaseURL = strings.TrimRight(os.Getenv("SUPPLIER_ACCOUNT_BASE_URL"), "/")
+	supplierAccountToken = strings.TrimSpace(os.Getenv("SUPPLIER_ACCOUNT_TOKEN"))
 	pipiReportURL = os.Getenv("PIPI_REPORT_URL")
 	pipiReportAPIKey = os.Getenv("PIPI_REPORT_API_KEY")
 	larkWebhook = os.Getenv("LARK_WEBHOOK")
@@ -4193,6 +4217,17 @@ func main() {
 	// page and by studio_operator's locked-studio UI — safe to open
 	// broadly.
 	api.GET("/studios", requireRoleOrProjectAdmin(minAdminRole), handleStudiosList)
+
+	// Supplier Account portal. Admin+ see and manage every studio's
+	// accounts; supplier_01 (role=4) sees and uploads only its own. The
+	// handlers enforce the ownership scoping (uploaded_by) and strip cost
+	// from metrics for non-admin callers.
+	supplierAPI := api.Group("/supplier-account", requireRoleOrSupplier(minAdminRole))
+	supplierAPI.GET("/providers", handleSupplierProviders)
+	supplierAPI.GET("/models", handleSupplierModels)
+	supplierAPI.GET("/accounts", handleSupplierAccountList)
+	supplierAPI.POST("/accounts", handleSupplierAccountCreate)
+	supplierAPI.POST("/metrics", handleSupplierMetrics)
 
 	adminAPI := api.Group("", requireRole(minAdminRole))
 	adminAPI.GET("/report", handleReport)

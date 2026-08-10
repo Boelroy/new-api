@@ -37,6 +37,7 @@ const (
 	RoleProjectAdmin         = "project_admin"
 	RoleStudioOperator       = "studio_operator"
 	RoleRemoteStudioOperator = "remote_studio_operator"
+	RoleSupplier01           = "supplier_01"
 	RoleTester               = "tester"
 	RoleUser                 = "user"
 )
@@ -49,6 +50,7 @@ const (
 	LevelAdmin                = 50
 	LevelProjectAdmin         = 25
 	LevelRemoteStudioOperator = 22
+	LevelSupplier01           = 21
 	LevelStudioOperator       = 20
 	LevelTester               = 15
 	LevelUser                 = 10
@@ -100,6 +102,8 @@ const (
 	ActionTestingKeyTester       = "testing.key_tester"
 	ActionTestingProviderTesting = "testing.provider_testing"
 
+	ActionSupplierAccountManage = "supplier_account.manage"
+
 	ActionSystemConfig         = "system.config"
 )
 
@@ -135,6 +139,7 @@ var actionCatalog = []struct {
 	{"roles", ActionRolesManage, "Create / edit / delete custom roles"},
 	{"testing", ActionTestingKeyTester, "Use Key Tester"},
 	{"testing", ActionTestingProviderTesting, "Use Provider Testing"},
+	{"supplier_account", ActionSupplierAccountManage, "Upload / view supplier account portal keys"},
 	{"system", ActionSystemConfig, "System configuration"},
 }
 
@@ -202,6 +207,8 @@ var actionAllowedScopes = map[string]map[string]bool{
 	// Testing is global.
 	ActionTestingKeyTester:       {ScopeGlobal: true},
 	ActionTestingProviderTesting: {ScopeGlobal: true},
+	// Supplier account portal: own-studio for suppliers, any/global for admin.
+	ActionSupplierAccountManage: {ScopeOwnStudio: true, ScopeAnyStudio: true, ScopeGlobal: true},
 }
 
 // IsAllowedActionScope returns whether (action, scope) is a sensible pair.
@@ -677,6 +684,8 @@ func legacyLevelForRole(v1Role int) int {
 		return LevelProjectAdmin
 	case minRemoteStudioOperatorRole:
 		return LevelRemoteStudioOperator
+	case minSupplierRole:
+		return LevelSupplier01
 	case minStudioOperatorRole:
 		return LevelStudioOperator
 	case minTesterRole:

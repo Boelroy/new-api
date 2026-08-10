@@ -2629,10 +2629,10 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                   setBatchModels(resolvePresetModels(p, prof))
                   setBatchGroup(resolvePresetGroup(p, prof))
                   // Region default per preset: AWS needs a real region (baked
-                  // into the key + model mapping), Vertex uses the "global"
-                  // sentinel.
+                  // into the key + model mapping), Vertex defaults to the
+                  // {"default":"global"} map (global endpoint for every model).
                   if (p.kind === 'aws') setBatchRegion('us-east-1')
-                  else if (p.kind === 'vertex') setBatchRegion('global')
+                  else if (p.kind === 'vertex') setBatchRegion('{"default": "global"}')
                 }}
                 className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm bg-white focus:outline-none focus:border-gray-900"
               >
