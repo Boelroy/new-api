@@ -1438,7 +1438,8 @@ func handleAuthConfig(c *gin.Context) {
 		"profit_enabled":           profitEnabled,
 		"grader_configured":        graderConfigured(),
 		"r2_configured":            r2Configured(),
-		"supplier_account_enabled": supplierAccountEnabled(),
+		"supplier_account_enabled":      supplierAccountEnabled(),
+		"supplier_account_openapi_ready": supplierOpenAPIConfigured(),
 	}
 	if mainServiceURL != "" {
 		resp["sso_url"] = mainServiceURL + "/sign-in"
@@ -3450,6 +3451,8 @@ func main() {
 		}
 	}
 	supplierAccountBaseURL = strings.TrimRight(os.Getenv("SUPPLIER_ACCOUNT_BASE_URL"), "/")
+	supplierAccountUsername = strings.TrimSpace(os.Getenv("SUPPLIER_ACCOUNT_USERNAME"))
+	supplierAccountPassword = os.Getenv("SUPPLIER_ACCOUNT_PASSWORD")
 	supplierAccountToken = strings.TrimSpace(os.Getenv("SUPPLIER_ACCOUNT_TOKEN"))
 	pipiReportURL = os.Getenv("PIPI_REPORT_URL")
 	pipiReportAPIKey = os.Getenv("PIPI_REPORT_API_KEY")
@@ -4449,6 +4452,10 @@ func main() {
 	// remain untouched — V2 is opt-in per client.
 	registerV2Routes(r)
 	registerV2Frontend(r)
+
+	// Keep the supplier-portal WEB token warm (providers / models). No-op
+	// unless SUPPLIER_ACCOUNT_USERNAME / _PASSWORD are configured.
+	startSupplierWebTokenRefresher()
 
 	// SPA — serve for all non-API routes
 	r.NoRoute(spaHandler())

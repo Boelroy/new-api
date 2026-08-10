@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import Layout from '../components/Layout'
+import { withBase } from '../basePath'
 import {
   api,
   ROLE_ADMIN,
@@ -58,6 +59,7 @@ function statusBadge(status: string) {
 
 export default function SupplierAccounts() {
   const [isAdmin, setIsAdmin] = useState(false)
+  const [openapiReady, setOpenapiReady] = useState(true)
   const [providers, setProviders] = useState<SupplierProvider[]>([])
   const [models, setModels] = useState<SupplierModel[]>([])
   const [bootErr, setBootErr] = useState<string | null>(null)
@@ -112,6 +114,12 @@ export default function SupplierAccounts() {
         setIsAdmin((me?.role ?? 0) >= ROLE_ADMIN)
       } catch {
         /* role defaults to non-admin */
+      }
+      try {
+        const cfg = await fetch(withBase('/api/auth/config')).then(r => r.json())
+        setOpenapiReady(cfg?.supplier_account_openapi_ready === true)
+      } catch {
+        /* leave optimistic; upload/metrics will surface a 503 if not ready */
       }
       try {
         const [prov, mod] = await Promise.all([api.supplierProviders(), api.supplierModels()])
@@ -194,6 +202,12 @@ export default function SupplierAccounts() {
       {bootErr && (
         <div className="mb-4 bg-rose-50 border border-rose-200 text-rose-700 text-sm rounded-md px-3 py-2">
           加载厂商/模型失败：{bootErr}
+        </div>
+      )}
+
+      {!openapiReady && (
+        <div className="mb-4 bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-md px-3 py-2">
+          OpenAPI token 尚未配置（<code>SUPPLIER_ACCOUNT_TOKEN</code>）——厂商/模型可正常浏览，但<b>上号与实时用量暂不可用</b>，配置后即可启用。
         </div>
       )}
 

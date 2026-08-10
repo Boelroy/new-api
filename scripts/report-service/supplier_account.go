@@ -2,42 +2,77 @@ package main
 
 // Supplier Account portal integration.
 //
-// A third-party "账号资源录入系统" (API Account Portal) exposes an OpenAPI
-// (Bearer token) for batch-uploading API keys and querying per-account
-// realtime metrics. This module lets report-service act as a scoped proxy:
+// A third-party "账号资源录入系统" (API Account Portal) exposes two auth lanes:
 //
+//   - WEB token: authenticates the portal UI endpoints (providers / models).
+//     Obtained via a login flow — fetch a per-user RSA public key, encrypt the
+//     password with hybrid AES-GCM + RSA-OAEP, then POST /supplier/login. The
+//     token expires after `expires_in` seconds, so we cache + auto-refresh it.
+//   - OpenAPI token: authenticates the /openapi/* endpoints (account upload +
+//     metrics query). Issued separately by the portal admin and supplied via
+//     SUPPLIER_ACCOUNT_TOKEN.
+//
+// report-service acts as a scoped proxy:
 //   - supplier_01 studios upload keys and see ONLY their own accounts + usage.
 //   - admin / super_admin see every account and its usage, and can upload too.
 //
-// Ownership is tracked locally in rs_supplier_account (uploaded_by). All
-// upstream calls use a single server-side admin token (SUPPLIER_ACCOUNT_TOKEN)
-// so the scoping is enforced here, not by the upstream token.
+// Ownership is tracked locally in rs_supplier_account (uploaded_by). Upstream
+// calls use a single server-side WEB login + OpenAPI token, so the scoping is
+// enforced here, not by the upstream credentials.
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
 var (
-	// supplierAccountBaseURL is the third-party portal origin, e.g.
+	// supplierAccountBaseURL is the portal origin, e.g.
 	// "https://120.233.254.152:8000". Empty disables the feature.
 	supplierAccountBaseURL string
-	// supplierAccountToken is the single server-side admin OpenAPI token.
+	// supplierAccountUsername / supplierAccountPassword drive the WEB login
+	// flow (providers / models). Required for the page to render.
+	supplierAccountUsername string
+	supplierAccountPassword string
+	// supplierAccountToken is the OpenAPI token for /openapi/* (upload +
+	// metrics). Filled later by the portal admin.
 	supplierAccountToken string
 )
 
-// supplierAccountEnabled reports whether the portal integration is wired up.
-func supplierAccountEnabled() bool {
+// supplierWebConfigured reports whether the WEB login flow can run (drives the
+// nav item + providers/models).
+func supplierWebConfigured() bool {
+	return supplierAccountBaseURL != "" && supplierAccountUsername != "" && supplierAccountPassword != ""
+}
+
+// supplierOpenAPIConfigured reports whether upload + metrics can run.
+func supplierOpenAPIConfigured() bool {
 	return supplierAccountBaseURL != "" && supplierAccountToken != ""
+}
+
+// supplierAccountEnabled gates the page/nav. The upload + metrics paths
+// additionally require supplierOpenAPIConfigured().
+func supplierAccountEnabled() bool {
+	return supplierWebConfigured()
 }
 
 // supplierHTTPClient talks to a portal that serves a self-signed cert (every
@@ -49,9 +84,17 @@ var supplierHTTPClient = &http.Client{
 	},
 }
 
-// supplierProxy issues a request to the portal with the server admin token and
-// returns the raw status code + body. jsonBody may be nil for GETs.
-func supplierProxy(method, path string, jsonBody []byte) (int, []byte, error) {
+// ---- WEB token cache + refresh ----
+
+var (
+	supplierWebMu     sync.Mutex
+	supplierWebToken  string
+	supplierWebExpiry time.Time
+)
+
+// supplierProxy issues a request to the portal, optionally with a Bearer
+// token, and returns the raw status code + body. jsonBody may be nil for GETs.
+func supplierProxy(method, path, token string, jsonBody []byte) (int, []byte, error) {
 	var reader io.Reader
 	if jsonBody != nil {
 		reader = bytes.NewReader(jsonBody)
@@ -60,7 +103,9 @@ func supplierProxy(method, path string, jsonBody []byte) (int, []byte, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+supplierAccountToken)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	req.Header.Set("Accept", "application/json")
 	if jsonBody != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -93,22 +138,175 @@ func supplierErr(body []byte) string {
 	return s
 }
 
-// callerIsSupplierAdmin returns true when the caller may see every studio's
-// accounts (admin and above). Suppliers see only their own uploads.
-func callerIsSupplierAdmin(c *gin.Context) bool {
-	roleAny, _ := c.Get("role")
-	role, _ := roleAny.(int)
-	return role >= minAdminRole
+// supplierEncryptPassword mirrors the portal's front-end hybrid scheme:
+// AES-256-GCM encrypt the UTF-8 password, RSA-OAEP(SHA-256) encrypt the AES
+// key, then base64 a {__enc__,k,iv,ct} JSON envelope. Returns the value the
+// login endpoint expects in enc_password.
+func supplierEncryptPassword(pubPEM, password string) (string, error) {
+	block, _ := pem.Decode([]byte(pubPEM))
+	if block == nil {
+		return "", errors.New("invalid public key PEM")
+	}
+	pubAny, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("parse public key: %w", err)
+	}
+	pub, ok := pubAny.(*rsa.PublicKey)
+	if !ok {
+		return "", errors.New("public key is not RSA")
+	}
+
+	aesKey := make([]byte, 32)
+	if _, err := rand.Read(aesKey); err != nil {
+		return "", err
+	}
+	iv := make([]byte, 12)
+	if _, err := rand.Read(iv); err != nil {
+		return "", err
+	}
+	blockC, err := aes.NewCipher(aesKey)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(blockC)
+	if err != nil {
+		return "", err
+	}
+	// Seal appends the 16-byte tag after the ciphertext — matches forge's
+	// `output.getBytes() + tag.getBytes()`.
+	ctTag := gcm.Seal(nil, iv, []byte(password), nil)
+
+	encKey, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, pub, aesKey, nil)
+	if err != nil {
+		return "", err
+	}
+
+	envelope := struct {
+		Enc string `json:"__enc__"`
+		K   string `json:"k"`
+		IV  string `json:"iv"`
+		CT  string `json:"ct"`
+	}{
+		Enc: "hybrid-aesgcm",
+		K:   base64.StdEncoding.EncodeToString(encKey),
+		IV:  base64.StdEncoding.EncodeToString(iv),
+		CT:  base64.StdEncoding.EncodeToString(ctTag),
+	}
+	jsonBytes, err := json.Marshal(envelope)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(jsonBytes), nil
 }
 
-// ---- Proxy passthrough (providers / models) ----
+// supplierLogin runs the full WEB login flow and returns (token, expiresIn).
+func supplierLogin() (string, int, error) {
+	if !supplierWebConfigured() {
+		return "", 0, errors.New("supplier account username/password not configured")
+	}
+	// 1. Fetch the per-user RSA public key.
+	pkReq, _ := json.Marshal(map[string]string{"username": supplierAccountUsername})
+	st, resp, err := supplierProxy(http.MethodPost, "/supplier-account/api/supplier/pubkey", "", pkReq)
+	if err != nil {
+		return "", 0, err
+	}
+	if st < 200 || st >= 300 {
+		return "", 0, fmt.Errorf("pubkey: %s", supplierErr(resp))
+	}
+	var pk struct {
+		PublicKey string `json:"public_key"`
+	}
+	if err := json.Unmarshal(resp, &pk); err != nil || pk.PublicKey == "" {
+		return "", 0, errors.New("pubkey: unexpected response")
+	}
+
+	// 2. Encrypt the password with the fetched key.
+	enc, err := supplierEncryptPassword(pk.PublicKey, supplierAccountPassword)
+	if err != nil {
+		return "", 0, err
+	}
+
+	// 3. Log in.
+	loginReq, _ := json.Marshal(map[string]string{"username": supplierAccountUsername, "enc_password": enc})
+	st2, resp2, err := supplierProxy(http.MethodPost, "/supplier-account/api/supplier/login", "", loginReq)
+	if err != nil {
+		return "", 0, err
+	}
+	if st2 < 200 || st2 >= 300 {
+		return "", 0, fmt.Errorf("login: %s", supplierErr(resp2))
+	}
+	var lg struct {
+		Token     string `json:"token"`
+		ExpiresIn int    `json:"expires_in"`
+	}
+	if err := json.Unmarshal(resp2, &lg); err != nil || lg.Token == "" {
+		return "", 0, errors.New("login: unexpected response")
+	}
+	if lg.ExpiresIn <= 0 {
+		lg.ExpiresIn = 3600
+	}
+	return lg.Token, lg.ExpiresIn, nil
+}
+
+// getSupplierWebToken returns a valid WEB token, refreshing via login when the
+// cached one is missing or within a minute of expiry.
+func getSupplierWebToken() (string, error) {
+	supplierWebMu.Lock()
+	defer supplierWebMu.Unlock()
+	if supplierWebToken != "" && time.Now().Before(supplierWebExpiry) {
+		return supplierWebToken, nil
+	}
+	tok, expiresIn, err := supplierLogin()
+	if err != nil {
+		return "", err
+	}
+	supplierWebToken = tok
+	// Refresh a minute early; for very short TTLs fall back to half the TTL.
+	lead := 60
+	if expiresIn <= 120 {
+		lead = expiresIn / 2
+	}
+	supplierWebExpiry = time.Now().Add(time.Duration(expiresIn-lead) * time.Second)
+	return tok, nil
+}
+
+// startSupplierWebTokenRefresher logs in at startup and keeps the WEB token
+// fresh, re-logging in shortly before each expiry. No-op when not configured.
+func startSupplierWebTokenRefresher() {
+	if !supplierWebConfigured() {
+		return
+	}
+	go func() {
+		for {
+			if _, err := getSupplierWebToken(); err != nil {
+				log.Printf("[supplier] web token login failed: %v", err)
+				time.Sleep(60 * time.Second)
+				continue
+			}
+			supplierWebMu.Lock()
+			sleep := time.Until(supplierWebExpiry)
+			supplierWebMu.Unlock()
+			if sleep < 30*time.Second {
+				sleep = 30 * time.Second
+			}
+			time.Sleep(sleep)
+		}
+	}()
+}
+
+// ---- Proxy passthrough (providers / models) — WEB token ----
 
 func handleSupplierProviders(c *gin.Context) {
 	if !supplierAccountEnabled() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier account portal not configured"})
 		return
 	}
-	status, body, err := supplierProxy(http.MethodGet, "/supplier-account/api/providers", nil)
+	tok, err := getSupplierWebToken()
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "supplier login failed: " + err.Error()})
+		return
+	}
+	status, body, err := supplierProxy(http.MethodGet, "/supplier-account/api/providers", tok, nil)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
@@ -125,7 +323,12 @@ func handleSupplierModels(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier account portal not configured"})
 		return
 	}
-	status, body, err := supplierProxy(http.MethodGet, "/supplier-account/api/models", nil)
+	tok, err := getSupplierWebToken()
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "supplier login failed: " + err.Error()})
+		return
+	}
+	status, body, err := supplierProxy(http.MethodGet, "/supplier-account/api/models", tok, nil)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
@@ -137,11 +340,15 @@ func handleSupplierModels(c *gin.Context) {
 	c.Data(http.StatusOK, "application/json", body)
 }
 
-// ---- Upload (create account) ----
+// ---- Upload (create account) — OpenAPI token ----
 
 func handleSupplierAccountCreate(c *gin.Context) {
-	if !supplierAccountEnabled() {
+	if supplierAccountBaseURL == "" {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier account portal not configured"})
+		return
+	}
+	if !supplierOpenAPIConfigured() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier OpenAPI token not configured (set SUPPLIER_ACCOUNT_TOKEN)"})
 		return
 	}
 	var body struct {
@@ -182,7 +389,7 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	}
 	reqBytes, _ := json.Marshal(upstreamReq)
 
-	status, respBody, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/accounts", reqBytes)
+	status, respBody, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/accounts", supplierAccountToken, reqBytes)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
@@ -275,7 +482,7 @@ func handleSupplierAccountList(c *gin.Context) {
 		err error
 	)
 	if isAdmin {
-		r, e := db.Query(query+` ORDER BY a.id DESC`)
+		r, e := db.Query(query + ` ORDER BY a.id DESC`)
 		rows, err = r, e
 	} else {
 		uidAny, _ := c.Get("user_id")
@@ -309,7 +516,15 @@ func handleSupplierAccountList(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"accounts": out})
 }
 
-// ---- Realtime metrics (scoped by role) ----
+// callerIsSupplierAdmin returns true when the caller may see every studio's
+// accounts (admin and above). Suppliers see only their own uploads.
+func callerIsSupplierAdmin(c *gin.Context) bool {
+	roleAny, _ := c.Get("role")
+	role, _ := roleAny.(int)
+	return role >= minAdminRole
+}
+
+// ---- Realtime metrics (scoped by role) — OpenAPI token ----
 
 // supplierMetric mirrors one entry of the portal metrics response. Cost is a
 // pointer so it can be omitted for non-admin callers.
@@ -325,8 +540,12 @@ type supplierMetric struct {
 }
 
 func handleSupplierMetrics(c *gin.Context) {
-	if !supplierAccountEnabled() {
+	if supplierAccountBaseURL == "" {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier account portal not configured"})
+		return
+	}
+	if !supplierOpenAPIConfigured() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier OpenAPI token not configured (set SUPPLIER_ACCOUNT_TOKEN)"})
 		return
 	}
 	var body struct {
@@ -399,7 +618,7 @@ func handleSupplierMetrics(c *gin.Context) {
 			"end_time":    body.EndTime,
 			"aggregate":   false,
 		})
-		status, respBody, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/metrics/query", reqBytes)
+		status, respBody, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/metrics/query", supplierAccountToken, reqBytes)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return
