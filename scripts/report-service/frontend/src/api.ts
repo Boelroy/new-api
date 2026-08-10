@@ -510,6 +510,12 @@ export type SupplierAccount = {
   created_at: number
 }
 
+export type SupplierSettings = {
+  openapi_token_set: boolean
+  openapi_token_last4: string
+  visible_providers: string[]
+}
+
 export type SupplierMetric = {
   aid: number
   account_alias: string
@@ -1644,6 +1650,18 @@ export const api = {
   supplierMetrics: (payload: { begin_time: string; end_time: string }) =>
     request<{ accounts: SupplierMetric[] }>('/api/supplier-account/metrics', {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  // Admin-only: read + write the OpenAPI token and the supplier-visible
+  // provider allowlist. The token is never returned in full (last4 only).
+  getSupplierSettings: () =>
+    request<SupplierSettings>('/api/supplier-account/settings'),
+
+  setSupplierSettings: (payload: { openapi_token?: string; visible_providers?: string[] }) =>
+    request<SupplierSettings>('/api/supplier-account/settings', {
+      method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),

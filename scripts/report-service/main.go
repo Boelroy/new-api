@@ -4231,6 +4231,10 @@ func main() {
 	supplierAPI.GET("/accounts", handleSupplierAccountList)
 	supplierAPI.POST("/accounts", handleSupplierAccountCreate)
 	supplierAPI.POST("/metrics", handleSupplierMetrics)
+	// OpenAPI token + provider visibility are admin-only (further restricts
+	// the group's admin-or-supplier gate to admin+).
+	supplierAPI.GET("/settings", requireRole(minAdminRole), handleSupplierSettingsGet)
+	supplierAPI.PUT("/settings", requireRole(minAdminRole), handleSupplierSettingsSet)
 
 	adminAPI := api.Group("", requireRole(minAdminRole))
 	adminAPI.GET("/report", handleReport)

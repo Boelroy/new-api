@@ -64,9 +64,76 @@ func supplierWebConfigured() bool {
 	return supplierAccountBaseURL != "" && supplierAccountUsername != "" && supplierAccountPassword != ""
 }
 
+// report_config keys for admin-editable supplier settings. The OpenAPI token
+// and the supplier-visible provider allowlist are configured through the web
+// UI and stored in report_config (env stays a bootstrap fallback for token).
+const (
+	cfgSupplierOpenAPIToken   = "supplier_openapi_token"
+	cfgSupplierVisibleProvers = "supplier_visible_providers"
+)
+
+// supplierConfigGet reads a report_config value, empty string when unset.
+func supplierConfigGet(key string) string {
+	var v string
+	if err := db.QueryRow(`SELECT value FROM report_config WHERE key=$1`, key).Scan(&v); err != nil {
+		return ""
+	}
+	return v
+}
+
+// supplierConfigSet upserts a report_config value.
+func supplierConfigSet(key, value string) error {
+	_, err := db.Exec(
+		`INSERT INTO report_config (key, value, updated_at) VALUES ($1, $2, $3)
+		 ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=EXCLUDED.updated_at`,
+		key, value, time.Now().Unix(),
+	)
+	return err
+}
+
+// effectiveOpenAPIToken prefers the web-configured token, falling back to the
+// SUPPLIER_ACCOUNT_TOKEN env for bootstrap.
+func effectiveOpenAPIToken() string {
+	if t := strings.TrimSpace(supplierConfigGet(cfgSupplierOpenAPIToken)); t != "" {
+		return t
+	}
+	return supplierAccountToken
+}
+
+// supplierVisibleProviders returns the admin-configured allowlist of provider
+// names visible to supplier_01 users. Empty slice = all providers visible.
+func supplierVisibleProviders() []string {
+	raw := strings.TrimSpace(supplierConfigGet(cfgSupplierVisibleProvers))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// supplierProviderAllowed reports whether a provider is visible to a supplier
+// given the allowlist. An empty allowlist permits everything.
+func supplierProviderAllowed(allow []string, name string) bool {
+	if len(allow) == 0 {
+		return true
+	}
+	for _, a := range allow {
+		if a == name {
+			return true
+		}
+	}
+	return false
+}
+
 // supplierOpenAPIConfigured reports whether upload + metrics can run.
 func supplierOpenAPIConfigured() bool {
-	return supplierAccountBaseURL != "" && supplierAccountToken != ""
+	return supplierAccountBaseURL != "" && effectiveOpenAPIToken() != ""
 }
 
 // supplierAccountEnabled gates the page/nav. The upload + metrics paths
@@ -315,6 +382,30 @@ func handleSupplierProviders(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": supplierErr(body)})
 		return
 	}
+	// Admins see every provider (needed to configure the allowlist); suppliers
+	// see only the admin-permitted ones.
+	if !callerIsSupplierAdmin(c) {
+		if allow := supplierVisibleProviders(); len(allow) > 0 {
+			var parsed struct {
+				List []json.RawMessage `json:"list"`
+			}
+			if json.Unmarshal(body, &parsed) == nil {
+				filtered := make([]json.RawMessage, 0, len(parsed.List))
+				for _, raw := range parsed.List {
+					var p struct {
+						Name string `json:"name"`
+					}
+					if json.Unmarshal(raw, &p) == nil && supplierProviderAllowed(allow, p.Name) {
+						filtered = append(filtered, raw)
+					}
+				}
+				if out, err := json.Marshal(gin.H{"list": filtered}); err == nil {
+					c.Data(http.StatusOK, "application/json", out)
+					return
+				}
+			}
+		}
+	}
 	c.Data(http.StatusOK, "application/json", body)
 }
 
@@ -374,6 +465,13 @@ func handleSupplierAccountCreate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "account_type must be 0 or 1"})
 		return
 	}
+	// Suppliers may only upload for providers the admin has made visible.
+	if !callerIsSupplierAdmin(c) {
+		if allow := supplierVisibleProviders(); !supplierProviderAllowed(allow, body.Provider) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "该厂商未开放上号，请联系管理员"})
+			return
+		}
+	}
 
 	upstreamReq := map[string]any{
 		"provider":     body.Provider,
@@ -389,7 +487,7 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	}
 	reqBytes, _ := json.Marshal(upstreamReq)
 
-	status, respBody, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/accounts", supplierAccountToken, reqBytes)
+	status, respBody, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/accounts", effectiveOpenAPIToken(), reqBytes)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
@@ -618,7 +716,7 @@ func handleSupplierMetrics(c *gin.Context) {
 			"end_time":    body.EndTime,
 			"aggregate":   false,
 		})
-		status, respBody, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/metrics/query", supplierAccountToken, reqBytes)
+		status, respBody, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/metrics/query", effectiveOpenAPIToken(), reqBytes)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return
@@ -645,4 +743,57 @@ func handleSupplierMetrics(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"accounts": merged})
+}
+
+// ---- Admin settings: OpenAPI token + provider visibility ----
+
+func handleSupplierSettingsGet(c *gin.Context) {
+	token := effectiveOpenAPIToken()
+	last4 := ""
+	if len(token) > 4 {
+		last4 = token[len(token)-4:]
+	}
+	vp := supplierVisibleProviders()
+	if vp == nil {
+		vp = []string{}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"openapi_token_set":   token != "",
+		"openapi_token_last4": last4,
+		"visible_providers":   vp,
+	})
+}
+
+func handleSupplierSettingsSet(c *gin.Context) {
+	var body struct {
+		// Pointers so "omitted" (leave unchanged) is distinct from "" (clear)
+		// and [] (allow all).
+		OpenAPIToken     *string   `json:"openapi_token"`
+		VisibleProviders *[]string `json:"visible_providers"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	if body.OpenAPIToken != nil {
+		if err := supplierConfigSet(cfgSupplierOpenAPIToken, strings.TrimSpace(*body.OpenAPIToken)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.VisibleProviders != nil {
+		seen := map[string]bool{}
+		cleaned := make([]string, 0, len(*body.VisibleProviders))
+		for _, p := range *body.VisibleProviders {
+			if p = strings.TrimSpace(p); p != "" && !seen[p] {
+				seen[p] = true
+				cleaned = append(cleaned, p)
+			}
+		}
+		if err := supplierConfigSet(cfgSupplierVisibleProvers, strings.Join(cleaned, ",")); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	handleSupplierSettingsGet(c)
 }

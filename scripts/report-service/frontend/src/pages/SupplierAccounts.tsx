@@ -8,6 +8,7 @@ import {
   type SupplierMetric,
   type SupplierModel,
   type SupplierProvider,
+  type SupplierSettings,
 } from '../api'
 
 // Supplier Account portal page.
@@ -83,6 +84,15 @@ export default function SupplierAccounts() {
   const [loadingMetrics, setLoadingMetrics] = useState(false)
   const [metricsErr, setMetricsErr] = useState<string | null>(null)
 
+  // Admin settings: OpenAPI token + provider visibility.
+  const [settings, setSettings] = useState<SupplierSettings | null>(null)
+  const [tokenInput, setTokenInput] = useState('')
+  const [visibleSet, setVisibleSet] = useState<Set<string>>(new Set())
+  const [savingToken, setSavingToken] = useState(false)
+  const [savingVis, setSavingVis] = useState(false)
+  const [settingsMsg, setSettingsMsg] = useState<string | null>(null)
+  const [settingsErr, setSettingsErr] = useState<string | null>(null)
+
   // Only keyonly providers can be uploaded through this portal.
   const keyonlyProviders = useMemo(
     () => providers.filter(p => p.shape === 'keyonly'),
@@ -109,9 +119,11 @@ export default function SupplierAccounts() {
 
   useEffect(() => {
     void (async () => {
+      let admin = false
       try {
         const me = await api.getAuthMe()
-        setIsAdmin((me?.role ?? 0) >= ROLE_ADMIN)
+        admin = (me?.role ?? 0) >= ROLE_ADMIN
+        setIsAdmin(admin)
       } catch {
         /* role defaults to non-admin */
       }
@@ -120,6 +132,15 @@ export default function SupplierAccounts() {
         setOpenapiReady(cfg?.supplier_account_openapi_ready === true)
       } catch {
         /* leave optimistic; upload/metrics will surface a 503 if not ready */
+      }
+      if (admin) {
+        try {
+          const s = await api.getSupplierSettings()
+          setSettings(s)
+          setVisibleSet(new Set(s.visible_providers || []))
+        } catch {
+          /* settings panel just won't prefill */
+        }
       }
       try {
         const [prov, mod] = await Promise.all([api.supplierProviders(), api.supplierModels()])
@@ -179,6 +200,48 @@ export default function SupplierAccounts() {
     }
   }
 
+  async function handleSaveToken() {
+    setSettingsMsg(null)
+    setSettingsErr(null)
+    setSavingToken(true)
+    try {
+      const s = await api.setSupplierSettings({ openapi_token: tokenInput.trim() })
+      setSettings(s)
+      setTokenInput('')
+      setOpenapiReady(s.openapi_token_set)
+      setSettingsMsg(s.openapi_token_set ? `OpenAPI token 已保存（…${s.openapi_token_last4}）` : 'OpenAPI token 已清空')
+    } catch (e: any) {
+      setSettingsErr(e?.message || String(e))
+    } finally {
+      setSavingToken(false)
+    }
+  }
+
+  function toggleVisible(name: string) {
+    setVisibleSet(prev => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+  }
+
+  async function handleSaveVisibility() {
+    setSettingsMsg(null)
+    setSettingsErr(null)
+    setSavingVis(true)
+    try {
+      const s = await api.setSupplierSettings({ visible_providers: Array.from(visibleSet) })
+      setSettings(s)
+      setVisibleSet(new Set(s.visible_providers || []))
+      setSettingsMsg(s.visible_providers.length === 0 ? '已保存：全部厂商对工作室可见' : `已保存：${s.visible_providers.length} 个厂商对工作室可见`)
+    } catch (e: any) {
+      setSettingsErr(e?.message || String(e))
+    } finally {
+      setSavingVis(false)
+    }
+  }
+
   async function handleRefreshMetrics() {
     setMetricsErr(null)
     setLoadingMetrics(true)
@@ -209,6 +272,73 @@ export default function SupplierAccounts() {
         <div className="mb-4 bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-md px-3 py-2">
           OpenAPI token 尚未配置（<code>SUPPLIER_ACCOUNT_TOKEN</code>）——厂商/模型可正常浏览，但<b>上号与实时用量暂不可用</b>，配置后即可启用。
         </div>
+      )}
+
+      {isAdmin && (
+        <section className="mb-5 bg-white border border-gray-200 rounded-lg p-4 sm:p-5">
+          <h2 className="text-base font-semibold mb-4">管理员设置</h2>
+          {settingsErr && (
+            <div className="mb-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-md px-3 py-2">{settingsErr}</div>
+          )}
+          {settingsMsg && (
+            <div className="mb-3 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs rounded-md px-3 py-2">{settingsMsg}</div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* OpenAPI token */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-medium text-gray-600">OpenAPI Token</label>
+                <span className="text-[11px] text-gray-400">
+                  {settings?.openapi_token_set ? `已配置 …${settings.openapi_token_last4}` : '未配置'}
+                </span>
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  value={tokenInput}
+                  onChange={e => setTokenInput(e.target.value)}
+                  placeholder={settings?.openapi_token_set ? '输入新 token 覆盖，留空并保存则清除' : '粘贴管理员签发的 OpenAPI token'}
+                  className="flex-1 border border-gray-300 rounded-md px-2.5 py-2 text-sm font-mono"
+                />
+                <button
+                  onClick={handleSaveToken}
+                  disabled={savingToken}
+                  className="bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 whitespace-nowrap"
+                >
+                  {savingToken ? '保存中…' : '保存'}
+                </button>
+              </div>
+              <p className="text-[11px] text-gray-400 mt-1">用于上号与实时用量（/openapi/*）。保存后立即生效,无需重启。</p>
+            </div>
+
+            {/* Provider visibility */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-medium text-gray-600">工作室可见厂商（不勾 = 全部可见）</label>
+                <button
+                  onClick={handleSaveVisibility}
+                  disabled={savingVis}
+                  className="bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-white text-xs rounded-md px-3 py-1.5"
+                >
+                  {savingVis ? '保存中…' : '保存可见性'}
+                </button>
+              </div>
+              <div className="border border-gray-300 rounded-md max-h-40 overflow-y-auto p-1">
+                {keyonlyProviders.length === 0 ? (
+                  <div className="text-xs text-gray-400 px-2 py-2">厂商加载中…</div>
+                ) : (
+                  keyonlyProviders.map(p => (
+                    <label key={p.name} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-50 cursor-pointer text-sm">
+                      <input type="checkbox" checked={visibleSet.has(p.name)} onChange={() => toggleVisible(p.name)} />
+                      <span>{p.name}</span>
+                    </label>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-[minmax(320px,380px)_1fr] gap-5">
