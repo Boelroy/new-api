@@ -603,7 +603,7 @@ export default function SupplierAccounts() {
                     <th className="py-2 pr-3 font-medium text-right">请求数</th>
                     <th className="py-2 pr-3 font-medium text-right">Tokens (入/出)</th>
                     <th className="py-2 pr-3 font-medium text-right">成功率</th>
-                    <th className="py-2 pr-3 font-medium text-right">成本($)</th>
+                    <th className="py-2 pr-3 font-medium text-right">成本(¥)</th>
                   </tr>
                 </thead>
                 <tbody>
