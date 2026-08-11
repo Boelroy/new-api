@@ -8,6 +8,7 @@ import {
   type SupplierMetric,
   type SupplierModel,
   type SupplierProvider,
+  type SupplierProviderDefault,
   type SupplierSettings,
 } from '../api'
 
@@ -93,6 +94,13 @@ export default function SupplierAccounts() {
   const [settingsMsg, setSettingsMsg] = useState<string | null>(null)
   const [settingsErr, setSettingsErr] = useState<string | null>(null)
 
+  // Per-provider defaults: formDefaults prefills the upload form (all users);
+  // defaultsDraft is the admin editor's working copy.
+  const [formDefaults, setFormDefaults] = useState<Record<string, SupplierProviderDefault>>({})
+  const [defaultsDraft, setDefaultsDraft] = useState<Record<string, SupplierProviderDefault>>({})
+  const [defProvider, setDefProvider] = useState('')
+  const [savingDefaults, setSavingDefaults] = useState(false)
+
   // Only keyonly providers can be uploaded through this portal.
   const keyonlyProviders = useMemo(
     () => providers.filter(p => p.shape === 'keyonly'),
@@ -133,11 +141,18 @@ export default function SupplierAccounts() {
       } catch {
         /* leave optimistic; upload/metrics will surface a 503 if not ready */
       }
+      try {
+        const d = await api.getSupplierProviderDefaults()
+        setFormDefaults(d.defaults || {})
+      } catch {
+        /* form just won't prefill */
+      }
       if (admin) {
         try {
           const s = await api.getSupplierSettings()
           setSettings(s)
           setVisibleSet(new Set(s.visible_providers || []))
+          setDefaultsDraft(s.provider_defaults || {})
         } catch {
           /* settings panel just won't prefill */
         }
@@ -153,11 +168,14 @@ export default function SupplierAccounts() {
     })()
   }, [])
 
-  // Reset the model picker whenever the provider changes.
+  // Prefill the model picker + account type from the admin-configured
+  // defaults whenever the provider changes (or the defaults finish loading).
   useEffect(() => {
-    setSelectedModels(new Set())
+    const d = formDefaults[provider]
+    setSelectedModels(new Set(d?.models ?? []))
+    setAccountType(d?.account_type ?? 0)
     setModelSearch('')
-  }, [provider])
+  }, [provider, formDefaults])
 
   function toggleModel(value: string) {
     setSelectedModels(prev => {
@@ -239,6 +257,39 @@ export default function SupplierAccounts() {
       setSettingsErr(e?.message || String(e))
     } finally {
       setSavingVis(false)
+    }
+  }
+
+  function toggleDefaultModel(prov: string, model: string) {
+    setDefaultsDraft(prev => {
+      const cur = prev[prov] ?? { models: [], account_type: 0 }
+      const has = cur.models.includes(model)
+      const models = has ? cur.models.filter(m => m !== model) : [...cur.models, model]
+      return { ...prev, [prov]: { ...cur, models } }
+    })
+  }
+
+  function setDefaultAccountType(prov: string, at: number) {
+    setDefaultsDraft(prev => {
+      const cur = prev[prov] ?? { models: [], account_type: 0 }
+      return { ...prev, [prov]: { ...cur, account_type: at } }
+    })
+  }
+
+  async function handleSaveDefaults() {
+    setSettingsMsg(null)
+    setSettingsErr(null)
+    setSavingDefaults(true)
+    try {
+      const s = await api.setSupplierSettings({ provider_defaults: defaultsDraft })
+      setSettings(s)
+      setDefaultsDraft(s.provider_defaults || {})
+      setFormDefaults(s.provider_defaults || {})
+      setSettingsMsg('厂商默认配置已保存')
+    } catch (e: any) {
+      setSettingsErr(e?.message || String(e))
+    } finally {
+      setSavingDefaults(false)
     }
   }
 
@@ -337,6 +388,68 @@ export default function SupplierAccounts() {
                 )}
               </div>
             </div>
+          </div>
+
+          {/* Per-provider defaults: default models + default account type. */}
+          <div className="mt-6 border-t border-gray-100 pt-4">
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-xs font-medium text-gray-600">厂商默认（默认模型 + 默认账号类型,选厂商后上号表单自动预填）</label>
+              <button
+                onClick={handleSaveDefaults}
+                disabled={savingDefaults}
+                className="bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-white text-xs rounded-md px-3 py-1.5"
+              >
+                {savingDefaults ? '保存中…' : '保存默认配置'}
+              </button>
+            </div>
+            <select
+              value={defProvider}
+              onChange={e => setDefProvider(e.target.value)}
+              className="w-full sm:w-72 border border-gray-300 rounded-md px-2.5 py-2 text-sm mb-3 bg-white"
+            >
+              <option value="">选择厂商配置默认…</option>
+              {keyonlyProviders.map(p => {
+                const n = defaultsDraft[p.name]?.models.length ?? 0
+                return <option key={p.name} value={p.name}>{p.name}{n ? ` · 默认 ${n} 模型` : ''}</option>
+              })}
+            </select>
+            {defProvider && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <div className="text-[11px] text-gray-400 mb-1">默认模型（可多选）</div>
+                  <div className="border border-gray-300 rounded-md max-h-44 overflow-y-auto p-1">
+                    {models.filter(m => m.provider === defProvider).length === 0 ? (
+                      <div className="text-xs text-gray-400 px-2 py-2">该厂商暂无模型</div>
+                    ) : (
+                      models
+                        .filter(m => m.provider === defProvider)
+                        .map(m => {
+                          const val = m.model_name || m.value
+                          const checked = (defaultsDraft[defProvider]?.models ?? []).includes(val)
+                          return (
+                            <label key={val} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-50 cursor-pointer text-sm">
+                              <input type="checkbox" checked={checked} onChange={() => toggleDefaultModel(defProvider, val)} />
+                              <span>{val}</span>
+                            </label>
+                          )
+                        })
+                    )}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] text-gray-400 mb-1">默认账号类型</div>
+                  <select
+                    value={defaultsDraft[defProvider]?.account_type ?? 0}
+                    onChange={e => setDefaultAccountType(defProvider, Number(e.target.value))}
+                    className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm bg-white"
+                  >
+                    <option value={0}>普通</option>
+                    <option value={1}>速刷号</option>
+                  </select>
+                  <p className="text-[11px] text-gray-400 mt-1">工作室选择该厂商时,模型与账号类型会按此预填(仍可手动改)。</p>
+                </div>
+              </div>
+            )}
           </div>
         </section>
       )}

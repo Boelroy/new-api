@@ -4231,6 +4231,9 @@ func main() {
 	supplierAPI.GET("/accounts", handleSupplierAccountList)
 	supplierAPI.POST("/accounts", handleSupplierAccountCreate)
 	supplierAPI.POST("/metrics", handleSupplierMetrics)
+	// Per-provider default models + account type, read by the upload form
+	// (available to suppliers too — not sensitive).
+	supplierAPI.GET("/provider-defaults", handleSupplierProviderDefaults)
 	// OpenAPI token + provider visibility are admin-only (further restricts
 	// the group's admin-or-supplier gate to admin+).
 	supplierAPI.GET("/settings", requireRole(minAdminRole), handleSupplierSettingsGet)

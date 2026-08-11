@@ -68,9 +68,30 @@ func supplierWebConfigured() bool {
 // and the supplier-visible provider allowlist are configured through the web
 // UI and stored in report_config (env stays a bootstrap fallback for token).
 const (
-	cfgSupplierOpenAPIToken   = "supplier_openapi_token"
-	cfgSupplierVisibleProvers = "supplier_visible_providers"
+	cfgSupplierOpenAPIToken     = "supplier_openapi_token"
+	cfgSupplierVisibleProvers   = "supplier_visible_providers"
+	cfgSupplierProviderDefaults = "supplier_provider_defaults"
 )
+
+// supplierProviderDefault is the admin-configured prefill for one provider:
+// which models to pre-select and the default account type when a studio picks
+// that provider in the upload form.
+type supplierProviderDefault struct {
+	Models      []string `json:"models"`
+	AccountType int      `json:"account_type"`
+}
+
+// supplierProviderDefaults returns the per-provider prefill map, empty when
+// unset or unparseable.
+func supplierProviderDefaults() map[string]supplierProviderDefault {
+	out := map[string]supplierProviderDefault{}
+	raw := strings.TrimSpace(supplierConfigGet(cfgSupplierProviderDefaults))
+	if raw == "" {
+		return out
+	}
+	_ = json.Unmarshal([]byte(raw), &out)
+	return out
+}
 
 // supplierConfigGet reads a report_config value, empty string when unset.
 func supplierConfigGet(key string) string {
@@ -761,15 +782,24 @@ func handleSupplierSettingsGet(c *gin.Context) {
 		"openapi_token_set":   token != "",
 		"openapi_token_last4": last4,
 		"visible_providers":   vp,
+		"provider_defaults":   supplierProviderDefaults(),
 	})
+}
+
+// handleSupplierProviderDefaults exposes the prefill map to the upload form.
+// Available to suppliers too (admin+supplier group) — the defaults are not
+// sensitive and drive the studio's form pre-selection.
+func handleSupplierProviderDefaults(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"defaults": supplierProviderDefaults()})
 }
 
 func handleSupplierSettingsSet(c *gin.Context) {
 	var body struct {
 		// Pointers so "omitted" (leave unchanged) is distinct from "" (clear)
 		// and [] (allow all).
-		OpenAPIToken     *string   `json:"openapi_token"`
-		VisibleProviders *[]string `json:"visible_providers"`
+		OpenAPIToken     *string                             `json:"openapi_token"`
+		VisibleProviders *[]string                           `json:"visible_providers"`
+		ProviderDefaults *map[string]supplierProviderDefault `json:"provider_defaults"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
@@ -791,6 +821,38 @@ func handleSupplierSettingsSet(c *gin.Context) {
 			}
 		}
 		if err := supplierConfigSet(cfgSupplierVisibleProvers, strings.Join(cleaned, ",")); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.ProviderDefaults != nil {
+		cleaned := map[string]supplierProviderDefault{}
+		for prov, d := range *body.ProviderDefaults {
+			prov = strings.TrimSpace(prov)
+			if prov == "" {
+				continue
+			}
+			at := d.AccountType
+			if at != 0 && at != 1 {
+				at = 0
+			}
+			seen := map[string]bool{}
+			models := make([]string, 0, len(d.Models))
+			for _, m := range d.Models {
+				if m = strings.TrimSpace(m); m != "" && !seen[m] {
+					seen[m] = true
+					models = append(models, m)
+				}
+			}
+			// Drop no-op entries (no default models and the default account
+			// type) so the stored map stays tidy.
+			if len(models) == 0 && at == 0 {
+				continue
+			}
+			cleaned[prov] = supplierProviderDefault{Models: models, AccountType: at}
+		}
+		blob, _ := json.Marshal(cleaned)
+		if err := supplierConfigSet(cfgSupplierProviderDefaults, string(blob)); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}

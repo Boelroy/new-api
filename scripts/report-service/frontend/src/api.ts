@@ -510,10 +510,16 @@ export type SupplierAccount = {
   created_at: number
 }
 
+export type SupplierProviderDefault = {
+  models: string[]
+  account_type: number
+}
+
 export type SupplierSettings = {
   openapi_token_set: boolean
   openapi_token_last4: string
   visible_providers: string[]
+  provider_defaults: Record<string, SupplierProviderDefault>
 }
 
 export type SupplierMetric = {
@@ -1659,12 +1665,21 @@ export const api = {
   getSupplierSettings: () =>
     request<SupplierSettings>('/api/supplier-account/settings'),
 
-  setSupplierSettings: (payload: { openapi_token?: string; visible_providers?: string[] }) =>
+  setSupplierSettings: (payload: {
+    openapi_token?: string
+    visible_providers?: string[]
+    provider_defaults?: Record<string, SupplierProviderDefault>
+  }) =>
     request<SupplierSettings>('/api/supplier-account/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
+
+  // Per-provider default models + account type, for prefilling the upload
+  // form. Available to suppliers too.
+  getSupplierProviderDefaults: () =>
+    request<{ defaults: Record<string, SupplierProviderDefault> }>('/api/supplier-account/provider-defaults'),
 }
 
 // One stored credential and its resolved local-channel target. Mirrors the
