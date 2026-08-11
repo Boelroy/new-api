@@ -15,9 +15,12 @@ import {
 // Supplier Account portal page.
 //
 //   - supplier_01 (role=4) uploads keys to the third-party account portal and
-//     sees ONLY their own accounts + realtime usage (cost hidden).
-//   - admin / super_admin see every studio's accounts (incl. cost + owner)
+//     sees ONLY their own accounts + realtime usage (incl. cost).
+//   - admin / super_admin see every studio's accounts (+ owner identity)
 //     and can upload too.
+//
+// The supplier/company name embedded in the portal alias is masked server-side
+// for everyone; the raw name never reaches this page.
 //
 // Server enforces the scoping; the `isAdmin` flag here only drives which
 // columns are rendered. Only "keyonly"-shape providers are supported for
@@ -165,6 +168,9 @@ export default function SupplierAccounts() {
         setBootErr(e?.message || String(e))
       }
       await loadAccounts()
+      // Populate the realtime metric columns on open instead of forcing the
+      // user to hit "刷新实时数据" first.
+      await handleRefreshMetrics()
     })()
   }, [])
 
@@ -597,7 +603,7 @@ export default function SupplierAccounts() {
                     <th className="py-2 pr-3 font-medium text-right">请求数</th>
                     <th className="py-2 pr-3 font-medium text-right">Tokens (入/出)</th>
                     <th className="py-2 pr-3 font-medium text-right">成功率</th>
-                    {isAdmin && <th className="py-2 pr-3 font-medium text-right">成本($)</th>}
+                    <th className="py-2 pr-3 font-medium text-right">成本($)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -629,11 +635,9 @@ export default function SupplierAccounts() {
                         <td className="py-2 pr-3 text-right tabular-nums">
                           {m?.success_rate != null ? `${m.success_rate}%` : '—'}
                         </td>
-                        {isAdmin && (
-                          <td className="py-2 pr-3 text-right tabular-nums">
-                            {m?.cost != null ? m.cost.toFixed(2) : '—'}
-                          </td>
-                        )}
+                        <td className="py-2 pr-3 text-right tabular-nums">
+                          {m?.cost != null ? m.cost.toFixed(2) : '—'}
+                        </td>
                       </tr>
                     )
                   })}

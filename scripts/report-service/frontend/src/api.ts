@@ -527,7 +527,7 @@ export type SupplierMetric = {
   account_alias: string
   status: string
   requests: number | null
-  // Present only for admin+ callers; suppliers never receive cost.
+  // Shown to studios as well as admins; null when the upstream omits it.
   cost?: number | null
   success_rate: number | null
   prompt_tokens: number | null

@@ -584,6 +584,18 @@ type supplierAccountRow struct {
 	CreatedAt       int64  `json:"created_at"`
 }
 
+// maskSupplierAlias hides the supplier/company name embedded in a portal alias
+// of the form "<provider>-<supplier name>-<datetime seq>", returning
+// "<provider>-***-<seq>". Aliases with fewer than three "-" segments have
+// nothing unambiguous to mask and are returned unchanged.
+func maskSupplierAlias(alias string) string {
+	parts := strings.Split(alias, "-")
+	if len(parts) < 3 {
+		return alias
+	}
+	return parts[0] + "-***-" + parts[len(parts)-1]
+}
+
 func handleSupplierAccountList(c *gin.Context) {
 	isAdmin := callerIsSupplierAdmin(c)
 
@@ -630,6 +642,8 @@ func handleSupplierAccountList(c *gin.Context) {
 		if !isAdmin {
 			row.Username = ""
 		}
+		// Hide the supplier/company name embedded in the portal alias.
+		row.Alias = maskSupplierAlias(row.Alias)
 		out = append(out, row)
 	}
 	c.JSON(http.StatusOK, gin.H{"accounts": out})
@@ -646,7 +660,7 @@ func callerIsSupplierAdmin(c *gin.Context) bool {
 // ---- Realtime metrics (scoped by role) — OpenAPI token ----
 
 // supplierMetric mirrors one entry of the portal metrics response. Cost is a
-// pointer so it can be omitted for non-admin callers.
+// pointer so a missing upstream value serializes as null rather than 0.
 type supplierMetric struct {
 	AID              int64    `json:"aid"`
 	AccountAlias     string   `json:"account_alias"`
@@ -694,12 +708,12 @@ func handleSupplierMetrics(c *gin.Context) {
 		err error
 	)
 	if isAdmin {
-		r, e := db.Query(`SELECT remote_account_id FROM rs_supplier_account ORDER BY id DESC`)
+		r, e := db.Query(`SELECT remote_account_id, alias FROM rs_supplier_account ORDER BY id DESC`)
 		idRows, err = r, e
 	} else {
 		uidAny, _ := c.Get("user_id")
 		uid, _ := uidAny.(int64)
-		r, e := db.Query(`SELECT remote_account_id FROM rs_supplier_account WHERE uploaded_by=$1 ORDER BY id DESC`, uid)
+		r, e := db.Query(`SELECT remote_account_id, alias FROM rs_supplier_account WHERE uploaded_by=$1 ORDER BY id DESC`, uid)
 		idRows, err = r, e
 	}
 	if err != nil {
@@ -707,14 +721,24 @@ func handleSupplierMetrics(c *gin.Context) {
 		return
 	}
 	ids := make([]int64, 0)
+	// The portal returns metrics keyed by its own internal aid, which is NOT the
+	// account_id we query with (our remote_account_id). alias is the only field
+	// shared by both sides, so keep an alias -> remote_account_id map to re-key.
+	aliasToRemoteID := make(map[string]int64)
 	for idRows.Next() {
-		var id int64
-		if err := idRows.Scan(&id); err != nil {
+		var (
+			id    int64
+			alias string
+		)
+		if err := idRows.Scan(&id, &alias); err != nil {
 			idRows.Close()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 		ids = append(ids, id)
+		if alias != "" {
+			aliasToRemoteID[alias] = id
+		}
 	}
 	idRows.Close()
 
@@ -756,11 +780,14 @@ func handleSupplierMetrics(c *gin.Context) {
 		merged = append(merged, parsed.Accounts...)
 	}
 
-	// Suppliers must not see cost — strip it before serializing.
-	if !isAdmin {
-		for i := range merged {
-			merged[i].Cost = nil
+	// Re-key each row onto the queried remote_account_id (via the shared alias)
+	// so the client can join metrics to accounts, then mask the supplier name
+	// embedded in the alias. Cost is shown to studios as well as admins.
+	for i := range merged {
+		if rid, ok := aliasToRemoteID[merged[i].AccountAlias]; ok {
+			merged[i].AID = rid
 		}
+		merged[i].AccountAlias = maskSupplierAlias(merged[i].AccountAlias)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"accounts": merged})
