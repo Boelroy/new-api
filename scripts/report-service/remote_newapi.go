@@ -2731,17 +2731,28 @@ func handleAzureChannelCreate(c *gin.Context) {
 
 // awsBedrockClaudeModelBase maps the friendly model names advertised on the
 // channel to their region-agnostic Bedrock model ids. buildAwsBedrockModelMapping
-// prepends the region's cross-region inference prefix (us./eu./apac.) to each id.
+// prepends a cross-region inference prefix (global./us./eu./apac.) to each id.
 // Kept as an ordered slice so the generated mapping is deterministic. The exact
 // suffixes (-v1, -v1:0, none) are the real Bedrock model ids and intentionally
 // inconsistent across models.
 var awsBedrockClaudeModelBase = []struct{ Name, ID string }{
-	{"claude-opus-4-6", "anthropic.claude-opus-4-6-v1"},
-	{"claude-opus-4-5-20251101", "anthropic.claude-opus-4-5-20251101-v1:0"},
-	{"claude-sonnet-4-6", "anthropic.claude-sonnet-4-6"},
-	{"claude-sonnet-4-5-20250929", "anthropic.claude-sonnet-4-5-20250929-v1:0"},
 	{"claude-haiku-4-5-20251001", "anthropic.claude-haiku-4-5-20251001-v1:0"},
+	{"claude-sonnet-4-5-20250929", "anthropic.claude-sonnet-4-5-20250929-v1:0"},
+	{"claude-sonnet-4-6", "anthropic.claude-sonnet-4-6"},
+	{"claude-opus-4-5-20251101", "anthropic.claude-opus-4-5-20251101-v1:0"},
+	{"claude-opus-4-6", "anthropic.claude-opus-4-6-v1"},
+	{"claude-opus-4-1-20250805", "anthropic.claude-opus-4-1-20250805-v1:0"},
+	{"claude-opus-5", "anthropic.claude-opus-5"},
+	{"claude-opus-4-7", "anthropic.claude-opus-4-7"},
+	{"claude-opus-4-8", "anthropic.claude-opus-4-8"},
+	{"claude-fable-5", "anthropic.claude-fable-5"},
 }
+
+// awsBedrockDefaultModelPrefix is the cross-region inference prefix used when
+// a caller doesn't specify one. "global" is the global inference profile,
+// which routes to whichever region has capacity; the batch-create flow
+// defaults to it and lets the operator override with us/eu/apac.
+const awsBedrockDefaultModelPrefix = "global"
 
 // awsBedrockRegionPrefix derives the Bedrock cross-region inference prefix from
 // an AWS region id. Mirrors new-api's awsRegionCrossModelPrefixMap
@@ -2766,10 +2777,15 @@ func awsBedrockRegionPrefix(region string) string {
 }
 
 // buildAwsBedrockModelMapping returns the channel.model_mapping JSON string for
-// the given region, e.g. region "us-east-1" →
-// {"claude-opus-4-6":"us.anthropic.claude-opus-4-6-v1", ...}.
-func buildAwsBedrockModelMapping(region string) (string, error) {
-	prefix := awsBedrockRegionPrefix(strings.TrimSpace(region))
+// the given cross-region inference prefix, e.g. prefix "global" →
+// {"claude-opus-4-6":"global.anthropic.claude-opus-4-6-v1", ...}. Callers that
+// derive the prefix from an AWS region pass awsBedrockRegionPrefix(region);
+// the batch-create flow passes "global" (or an operator override) directly.
+func buildAwsBedrockModelMapping(prefix string) (string, error) {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		prefix = awsBedrockDefaultModelPrefix
+	}
 	mapping := make(map[string]string, len(awsBedrockClaudeModelBase))
 	for _, m := range awsBedrockClaudeModelBase {
 		mapping[m.Name] = prefix + "." + m.ID
@@ -2894,9 +2910,10 @@ func handleAwsChannelCreate(c *gin.Context) {
 		settingsJSON = `{"aws_key_type":"ak_sk"}`
 	}
 
-	// model_mapping is region-derived: friendly Claude names → region-prefixed
-	// Bedrock model ids. Built once per batch (region is per-batch).
-	modelMapping, err := buildAwsBedrockModelMapping(body.Region)
+	// model_mapping is region-derived here (remote upload keeps its existing
+	// per-region behaviour): friendly Claude names → region-prefixed Bedrock
+	// model ids. Built once per batch (region is per-batch).
+	modelMapping, err := buildAwsBedrockModelMapping(awsBedrockRegionPrefix(body.Region))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "build model mapping: " + err.Error()})
 		return

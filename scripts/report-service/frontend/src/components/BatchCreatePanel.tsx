@@ -159,6 +159,10 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   // the auth flavour (ak_sk default / api_key).
   const [awsRegion, setAwsRegion] = useState('us-east-1')
   const [awsKeyMode, setAwsKeyMode] = useState<'ak_sk' | 'api_key'>('ak_sk')
+  // Cross-region inference prefix for the Bedrock model_mapping. Decoupled
+  // from awsRegion (which is the SigV4 signing region). Defaults to the
+  // global inference profile; operator can switch to us/eu/apac.
+  const [awsModelPrefix, setAwsModelPrefix] = useState('global')
 
   // 可配置的默认 model 列表 —— 按预设分开存（rc.154+）。key 是 preset.id，
   // value 是服务端保存的 models 字符串；'' 或缺失表示尚未保存过（前端会
@@ -286,6 +290,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       base_url?: string
       region?: string
       key_type?: 'ak_sk' | 'api_key'
+      model_prefix?: string
     } = {
       type: preset.type,
       group: group.trim() || preset.fallbackGroup,
@@ -310,6 +315,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       if (!region) return setResult('AWS 需要填写 Region (例: us-east-1)')
       baseDefaults.region = region
       baseDefaults.key_type = awsKeyMode
+      baseDefaults.model_prefix = awsModelPrefix.trim() || 'global'
     }
 
     // Vertex takes JSON files or plain API keys + a shared region, so it
@@ -747,7 +753,24 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
                   placeholder="us-east-1"
                   className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
                 />
-                <p className="text-[10px] text-gray-400 mt-1">拼进 channels.key 并按区域生成 Claude 模型映射（us→us、eu→eu、ap→apac）。</p>
+                <p className="text-[10px] text-gray-400 mt-1">SigV4 签名区域，拼进 channels.key（模型映射前缀单独选，见右侧）。</p>
+              </div>
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">模型映射前缀</label>
+                <input
+                  value={awsModelPrefix}
+                  onChange={e => setAwsModelPrefix(e.target.value)}
+                  placeholder="global"
+                  list="aws-model-prefix-options"
+                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
+                />
+                <datalist id="aws-model-prefix-options">
+                  <option value="global" />
+                  <option value="us" />
+                  <option value="eu" />
+                  <option value="apac" />
+                </datalist>
+                <p className="text-[10px] text-gray-400 mt-1">Claude 模型映射前缀，默认 <code className="font-mono">global</code>（全局推理配置），可改 us/eu/apac。</p>
               </div>
               <div>
                 <label className="block text-[11px] text-gray-500 mb-1">认证方式</label>

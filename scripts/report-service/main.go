@@ -2350,6 +2350,11 @@ func handleBatchCreateChannels(c *gin.Context) {
 		// leave these empty.
 		Region  string `json:"region"`
 		KeyType string `json:"key_type"`
+		// AWS Bedrock cross-region inference prefix for the model_mapping
+		// (global./us./eu./apac.). Empty → "global" (the global inference
+		// profile). Decoupled from Region, which stays the real signing
+		// region baked into channel.key.
+		ModelPrefix string `json:"model_prefix"`
 		// Default priority + unit price applied to every channel that does not
 		// override them in the per-row entry. Lets the form set a single value
 		// up top instead of repeating it on every key.
@@ -2469,11 +2474,11 @@ func handleBatchCreateChannels(c *gin.Context) {
 		}
 	}
 	if channelType == 33 {
-		// AWS Bedrock: region is required (baked into the key + model mapping).
-		// KeyType picks the auth flavour written to channel.settings; the
-		// region-prefixed Claude model_mapping is built server-side (reusing
-		// the same helpers as the remote AWS upload) unless the caller sent
-		// an explicit mapping.
+		// AWS Bedrock: region is required (baked into the key for SigV4
+		// signing). KeyType picks the auth flavour written to channel.settings.
+		// The Claude model_mapping is built server-side from ModelPrefix,
+		// which is decoupled from the signing region and defaults to the
+		// "global" inference profile.
 		awsRegion = strings.TrimSpace(payload.Region)
 		if awsRegion == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "region is required for AWS channels (e.g. us-east-1)"})
@@ -2490,7 +2495,8 @@ func handleBatchCreateChannels(c *gin.Context) {
 		if settings == "" {
 			settings = fmt.Sprintf(`{"aws_key_type":"%s"}`, awsKeyType)
 		}
-		mm, err := buildAwsBedrockModelMapping(awsRegion)
+		// Prefix defaults to "global"; operator can override with us/eu/apac.
+		mm, err := buildAwsBedrockModelMapping(payload.ModelPrefix)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "build model mapping: " + err.Error()})
 			return

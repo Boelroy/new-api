@@ -783,10 +783,12 @@ export const api = {
       other?: string          // Vertex region / Azure api-version
       settings?: string       // pre-serialised JSON string, e.g. '{"vertex_key_type":"json"}'
       base_url?: string       // Azure resource endpoint (https://<res>.openai.azure.com)
-      // AWS Bedrock (type=33): region is baked into the key + drives the
-      // server-built Claude model_mapping; key_type selects the auth mode.
+      // AWS Bedrock (type=33): region is the SigV4 signing region baked into
+      // the key. model_prefix is the cross-region inference prefix for the
+      // server-built Claude model_mapping (global/us/eu/apac); empty → global.
       region?: string
       key_type?: 'ak_sk' | 'api_key'
+      model_prefix?: string
     },
   ) =>
     request<{ created: { id: number; name: string }[]; count: number }>('/api/channels/batch-create', {
