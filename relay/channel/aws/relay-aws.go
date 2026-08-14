@@ -67,6 +67,12 @@ func newAwsClient(c *gin.Context, info *relaycommon.RelayInfo) (*bedrockruntime.
 	}
 
 	awsSecret := strings.Split(info.ApiKey, "|")
+	// Total attempts = 1 initial + retries (AWS SDK v2 semantics). Configurable
+	// via AWS_BEDROCK_MAX_ATTEMPTS; fall back to the SDK default of 3.
+	maxAttempts := common.AwsBedrockMaxAttempts
+	if maxAttempts < 1 {
+		maxAttempts = 3
+	}
 	var client *bedrockruntime.Client
 	switch len(awsSecret) {
 	case 2:
@@ -76,15 +82,17 @@ func newAwsClient(c *gin.Context, info *relaycommon.RelayInfo) (*bedrockruntime.
 			Region:                  region,
 			BearerAuthTokenProvider: bearer.StaticTokenProvider{Token: bearer.Token{Value: apiKey}},
 			HTTPClient:              httpClient,
+			RetryMaxAttempts:        maxAttempts,
 		})
 	case 3:
 		ak := awsSecret[0]
 		sk := awsSecret[1]
 		region := awsSecret[2]
 		client = bedrockruntime.New(bedrockruntime.Options{
-			Region:      region,
-			Credentials: aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(ak, sk, "")),
-			HTTPClient:  httpClient,
+			Region:           region,
+			Credentials:      aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(ak, sk, "")),
+			HTTPClient:       httpClient,
+			RetryMaxAttempts: maxAttempts,
 		})
 	default:
 		return nil, errors.New("invalid aws secret key")

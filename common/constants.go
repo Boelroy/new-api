@@ -165,6 +165,10 @@ var RelayIdleConnTimeout int // unit is second
 var RelayMaxIdleConns int
 var RelayMaxIdleConnsPerHost int
 
+// AwsBedrockMaxAttempts controls the AWS SDK v2 retryer's max attempts for
+// Bedrock calls (total attempts = 1 initial + retries). Default 3.
+var AwsBedrockMaxAttempts int
+
 var GeminiSafetySetting string
 
 // https://docs.cohere.com/docs/safety-modes Type; NONE/CONTEXTUAL/STRICT
