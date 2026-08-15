@@ -97,6 +97,7 @@ const DEFAULT_OPENROUTER_MODELS = [
   'claude-haiku-4-5-20251001',
   'claude-sonnet-4-5-20250929',
   'claude-opus-4-5-20251101',
+  'claude-fable-5',
   'claude-sonnet-5',
   'claude-opus-5',
 ].join(',')

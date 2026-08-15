@@ -2810,6 +2810,7 @@ var openRouterClaudeModelBase = []struct{ Name, ID string }{
 	{"claude-haiku-4-5-20251001", "anthropic/claude-haiku-4-5-20251001"},
 	{"claude-sonnet-4-5-20250929", "anthropic/claude-sonnet-4-5-20250929"},
 	{"claude-opus-4-5-20251101", "anthropic/claude-opus-4-5-20251101"},
+	{"claude-fable-5", "anthropic/claude-fable-5"},
 	{"claude-sonnet-5", "anthropic/claude-sonnet-5"},
 	{"claude-opus-5", "anthropic/claude-opus-5"},
 }
