@@ -2173,6 +2173,21 @@ var defaultAnthropicModels = strings.Join([]string{
 	"claude-opus-5",
 }, ",")
 
+// defaultOpenRouterModels is the batch-create fallback for OpenRouter channels
+// (type 20). The active model names stay friendly; buildOpenRouterModelMapping
+// translates them to anthropic/* slugs in channel.model_mapping.
+var defaultOpenRouterModels = strings.Join([]string{
+	"claude-opus-4-8",
+	"claude-opus-4-7",
+	"claude-sonnet-4-6",
+	"claude-opus-4-6",
+	"claude-haiku-4-5-20251001",
+	"claude-sonnet-4-5-20250929",
+	"claude-opus-4-5-20251101",
+	"claude-sonnet-5",
+	"claude-opus-5",
+}, ",")
+
 var defaultOpenAIModels = strings.Join([]string{
 	"gpt-5",
 	"gpt-5-mini",
@@ -2223,6 +2238,8 @@ func batchModelsFallback(channelType int) string {
 		return defaultGeminiModels
 	case 41:
 		return defaultVertexModels
+	case 20:
+		return defaultOpenRouterModels
 	}
 	return defaultAnthropicModels
 }
@@ -2290,7 +2307,7 @@ func handleSetBatchModels(c *gin.Context) {
 	// Allowlist matches handleBatchCreateChannels — refuse anything we can't
 	// batch-create anyway so we don't silently accumulate stale config rows.
 	switch channelType {
-	case 1, 3, 14, 24, 41:
+	case 1, 3, 14, 20, 24, 41:
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unsupported channel type %d", channelType)})
 		return
@@ -2417,7 +2434,7 @@ func handleBatchCreateChannels(c *gin.Context) {
 		channelType = 14 // Anthropic — legacy default for backward compat.
 	}
 	switch channelType {
-	case 1, 3, 14, 24, 33, 41: // OpenAI, Azure, Anthropic, Gemini (AI Studio), AWS Bedrock, Vertex AI
+	case 1, 3, 14, 20, 24, 33, 41: // OpenAI, Azure, Anthropic, OpenRouter, Gemini (AI Studio), AWS Bedrock, Vertex AI
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unsupported channel type %d", channelType)})
 		return
@@ -2497,6 +2514,16 @@ func handleBatchCreateChannels(c *gin.Context) {
 		}
 		// Prefix defaults to "global"; operator can override with us/eu/apac.
 		mm, err := buildAwsBedrockModelMapping(payload.ModelPrefix)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "build model mapping: " + err.Error()})
+			return
+		}
+		modelMapping = mm
+	}
+	if channelType == 20 {
+		// OpenRouter: models are addressed by anthropic/* slug, so map the
+		// friendly Claude names onto their OpenRouter slugs. No region prefix.
+		mm, err := buildOpenRouterModelMapping()
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "build model mapping: " + err.Error()})
 			return

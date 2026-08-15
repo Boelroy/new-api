@@ -2797,6 +2797,39 @@ func buildAwsBedrockModelMapping(prefix string) (string, error) {
 	return string(b), nil
 }
 
+// openRouterClaudeModelBase maps the friendly Claude model names advertised on
+// the channel to their OpenRouter slugs. OpenRouter addresses Anthropic models
+// as "anthropic/<name>" and needs no cross-region prefix, so the mapping is a
+// straight friendly→slug translation. Kept as an ordered slice so the generated
+// mapping is deterministic.
+var openRouterClaudeModelBase = []struct{ Name, ID string }{
+	{"claude-opus-4-8", "anthropic/claude-opus-4-8"},
+	{"claude-opus-4-7", "anthropic/claude-opus-4-7"},
+	{"claude-sonnet-4-6", "anthropic/claude-sonnet-4-6"},
+	{"claude-opus-4-6", "anthropic/claude-opus-4-6"},
+	{"claude-haiku-4-5-20251001", "anthropic/claude-haiku-4-5-20251001"},
+	{"claude-sonnet-4-5-20250929", "anthropic/claude-sonnet-4-5-20250929"},
+	{"claude-opus-4-5-20251101", "anthropic/claude-opus-4-5-20251101"},
+	{"claude-sonnet-5", "anthropic/claude-sonnet-5"},
+	{"claude-opus-5", "anthropic/claude-opus-5"},
+}
+
+// buildOpenRouterModelMapping returns the channel.model_mapping JSON string that
+// maps the org's friendly Claude names onto OpenRouter's anthropic/* slugs, e.g.
+// {"claude-opus-4-8":"anthropic/claude-opus-4-8", ...}. Unlike Bedrock there is
+// no region / inference-profile prefix.
+func buildOpenRouterModelMapping() (string, error) {
+	mapping := make(map[string]string, len(openRouterClaudeModelBase))
+	for _, m := range openRouterClaudeModelBase {
+		mapping[m.Name] = m.ID
+	}
+	b, err := json.Marshal(mapping)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
 // handleAwsChannelCreate uploads one or more AWS Bedrock credentials to the
 // remote as newapi channels (channel_type = 33). Runs synchronously, one
 // channel per credential — AWS batches are small and serial makes each error
