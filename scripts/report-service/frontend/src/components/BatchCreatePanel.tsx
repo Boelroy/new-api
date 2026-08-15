@@ -16,7 +16,7 @@ type Props = {
 // by RemoteChannelsStudio.tsx — same integers, same groups, same fallback
 // model lists — but the two components stay standalone on purpose (remote
 // upload vs local channel insert diverge downstream).
-type PresetID = 'anthropic' | 'openai' | 'azure' | 'gemini' | 'vertex' | 'vertex-claude' | 'aws'
+type PresetID = 'anthropic' | 'openai' | 'azure' | 'gemini' | 'vertex' | 'vertex-claude' | 'aws' | 'openrouter'
 type PresetSpec = {
   id: PresetID
   label: string
@@ -86,6 +86,21 @@ const DEFAULT_AWS_CLAUDE_MODELS = [
   'claude-haiku-4-5-20251001',
 ].join(',')
 
+// OpenRouter (channel_type=20) is OpenAI-compatible; the backend maps these
+// friendly names onto anthropic/* slugs in channel.model_mapping, so the
+// operator just picks the preset — no mapping editing here.
+const DEFAULT_OPENROUTER_MODELS = [
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-sonnet-4-6',
+  'claude-opus-4-6',
+  'claude-haiku-4-5-20251001',
+  'claude-sonnet-4-5-20250929',
+  'claude-opus-4-5-20251101',
+  'claude-sonnet-5',
+  'claude-opus-5',
+].join(',')
+
 const PRESETS: PresetSpec[] = [
   { id: 'anthropic',     label: 'Anthropic',        kind: 'text',   type: 14, fallbackGroup: 'default',        fallbackModels: DEFAULT_ANTHROPIC_MODELS },
   { id: 'openai',        label: 'OpenAI',           kind: 'text',   type: 1,  fallbackGroup: 'openai',         fallbackModels: DEFAULT_OPENAI_MODELS },
@@ -94,6 +109,7 @@ const PRESETS: PresetSpec[] = [
   { id: 'vertex',        label: 'Vertex AI',        kind: 'vertex', type: 41, fallbackGroup: 'gemini',         fallbackModels: DEFAULT_VERTEX_MODELS },
   { id: 'vertex-claude', label: 'Vertex AI (Claude)', kind: 'vertex', type: 41, fallbackGroup: 'claude-vertex', fallbackModels: DEFAULT_VERTEX_CLAUDE_MODELS },
   { id: 'aws',           label: 'AWS (Bedrock)',    kind: 'aws',    type: 33, fallbackGroup: 'claude-aws',     fallbackModels: DEFAULT_AWS_CLAUDE_MODELS },
+  { id: 'openrouter',    label: 'OpenRouter',       kind: 'text',   type: 20, fallbackGroup: 'default',        fallbackModels: DEFAULT_OPENROUTER_MODELS },
 ]
 
 // Azure only: default API version. Mirrors AZURE_DEFAULT_API_VERSION on the

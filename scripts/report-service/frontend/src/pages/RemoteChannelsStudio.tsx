@@ -86,6 +86,7 @@ const CHANNEL_TYPE_GEMINI = 24
 const CHANNEL_TYPE_VERTEX = 41
 const CHANNEL_TYPE_AZURE = 3
 const CHANNEL_TYPE_AWS = 33
+const CHANNEL_TYPE_OPENROUTER = 20
 
 // Claude-on-Bedrock model list advertised by the AWS preset. The backend
 // pairs each name with a region-prefixed Bedrock model id in
@@ -97,6 +98,21 @@ const DEFAULT_AWS_CLAUDE_MODELS = [
   'claude-sonnet-4-6',
   'claude-sonnet-4-5-20250929',
   'claude-haiku-4-5-20251001',
+].join(',')
+
+// OpenRouter (channel_type=20) is OpenAI-compatible; the backend maps these
+// friendly names onto anthropic/* slugs in channel.model_mapping, so the
+// operator never edits the mapping — they just pick the preset.
+const DEFAULT_OPENROUTER_MODELS = [
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-sonnet-4-6',
+  'claude-opus-4-6',
+  'claude-haiku-4-5-20251001',
+  'claude-sonnet-4-5-20250929',
+  'claude-opus-4-5-20251101',
+  'claude-sonnet-5',
+  'claude-opus-5',
 ].join(',')
 
 // Anthropic-on-Vertex reuses the same channel_type=41 + SA JSON / API-key
@@ -117,7 +133,7 @@ const DEFAULT_VERTEX_CLAUDE_MODELS = [
   'claude-sonnet-5',
 ].join(',')
 
-type PresetID = 'anthropic' | 'openai' | 'gemini' | 'vertex' | 'vertex-claude' | 'azure' | 'aws'
+type PresetID = 'anthropic' | 'openai' | 'gemini' | 'vertex' | 'vertex-claude' | 'azure' | 'aws' | 'openrouter'
 // `kind` gates the modal's form flow: 'text' presets use the per-line
 // key textarea + pending-queue path; 'vertex' presets swap in a JSON
 // file picker + region input and post directly to remoteVertexCreate;
@@ -147,6 +163,7 @@ const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
   { id: 'vertex-claude', label: 'Vertex AI (Claude)',  kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_CLAUDE_MODELS, fallbackGroup: 'claude-vertex' },
   { id: 'azure',         label: 'Azure',               kind: 'azure',  type: CHANNEL_TYPE_AZURE,     fallbackModels: DEFAULT_OPENAI_MODELS,        fallbackGroup: 'openai',         profileGroupField: 'default_group',        profileModelsField: 'default_models' },
   { id: 'aws',           label: 'AWS (Bedrock)',       kind: 'aws',    type: CHANNEL_TYPE_AWS,       fallbackModels: DEFAULT_AWS_CLAUDE_MODELS,    fallbackGroup: 'claude-aws' },
+  { id: 'openrouter',    label: 'OpenRouter',          kind: 'text',   type: CHANNEL_TYPE_OPENROUTER, fallbackModels: DEFAULT_OPENROUTER_MODELS,    fallbackGroup: 'default' },
 ]
 
 function resolvePresetGroup(preset: PresetSpec, profile: RemoteProfile | undefined): string {
