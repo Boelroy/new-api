@@ -853,17 +853,24 @@ func insertLocalChannelForPending(pendingID int64, studio, suffix, key string, q
 	}
 	channelGroup := strings.Join(groupList, ",")
 
-	// model_mapping / param_override are derived from the channel type,
-	// mirroring handleBatchCreateChannels. Anthropic (14) needs neither;
-	// OpenRouter (20) maps friendly names to anthropic/* slugs and pins
-	// routing to the anthropic provider.
+	// model_mapping / param_override / base_url / stored type are derived from
+	// the channel type, mirroring handleBatchCreateChannels. Anthropic (14)
+	// needs none. OpenRouter (20) maps friendly names to anthropic/* slugs,
+	// pins routing to the anthropic provider, and is persisted as an
+	// Anthropic-type channel pointed at OpenRouter's endpoint so new-api uses
+	// the native Anthropic wire format while the base URL redirects to
+	// OpenRouter.
 	modelMapping := ""
 	paramOverride := ""
+	storedType := channelType
+	baseURL := ""
 	if channelType == 20 {
 		if mm, mmErr := buildOpenRouterModelMapping(); mmErr == nil {
 			modelMapping = mm
 		}
 		paramOverride = openRouterParamOverride
+		storedType = openRouterChannelType
+		baseURL = openRouterAnthropicBaseURL
 	}
 
 	tx, err := db.Begin()
@@ -877,10 +884,10 @@ func insertLocalChannelForPending(pendingID int64, studio, suffix, key string, q
 		INSERT INTO channels
 		(type, key, status, name, weight, created_time, base_url, "group", models,
 		 model_mapping, status_code_mapping, priority, auto_ban, used_quota, channel_info, tag, param_override)
-		VALUES ($9, $1, 1, $2, 0, $3, '', $8, $4,
+		VALUES ($9, $1, 1, $2, 0, $3, $12, $8, $4,
 		        $10, '', $7, 1, 0, $5::json, $6, $11)
 		RETURNING id`,
-		key, name, now, activeModels, channelInfoDefault, studio, priority, channelGroup, channelType, modelMapping, paramOverride,
+		key, name, now, activeModels, channelInfoDefault, studio, priority, channelGroup, storedType, modelMapping, paramOverride, baseURL,
 	).Scan(&channelID); err != nil {
 		return fmt.Errorf("insert channel: %v", err)
 	}

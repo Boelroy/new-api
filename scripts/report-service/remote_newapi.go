@@ -2837,6 +2837,18 @@ func buildOpenRouterModelMapping() (string, error) {
 // straight through to Anthropic instead of OpenRouter's cheapest reseller.
 const openRouterParamOverride = `{"operations":[{"mode":"set","path":"provider","logic":"AND","value":{"only":["anthropic"],"allow_fallbacks":false},"conditions":[{"mode":"prefix","path":"upstream_model","value":"anthropic/claude"}]}]}`
 
+// openRouterChannelType / openRouterAnthropicBaseURL define how an OpenRouter
+// preset is persisted. The operator selects the OpenRouter preset (type 20) at
+// request time, but the channel is stored as an Anthropic-type (14) channel
+// pointed at OpenRouter's endpoint: new-api then speaks the native Anthropic
+// /v1/messages wire format while the base URL redirects that traffic to
+// OpenRouter, where openRouterParamOverride pins routing to Anthropic's own
+// upstream. Mirrors the manual channel layout on newapi_zl.
+const (
+	openRouterChannelType      = 14
+	openRouterAnthropicBaseURL = "https://openrouter.ai/api"
+)
+
 // handleAwsChannelCreate uploads one or more AWS Bedrock credentials to the
 // remote as newapi channels (channel_type = 33). Runs synchronously, one
 // channel per credential — AWS batches are small and serial makes each error

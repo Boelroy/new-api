@@ -2480,6 +2480,12 @@ func handleBatchCreateChannels(c *gin.Context) {
 	// paramOverride is bound into the INSERT below; empty for every preset
 	// except OpenRouter, which pins routing to the anthropic provider.
 	paramOverride := ""
+	// storedType is the channel type actually written to the DB. It equals the
+	// requested channelType for every preset except OpenRouter, which is stored
+	// as an Anthropic-type channel pointed at OpenRouter's endpoint (see the
+	// channelType == 20 block below). channelType keeps the requested value so
+	// model-list / group / studio-limit resolution stays keyed to the preset.
+	storedType := channelType
 	// awsRegion / awsKeyType are only meaningful for channel type 33; used
 	// in the channel loop to bake the region into each key.
 	awsRegion := ""
@@ -2553,6 +2559,13 @@ func handleBatchCreateChannels(c *gin.Context) {
 		// Pin OpenRouter routing to the anthropic provider (no reseller
 		// fallbacks) for anthropic/claude* upstream models.
 		paramOverride = openRouterParamOverride
+		// Persist as an Anthropic-type channel pointed at OpenRouter's endpoint
+		// so new-api uses the native Anthropic wire format; the base URL
+		// redirects to OpenRouter. An explicit base_url from the operator wins.
+		storedType = openRouterChannelType
+		if baseUrl == "" {
+			baseUrl = openRouterAnthropicBaseURL
+		}
 	}
 
 	dateStr := time.Now().UTC().Format("0102")
@@ -2617,7 +2630,7 @@ func handleBatchCreateChannels(c *gin.Context) {
 			VALUES ($1, $2, 1, $3, 0, $4, $5, $6, $7,
 			        $13, '', $8, 1, 0, $9::json, $10, $11, $12, $14)
 			RETURNING id`,
-			channelType, key, name, now, baseUrl, groupName, activeModels,
+			storedType, key, name, now, baseUrl, groupName, activeModels,
 			priority, channelInfoDefault, studio, other, settings, modelMapping, paramOverride,
 		).Scan(&channelID)
 		if err != nil {
