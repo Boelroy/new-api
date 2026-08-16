@@ -2460,6 +2460,9 @@ func handleBatchCreateChannels(c *gin.Context) {
 	// except AWS Bedrock, which maps its advertised Claude names onto
 	// region-prefixed Bedrock model ids.
 	modelMapping := ""
+	// paramOverride is bound into the INSERT below; empty for every preset
+	// except OpenRouter, which pins routing to the anthropic provider.
+	paramOverride := ""
 	// awsRegion / awsKeyType are only meaningful for channel type 33; used
 	// in the channel loop to bake the region into each key.
 	awsRegion := ""
@@ -2530,6 +2533,9 @@ func handleBatchCreateChannels(c *gin.Context) {
 			return
 		}
 		modelMapping = mm
+		// Pin OpenRouter routing to the anthropic provider (no reseller
+		// fallbacks) for anthropic/claude* upstream models.
+		paramOverride = openRouterParamOverride
 	}
 
 	dateStr := time.Now().UTC().Format("0102")
@@ -2590,12 +2596,12 @@ func handleBatchCreateChannels(c *gin.Context) {
 			INSERT INTO channels
 			(type, key, status, name, weight, created_time, base_url, "group", models,
 			 model_mapping, status_code_mapping, priority, auto_ban, used_quota,
-			 channel_info, tag, other, settings)
+			 channel_info, tag, other, settings, param_override)
 			VALUES ($1, $2, 1, $3, 0, $4, $5, $6, $7,
-			        $13, '', $8, 1, 0, $9::json, $10, $11, $12)
+			        $13, '', $8, 1, 0, $9::json, $10, $11, $12, $14)
 			RETURNING id`,
 			channelType, key, name, now, baseUrl, groupName, activeModels,
-			priority, channelInfoDefault, studio, other, settings, modelMapping,
+			priority, channelInfoDefault, studio, other, settings, modelMapping, paramOverride,
 		).Scan(&channelID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("insert channel: %v", err)})

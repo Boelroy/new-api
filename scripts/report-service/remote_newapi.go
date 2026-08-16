@@ -2831,6 +2831,12 @@ func buildOpenRouterModelMapping() (string, error) {
 	return string(b), nil
 }
 
+// openRouterParamOverride pins OpenRouter requests to Anthropic's own upstream
+// (no reseller fallbacks) for anthropic/claude* models. Written to
+// channel.param_override on batch create so every OpenRouter channel routes
+// straight through to Anthropic instead of OpenRouter's cheapest reseller.
+const openRouterParamOverride = `{"operations":[{"mode":"set","path":"provider","logic":"AND","value":{"only":["anthropic"],"allow_fallbacks":false},"conditions":[{"mode":"prefix","path":"upstream_model","value":"anthropic/claude"}]}]}`
+
 // handleAwsChannelCreate uploads one or more AWS Bedrock credentials to the
 // remote as newapi channels (channel_type = 33). Runs synchronously, one
 // channel per credential — AWS batches are small and serial makes each error
