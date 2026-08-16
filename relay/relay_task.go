@@ -221,7 +221,9 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	if err != nil {
 		return nil, service.TaskErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}
-	if resp != nil && resp.StatusCode != http.StatusOK {
+	// Accept any 2xx: async task-submit APIs may return 202 Accepted (e.g.
+	// OpenRouter's /v1/videos), not just 200. Only non-2xx is a real failure.
+	if resp != nil && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
 		responseBody, _ := io.ReadAll(resp.Body)
 		return nil, service.TaskErrorWrapper(fmt.Errorf("%s", string(responseBody)), "fail_to_fetch_task", resp.StatusCode)
 	}
