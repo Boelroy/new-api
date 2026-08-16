@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -50,6 +51,11 @@ const (
 	// pending-row at enqueue so a mid-flight config change won't retag
 	// already-queued keys. Empty → 'default' at upload time.
 	cfgLocalPoolDefaultGroup = "local_pool_default_group"
+	// Per-studio channel-type allowlist for local-pool uploads, stored as a
+	// JSON object {studio: [types]}. A studio absent from the map (or mapped
+	// to an empty list) is unrestricted. Supported types mirror
+	// localPoolSupportedTypes (14 Anthropic, 20 OpenRouter).
+	cfgLocalPoolStudioTypeLimits = "local_pool_studio_type_limits"
 
 	localPoolIntervalDef  = 60
 	localPoolBatchDef     = 2
@@ -73,8 +79,9 @@ type localPoolConfig struct {
 	AutoMode      bool   `json:"auto_mode"`
 	RPMBase       int    `json:"rpm_base"`
 	RPMMin        int    `json:"rpm_min"`
-	DefaultModels string `json:"default_models"`
-	DefaultGroup  string `json:"default_group"`
+	DefaultModels    string           `json:"default_models"`
+	DefaultGroup     string           `json:"default_group"`
+	StudioTypeLimits map[string][]int `json:"studio_type_limits"`
 }
 
 func loadLocalPoolConfig() localPoolConfig {
@@ -115,6 +122,16 @@ func loadLocalPoolConfig() localPoolConfig {
 	readInt(cfgLocalPoolRPMMin, &out.RPMMin)
 	readStr(cfgLocalPoolDefaultModels, &out.DefaultModels)
 	readStr(cfgLocalPoolDefaultGroup, &out.DefaultGroup)
+	// Per-studio type limits: JSON object. Malformed / missing leaves the
+	// map nil (⇒ unrestricted for every studio).
+	var limitsRaw string
+	readStr(cfgLocalPoolStudioTypeLimits, &limitsRaw)
+	if strings.TrimSpace(limitsRaw) != "" {
+		var m map[string][]int
+		if err := json.Unmarshal([]byte(limitsRaw), &m); err == nil {
+			out.StudioTypeLimits = m
+		}
+	}
 	// Reuse remote-pool clamps for the local values — same [min, max]
 	// safety bounds apply to both since they feed the same scheduler
 	// shape. Cheaper than duplicating five constants.
@@ -127,6 +144,31 @@ func loadLocalPoolConfig() localPoolConfig {
 		out.RPMMin = 0
 	}
 	return out
+}
+
+// localPoolSupportedTypes are the channel types the local pool can serve.
+// 14 = Anthropic (default), 20 = OpenRouter.
+var localPoolSupportedTypes = []int{14, 20}
+
+// localPoolAllowedTypes returns the channel types a studio may pick. A studio
+// with a non-empty configured limit is restricted to it (intersected with the
+// supported set); everyone else gets the full supported set.
+func localPoolAllowedTypes(cfg localPoolConfig, studio string) []int {
+	if lim, ok := cfg.StudioTypeLimits[studio]; ok && len(lim) > 0 {
+		out := make([]int, 0, len(lim))
+		for _, t := range lim {
+			for _, s := range localPoolSupportedTypes {
+				if t == s {
+					out = append(out, t)
+					break
+				}
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return append([]int{}, localPoolSupportedTypes...)
 }
 
 func writeLocalPoolConfig(k, v string) error {
@@ -153,8 +195,9 @@ func handleLocalPoolConfigSet(c *gin.Context) {
 		AutoMode      *bool   `json:"auto_mode,omitempty"`
 		RPMBase       *int    `json:"rpm_base,omitempty"`
 		RPMMin        *int    `json:"rpm_min,omitempty"`
-		DefaultModels *string `json:"default_models,omitempty"`
-		DefaultGroup  *string `json:"default_group,omitempty"`
+		DefaultModels    *string           `json:"default_models,omitempty"`
+		DefaultGroup     *string           `json:"default_group,omitempty"`
+		StudioTypeLimits *map[string][]int `json:"studio_type_limits,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -210,7 +253,52 @@ func handleLocalPoolConfigSet(c *gin.Context) {
 			return
 		}
 	}
+	if body.StudioTypeLimits != nil {
+		// Normalize: drop blank studios, empty lists, and unsupported types
+		// so the stored map only carries real restrictions.
+		clean := make(map[string][]int)
+		for studio, types := range *body.StudioTypeLimits {
+			studio = strings.TrimSpace(studio)
+			if studio == "" {
+				continue
+			}
+			kept := make([]int, 0, len(types))
+			for _, t := range types {
+				for _, s := range localPoolSupportedTypes {
+					if t == s {
+						kept = append(kept, t)
+						break
+					}
+				}
+			}
+			if len(kept) > 0 {
+				clean[studio] = kept
+			}
+		}
+		blob, err := json.Marshal(clean)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if err := writeLocalPoolConfig(cfgLocalPoolStudioTypeLimits, string(blob)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
 	c.JSON(http.StatusOK, loadLocalPoolConfig())
+}
+
+// handleLocalPoolAllowedTypes returns the channel types the caller may pick for
+// a local-pool upload. Admins get the full supported set; a studio operator is
+// scoped to their studio's configured limit. The enqueue handler enforces the
+// same rule server-side — this endpoint only drives the UI.
+func handleLocalPoolAllowedTypes(c *gin.Context) {
+	if !callerIsStudioOperator(c) {
+		c.JSON(http.StatusOK, gin.H{"types": localPoolSupportedTypes})
+		return
+	}
+	cfg := loadLocalPoolConfig()
+	c.JSON(http.StatusOK, gin.H{"types": localPoolAllowedTypes(cfg, callerStudio(c))})
 }
 
 // handleLocalRPM returns the 5-minute moving average of successful log
@@ -306,6 +394,23 @@ func handleLocalPoolEnqueue(c *gin.Context) {
 	// batch-create default at upload time. Group empty on both ends →
 	// scheduler falls back to 'default' at upload time.
 	cfg := loadLocalPoolConfig()
+	// Enforce per-studio channel-type limits (unset/empty = unrestricted).
+	// Applies to admin and operator alike so the limit can't be bypassed by
+	// uploading on a studio's behalf.
+	{
+		allowed := localPoolAllowedTypes(cfg, studio)
+		ok := false
+		for _, t := range allowed {
+			if t == channelType {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("channel type %d is not allowed for studio %q", channelType, studio)})
+			return
+		}
+	}
 	models := strings.TrimSpace(body.Models)
 	if models == "" {
 		models = strings.TrimSpace(cfg.DefaultModels)

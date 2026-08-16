@@ -1528,6 +1528,9 @@ export const api = {
 
   localPoolGetRPM: () => request<{ rpm: number }>('/api/local-pool/rpm'),
 
+  localPoolAllowedTypes: () =>
+    request<{ types: number[] }>('/api/local-pool/allowed-types'),
+
   localPoolEnqueue: (payload: {
     studio: string
     suffix: string
@@ -1842,6 +1845,9 @@ export type LocalPoolConfig = {
   // rows. Snapshotted per-pending-row at enqueue so a mid-flight
   // change doesn't retarget already-queued keys. Empty → 'default'.
   default_group: string
+  // Per-studio channel-type allowlist. A studio absent from the map (or with
+  // an empty list) is unrestricted. Supported types: 14 Anthropic, 20 OpenRouter.
+  studio_type_limits?: Record<string, number[]>
 }
 
 export type LocalPendingKey = {

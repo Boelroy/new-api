@@ -1,5 +1,12 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, type LocalPendingKey, type LocalPoolConfig } from '../api'
+
+// Channel types the local pool can serve. Mirrors localPoolSupportedTypes in
+// the backend (14 Anthropic, 20 OpenRouter).
+const LOCAL_POOL_PROVIDERS = [
+  { type: 14, label: 'Anthropic' },
+  { type: 20, label: 'OpenRouter' },
+] as const
 
 // Local pool panel — the "Pool 上 Key" tab on KeyCapacity. Same drip
 // mechanism as the Remote Channels pool (interval + batch + auto RPM +
@@ -48,6 +55,9 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
   // channel_type at enqueue; the backend derives model_mapping/param_override
   // from it. Model names stay the same friendly Claude names for both.
   const [channelType, setChannelType] = useState(14)
+  // Operator-scoped allowed types (from /allowed-types). Admin derives the
+  // form's allowed set locally from cfg.studio_type_limits instead.
+  const [allowedTypes, setAllowedTypes] = useState<number[]>(() => LOCAL_POOL_PROVIDERS.map(p => p.type))
   const [models, setModels] = useState('')
   const [input, setInput] = useState('')
   const [enqueueBusy, setEnqueueBusy] = useState(false)
@@ -64,6 +74,35 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
 
   const [pending, setPending] = useState<LocalPendingKey[]>([])
   const studioLocked = !!lockedStudio
+
+  // Fetch the caller's allowed channel types (operator = studio-scoped,
+  // admin = full set). Drives the provider dropdown for operators.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await api.localPoolAllowedTypes()
+        if (res.types?.length) setAllowedTypes(res.types)
+      } catch (e) {
+        console.warn('local pool allowed-types failed', e)
+      }
+    })()
+  }, [])
+
+  // Provider options for the enqueue form. Operator: server-scoped list.
+  // Admin: derived from the selected studio's configured limit (empty =
+  // unrestricted) so the form matches what the backend will accept.
+  const allowedForForm = useMemo<number[]>(() => {
+    if (studioLocked) return allowedTypes
+    const lim = cfg?.studio_type_limits?.[studio] ?? []
+    return lim.length > 0 ? lim : LOCAL_POOL_PROVIDERS.map(p => p.type)
+  }, [studioLocked, allowedTypes, cfg?.studio_type_limits, studio])
+
+  // Keep the selected provider valid when the allowed set changes.
+  useEffect(() => {
+    if (allowedForForm.length > 0 && !allowedForForm.includes(channelType)) {
+      setChannelType(allowedForForm[0])
+    }
+  }, [allowedForForm, channelType])
 
   // Load studios list (super admin) + initial config + queue.
   useEffect(() => {
@@ -333,6 +372,54 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
             className={`w-full border rounded px-2 py-1 text-[11px] font-mono focus:outline-none ${configEditable ? 'border-gray-300 focus:border-gray-900' : 'border-gray-200 bg-gray-50 text-gray-500'}`}
           />
         </div>
+        {/* Per-studio channel-type limits. Nothing checked = unrestricted.
+            Applies to the local pool upload path only; enforced server-side
+            at enqueue. Shared "保存" button up top persists it. */}
+        <div className="px-4 pb-2.5">
+          <label className="block text-[10px] uppercase tracking-wider text-gray-500 font-medium mb-1">
+            工作室渠道类型限制（勾选 = 只能选这些；全不勾 = 不限制）
+          </label>
+          {studios.length === 0 ? (
+            <div className="text-[11px] text-gray-400">暂无工作室</div>
+          ) : (
+            <div className="space-y-1">
+              {studios.map(s => {
+                const limits = cfg?.studio_type_limits?.[s] ?? []
+                const toggle = (t: number) => {
+                  setCfg(c => {
+                    if (!c) return c
+                    const cur: Record<string, number[]> = { ...(c.studio_type_limits ?? {}) }
+                    const set = new Set(cur[s] ?? [])
+                    if (set.has(t)) set.delete(t)
+                    else set.add(t)
+                    const arr = [...set]
+                    if (arr.length === 0) delete cur[s]
+                    else cur[s] = arr
+                    return { ...c, studio_type_limits: cur }
+                  })
+                  setCfgDirty(true)
+                }
+                return (
+                  <div key={s} className="flex items-center gap-3 text-xs">
+                    <span className="font-mono w-32 truncate text-gray-700">{s}</span>
+                    {LOCAL_POOL_PROVIDERS.map(p => (
+                      <label key={p.type} className="flex items-center gap-1 text-gray-600">
+                        <input
+                          type="checkbox"
+                          checked={limits.includes(p.type)}
+                          onChange={() => toggle(p.type)}
+                          disabled={!configEditable}
+                        />
+                        {p.label}
+                      </label>
+                    ))}
+                    {limits.length === 0 && <span className="text-[10px] text-gray-400">不限制</span>}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
         <div className="px-4 pb-2 text-[10px] text-gray-400 flex flex-wrap gap-4">
           <span>当前 RPM: <span className="tabular-nums text-gray-600">{rpmNow ?? '—'}</span></span>
           <span>下一 tick 上 key 数: <span className="tabular-nums text-gray-600">{effectiveN ?? '—'}</span></span>
@@ -401,8 +488,9 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
             onChange={e => setChannelType(parseInt(e.target.value, 10))}
             className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
           >
-            <option value={14}>Anthropic</option>
-            <option value={20}>OpenRouter</option>
+            {LOCAL_POOL_PROVIDERS.filter(p => allowedForForm.includes(p.type)).map(p => (
+              <option key={p.type} value={p.type}>{p.label}</option>
+            ))}
           </select>
         </div>
         <div>

@@ -4395,6 +4395,7 @@ func main() {
 	localPoolAPI := api.Group("", requireRoleOrStudioOperator(minAdminRole))
 	localPoolAPI.POST("/local-pool/enqueue", handleLocalPoolEnqueue)
 	localPoolAPI.GET("/local-pool/queue", handleLocalPoolList)
+	localPoolAPI.GET("/local-pool/allowed-types", handleLocalPoolAllowedTypes)
 	localPoolAPI.DELETE("/local-pool/pending/:id", handleLocalPoolDelete)
 	// Pool config is read by any admin (they need to see the current
 	// throttle so the queue view + RPM readout make sense) but only
