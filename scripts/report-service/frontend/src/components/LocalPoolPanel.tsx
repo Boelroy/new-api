@@ -44,6 +44,10 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
   const [studioMode, setStudioMode] = useState<'pick' | 'new'>('pick')
   const [studios, setStudios] = useState<string[]>([])
   const [suffix, setSuffix] = useState('')
+  // Provider preset: 14 = Anthropic (default), 20 = OpenRouter. Only affects
+  // channel_type at enqueue; the backend derives model_mapping/param_override
+  // from it. Model names stay the same friendly Claude names for both.
+  const [channelType, setChannelType] = useState(14)
   const [models, setModels] = useState('')
   const [input, setInput] = useState('')
   const [enqueueBusy, setEnqueueBusy] = useState(false)
@@ -174,6 +178,7 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
       const res = await api.localPoolEnqueue({
         studio: studioLocked ? '' : studio.trim(),  // server overrides when operator
         suffix: suffix.trim(),
+        type: channelType,
         models: models.trim() || undefined,
         channels,
       })
@@ -388,6 +393,17 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
               className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
             />
           </div>
+        </div>
+        <div>
+          <label className="block text-[11px] text-gray-500 mb-1">Provider</label>
+          <select
+            value={channelType}
+            onChange={e => setChannelType(parseInt(e.target.value, 10))}
+            className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
+          >
+            <option value={14}>Anthropic</option>
+            <option value={20}>OpenRouter</option>
+          </select>
         </div>
         <div>
           <label className="block text-[11px] text-gray-500 mb-1 flex items-center justify-between">

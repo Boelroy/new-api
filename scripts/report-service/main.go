@@ -4026,6 +4026,10 @@ func main() {
 		// config change doesn't retroactively re-target pending rows.
 		// Empty string → scheduler falls back to 'default' at insert time.
 		`ALTER TABLE local_pending_key ADD COLUMN IF NOT EXISTS group_name TEXT NOT NULL DEFAULT ''`,
+		// Per-row channel type (14=Anthropic default, 20=OpenRouter). The
+		// scheduler derives model_mapping / param_override from it at insert
+		// time, mirroring handleBatchCreateChannels. Legacy rows default to 14.
+		`ALTER TABLE local_pending_key ADD COLUMN IF NOT EXISTS channel_type INT NOT NULL DEFAULT 14`,
 		// Per-channel credential blob for batch-created remote channels
 		// (Vertex SA JSON / Vertex API key / Azure key). remote_pending_key
 		// already carries an encrypted copy inside the shared queue row, but

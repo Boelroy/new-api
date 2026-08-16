@@ -251,6 +251,7 @@ func handleLocalPoolEnqueue(c *gin.Context) {
 		Suffix       string  `json:"suffix"`
 		UnitPriceCNY float64 `json:"unit_price_cny"`
 		Models       string  `json:"models"`
+		Type         int     `json:"type"`
 		Channels     []struct {
 			Key          string   `json:"key"`
 			QuotaUSD     float64  `json:"quota_usd"`
@@ -284,6 +285,20 @@ func handleLocalPoolEnqueue(c *gin.Context) {
 	}
 	if len(body.Channels) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no channels provided"})
+		return
+	}
+	// Provider preset. The local pool serves Anthropic (14, default) and
+	// OpenRouter (20); the scheduler derives model_mapping / param_override
+	// from this at upload time. Reject anything else so we don't stage rows
+	// the insert path can't serve.
+	channelType := body.Type
+	if channelType == 0 {
+		channelType = 14
+	}
+	switch channelType {
+	case 14, 20:
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unsupported channel type %d for local pool", channelType)})
 		return
 	}
 	// Per-batch models + group; both fall back to the local-pool config.
@@ -331,10 +346,10 @@ func handleLocalPoolEnqueue(c *gin.Context) {
 		res, err := db.Exec(
 			`INSERT INTO local_pending_key
 			 (studio, suffix, key_hash, key_encrypted, quota_usd, unit_price_cny,
-			  models, group_name, status, created_at, updated_at)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',$9,$9)
+			  models, group_name, channel_type, status, created_at, updated_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$10,'pending',$9,$9)
 			 ON CONFLICT (studio, key_hash) DO NOTHING`,
-			studio, suffix, hash, enc, quotaUSD, unitPtr, models, groupName, now,
+			studio, suffix, hash, enc, quotaUSD, unitPtr, models, groupName, now, channelType,
 		)
 		if err != nil {
 			skipped++
@@ -605,7 +620,7 @@ func uploadLocalPoolBatch(n int) {
 		return
 	}
 	rows, err := db.Query(
-		`SELECT id, studio, suffix, key_encrypted, quota_usd, unit_price_cny, models, group_name
+		`SELECT id, studio, suffix, key_encrypted, quota_usd, unit_price_cny, models, group_name, channel_type
 		   FROM local_pending_key WHERE status='pending'
 		  ORDER BY created_at ASC, id ASC
 		  LIMIT $1`,
@@ -616,20 +631,21 @@ func uploadLocalPoolBatch(n int) {
 		return
 	}
 	type job struct {
-		id      int64
-		studio  string
-		suffix  string
-		enc     string
-		quota   float64
-		unitPtr *float64
-		models  string
-		group   string
+		id          int64
+		studio      string
+		suffix      string
+		enc         string
+		quota       float64
+		unitPtr     *float64
+		models      string
+		group       string
+		channelType int
 	}
 	jobs := make([]job, 0, n)
 	for rows.Next() {
 		var j job
 		var unit sql.NullFloat64
-		if err := rows.Scan(&j.id, &j.studio, &j.suffix, &j.enc, &j.quota, &unit, &j.models, &j.group); err != nil {
+		if err := rows.Scan(&j.id, &j.studio, &j.suffix, &j.enc, &j.quota, &unit, &j.models, &j.group, &j.channelType); err != nil {
 			continue
 		}
 		if unit.Valid {
@@ -660,13 +676,7 @@ func uploadLocalPoolBatch(n int) {
 	// never insert a channel with an empty models list. Same cascade for
 	// group_name — empty → local pool default_group → 'default'.
 	cfg := loadLocalPoolConfig()
-	fallbackModels := strings.TrimSpace(cfg.DefaultModels)
-	if fallbackModels == "" {
-		// Local pool inherits the Anthropic default — it's Claude-only in
-		// practice. Explicit type=14 keeps the call site self-documenting
-		// after the per-type refactor.
-		fallbackModels = getBatchCreateModels(14)
-	}
+	cfgFallbackModels := strings.TrimSpace(cfg.DefaultModels)
 	fallbackGroup := strings.TrimSpace(cfg.DefaultGroup)
 	if fallbackGroup == "" {
 		fallbackGroup = "default"
@@ -681,7 +691,11 @@ func uploadLocalPoolBatch(n int) {
 		}
 		modelsStr := strings.TrimSpace(j.models)
 		if modelsStr == "" {
-			modelsStr = fallbackModels
+			modelsStr = cfgFallbackModels
+		}
+		if modelsStr == "" {
+			// Per-type default: type 20 → OpenRouter list, else Anthropic.
+			modelsStr = getBatchCreateModels(j.channelType)
 		}
 		modelsList := strings.Split(modelsStr, ",")
 		groupStr := strings.TrimSpace(j.group)
@@ -690,7 +704,7 @@ func uploadLocalPoolBatch(n int) {
 		}
 		pMax++
 		if err := insertLocalChannelForPending(j.id, j.studio, j.suffix, key, j.quota, j.unitPtr,
-			pMax, dateStr, modelsStr, modelsList, groupStr); err != nil {
+			pMax, dateStr, modelsStr, modelsList, groupStr, j.channelType); err != nil {
 			recordLocalFailure(j.id, err.Error())
 			continue
 		}
@@ -702,7 +716,7 @@ func uploadLocalPoolBatch(n int) {
 // for a single pending row and flips it to 'active' on success. All in
 // one tx so a mid-flight failure doesn't leave orphan abilities rows.
 func insertLocalChannelForPending(pendingID int64, studio, suffix, key string, quotaUSD float64,
-	unitPtr *float64, priority int64, dateStr, activeModels string, models []string, groupName string) error {
+	unitPtr *float64, priority int64, dateStr, activeModels string, models []string, groupName string, channelType int) error {
 	quotaInt := int(quotaUSD)
 	name := fmt.Sprintf("%s-%s-%s-%d", dateStr, studio, suffix, quotaInt)
 	now := time.Now().Unix()
@@ -726,6 +740,19 @@ func insertLocalChannelForPending(pendingID int64, studio, suffix, key string, q
 	}
 	channelGroup := strings.Join(groupList, ",")
 
+	// model_mapping / param_override are derived from the channel type,
+	// mirroring handleBatchCreateChannels. Anthropic (14) needs neither;
+	// OpenRouter (20) maps friendly names to anthropic/* slugs and pins
+	// routing to the anthropic provider.
+	modelMapping := ""
+	paramOverride := ""
+	if channelType == 20 {
+		if mm, mmErr := buildOpenRouterModelMapping(); mmErr == nil {
+			modelMapping = mm
+		}
+		paramOverride = openRouterParamOverride
+	}
+
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin: %v", err)
@@ -736,11 +763,11 @@ func insertLocalChannelForPending(pendingID int64, studio, suffix, key string, q
 	if err := tx.QueryRow(`
 		INSERT INTO channels
 		(type, key, status, name, weight, created_time, base_url, "group", models,
-		 model_mapping, status_code_mapping, priority, auto_ban, used_quota, channel_info, tag)
-		VALUES (14, $1, 1, $2, 0, $3, '', $8, $4,
-		        '', '', $7, 1, 0, $5::json, $6)
+		 model_mapping, status_code_mapping, priority, auto_ban, used_quota, channel_info, tag, param_override)
+		VALUES ($9, $1, 1, $2, 0, $3, '', $8, $4,
+		        $10, '', $7, 1, 0, $5::json, $6, $11)
 		RETURNING id`,
-		key, name, now, activeModels, channelInfoDefault, studio, priority, channelGroup,
+		key, name, now, activeModels, channelInfoDefault, studio, priority, channelGroup, channelType, modelMapping, paramOverride,
 	).Scan(&channelID); err != nil {
 		return fmt.Errorf("insert channel: %v", err)
 	}

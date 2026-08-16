@@ -1531,6 +1531,7 @@ export const api = {
   localPoolEnqueue: (payload: {
     studio: string
     suffix: string
+    type?: number
     unit_price_cny?: number
     models?: string
     channels: { key: string; quota_usd: number; unit_price_cny?: number }[]
