@@ -1529,7 +1529,7 @@ export const api = {
   localPoolGetRPM: () => request<{ rpm: number }>('/api/local-pool/rpm'),
 
   localPoolAllowedTypes: () =>
-    request<{ types: number[] }>('/api/local-pool/allowed-types'),
+    request<{ limits: number[] }>('/api/local-pool/allowed-types'),
 
   localPoolEnqueue: (payload: {
     studio: string

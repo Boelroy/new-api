@@ -55,9 +55,9 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
   // channel_type at enqueue; the backend derives model_mapping/param_override
   // from it. Model names stay the same friendly Claude names for both.
   const [channelType, setChannelType] = useState(14)
-  // Operator-scoped allowed types (from /allowed-types). Admin derives the
-  // form's allowed set locally from cfg.studio_type_limits instead.
-  const [allowedTypes, setAllowedTypes] = useState<number[]>(() => LOCAL_POOL_PROVIDERS.map(p => p.type))
+  // Operator's configured per-studio limit (empty = unrestricted). Admin
+  // leaves this empty and the form derives the set from cfg.studio_type_limits.
+  const [studioLimits, setStudioLimits] = useState<number[]>([])
   const [models, setModels] = useState('')
   const [input, setInput] = useState('')
   const [enqueueBusy, setEnqueueBusy] = useState(false)
@@ -81,7 +81,7 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
     void (async () => {
       try {
         const res = await api.localPoolAllowedTypes()
-        if (res.types?.length) setAllowedTypes(res.types)
+        setStudioLimits(res.limits ?? [])
       } catch (e) {
         console.warn('local pool allowed-types failed', e)
       }
@@ -92,10 +92,10 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
   // Admin: derived from the selected studio's configured limit (empty =
   // unrestricted) so the form matches what the backend will accept.
   const allowedForForm = useMemo<number[]>(() => {
-    if (studioLocked) return allowedTypes
-    const lim = cfg?.studio_type_limits?.[studio] ?? []
-    return lim.length > 0 ? lim : LOCAL_POOL_PROVIDERS.map(p => p.type)
-  }, [studioLocked, allowedTypes, cfg?.studio_type_limits, studio])
+    const supported = LOCAL_POOL_PROVIDERS.map(p => p.type)
+    const lim = studioLocked ? studioLimits : (cfg?.studio_type_limits?.[studio] ?? [])
+    return lim.length > 0 ? supported.filter(t => lim.includes(t)) : supported
+  }, [studioLocked, studioLimits, cfg?.studio_type_limits, studio])
 
   // Keep the selected provider valid when the allowed set changes.
   useEffect(() => {

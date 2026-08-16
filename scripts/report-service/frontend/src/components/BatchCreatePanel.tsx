@@ -147,6 +147,13 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   // edited them (tracked by `modelsDirty` / `groupDirty`).
   const [presetID, setPresetID] = useState<PresetID>('anthropic')
   const preset = PRESETS.find(p => p.id === presetID) ?? PRESETS[0]
+  // Operator's per-studio channel-type limit (empty = unrestricted). Filters
+  // the provider dropdown so operators only see types their studio may use;
+  // the backend enforces the same rule regardless.
+  const [studioLimits, setStudioLimits] = useState<number[]>([])
+  const visiblePresets = studioLimits.length > 0
+    ? PRESETS.filter(p => studioLimits.includes(p.type))
+    : PRESETS
   const [models, setModels] = useState(DEFAULT_ANTHROPIC_MODELS)
   const [group, setGroup] = useState('default')
   const [modelsDirty, setModelsDirty] = useState(false)
@@ -192,6 +199,26 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   const [modelsMsg, setModelsMsg] = useState<string | null>(null)
 
   const studioLocked = !!lockedStudio
+
+  // Operator: fetch this studio's channel-type limit to filter the dropdown.
+  useEffect(() => {
+    if (!studioLocked) return
+    void (async () => {
+      try {
+        const res = await api.localPoolAllowedTypes()
+        setStudioLimits(res.limits ?? [])
+      } catch { /* keep unrestricted */ }
+    })()
+  }, [studioLocked])
+
+  // Keep the selected preset valid when the limit narrows the list.
+  useEffect(() => {
+    if (studioLimits.length === 0) return
+    const allowed = PRESETS.filter(p => studioLimits.includes(p.type))
+    if (allowed.length > 0 && !allowed.some(p => p.id === presetID)) {
+      setPresetID(allowed[0].id)
+    }
+  }, [studioLimits, presetID])
 
   useEffect(() => {
     if (!studioLocked) {
@@ -447,7 +474,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
           }}
           className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm bg-white focus:outline-none focus:border-gray-900"
         >
-          {PRESETS.map(p => (
+          {visiblePresets.map(p => (
             <option key={p.id} value={p.id}>{p.label}</option>
           ))}
         </select>

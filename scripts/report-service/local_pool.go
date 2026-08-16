@@ -293,12 +293,20 @@ func handleLocalPoolConfigSet(c *gin.Context) {
 // scoped to their studio's configured limit. The enqueue handler enforces the
 // same rule server-side — this endpoint only drives the UI.
 func handleLocalPoolAllowedTypes(c *gin.Context) {
+	// Returns the caller's configured per-studio channel-type limit (empty =
+	// unrestricted). Operator → their studio's limit; admin → empty (they pick
+	// a studio in the form, so the UI applies that studio's config directly).
+	// Shared by the local pool and the synchronous batch-create panel, which
+	// each intersect it with their own supported-type set.
 	if !callerIsStudioOperator(c) {
-		c.JSON(http.StatusOK, gin.H{"types": localPoolSupportedTypes})
+		c.JSON(http.StatusOK, gin.H{"limits": []int{}})
 		return
 	}
-	cfg := loadLocalPoolConfig()
-	c.JSON(http.StatusOK, gin.H{"types": localPoolAllowedTypes(cfg, callerStudio(c))})
+	lim := loadLocalPoolConfig().StudioTypeLimits[callerStudio(c)]
+	if lim == nil {
+		lim = []int{}
+	}
+	c.JSON(http.StatusOK, gin.H{"limits": lim})
 }
 
 // handleLocalRPM returns the 5-minute moving average of successful log

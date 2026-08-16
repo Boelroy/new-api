@@ -2440,6 +2440,23 @@ func handleBatchCreateChannels(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unsupported channel type %d", channelType)})
 		return
 	}
+	// Per-studio channel-type limit (shared with the local pool config). A
+	// studio with a non-empty configured list may only create those types;
+	// unset = unrestricted. Enforced for admins creating on a studio's behalf
+	// too, so the limit can't be bypassed via the synchronous batch path.
+	if lim := loadLocalPoolConfig().StudioTypeLimits[studio]; len(lim) > 0 {
+		ok := false
+		for _, t := range lim {
+			if t == channelType {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("channel type %d is not allowed for studio %q", channelType, studio)})
+			return
+		}
+	}
 	groupName := strings.TrimSpace(payload.Group)
 	if groupName == "" {
 		switch channelType {
