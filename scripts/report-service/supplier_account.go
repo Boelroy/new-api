@@ -38,6 +38,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -56,6 +57,10 @@ var (
 	// supplierAccountToken is the OpenAPI token for /openapi/* (upload +
 	// metrics). Filled later by the portal admin.
 	supplierAccountToken string
+	// supplierQuotaWebhook is the bootstrap fallback (env SUPPLIER_QUOTA_WEBHOOK)
+	// for the per-account quota alert channel. Independent of LARK_WEBHOOK
+	// (group-balance alerts). The report_config override takes precedence.
+	supplierQuotaWebhook string
 )
 
 // supplierWebConfigured reports whether the WEB login flow can run (drives the
@@ -71,7 +76,45 @@ const (
 	cfgSupplierOpenAPIToken     = "supplier_openapi_token"
 	cfgSupplierVisibleProvers   = "supplier_visible_providers"
 	cfgSupplierProviderDefaults = "supplier_provider_defaults"
+	cfgSupplierQuotaWebhook     = "supplier_quota_webhook"
+	cfgSupplierFxRate           = "supplier_fx_rate"
+	cfgSupplierQuotaTickSec     = "supplier_quota_tick_sec"
+	cfgDefaultFxRate            = "default_fx_rate"
 )
+
+// supplierDefaultFxRate is the RMB->USD divisor used when no rate is
+// configured. The portal reports cost in RMB; the UI and quotas are in USD.
+const supplierDefaultFxRate = 7.2
+
+// supplierQuotaTickSec bounds for the alert loop interval (seconds).
+const (
+	supplierQuotaTickDef = 3600
+	supplierQuotaTickMin = 300
+	supplierQuotaTickMax = 86400
+)
+
+// supplierFxRate returns the RMB->USD divisor: the supplier-specific rate if
+// set, else the service-wide default_fx_rate, else supplierDefaultFxRate.
+// Always > 0.
+func supplierFxRate() float64 {
+	for _, key := range []string{cfgSupplierFxRate, cfgDefaultFxRate} {
+		if raw := strings.TrimSpace(supplierConfigGet(key)); raw != "" {
+			if f, err := strconv.ParseFloat(raw, 64); err == nil && f > 0 {
+				return f
+			}
+		}
+	}
+	return supplierDefaultFxRate
+}
+
+// effectiveQuotaWebhook prefers the web-configured quota webhook, falling back
+// to the SUPPLIER_QUOTA_WEBHOOK env for bootstrap.
+func effectiveQuotaWebhook() string {
+	if w := strings.TrimSpace(supplierConfigGet(cfgSupplierQuotaWebhook)); w != "" {
+		return w
+	}
+	return supplierQuotaWebhook
+}
 
 // supplierProviderDefault is the admin-configured prefill for one provider:
 // which models to pre-select and the default account type when a studio picks
@@ -567,6 +610,166 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"id": upstream.ID, "alias": upstream.Alias, "msg": msg})
 }
 
+// ---- Sync portal roster into local table (admin) — WEB token ----
+
+// portalAccount is one entry of the WEB `/supplier/accounts` list. The portal
+// returns the full api_key here (unlike our masked local view). `ID` is the
+// account id used as `account_ids` in metrics queries; CreatedAt is
+// "2006-01-02 15:04" in the portal's local time.
+type portalAccount struct {
+	ID           int64  `json:"id"`
+	AccountAlias string `json:"account_alias"`
+	AccountType  int    `json:"account_type"`
+	APIKey       string `json:"api_key"`
+	Model        string `json:"model"`
+	Provider     string `json:"provider"`
+	Remark       string `json:"remark"`
+	SupplierName string `json:"supplier_name"`
+	CreatedAt    string `json:"created_at"`
+}
+
+// fetchSupplierPortalAccounts pages through the WEB `/supplier/accounts`
+// endpoint and returns the full roster the logged-in supplier can see.
+func fetchSupplierPortalAccounts() ([]portalAccount, error) {
+	tok, err := getSupplierWebToken()
+	if err != nil {
+		return nil, fmt.Errorf("supplier login failed: %w", err)
+	}
+	const pageSize = 100
+	out := make([]portalAccount, 0, pageSize)
+	// Cap pages as a runaway guard (100 pages = 10k accounts).
+	for page := 1; page <= 100; page++ {
+		path := fmt.Sprintf(
+			"/supplier-account/api/supplier/accounts?status=all&keyword=&page=%d&page_size=%d&provider=&model=&account_type=",
+			page, pageSize,
+		)
+		status, body, err := supplierProxy(http.MethodGet, path, tok, nil)
+		if err != nil {
+			return nil, err
+		}
+		if status != http.StatusOK {
+			return nil, errors.New(supplierErr(body))
+		}
+		var parsed struct {
+			List []portalAccount `json:"list"`
+		}
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			return nil, fmt.Errorf("unexpected accounts response: %w", err)
+		}
+		out = append(out, parsed.List...)
+		if len(parsed.List) < pageSize {
+			break
+		}
+	}
+	return out, nil
+}
+
+// supplierPortalLoc is the portal's clock (UTC+8). The metrics endpoint checks
+// end_time against "current time" and rejects >7-day spans in this timezone,
+// and created_at strings are in it, so we format/parse all portal times here
+// rather than relying on the container's TZ / tzdata availability.
+var supplierPortalLoc = time.FixedZone("CST", 8*3600)
+
+// parsePortalCreatedAt converts the portal's "2006-01-02 15:04" local-time
+// string to a unix timestamp, falling back to fallback on any parse error.
+func parsePortalCreatedAt(s string, fallback int64) int64 {
+	s = strings.TrimSpace(s)
+	for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02 15:04"} {
+		if t, err := time.ParseInLocation(layout, s, supplierPortalLoc); err == nil {
+			return t.Unix()
+		}
+	}
+	return fallback
+}
+
+func handleSupplierAccountSync(c *gin.Context) {
+	if !supplierWebConfigured() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier account portal not configured"})
+		return
+	}
+	accounts, err := fetchSupplierPortalAccounts()
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+
+	uidAny, _ := c.Get("user_id")
+	uid, _ := uidAny.(int64)
+
+	now := time.Now().Unix()
+	synced := 0
+	for _, a := range accounts {
+		if a.ID == 0 || strings.TrimSpace(a.Provider) == "" {
+			continue
+		}
+		sum := sha256.Sum256([]byte(a.APIKey))
+		keyHash := hex.EncodeToString(sum[:])
+		last8 := a.APIKey
+		if len(last8) > 8 {
+			last8 = last8[len(last8)-8:]
+		}
+		created := parsePortalCreatedAt(a.CreatedAt, now)
+
+		// Upsert on remote_account_id. quota_usd / quota_alerted_at are omitted
+		// from the column list so a re-sync preserves any configured quota.
+		// created_at is preserved on conflict (only updated_at bumps).
+		if _, err := db.Exec(
+			`INSERT INTO rs_supplier_account
+			   (uploaded_by, studio, provider, models, remote_account_id, alias,
+			    account_type, remark, key_last8, key_hash, created_at, updated_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+			 ON CONFLICT (remote_account_id) DO UPDATE SET
+			    uploaded_by=EXCLUDED.uploaded_by, studio=EXCLUDED.studio,
+			    provider=EXCLUDED.provider, models=EXCLUDED.models,
+			    alias=EXCLUDED.alias, account_type=EXCLUDED.account_type,
+			    remark=EXCLUDED.remark, key_last8=EXCLUDED.key_last8,
+			    key_hash=EXCLUDED.key_hash, updated_at=EXCLUDED.updated_at`,
+			uid, a.SupplierName, a.Provider, a.Model, a.ID, a.AccountAlias,
+			a.AccountType, a.Remark, last8, keyHash, created, now,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record account: " + err.Error()})
+			return
+		}
+		synced++
+	}
+
+	c.JSON(http.StatusOK, gin.H{"synced": synced, "total": len(accounts)})
+}
+
+// handleSupplierAccountSetQuota sets a per-account USD cost cap (0 clears it).
+// Resets the alert cooldown so a lowered/raised quota re-evaluates cleanly.
+func handleSupplierAccountSetQuota(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid account id"})
+		return
+	}
+	var body struct {
+		QuotaUSD float64 `json:"quota_usd"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	if body.QuotaUSD < 0 || body.QuotaUSD > 1e7 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "quota_usd must be between 0 and 10000000"})
+		return
+	}
+	res, err := db.Exec(
+		`UPDATE rs_supplier_account SET quota_usd=$1, quota_alerted_at=0, updated_at=$2 WHERE id=$3`,
+		body.QuotaUSD, time.Now().Unix(), id,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "account not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"id": id, "quota_usd": body.QuotaUSD})
+}
+
 // ---- List local accounts (scoped by role) ----
 
 type supplierAccountRow struct {
@@ -579,9 +782,10 @@ type supplierAccountRow struct {
 	Remark          string `json:"remark"`
 	KeyLast8        string `json:"key_last8"`
 	Studio          string `json:"studio"`
-	UploadedBy      int64  `json:"uploaded_by"`
-	Username        string `json:"username,omitempty"`
-	CreatedAt       int64  `json:"created_at"`
+	UploadedBy      int64   `json:"uploaded_by"`
+	Username        string  `json:"username,omitempty"`
+	CreatedAt       int64   `json:"created_at"`
+	QuotaUSD        float64 `json:"quota_usd"`
 }
 
 // maskSupplierAlias hides the supplier/company name embedded in a portal alias
@@ -601,7 +805,7 @@ func handleSupplierAccountList(c *gin.Context) {
 
 	query := `SELECT a.id, a.remote_account_id, a.provider, a.models, a.alias,
 	                 a.account_type, a.remark, a.key_last8, a.studio,
-	                 a.uploaded_by, COALESCE(u.username, ''), a.created_at
+	                 a.uploaded_by, COALESCE(u.username, ''), a.created_at, a.quota_usd
 	            FROM rs_supplier_account a
 	            LEFT JOIN rs_auth_user u ON u.id = a.uploaded_by`
 	var (
@@ -633,7 +837,7 @@ func handleSupplierAccountList(c *gin.Context) {
 		if err := rows.Scan(
 			&row.ID, &row.RemoteAccountID, &row.Provider, &row.Models, &row.Alias,
 			&row.AccountType, &row.Remark, &row.KeyLast8, &row.Studio,
-			&row.UploadedBy, &row.Username, &row.CreatedAt,
+			&row.UploadedBy, &row.Username, &row.CreatedAt, &row.QuotaUSD,
 		); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -646,7 +850,9 @@ func handleSupplierAccountList(c *gin.Context) {
 		row.Alias = maskSupplierAlias(row.Alias)
 		out = append(out, row)
 	}
-	c.JSON(http.StatusOK, gin.H{"accounts": out})
+	// fx_rate lets both admins and suppliers convert the portal's RMB cost to
+	// USD client-side, consistent with the USD quota.
+	c.JSON(http.StatusOK, gin.H{"accounts": out, "fx_rate": supplierFxRate()})
 }
 
 // callerIsSupplierAdmin returns true when the caller may see every studio's
@@ -805,11 +1011,19 @@ func handleSupplierSettingsGet(c *gin.Context) {
 	if vp == nil {
 		vp = []string{}
 	}
+	webhook := effectiveQuotaWebhook()
+	whLast4 := ""
+	if len(webhook) > 4 {
+		whLast4 = webhook[len(webhook)-4:]
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"openapi_token_set":   token != "",
 		"openapi_token_last4": last4,
 		"visible_providers":   vp,
 		"provider_defaults":   supplierProviderDefaults(),
+		"quota_webhook_set":   webhook != "",
+		"quota_webhook_last4": whLast4,
+		"fx_rate":             supplierFxRate(),
 	})
 }
 
@@ -827,6 +1041,8 @@ func handleSupplierSettingsSet(c *gin.Context) {
 		OpenAPIToken     *string                             `json:"openapi_token"`
 		VisibleProviders *[]string                           `json:"visible_providers"`
 		ProviderDefaults *map[string]supplierProviderDefault `json:"provider_defaults"`
+		QuotaWebhook     *string                             `json:"quota_webhook"`
+		FxRate           *float64                            `json:"fx_rate"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
@@ -834,6 +1050,22 @@ func handleSupplierSettingsSet(c *gin.Context) {
 	}
 	if body.OpenAPIToken != nil {
 		if err := supplierConfigSet(cfgSupplierOpenAPIToken, strings.TrimSpace(*body.OpenAPIToken)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.QuotaWebhook != nil {
+		if err := supplierConfigSet(cfgSupplierQuotaWebhook, strings.TrimSpace(*body.QuotaWebhook)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.FxRate != nil {
+		if *body.FxRate <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "fx_rate must be > 0"})
+			return
+		}
+		if err := supplierConfigSet(cfgSupplierFxRate, strconv.FormatFloat(*body.FxRate, 'f', -1, 64)); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -885,4 +1117,181 @@ func handleSupplierSettingsSet(c *gin.Context) {
 		}
 	}
 	handleSupplierSettingsGet(c)
+}
+
+// ---- Per-account quota alert loop (leader-gated) — OpenAPI token ----
+
+const supplierQuotaLookbackDays = 180
+
+// supplierQuotaTickSeconds reads the alert-loop interval from report_config,
+// clamped, defaulting when unset/invalid. Re-read each tick so the interval is
+// tunable without a restart.
+func supplierQuotaTickSeconds() int {
+	n := supplierQuotaTickDef
+	if raw := strings.TrimSpace(supplierConfigGet(cfgSupplierQuotaTickSec)); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil {
+			n = v
+		}
+	}
+	if n < supplierQuotaTickMin {
+		n = supplierQuotaTickMin
+	}
+	if n > supplierQuotaTickMax {
+		n = supplierQuotaTickMax
+	}
+	return n
+}
+
+// startSupplierQuotaAlertLoop periodically compares each account's cumulative
+// USD spend to its configured quota and fires a Lark alert to the dedicated
+// quota webhook. Leader-gated so only one node alerts across the deployment.
+// No-op when the portal isn't configured at all; webhook/token/quota are
+// re-checked each tick so live config changes take effect without a restart.
+func startSupplierQuotaAlertLoop() {
+	if supplierAccountBaseURL == "" {
+		return
+	}
+	go func() {
+		// Stagger past the other schedulers' first ticks on a cold start.
+		time.Sleep(90 * time.Second)
+		for {
+			if IsLeader() {
+				runSupplierQuotaCheck()
+			}
+			time.Sleep(time.Duration(supplierQuotaTickSeconds()) * time.Second)
+		}
+	}()
+}
+
+// quotaAccount is one account under quota evaluation.
+type quotaAccount struct {
+	id, remoteID, alertedAt, createdAt int64
+	alias                              string
+	quotaUSD                           float64
+}
+
+func runSupplierQuotaCheck() {
+	webhook := effectiveQuotaWebhook()
+	if webhook == "" || !supplierOpenAPIConfigured() {
+		return
+	}
+	rows, err := db.Query(`SELECT id, remote_account_id, alias, quota_usd, quota_alerted_at, created_at
+	                        FROM rs_supplier_account WHERE quota_usd > 0`)
+	if err != nil {
+		log.Printf("[supplier-quota] load accounts: %v", err)
+		return
+	}
+	var (
+		accts         []quotaAccount
+		ids           = make([]int64, 0)
+		aliasToRemote = make(map[string]int64)
+		minCreated    = time.Now().Unix()
+	)
+	for rows.Next() {
+		var a quotaAccount
+		if err := rows.Scan(&a.id, &a.remoteID, &a.alias, &a.quotaUSD, &a.alertedAt, &a.createdAt); err != nil {
+			rows.Close()
+			log.Printf("[supplier-quota] scan: %v", err)
+			return
+		}
+		accts = append(accts, a)
+		ids = append(ids, a.remoteID)
+		if a.alias != "" {
+			aliasToRemote[a.alias] = a.remoteID
+		}
+		if a.createdAt > 0 && a.createdAt < minCreated {
+			minCreated = a.createdAt
+		}
+	}
+	rows.Close()
+	if len(accts) == 0 {
+		return
+	}
+
+	costRMB, err := supplierLifetimeCostRMB(ids, aliasToRemote, minCreated)
+	if err != nil {
+		log.Printf("[supplier-quota] usage query: %v", err)
+		return
+	}
+
+	fx := supplierFxRate()
+	now := time.Now().Unix()
+	for _, a := range accts {
+		usd := costRMB[a.remoteID] / fx
+		if usd < a.quotaUSD {
+			continue
+		}
+		// Re-alert at most once per 24h while still over quota.
+		if now-a.alertedAt < 24*3600 {
+			continue
+		}
+		msg := fmt.Sprintf(
+			"🚨 账号额度预警\n账号：%s (id=%d)\n累计消耗：$%.2f / 额度 $%.2f\n汇率：%.2f（口径：单账号累计）",
+			maskSupplierAlias(a.alias), a.remoteID, usd, a.quotaUSD, fx,
+		)
+		sendLarkTo(webhook, msg)
+		if _, err := db.Exec(`UPDATE rs_supplier_account SET quota_alerted_at=$1 WHERE id=$2`, now, a.id); err != nil {
+			log.Printf("[supplier-quota] mark alerted id=%d: %v", a.id, err)
+		}
+	}
+}
+
+// supplierLifetimeCostRMB sums each account's portal cost (RMB) from its
+// creation (bounded to a 180-day lookback) to now. The metrics endpoint caps a
+// single query at 7 days / 100 ids, so we window in <7-day chunks and batch
+// ids, keying results back onto remote_account_id via the shared alias.
+func supplierLifetimeCostRMB(ids []int64, aliasToRemote map[string]int64, minCreated int64) (map[int64]float64, error) {
+	const layout = "2006-01-02 15:04:05"
+	now := time.Now().In(supplierPortalLoc)
+	earliest := now.AddDate(0, 0, -supplierQuotaLookbackDays)
+	begin := time.Unix(minCreated, 0).In(supplierPortalLoc)
+	if begin.Before(earliest) {
+		begin = earliest
+	}
+	// Just under 7 days so the portal's ">7天" guard never trips.
+	step := 7*24*time.Hour - time.Minute
+
+	out := make(map[int64]float64, len(ids))
+	for chunkStart := begin; chunkStart.Before(now); chunkStart = chunkStart.Add(step) {
+		chunkEnd := chunkStart.Add(step)
+		if chunkEnd.After(now) {
+			chunkEnd = now
+		}
+		for start := 0; start < len(ids); start += 100 {
+			end := start + 100
+			if end > len(ids) {
+				end = len(ids)
+			}
+			reqBytes, _ := json.Marshal(map[string]any{
+				"account_ids": ids[start:end],
+				"begin_time":  chunkStart.Format(layout),
+				"end_time":    chunkEnd.Format(layout),
+				"aggregate":   false,
+			})
+			status, body, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/metrics/query", effectiveOpenAPIToken(), reqBytes)
+			if err != nil {
+				return nil, err
+			}
+			if status < 200 || status >= 300 {
+				return nil, errors.New(supplierErr(body))
+			}
+			var parsed struct {
+				Accounts []supplierMetric `json:"accounts"`
+			}
+			if err := json.Unmarshal(body, &parsed); err != nil {
+				return nil, err
+			}
+			for _, m := range parsed.Accounts {
+				if m.Cost == nil {
+					continue
+				}
+				rid, ok := aliasToRemote[m.AccountAlias]
+				if !ok {
+					rid = m.AID
+				}
+				out[rid] += *m.Cost
+			}
+		}
+	}
+	return out, nil
 }

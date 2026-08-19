@@ -94,6 +94,11 @@ var v2SchemaStatements = []string{
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS ux_supplier_account_remote_id ON rs_supplier_account(remote_account_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_supplier_account_uploaded_by ON rs_supplier_account(uploaded_by)`,
+	// Per-account USD quota (cost cap; 0 = no limit) and the last time a quota
+	// alert fired for it (unix seconds; drives a re-alert cooldown). Added via
+	// idempotent ALTER so existing deployments migrate on startup.
+	`ALTER TABLE rs_supplier_account ADD COLUMN IF NOT EXISTS quota_usd DOUBLE PRECISION NOT NULL DEFAULT 0`,
+	`ALTER TABLE rs_supplier_account ADD COLUMN IF NOT EXISTS quota_alerted_at BIGINT NOT NULL DEFAULT 0`,
 }
 
 // initV2Schema applies all V2 DDLs. Panics on failure — startup should not

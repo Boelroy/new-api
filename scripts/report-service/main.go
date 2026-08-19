@@ -481,14 +481,21 @@ func canNotify(key string) bool {
 }
 
 func sendLark(msg string) {
-	if larkWebhook == "" {
+	sendLarkTo(larkWebhook, msg)
+}
+
+// sendLarkTo posts a Lark text message to an explicit webhook URL. Used by the
+// group-balance alerts (larkWebhook) and the supplier quota alerts, which point
+// at independently-configured webhooks.
+func sendLarkTo(webhook, msg string) {
+	if webhook == "" {
 		return
 	}
 	body, _ := json.Marshal(map[string]any{
 		"msg_type": "text",
 		"content":  map[string]string{"text": msg},
 	})
-	resp, err := http.Post(larkWebhook, "application/json", bytes.NewReader(body))
+	resp, err := http.Post(webhook, "application/json", bytes.NewReader(body))
 	if err != nil {
 		log.Printf("lark notify error: %v", err)
 		return
@@ -3524,6 +3531,7 @@ func main() {
 	supplierAccountUsername = strings.TrimSpace(os.Getenv("SUPPLIER_ACCOUNT_USERNAME"))
 	supplierAccountPassword = os.Getenv("SUPPLIER_ACCOUNT_PASSWORD")
 	supplierAccountToken = strings.TrimSpace(os.Getenv("SUPPLIER_ACCOUNT_TOKEN"))
+	supplierQuotaWebhook = strings.TrimSpace(os.Getenv("SUPPLIER_QUOTA_WEBHOOK"))
 	pipiReportURL = os.Getenv("PIPI_REPORT_URL")
 	pipiReportAPIKey = os.Getenv("PIPI_REPORT_API_KEY")
 	larkWebhook = os.Getenv("LARK_WEBHOOK")
@@ -4216,6 +4224,7 @@ func main() {
 	startLocalHealthLoop()
 	startRemoteErrorLogSync()
 	startRemoteAutoDisableLoop()
+	startSupplierQuotaAlertLoop()
 	if profitEnabled {
 		startPipiSync()
 		startDownstreamDailyCarryForward()
@@ -4305,6 +4314,10 @@ func main() {
 	supplierAPI.GET("/accounts", handleSupplierAccountList)
 	supplierAPI.POST("/accounts", handleSupplierAccountCreate)
 	supplierAPI.POST("/metrics", handleSupplierMetrics)
+	// Sync the portal's account roster into the local table, and per-account
+	// USD quota config — admin-only (further restricts the group's gate).
+	supplierAPI.POST("/sync", requireRole(minAdminRole), handleSupplierAccountSync)
+	supplierAPI.PUT("/accounts/:id/quota", requireRole(minAdminRole), handleSupplierAccountSetQuota)
 	// Per-provider default models + account type, read by the upload form
 	// (available to suppliers too — not sensitive).
 	supplierAPI.GET("/provider-defaults", handleSupplierProviderDefaults)

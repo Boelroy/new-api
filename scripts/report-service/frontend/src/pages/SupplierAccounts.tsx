@@ -88,12 +88,25 @@ export default function SupplierAccounts() {
   const [loadingMetrics, setLoadingMetrics] = useState(false)
   const [metricsErr, setMetricsErr] = useState<string | null>(null)
 
+  // RMB->USD divisor (from the accounts response); cost/quota are shown in USD.
+  const [fxRate, setFxRate] = useState(7.2)
+
+  // Sync-from-portal (admin) + per-account quota editing.
+  const [syncing, setSyncing] = useState(false)
+  const [syncMsg, setSyncMsg] = useState<string | null>(null)
+  const [quotaDrafts, setQuotaDrafts] = useState<Record<number, string>>({})
+  const [savingQuota, setSavingQuota] = useState<number | null>(null)
+
   // Admin settings: OpenAPI token + provider visibility.
   const [settings, setSettings] = useState<SupplierSettings | null>(null)
   const [tokenInput, setTokenInput] = useState('')
   const [visibleSet, setVisibleSet] = useState<Set<string>>(new Set())
   const [savingToken, setSavingToken] = useState(false)
   const [savingVis, setSavingVis] = useState(false)
+  const [webhookInput, setWebhookInput] = useState('')
+  const [savingWebhook, setSavingWebhook] = useState(false)
+  const [fxInput, setFxInput] = useState('')
+  const [savingFx, setSavingFx] = useState(false)
   const [settingsMsg, setSettingsMsg] = useState<string | null>(null)
   const [settingsErr, setSettingsErr] = useState<string | null>(null)
 
@@ -122,7 +135,12 @@ export default function SupplierAccounts() {
   async function loadAccounts() {
     try {
       const res = await api.supplierAccounts()
-      setAccounts(res.accounts || [])
+      const list = res.accounts || []
+      setAccounts(list)
+      if (typeof res.fx_rate === 'number' && res.fx_rate > 0) setFxRate(res.fx_rate)
+      const drafts: Record<number, string> = {}
+      for (const a of list) drafts[a.id] = a.quota_usd > 0 ? String(a.quota_usd) : ''
+      setQuotaDrafts(drafts)
     } catch (e: any) {
       setMetricsErr(e?.message || String(e))
     }
@@ -156,6 +174,10 @@ export default function SupplierAccounts() {
           setSettings(s)
           setVisibleSet(new Set(s.visible_providers || []))
           setDefaultsDraft(s.provider_defaults || {})
+          if (typeof s.fx_rate === 'number' && s.fx_rate > 0) {
+            setFxRate(s.fx_rate)
+            setFxInput(String(s.fx_rate))
+          }
         } catch {
           /* settings panel just won't prefill */
         }
@@ -314,6 +336,81 @@ export default function SupplierAccounts() {
     }
   }
 
+  async function handleSync() {
+    setMetricsErr(null)
+    setSyncMsg(null)
+    setSyncing(true)
+    try {
+      const res = await api.supplierSyncAccounts()
+      setSyncMsg(`已从号池同步 ${res.synced}/${res.total} 个账号`)
+      await loadAccounts()
+      await handleRefreshMetrics()
+    } catch (e: any) {
+      setMetricsErr(e?.message || String(e))
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  async function handleSaveQuota(id: number) {
+    setMetricsErr(null)
+    const raw = (quotaDrafts[id] ?? '').trim()
+    const usd = raw === '' ? 0 : Number(raw)
+    if (!Number.isFinite(usd) || usd < 0) {
+      setMetricsErr('额度必须是非负数字（$）')
+      return
+    }
+    setSavingQuota(id)
+    try {
+      await api.supplierSetQuota(id, usd)
+      setAccounts(prev => prev.map(a => (a.id === id ? { ...a, quota_usd: usd } : a)))
+    } catch (e: any) {
+      setMetricsErr(e?.message || String(e))
+    } finally {
+      setSavingQuota(null)
+    }
+  }
+
+  async function handleSaveWebhook() {
+    setSettingsMsg(null)
+    setSettingsErr(null)
+    setSavingWebhook(true)
+    try {
+      const s = await api.setSupplierSettings({ quota_webhook: webhookInput.trim() })
+      setSettings(s)
+      setWebhookInput('')
+      setSettingsMsg(s.quota_webhook_set ? `额度报警 webhook 已保存（…${s.quota_webhook_last4}）` : '额度报警 webhook 已清空')
+    } catch (e: any) {
+      setSettingsErr(e?.message || String(e))
+    } finally {
+      setSavingWebhook(false)
+    }
+  }
+
+  async function handleSaveFx() {
+    setSettingsMsg(null)
+    setSettingsErr(null)
+    const fx = Number(fxInput.trim())
+    if (!Number.isFinite(fx) || fx <= 0) {
+      setSettingsErr('汇率必须是正数')
+      return
+    }
+    setSavingFx(true)
+    try {
+      const s = await api.setSupplierSettings({ fx_rate: fx })
+      setSettings(s)
+      if (typeof s.fx_rate === 'number' && s.fx_rate > 0) {
+        setFxRate(s.fx_rate)
+        setFxInput(String(s.fx_rate))
+      }
+      setSettingsMsg(`汇率已保存：1 USD = ${s.fx_rate} RMB`)
+    } catch (e: any) {
+      setSettingsErr(e?.message || String(e))
+    } finally {
+      setSavingFx(false)
+    }
+  }
+
   return (
     <Layout
       title="账号上号 / 账号资源录入"
@@ -393,6 +490,55 @@ export default function SupplierAccounts() {
                   ))
                 )}
               </div>
+            </div>
+          </div>
+
+          {/* Account quota alert webhook + RMB→USD fx rate. */}
+          <div className="mt-6 border-t border-gray-100 pt-4 grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-medium text-gray-600">额度报警 Webhook</label>
+                <span className="text-[11px] text-gray-400">
+                  {settings?.quota_webhook_set ? `已配置 …${settings.quota_webhook_last4}` : '未配置'}
+                </span>
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  value={webhookInput}
+                  onChange={e => setWebhookInput(e.target.value)}
+                  placeholder={settings?.quota_webhook_set ? '输入新 webhook 覆盖，留空并保存则清除' : '粘贴飞书机器人 webhook'}
+                  className="flex-1 border border-gray-300 rounded-md px-2.5 py-2 text-sm font-mono"
+                />
+                <button
+                  onClick={handleSaveWebhook}
+                  disabled={savingWebhook}
+                  className="bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 whitespace-nowrap"
+                >
+                  {savingWebhook ? '保存中…' : '保存'}
+                </button>
+              </div>
+              <p className="text-[11px] text-gray-400 mt-1">账号累计消耗达到额度时推送到此（独立于群余额报警）。保存后立即生效。</p>
+            </div>
+
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">汇率（1 USD = ? RMB）</label>
+              <div className="flex gap-2">
+                <input
+                  value={fxInput}
+                  onChange={e => setFxInput(e.target.value)}
+                  placeholder="7.2"
+                  className="w-32 border border-gray-300 rounded-md px-2.5 py-2 text-sm"
+                />
+                <button
+                  onClick={handleSaveFx}
+                  disabled={savingFx}
+                  className="bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 whitespace-nowrap"
+                >
+                  {savingFx ? '保存中…' : '保存汇率'}
+                </button>
+              </div>
+              <p className="text-[11px] text-gray-400 mt-1">号池成本按 RMB 计，账号成本与额度均按此汇率折算为 USD。</p>
             </div>
           </div>
 
@@ -571,6 +717,16 @@ export default function SupplierAccounts() {
                 <label className="block text-[10px] text-gray-400 mb-0.5">结束</label>
                 <input value={endTime} onChange={e => setEndTime(e.target.value)} className="border border-gray-300 rounded-md px-2 py-1.5 text-xs w-40" />
               </div>
+              {isAdmin && (
+                <button
+                  onClick={handleSync}
+                  disabled={syncing}
+                  className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 transition-colors whitespace-nowrap"
+                  title="从号池拉取账号名单到本地"
+                >
+                  {syncing ? '同步中…' : '从号池同步'}
+                </button>
+              )}
               <button
                 onClick={handleRefreshMetrics}
                 disabled={loadingMetrics}
@@ -583,6 +739,9 @@ export default function SupplierAccounts() {
 
           {metricsErr && (
             <div className="mb-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-md px-3 py-2">{metricsErr}</div>
+          )}
+          {syncMsg && (
+            <div className="mb-3 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs rounded-md px-3 py-2">{syncMsg}</div>
           )}
 
           {accounts.length === 0 ? (
@@ -603,12 +762,17 @@ export default function SupplierAccounts() {
                     <th className="py-2 pr-3 font-medium text-right">请求数</th>
                     <th className="py-2 pr-3 font-medium text-right">Tokens (入/出)</th>
                     <th className="py-2 pr-3 font-medium text-right">成功率</th>
-                    <th className="py-2 pr-3 font-medium text-right">成本(¥)</th>
+                    <th className="py-2 pr-3 font-medium text-right">成本($)</th>
+                    <th className="py-2 pr-3 font-medium text-right">额度($)</th>
                   </tr>
                 </thead>
                 <tbody>
                   {accounts.map(a => {
                     const m = metrics[a.remote_account_id]
+                    const usdSpent = m?.cost != null ? m.cost / fxRate : null
+                    const overQuota = a.quota_usd > 0 && usdSpent != null && usdSpent >= a.quota_usd
+                    const nearQuota = a.quota_usd > 0 && usdSpent != null && usdSpent >= a.quota_usd * 0.8
+                    const costTone = overQuota ? 'text-rose-600 font-semibold' : nearQuota ? 'text-amber-600' : ''
                     return (
                       <tr key={a.id} className="border-b border-gray-100 hover:bg-gray-50">
                         <td className="py-2 pr-3">
@@ -635,8 +799,31 @@ export default function SupplierAccounts() {
                         <td className="py-2 pr-3 text-right tabular-nums">
                           {m?.success_rate != null ? `${m.success_rate}%` : '—'}
                         </td>
+                        <td className={`py-2 pr-3 text-right tabular-nums ${costTone}`}>
+                          {usdSpent != null ? `$${usdSpent.toFixed(2)}` : '—'}
+                        </td>
                         <td className="py-2 pr-3 text-right tabular-nums">
-                          {m?.cost != null ? m.cost.toFixed(2) : '—'}
+                          {isAdmin ? (
+                            <div className="flex items-center justify-end gap-1">
+                              <input
+                                value={quotaDrafts[a.id] ?? ''}
+                                onChange={e => setQuotaDrafts(prev => ({ ...prev, [a.id]: e.target.value }))}
+                                placeholder="无限制"
+                                className="w-16 border border-gray-300 rounded px-1.5 py-1 text-xs text-right"
+                              />
+                              <button
+                                onClick={() => handleSaveQuota(a.id)}
+                                disabled={savingQuota === a.id}
+                                className="text-[11px] text-indigo-600 hover:text-indigo-800 disabled:opacity-50"
+                              >
+                                {savingQuota === a.id ? '…' : '存'}
+                              </button>
+                            </div>
+                          ) : a.quota_usd > 0 ? (
+                            `$${a.quota_usd.toFixed(2)}`
+                          ) : (
+                            '—'
+                          )}
                         </td>
                       </tr>
                     )

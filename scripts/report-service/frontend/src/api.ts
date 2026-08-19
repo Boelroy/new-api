@@ -508,6 +508,8 @@ export type SupplierAccount = {
   uploaded_by: number
   username?: string
   created_at: number
+  // Per-account USD cost cap (0 = no limit).
+  quota_usd: number
 }
 
 export type SupplierProviderDefault = {
@@ -520,6 +522,11 @@ export type SupplierSettings = {
   openapi_token_last4: string
   visible_providers: string[]
   provider_defaults: Record<string, SupplierProviderDefault>
+  // Dedicated per-account quota alert webhook (separate from group balance).
+  quota_webhook_set: boolean
+  quota_webhook_last4: string
+  // RMB->USD divisor used to display cost and evaluate quotas.
+  fx_rate: number
 }
 
 export type SupplierMetric = {
@@ -1643,7 +1650,21 @@ export const api = {
     request<{ list: SupplierModel[] }>('/api/supplier-account/models'),
 
   supplierAccounts: () =>
-    request<{ accounts: SupplierAccount[] }>('/api/supplier-account/accounts'),
+    request<{ accounts: SupplierAccount[]; fx_rate: number }>('/api/supplier-account/accounts'),
+
+  // Admin-only: pull the portal's account roster into the local table.
+  supplierSyncAccounts: () =>
+    request<{ synced: number; total: number }>('/api/supplier-account/sync', {
+      method: 'POST',
+    }),
+
+  // Admin-only: set a per-account USD cost cap (0 clears it).
+  supplierSetQuota: (id: number, quota_usd: number) =>
+    request<{ id: number; quota_usd: number }>(`/api/supplier-account/accounts/${id}/quota`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ quota_usd }),
+    }),
 
   supplierUploadAccount: (payload: {
     provider: string
@@ -1675,6 +1696,8 @@ export const api = {
     openapi_token?: string
     visible_providers?: string[]
     provider_defaults?: Record<string, SupplierProviderDefault>
+    quota_webhook?: string
+    fx_rate?: number
   }) =>
     request<SupplierSettings>('/api/supplier-account/settings', {
       method: 'PUT',
