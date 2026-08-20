@@ -1139,52 +1139,138 @@ func backfillMissingDays() {
 	}
 }
 
-// reportRefreshDays is how many trailing UTC days (including today) the
-// periodic refresh re-aggregates each tick. Re-aggregating recent PAST days —
-// not just today — lets late-arriving and UTC-midnight-boundary logs get
-// folded in, so each day's report_daily_agg converges to the raw logs instead
-// of freezing a few percent short the moment the UTC date rolls over (which is
-// why the report used to read lower than the live newapi log totals).
-// Tunable via REPORT_REFRESH_DAYS (default 3; 1 restores the old today-only
-// behaviour).
+// reportRefreshDays is how many trailing UTC days the one-time boot heal
+// re-aggregates in full. On deploy/restart this repairs days that froze a few
+// percent short under the old today-only logic. Steady-state freshness is
+// handled by the cheaper hourly-window refresh below. Tunable via
+// REPORT_REFRESH_DAYS.
 func reportRefreshDays() int {
 	if v := strings.TrimSpace(os.Getenv("REPORT_REFRESH_DAYS")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 30 {
 			return n
 		}
 	}
+	return 2
+}
+
+// reportRefreshHours is the trailing window of UTC hour-buckets the periodic
+// refresh recomputes each tick. A few hours keeps the current day fresh AND
+// folds in late / post-midnight-boundary logs: the window slides across UTC
+// midnight, so a day's final hours keep updating for this many hours after
+// they end (which is what the old today-only refresh failed to do, leaving
+// completed days frozen short of the raw logs). Far cheaper than rescanning
+// whole days. Tunable via REPORT_REFRESH_HOURS.
+func reportRefreshHours() int {
+	if v := strings.TrimSpace(os.Getenv("REPORT_REFRESH_HOURS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 168 {
+			return n
+		}
+	}
 	return 3
 }
 
-// refreshRecentDays re-aggregates the trailing window of UTC days, oldest
-// first, so a completed day keeps catching up for reportRefreshDays()-1 more
-// days before it stops being touched.
+func refreshIntervalMinutes() int {
+	if v := strings.TrimSpace(os.Getenv("REPORT_REFRESH_INTERVAL_MIN")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 240 {
+			return n
+		}
+	}
+	return 5
+}
+
+// refreshRecentDays re-aggregates the trailing window of full UTC days (atomic
+// per-date DELETE+re-INSERT). Used only for the one-time boot heal.
 func refreshRecentDays() {
 	now := time.Now().UTC()
 	for i := reportRefreshDays() - 1; i >= 0; i-- {
 		d := now.AddDate(0, 0, -i).Format("2006-01-02")
 		if err := aggregateDay(d); err != nil {
-			log.Printf("recent-day refresh %s error: %v", d, err)
+			log.Printf("boot heal %s error: %v", d, err)
 		}
 	}
 }
 
-func startDailyRefresh() {
-	go func() {
-		if IsLeader() {
-			backfillMissingDays()
-			// Correct already-present-but-stale recent days immediately on
-			// boot (backfillMissingDays only fills days with zero rows).
-			refreshRecentDays()
+// refreshRecentHours recomputes just the last reportRefreshHours() UTC
+// hour-buckets and replaces exactly those rows. The `hour` column is a
+// zero-padded "YYYY-MM-DD HH:00" string, so a lexicographic BETWEEN range is a
+// chronological range and naturally spans two UTC dates around midnight.
+func refreshRecentHours() {
+	n := reportRefreshHours()
+	cur := time.Now().UTC().Truncate(time.Hour)
+	start := cur.Add(-time.Duration(n-1) * time.Hour)
+
+	aggMap := make(map[aggKey]*DailyRow)
+	for h := start; !h.After(cur); h = h.Add(time.Hour) {
+		if err := aggregateHour(h.Unix(), h.Add(time.Hour).Unix(), aggMap); err != nil {
+			log.Printf("recent-hours agg %s error: %v", h.Format("2006-01-02 15:00"), err)
+			return
 		}
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("recent-hours begin error: %v", err)
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM report_daily_agg WHERE hour >= $1 AND hour <= $2`,
+		start.Format("2006-01-02 15:00"), cur.Format("2006-01-02 15:00")); err != nil {
+		log.Printf("recent-hours delete error: %v", err)
+		return
+	}
+	stmt, err := tx.Prepare(`
+		INSERT INTO report_daily_agg
+		(date, hour, user_id, username, token_id, token_name, channel_id, channel_name, "group", model,
+		 request_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+		 total_tokens, input_cost, output_cost, cache_read_cost, cache_write_cost, total_cost)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`)
+	if err != nil {
+		log.Printf("recent-hours prepare error: %v", err)
+		return
+	}
+	defer stmt.Close()
+	for _, row := range aggMap {
+		date := row.Hour
+		if len(date) >= 10 {
+			date = date[:10]
+		}
+		if _, err := stmt.Exec(
+			date, row.Hour, row.UserID, row.Username, row.TokenID, row.TokenName,
+			row.ChannelID, row.ChannelName, row.Group, row.Model,
+			row.RequestCount, row.InputTokens, row.OutputTokens,
+			row.CacheReadTokens, row.CacheWriteTokens, row.TotalTokens,
+			roundTo(row.InputCost, 6), roundTo(row.OutputCost, 6),
+			roundTo(row.CacheReadCost, 6), roundTo(row.CacheWriteCost, 6),
+			roundTo(row.TotalCost, 6),
+		); err != nil {
+			log.Printf("recent-hours insert error: %v", err)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("recent-hours commit error: %v", err)
+	}
+}
+
+func startDailyRefresh() {
+	// Boot heal: wait until we actually hold leadership (election takes a few
+	// seconds after start — checking IsLeader() at t=0 would race and skip),
+	// then fill historical gaps and repair the last few days in full once.
+	go func() {
+		for !IsLeader() {
+			time.Sleep(10 * time.Second)
+		}
+		backfillMissingDays()
+		refreshRecentDays()
 	}()
-	ticker := time.NewTicker(time.Hour)
+	// Steady-state: cheap rolling re-aggregation of the last few UTC hours.
+	ticker := time.NewTicker(time.Duration(refreshIntervalMinutes()) * time.Minute)
 	go func() {
 		for range ticker.C {
 			if !IsLeader() {
 				continue
 			}
-			refreshRecentDays()
+			refreshRecentHours()
 		}
 	}()
 }
