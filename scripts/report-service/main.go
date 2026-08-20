@@ -1452,6 +1452,9 @@ func handleAuthConfig(c *gin.Context) {
 		// paths). Empty/absent ⇒ default sidebar. The frontend Sidebar reads
 		// this to hide items a super admin has switched off per role.
 		"sidebar_overrides": sidebarOverridesMap(),
+		// Deployment-wide statistics timezone for the Usage Report (IANA
+		// name). Everyone reads this; only a super admin can change it.
+		"report_timezone": reportTimezone(),
 	}
 	if mainServiceURL != "" {
 		resp["sso_url"] = mainServiceURL + "/sign-in"
@@ -1478,6 +1481,48 @@ func sidebarOverridesMap() map[string][]string {
 		return map[string][]string{}
 	}
 	return out
+}
+
+// cfgReportTimezone is the report_config key for the deployment-wide Usage
+// Report statistics timezone (IANA name, e.g. "Asia/Tokyo").
+const cfgReportTimezone = "report_timezone"
+
+// reportTimezone returns the configured statistics timezone, defaulting to
+// Asia/Tokyo (this fleet's operating zone) when unset.
+func reportTimezone() string {
+	v := strings.TrimSpace(supplierConfigGet(cfgReportTimezone))
+	if v == "" {
+		return "Asia/Tokyo"
+	}
+	return v
+}
+
+// handleReportSettingsSet lets a super admin set the deployment statistics
+// timezone. The value is validated as a real IANA zone before persisting.
+func handleReportSettingsSet(c *gin.Context) {
+	var body struct {
+		Timezone *string `json:"timezone"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	if body.Timezone != nil {
+		tz := strings.TrimSpace(*body.Timezone)
+		if tz == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "timezone required"})
+			return
+		}
+		if _, err := time.LoadLocation(tz); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown timezone: " + tz})
+			return
+		}
+		if err := supplierConfigSet(cfgReportTimezone, tz); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "timezone": reportTimezone()})
 }
 
 func handleSidebarConfigGet(c *gin.Context) {
@@ -4397,6 +4442,10 @@ func main() {
 	// data from /api/auth/config.
 	api.GET("/sidebar-config", requireRole(minSuperAdminRole), handleSidebarConfigGet)
 	api.PUT("/sidebar-config", requireRole(minSuperAdminRole), handleSidebarConfigSet)
+
+	// Deployment statistics timezone — read via /api/auth/config, set here
+	// by super admin only.
+	api.PUT("/report-settings", requireRole(minSuperAdminRole), handleReportSettingsSet)
 
 	adminAPI := api.Group("", requireRole(minAdminRole))
 	adminAPI.GET("/report", handleReport)

@@ -39,7 +39,7 @@ export default function Layout({ title, subtitle, actions, children }: Props) {
               <div className="flex items-center gap-2 flex-wrap">{actions}</div>
             )}
           </header>
-          {children}
+          <div className="page-enter">{children}</div>
         </div>
       </main>
     </div>

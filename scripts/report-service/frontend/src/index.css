@@ -87,6 +87,48 @@ body {
   }
 }
 
+/* ── Motion layer ──────────────────────────────────────────────────────
+   Site-wide entrance + interaction polish. Applied at the CSS layer so every
+   page benefits without per-page edits. Fully disabled under reduced-motion. */
+@media (prefers-reduced-motion: no-preference) {
+  /* Page content fades/slides in on each navigation (Layout remounts per route). */
+  .page-enter {
+    animation: fadeUp 0.3s ease-out both;
+  }
+  /* Staggered entrance for grid children (e.g. summary cards). */
+  .stagger > * {
+    animation: fadeUp 0.32s ease-out both;
+  }
+  .stagger > *:nth-child(1) { animation-delay: 0.02s }
+  .stagger > *:nth-child(2) { animation-delay: 0.06s }
+  .stagger > *:nth-child(3) { animation-delay: 0.10s }
+  .stagger > *:nth-child(4) { animation-delay: 0.14s }
+  .stagger > *:nth-child(5) { animation-delay: 0.18s }
+  .stagger > *:nth-child(6) { animation-delay: 0.22s }
+  .stagger > *:nth-child(7) { animation-delay: 0.26s }
+  .stagger > *:nth-child(8) { animation-delay: 0.30s }
+
+  /* Smooth interactive transitions across the app. */
+  button, a, select, summary, [role='button'] {
+    transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease, opacity 0.15s ease;
+  }
+  .card {
+    transition: box-shadow 0.2s ease, transform 0.2s ease, border-color 0.2s ease;
+  }
+  /* Cards flagged interactive lift slightly on hover. */
+  .card-hover:hover {
+    transform: translateY(-1px);
+  }
+  /* Table rows get a quick hover tint. */
+  tbody tr {
+    transition: background-color 0.12s ease;
+  }
+  /* Primary buttons give a tiny press cue. */
+  button:active {
+    transform: translateY(0.5px);
+  }
+}
+
 /* Thin scrollbars for the workspace */
 * {
   scrollbar-width: thin;

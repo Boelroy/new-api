@@ -4,21 +4,15 @@ import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
 import { api, LogRow } from '../api'
 import { toast } from '../components/feedback'
+import { TZ_OPTIONS, addDays, localDay, localHour, useReportTz } from '../lib/reportTz'
 
 const COLORS = ['#2864FF','#3E8E4F','#C97A12','#e11d48','#4D83FF','#7c3aed','#0d9488','#c026d3','#8DB7FF','#D9FF43']
 
-type View = 'daily' | 'billing' | 'hourly' | 'key' | 'model'
+type View = 'daily' | 'hourly' | 'key' | 'model'
 
 function today() { return new Date().toISOString().slice(0, 10) }
 function daysAgo(n: number) {
   const d = new Date(); d.setUTCDate(d.getUTCDate() - n)
-  return d.toISOString().slice(0, 10)
-}
-// Shift a YYYY-MM-DD string by whole days (UTC-safe), used to widen the
-// fetched UTC window by ±1 day so timezone re-bucketing never clips an edge
-// local-day (max TZ offset is ±14h < 24h).
-function addDays(s: string, n: number) {
-  const d = new Date(s + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n)
   return d.toISOString().slice(0, 10)
 }
 
@@ -26,41 +20,6 @@ function fmtCost(v: number) { return '$' + v.toFixed(4) }
 function fmtNum(v: number) { return v.toLocaleString() }
 
 const ALL = '__all__'
-
-// Statistics timezone. The backend aggregate (report_daily_agg) is bucketed
-// in UTC; `hour` is "YYYY-MM-DD HH:00". We re-bucket to the chosen zone in
-// the browser via Intl (DST-safe), so no server round trip is needed when the
-// zone changes.
-const TZ_OPTIONS = [
-  'UTC', 'Asia/Tokyo', 'Asia/Shanghai', 'Asia/Singapore', 'Asia/Hong_Kong',
-  'Asia/Kolkata', 'Europe/London', 'America/New_York', 'America/Los_Angeles',
-]
-const TZ_STORAGE_KEY = 'report:tz'
-
-const dayFmtCache: Record<string, Intl.DateTimeFormat> = {}
-const hourFmtCache: Record<string, Intl.DateTimeFormat> = {}
-function hourToUtcDate(hour: string) { return new Date(hour.replace(' ', 'T') + ':00Z') }
-// Local calendar day ("YYYY-MM-DD") of a UTC hour bucket in the given zone.
-function localDay(hour: string, tz: string): string {
-  if (tz === 'UTC') return hour.slice(0, 10)
-  if (!dayFmtCache[tz]) {
-    dayFmtCache[tz] = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })
-  }
-  return dayFmtCache[tz].format(hourToUtcDate(hour))
-}
-// Local "YYYY-MM-DD HH:00" label of a UTC hour bucket in the given zone.
-function localHour(hour: string, tz: string): string {
-  if (tz === 'UTC') return hour
-  if (!hourFmtCache[tz]) {
-    hourFmtCache[tz] = new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
-  }
-  return `${localDay(hour, tz)} ${hourFmtCache[tz].format(hourToUtcDate(hour))}`
-}
-
-function csvCell(v: string | number): string {
-  const s = String(v)
-  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
-}
 
 export default function Report() {
   const [start, setStart] = useState(daysAgo(6))
@@ -72,16 +31,10 @@ export default function Report() {
   const [filterUser, setFilterUser] = useState(ALL)
   const [filterToken, setFilterToken] = useState(ALL)
   const [filterGroup, setFilterGroup] = useState(ALL)
-  const [tz, setTz] = useState<string>(() => {
-    try { return localStorage.getItem(TZ_STORAGE_KEY) || 'Asia/Tokyo' } catch { return 'Asia/Tokyo' }
-  })
+  const { tz, setTz, isSuperAdmin } = useReportTz()
   // The local-day range actually loaded (set on fetch), used to trim the ±1
   // day fetch padding so the table shows exactly [start, end] local days.
   const [range, setRange] = useState({ start: daysAgo(6), end: today() })
-
-  useEffect(() => {
-    try { localStorage.setItem(TZ_STORAGE_KEY, tz) } catch { /* best-effort */ }
-  }, [tz])
 
   const load = async (s: string, e: string) => {
     setLoading(true)
@@ -160,55 +113,6 @@ export default function Report() {
     return Object.entries(map).sort(([,a],[,b]) => b - a).slice(0, 10).map(([model, cost]) => ({ model: model.replace('claude-',''), cost }))
   }, [data])
 
-  // Daily bill: one row per (user, local day, key), aggregated across models.
-  type BillRow = {
-    user_id: number; username: string; day: string
-    token_id: number; token_name: string
-    request_count: number; input_tokens: number; output_tokens: number
-    total_tokens: number; total_cost: number
-  }
-  const billingRows = useMemo<BillRow[]>(() => {
-    const map: Record<string, BillRow> = {}
-    data.forEach(r => {
-      const day = localDay(r.hour, tz)
-      const k = `${r.user_id}|${day}|${r.token_id}`
-      if (!map[k]) {
-        map[k] = {
-          user_id: r.user_id, username: r.username || `user#${r.user_id}`, day,
-          token_id: r.token_id, token_name: r.token_name || `key#${r.token_id}`,
-          request_count: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, total_cost: 0,
-        }
-      }
-      const e = map[k]
-      e.request_count += r.request_count
-      e.input_tokens += r.input_tokens
-      e.output_tokens += r.output_tokens
-      e.total_tokens += r.total_tokens
-      e.total_cost += r.total_cost
-    })
-    return Object.values(map).sort((a, b) =>
-      a.username.localeCompare(b.username) ||
-      a.day.localeCompare(b.day) ||
-      a.token_name.localeCompare(b.token_name)
-    )
-  }, [data, tz])
-
-  const exportBillingCSV = () => {
-    const header = ['User', 'User ID', 'Date', 'Key', 'Key ID', 'Requests', 'Input', 'Output', 'Total Tokens', 'Cost(USD)']
-    const lines = billingRows.map(r => [
-      r.username, r.user_id, r.day, r.token_name, r.token_id,
-      r.request_count, r.input_tokens, r.output_tokens, r.total_tokens, r.total_cost.toFixed(6),
-    ])
-    const csv = '﻿' + [header, ...lines].map(row => row.map(csvCell).join(',')).join('\n')
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `billing_${range.start}_to_${range.end}_${tz.replace(/\//g, '-')}.csv`
-    a.click()
-    URL.revokeObjectURL(url)
-  }
-
   const tableRows = useMemo(() => {
     if (view === 'daily') {
       const map: Record<string, LogRow & { day: string }> = {}
@@ -281,8 +185,9 @@ export default function Report() {
       <select
         value={tz}
         onChange={e => setTz(e.target.value)}
-        title="统计时区"
-        className="border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-white focus:outline-none focus:border-brand"
+        disabled={!isSuperAdmin}
+        title={isSuperAdmin ? '统计时区（保存为本站默认）' : '统计时区（本站默认，仅超级管理员可改）'}
+        className="border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-white focus:outline-none focus:border-brand disabled:opacity-70 disabled:cursor-not-allowed"
       >
         {TZ_OPTIONS.map(z => <option key={z} value={z}>{z}</option>)}
       </select>
@@ -397,67 +302,16 @@ export default function Report() {
       </div>
 
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-        <div className="flex items-center border-b border-gray-200 px-2">
-          <div className="flex gap-0">
-            {(['daily','billing','hourly','key','model'] as View[]).map(v => (
-              <button key={v} onClick={() => setView(v)}
-                className={`px-4 py-2.5 text-xs border-b-2 -mb-px transition-all ${view === v ? 'border-brand text-brand font-semibold' : 'border-transparent text-gray-400 hover:text-gray-700'}`}>
-                {v === 'daily' ? 'Daily' : v === 'billing' ? '账单' : v === 'hourly' ? 'Hourly' : v === 'key' ? 'Per-Key' : 'Per-Model'}
-              </button>
-            ))}
-          </div>
-          {view === 'billing' && (
-            <button
-              onClick={exportBillingCSV}
-              className="ml-auto mr-1 border border-gray-200 rounded-md px-3 py-1.5 text-xs bg-white hover:bg-gray-50"
-            >
-              导出账单 CSV
+        <div className="flex gap-0 border-b border-gray-200 px-2">
+          {(['daily','hourly','key','model'] as View[]).map(v => (
+            <button key={v} onClick={() => setView(v)}
+              className={`px-4 py-2.5 text-xs border-b-2 -mb-px transition-all ${view === v ? 'border-brand text-brand font-semibold' : 'border-transparent text-gray-400 hover:text-gray-700'}`}>
+              {v === 'daily' ? 'Daily' : v === 'hourly' ? 'Hourly' : v === 'key' ? 'Per-Key' : 'Per-Model'}
             </button>
-          )}
+          ))}
         </div>
 
         <div className="overflow-x-auto max-h-[60vh] overflow-y-auto">
-          {view === 'billing' ? (
-            <table className="w-full text-xs whitespace-nowrap border-separate border-spacing-0">
-              <thead>
-                <tr>
-                  <th className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">用户</th>
-                  <th className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">日期 ({tz})</th>
-                  <th className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">Key</th>
-                  <th className="sticky top-0 bg-gray-50 px-3 py-2 text-right mono-label border-b border-gray-200">Requests</th>
-                  <th className="sticky top-0 bg-gray-50 px-3 py-2 text-right mono-label border-b border-gray-200">Input</th>
-                  <th className="sticky top-0 bg-gray-50 px-3 py-2 text-right mono-label border-b border-gray-200">Output</th>
-                  <th className="sticky top-0 bg-gray-50 px-3 py-2 text-right mono-label border-b border-gray-200">Total Tokens</th>
-                  <th className="sticky top-0 bg-gray-50 px-3 py-2 text-right mono-label border-b border-gray-200">Cost</th>
-                </tr>
-              </thead>
-              <tbody>
-                {billingRows.map((r, i) => (
-                  <tr key={i} className="hover:bg-gray-50">
-                    <td className="px-3 py-1.5 border-b border-gray-50">{r.username}</td>
-                    <td className="px-3 py-1.5 border-b border-gray-50 font-mono text-gray-600">{r.day}</td>
-                    <td className="px-3 py-1.5 border-b border-gray-50 font-mono text-gray-500">{r.token_name}</td>
-                    <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{fmtNum(r.request_count)}</td>
-                    <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{fmtNum(r.input_tokens)}</td>
-                    <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{fmtNum(r.output_tokens)}</td>
-                    <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{fmtNum(r.total_tokens)}</td>
-                    <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums font-medium">{fmtCost(r.total_cost)}</td>
-                  </tr>
-                ))}
-                {billingRows.length === 0 && (
-                  <tr><td colSpan={8} className="px-4 py-6 text-center text-gray-400">{loading ? '加载中…' : '无数据'}</td></tr>
-                )}
-                <tr className="bg-emerald-50 font-semibold sticky bottom-0">
-                  <td className="px-3 py-1.5 border-t-2 border-emerald-200" colSpan={3}>TOTAL</td>
-                  <td className="px-3 py-1.5 border-t-2 border-emerald-200 text-right tabular-nums">{fmtNum(billingRows.reduce((s,r)=>s+r.request_count,0))}</td>
-                  <td className="px-3 py-1.5 border-t-2 border-emerald-200 text-right tabular-nums">{fmtNum(billingRows.reduce((s,r)=>s+r.input_tokens,0))}</td>
-                  <td className="px-3 py-1.5 border-t-2 border-emerald-200 text-right tabular-nums">{fmtNum(billingRows.reduce((s,r)=>s+r.output_tokens,0))}</td>
-                  <td className="px-3 py-1.5 border-t-2 border-emerald-200 text-right tabular-nums">{fmtNum(billingRows.reduce((s,r)=>s+r.total_tokens,0))}</td>
-                  <td className="px-3 py-1.5 border-t-2 border-emerald-200 text-right tabular-nums text-emerald-700">${billingRows.reduce((s,r)=>s+r.total_cost,0).toFixed(4)}</td>
-                </tr>
-              </tbody>
-            </table>
-          ) : (
           <table className="w-full text-xs whitespace-nowrap border-separate border-spacing-0">
             <thead>
               <tr>
@@ -501,7 +355,6 @@ export default function Report() {
               </tr>
             </tbody>
           </table>
-          )}
         </div>
       </div>
     </Layout>

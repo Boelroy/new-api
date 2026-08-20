@@ -4,7 +4,7 @@ type Card = { label: string; value: string; color?: string }
 
 export default function SummaryCards({ cards }: { cards: Card[] }) {
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
+    <div className="stagger grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
       {cards.map((c) => (
         <div
           key={c.label}

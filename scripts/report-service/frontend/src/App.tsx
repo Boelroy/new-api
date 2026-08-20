@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { BASE_PATH } from './basePath'
 import Login from './pages/Login'
 import Report from './pages/Report'
+import Billing from './pages/Billing'
 import KeyCapacity from './pages/KeyCapacity'
 import AllKeys from './pages/AllKeys'
 import KeyTester from './pages/KeyTester'
@@ -92,6 +93,7 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<RoleGate min={ROLE_ADMIN}><Report /></RoleGate>} />
+        <Route path="/billing" element={<RoleGate min={ROLE_ADMIN}><Billing /></RoleGate>} />
         <Route path="/profit" element={<RoleGate min={ROLE_SUPER_ADMIN}><Profit /></RoleGate>} />
         <Route path="/keys" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_PROJECT_ADMIN}><KeyCapacity /></RoleGate>} />
         <Route path="/allkeys" element={<AllKeys />} />

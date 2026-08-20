@@ -735,6 +735,15 @@ export const api = {
       body: JSON.stringify({ overrides }),
     }),
 
+  // Deployment statistics timezone. Read from /api/auth/config; set here
+  // (super admin only).
+  setReportTimezone: (timezone: string) =>
+    request<{ ok: boolean; timezone: string }>('/api/report-settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ timezone }),
+    }),
+
   listUsers: () => request<{ users: AuthUser[] }>('/api/users'),
 
   createUser: (payload: { username: string; password: string; role: number; studio?: string }) =>
