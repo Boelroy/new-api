@@ -16,9 +16,12 @@ export default function Layout({ title, subtitle, actions, children }: Props) {
       <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
       <main className="lg:pl-56">
-        <div className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-7">
-          <header className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4 mb-5 sm:mb-6 pb-5 border-b border-border">
-            <div className="flex items-start gap-2">
+        {/* Sticky page header bar (blueprint-style): white, hairline bottom,
+            holds the page title + subtitle on the left and actions on the
+            right. Stays pinned while the content below scrolls. */}
+        <header className="sticky top-0 z-20 bg-white border-b border-border">
+          <div className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 py-3.5 flex flex-col sm:flex-row sm:items-center gap-2.5 sm:gap-4">
+            <div className="flex items-start gap-2 min-w-0">
               <button
                 onClick={() => setSidebarOpen(true)}
                 className="lg:hidden mt-0.5 -ml-1 p-1.5 rounded-lg text-secondary hover:bg-canvas hover:text-ink"
@@ -30,16 +33,19 @@ export default function Layout({ title, subtitle, actions, children }: Props) {
                   <line x1="3" y1="18" x2="21" y2="18" />
                 </svg>
               </button>
-              <div>
-                <h1 className="display text-xl sm:text-[26px] leading-tight">{title}</h1>
-                {subtitle && <p className="text-[11px] sm:text-xs text-secondary mt-1.5">{subtitle}</p>}
+              <div className="min-w-0">
+                <h1 className="display text-lg sm:text-[22px] leading-tight">{title}</h1>
+                {subtitle && <p className="text-[11px] sm:text-xs text-secondary mt-1">{subtitle}</p>}
               </div>
             </div>
             {actions && (
-              <div className="flex items-center gap-2 flex-wrap">{actions}</div>
+              <div className="flex items-center gap-2 flex-wrap sm:ml-auto">{actions}</div>
             )}
-          </header>
-          <div className="page-enter">{children}</div>
+          </div>
+        </header>
+
+        <div className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-7 page-enter">
+          {children}
         </div>
       </main>
     </div>
