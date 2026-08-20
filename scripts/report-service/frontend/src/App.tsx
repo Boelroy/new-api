@@ -17,7 +17,7 @@ import RemoteChannels from './pages/RemoteChannels'
 import LocalChannelSync from './pages/LocalChannelSync'
 import PoolUploadStudio from './pages/PoolUploadStudio'
 import SupplierAccounts from './pages/SupplierAccounts'
-import SidebarSettings from './pages/SidebarSettings'
+import Settings from './pages/Settings'
 import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_01, ROLE_TESTER } from './api'
 import { Toaster, ConfirmHost } from './components/feedback'
 
@@ -108,7 +108,8 @@ export default function App() {
         <Route path="/local-sync" element={<RoleGate min={ROLE_ADMIN}><LocalChannelSync /></RoleGate>} />
         <Route path="/pool-upload" element={<RoleGate allow={r => r === ROLE_STUDIO_OPERATOR}><PoolUploadStudio /></RoleGate>} />
         <Route path="/supplier-accounts" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_01}><SupplierAccounts /></RoleGate>} />
-        <Route path="/sidebar-settings" element={<RoleGate min={ROLE_SUPER_ADMIN}><SidebarSettings /></RoleGate>} />
+        <Route path="/settings" element={<RoleGate min={ROLE_SUPER_ADMIN}><Settings /></RoleGate>} />
+        <Route path="/sidebar-settings" element={<Navigate to="/settings" replace />} />
         <Route path="/detect" element={<Navigate to="/testing" replace />} />
         <Route path="/eval" element={<Navigate to="/testing" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />
