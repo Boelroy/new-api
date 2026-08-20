@@ -97,7 +97,9 @@ export default function SupplierAccounts() {
   const [quotaDrafts, setQuotaDrafts] = useState<Record<number, string>>({})
   const [savingQuota, setSavingQuota] = useState<number | null>(null)
 
-  // Admin settings: OpenAPI token + provider visibility.
+  // Admin settings: OpenAPI token + provider visibility. Collapsed by default
+  // to keep the page focused on accounts; admins expand it when needed.
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [settings, setSettings] = useState<SupplierSettings | null>(null)
   const [tokenInput, setTokenInput] = useState('')
   const [visibleSet, setVisibleSet] = useState<Set<string>>(new Set())
@@ -458,7 +460,16 @@ export default function SupplierAccounts() {
 
       {isAdmin && (
         <section className="mb-5 bg-white border border-gray-200 rounded-lg p-4 sm:p-5">
-          <h2 className="text-base font-semibold mb-4">管理员设置</h2>
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(o => !o)}
+            className="w-full flex items-center justify-between text-left"
+          >
+            <h2 className="text-base font-semibold">管理员设置</h2>
+            <span className="text-xs text-gray-400 select-none">{settingsOpen ? '收起 ▾' : '展开 ▸'}</span>
+          </button>
+          {settingsOpen && (
+          <div className="mt-4">
           {settingsErr && (
             <div className="mb-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-md px-3 py-2">{settingsErr}</div>
           )}
@@ -651,6 +662,8 @@ export default function SupplierAccounts() {
               </div>
             )}
           </div>
+          </div>
+          )}
         </section>
       )}
 
