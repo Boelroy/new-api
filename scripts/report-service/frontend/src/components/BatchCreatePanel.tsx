@@ -459,7 +459,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
 
   return (
     <div className="bg-white border border-gray-200 rounded-xl p-4">
-      <h2 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">批量创建渠道</h2>
+      <h2 className="mono-label mb-3">批量创建渠道</h2>
       <div className="mb-3">
         <label className="block text-[11px] text-gray-500 mb-1">渠道类型</label>
         <select
@@ -615,7 +615,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
                   type="button"
                   onClick={handleSaveModels}
                   disabled={modelsSaving}
-                  className="bg-gray-900 text-white rounded-md px-3 py-1 text-[11px] hover:opacity-85 disabled:opacity-40"
+                  className="bg-brand text-white rounded-md px-3 py-1 text-[11px] hover:bg-brand-700 disabled:opacity-40"
                 >
                   {modelsSaving ? '保存中…' : '保存默认模型'}
                 </button>
@@ -676,7 +676,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
                     type="button"
                     onClick={() => setVertexKeyMode(m.id)}
                     className={`px-3 py-1 text-[11px] border-r border-gray-200 last:border-r-0 transition-colors ${
-                      active ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                      active ? 'bg-brand text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
                     }`}
                   >
                     {m.label}
@@ -823,7 +823,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
                     type="button"
                     onClick={() => setAwsKeyMode('ak_sk')}
                     className={`px-3 py-1.5 text-xs border-r border-gray-200 transition-colors ${
-                      awsKeyMode === 'ak_sk' ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                      awsKeyMode === 'ak_sk' ? 'bg-brand text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
                     }`}
                   >
                     AK/SK
@@ -832,7 +832,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
                     type="button"
                     onClick={() => setAwsKeyMode('api_key')}
                     className={`px-3 py-1.5 text-xs transition-colors ${
-                      awsKeyMode === 'api_key' ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                      awsKeyMode === 'api_key' ? 'bg-brand text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
                     }`}
                   >
                     API Key

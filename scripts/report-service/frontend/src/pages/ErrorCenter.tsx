@@ -20,8 +20,8 @@ function fmtTime(ts: number) {
 }
 
 function statusColor(code: string) {
-  if (code.startsWith('4')) return 'bg-amber-100 text-amber-800'
-  if (code.startsWith('5')) return 'bg-rose-100 text-rose-700'
+  if (code.startsWith('4')) return 'text-warning bg-[#FBF0DC]'
+  if (code.startsWith('5')) return 'text-red-700 bg-red-50'
   return 'bg-gray-100 text-gray-600'
 }
 
@@ -237,7 +237,7 @@ export default function ErrorCenter() {
                   {['时间', '分组', '模型', '渠道', '状态', '错误码', '类型', '路径', '内容'].map(h => (
                     <th
                       key={h}
-                      className="sticky top-0 bg-gray-50 px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200"
+                      className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200"
                     >
                       {h}
                     </th>

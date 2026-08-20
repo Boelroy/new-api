@@ -53,12 +53,12 @@ function statusBadge(status: string) {
   const label = STATUS_LABELS[status] || status || '—'
   const tone =
     status === 'online'
-      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+      ? 'bg-[#E6F4EE] text-success border-[#CDE9DC]'
       : status === 'check_fail' || status === 'arrearage'
-        ? 'bg-rose-50 text-rose-700 border-rose-200'
+        ? 'bg-red-50 text-red-700 border-red-200'
         : status === 'wait_check'
-          ? 'bg-amber-50 text-amber-700 border-amber-200'
-          : 'bg-gray-50 text-gray-600 border-gray-200'
+          ? 'bg-[#FBF0DC] text-warning border-[#F0DFBB]'
+          : 'bg-canvas text-secondary border-border'
   return <span className={`inline-block px-2 py-0.5 rounded text-[11px] border ${tone}`}>{label}</span>
 }
 
@@ -497,7 +497,7 @@ export default function SupplierAccounts() {
                 <button
                   onClick={handleSaveToken}
                   disabled={savingToken}
-                  className="bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 whitespace-nowrap"
+                  className="bg-brand hover:bg-brand-700 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 whitespace-nowrap"
                 >
                   {savingToken ? '保存中…' : '保存'}
                 </button>
@@ -512,7 +512,7 @@ export default function SupplierAccounts() {
                 <button
                   onClick={handleSaveVisibility}
                   disabled={savingVis}
-                  className="bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-white text-xs rounded-md px-3 py-1.5"
+                  className="bg-brand hover:bg-brand-700 disabled:opacity-60 text-white text-xs rounded-md px-3 py-1.5"
                 >
                   {savingVis ? '保存中…' : '保存可见性'}
                 </button>
@@ -552,7 +552,7 @@ export default function SupplierAccounts() {
                 <button
                   onClick={handleSaveWebhook}
                   disabled={savingWebhook}
-                  className="bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 whitespace-nowrap"
+                  className="bg-brand hover:bg-brand-700 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 whitespace-nowrap"
                 >
                   {savingWebhook ? '保存中…' : '保存'}
                 </button>
@@ -572,7 +572,7 @@ export default function SupplierAccounts() {
                 <button
                   onClick={handleSaveFx}
                   disabled={savingFx}
-                  className="bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 whitespace-nowrap"
+                  className="bg-brand hover:bg-brand-700 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 whitespace-nowrap"
                 >
                   {savingFx ? '保存中…' : '保存汇率'}
                 </button>
@@ -592,7 +592,7 @@ export default function SupplierAccounts() {
                 <button
                   onClick={handleSaveTick}
                   disabled={savingTick}
-                  className="bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 whitespace-nowrap"
+                  className="bg-brand hover:bg-brand-700 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 whitespace-nowrap"
                 >
                   {savingTick ? '保存中…' : '保存间隔'}
                 </button>
@@ -608,7 +608,7 @@ export default function SupplierAccounts() {
               <button
                 onClick={handleSaveDefaults}
                 disabled={savingDefaults}
-                className="bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-white text-xs rounded-md px-3 py-1.5"
+                className="bg-brand hover:bg-brand-700 disabled:opacity-60 text-white text-xs rounded-md px-3 py-1.5"
               >
                 {savingDefaults ? '保存中…' : '保存默认配置'}
               </button>
@@ -791,7 +791,7 @@ export default function SupplierAccounts() {
               <button
                 onClick={handleRefreshMetrics}
                 disabled={loadingMetrics}
-                className="bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 transition-colors"
+                className="bg-brand hover:bg-brand-700 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 transition-colors"
               >
                 {loadingMetrics ? '刷新中…' : '刷新实时数据'}
               </button>
@@ -813,18 +813,18 @@ export default function SupplierAccounts() {
             <div className="overflow-x-auto">
               <table className="w-full text-sm border-collapse">
                 <thead>
-                  <tr className="text-left text-[11px] text-gray-400 border-b border-gray-200">
-                    <th className="py-2 pr-3 font-medium">别名</th>
-                    <th className="py-2 pr-3 font-medium">厂商 / 模型</th>
-                    {isAdmin && <th className="py-2 pr-3 font-medium">工作室 / 上传人</th>}
-                    <th className="py-2 pr-3 font-medium">类型</th>
-                    <th className="py-2 pr-3 font-medium">Key</th>
-                    <th className="py-2 pr-3 font-medium">状态</th>
-                    <th className="py-2 pr-3 font-medium text-right">请求数</th>
-                    <th className="py-2 pr-3 font-medium text-right">Tokens (入/出)</th>
-                    <th className="py-2 pr-3 font-medium text-right">成功率</th>
-                    <th className="py-2 pr-3 font-medium text-right">成本($)</th>
-                    <th className="py-2 pr-3 font-medium text-right">额度($)</th>
+                  <tr className="text-left border-b border-gray-200">
+                    <th className="py-2 pr-3 mono-label">别名</th>
+                    <th className="py-2 pr-3 mono-label">厂商 / 模型</th>
+                    {isAdmin && <th className="py-2 pr-3 mono-label">工作室 / 上传人</th>}
+                    <th className="py-2 pr-3 mono-label">类型</th>
+                    <th className="py-2 pr-3 mono-label">Key</th>
+                    <th className="py-2 pr-3 mono-label">状态</th>
+                    <th className="py-2 pr-3 mono-label text-right">请求数</th>
+                    <th className="py-2 pr-3 mono-label text-right">Tokens (入/出)</th>
+                    <th className="py-2 pr-3 mono-label text-right">成功率</th>
+                    <th className="py-2 pr-3 mono-label text-right">成本($)</th>
+                    <th className="py-2 pr-3 mono-label text-right">额度($)</th>
                   </tr>
                 </thead>
                 <tbody>

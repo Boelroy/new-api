@@ -1,3 +1,102 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-canvas text-ink font-sans antialiased;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'ss01';
+}
+
+@layer base {
+  h1,
+  h2,
+  h3 {
+    @apply tracking-tight2;
+  }
+  /* Tabular figures everywhere numbers matter */
+  .tnum,
+  table,
+  .font-mono {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  /* Mono engineering label */
+  .mono-label {
+    @apply font-mono uppercase tracking-label text-[10.5px] leading-none text-secondary;
+  }
+  /* Numbered section eyebrow with trailing hairline (e.g. "02 · OUTPUTS") */
+  .eyebrow {
+    @apply flex items-center gap-3 font-mono text-[10px] font-bold uppercase text-brand;
+    letter-spacing: 0.16em;
+  }
+  .eyebrow::after {
+    content: '';
+    @apply h-px w-8 bg-border;
+  }
+  /* Editorial display heading — large, heavy, very tight */
+  .display {
+    @apply font-extrabold tracking-display;
+    line-height: 0.98;
+  }
+  .card {
+    @apply rounded-xl border border-border bg-white;
+  }
+  .card-hover {
+    @apply transition-shadow hover:shadow-hover;
+  }
+  .hairline {
+    @apply border-border;
+  }
+  /* Blueprint corner markers */
+  .corner-marks {
+    position: relative;
+  }
+  .corner-marks::before,
+  .corner-marks::after {
+    content: '';
+    position: absolute;
+    width: 8px;
+    height: 8px;
+    border-color: #c3ccd8;
+    border-style: solid;
+    pointer-events: none;
+  }
+  .corner-marks::before {
+    top: -1px;
+    left: -1px;
+    border-width: 1px 0 0 1px;
+  }
+  .corner-marks::after {
+    bottom: -1px;
+    right: -1px;
+    border-width: 0 1px 1px 0;
+  }
+}
+
+/* Thin scrollbars for the workspace */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #c3ccd8 transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #c3ccd8;
+  border-radius: 8px;
+}

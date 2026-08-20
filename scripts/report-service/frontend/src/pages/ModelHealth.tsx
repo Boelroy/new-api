@@ -14,10 +14,10 @@ import {
 const REFRESH_MS = 30_000
 
 const STATE_STYLE: Record<string, { label: string; cls: string }> = {
-  up: { label: '可用', cls: 'bg-emerald-100 text-emerald-700' },
+  up: { label: '可用', cls: 'bg-[#E6F4EE] text-success' },
   down: { label: '不可用', cls: 'bg-rose-100 text-rose-700' },
   unknown: { label: '未知', cls: 'bg-gray-100 text-gray-500' },
-  unsupported: { label: '不可测', cls: 'bg-amber-100 text-amber-800' },
+  unsupported: { label: '不可测', cls: 'bg-[#FBF0DC] text-warning' },
 }
 
 const CHANNEL_STATUS: Record<number, string> = {
@@ -319,7 +319,7 @@ function RulesTable({
                 {['名称', 'studio', '类型', '分组', '指定渠道', '候选模型', '探测间隔', '下线窗口', '连败/连胜', '启用', '执行', ''].map(h => (
                   <th
                     key={h}
-                    className="bg-gray-50 px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200"
+                    className="bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200"
                   >
                     {h}
                   </th>
@@ -420,7 +420,7 @@ function PreviewPanel({ preview, onClose }: { preview: LocalHealthPreview; onClo
             { label: '预计探测/天', value: String(preview.probes_per_day) },
           ].map(c => (
             <div key={c.label} className="border border-gray-200 rounded-lg px-3 py-2">
-              <div className="text-[10px] uppercase tracking-wider text-gray-400">{c.label}</div>
+              <div className="mono-label">{c.label}</div>
               <div className="text-lg font-semibold tabular-nums mt-0.5">{c.value}</div>
             </div>
           ))}
@@ -432,7 +432,7 @@ function PreviewPanel({ preview, onClose }: { preview: LocalHealthPreview; onClo
           <thead>
             <tr>
               {['渠道', '状态', '分组', '当前 models', '候选模型'].map(h => (
-                <th key={h} className="bg-gray-50 px-2 py-1.5 text-left text-[10px] uppercase text-gray-400 border-b border-gray-200">
+                <th key={h} className="bg-gray-50 px-2 py-1.5 text-left mono-label border-b border-gray-200">
                   {h}
                 </th>
               ))}
@@ -488,7 +488,7 @@ function HealthTable({
             {['渠道', 'studio', '模型', '状态', '在 models 里', '渠道状态', '连胜/连败', '最近成功', '最近探测', '下次探测', '最近错误', ''].map(h => (
               <th
                 key={h}
-                className="sticky top-0 bg-gray-50 px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200"
+                className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200"
               >
                 {h}
               </th>
@@ -569,7 +569,7 @@ function EventsTable({ events }: { events: LocalHealthEvent[] }) {
                 {['时间', '类型', '渠道', '模型', '详情'].map(h => (
                   <th
                     key={h}
-                    className="sticky top-0 bg-gray-50 px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200"
+                    className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200"
                   >
                     {h}
                   </th>
@@ -730,7 +730,7 @@ function RuleEditor({
               取消
             </button>
             <button
-              className="border border-gray-900 bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:bg-gray-800 disabled:opacity-40"
+              className="border border-brand bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-40"
               onClick={() => void submit()}
               disabled={saving}
             >

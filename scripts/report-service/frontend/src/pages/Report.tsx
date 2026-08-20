@@ -4,7 +4,7 @@ import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
 import { api, LogRow } from '../api'
 
-const COLORS = ['#2563eb','#059669','#d97706','#e11d48','#7c3aed','#ea580c','#0d9488','#c026d3','#3b82f6','#10b981']
+const COLORS = ['#2864FF','#3E8E4F','#C97A12','#e11d48','#4D83FF','#7c3aed','#0d9488','#c026d3','#8DB7FF','#D9FF43']
 
 type View = 'hourly' | 'daily' | 'key' | 'model'
 
@@ -172,7 +172,7 @@ export default function Report() {
       <input type="date" value={start} onChange={e => setStart(e.target.value)} className="border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white" />
       <span className="text-gray-300 text-xs">→</span>
       <input type="date" value={end} onChange={e => setEnd(e.target.value)} className="border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white" />
-      <button onClick={() => load(start, end)} disabled={loading} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-50">
+      <button onClick={() => load(start, end)} disabled={loading} className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-50">
         {loading ? '加载中...' : '查询'}
       </button>
       <button onClick={() => api.exportCSV(start, end)} className="border border-gray-200 rounded-md px-3 py-1.5 text-xs bg-white hover:bg-gray-50">
@@ -188,7 +188,7 @@ export default function Report() {
       actions={actions}
     >
       <div className="bg-white border border-gray-200 rounded-xl px-3 py-3 mb-4 flex flex-wrap items-center gap-3 text-xs">
-        <span className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">Filters</span>
+        <span className="mono-label">Filters</span>
         <label className="flex items-center gap-1.5">
           <span className="text-gray-500">用户</span>
           <select
@@ -250,22 +250,22 @@ export default function Report() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
         <div className="bg-white border border-gray-200 rounded-xl p-4">
-          <h3 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">Cost Over Time ($)</h3>
+          <h3 className="mono-label mb-3">Cost Over Time ($)</h3>
           <ResponsiveContainer width="100%" height={180}>
             <BarChart data={dailyChartData} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#D9DDD7" />
               <XAxis dataKey="date" tick={{ fontSize: 10 }} />
               <YAxis tick={{ fontSize: 10 }} tickFormatter={v => '$' + v} />
               <Tooltip formatter={(v: number) => ['$' + v.toFixed(2), 'Cost']} />
-              <Bar dataKey="cost" fill="#2563eb" radius={[3,3,0,0]} />
+              <Bar dataKey="cost" fill="#2864FF" radius={[3,3,0,0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
         <div className="bg-white border border-gray-200 rounded-xl p-4">
-          <h3 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">Cost By Model ($)</h3>
+          <h3 className="mono-label mb-3">Cost By Model ($)</h3>
           <ResponsiveContainer width="100%" height={180}>
             <BarChart data={modelChartData} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#D9DDD7" />
               <XAxis dataKey="model" tick={{ fontSize: 9 }} />
               <YAxis tick={{ fontSize: 10 }} tickFormatter={v => '$' + v} />
               <Tooltip formatter={(v: number) => ['$' + v.toFixed(2), 'Cost']} />
@@ -283,7 +283,7 @@ export default function Report() {
         <div className="flex gap-0 border-b border-gray-200 px-2">
           {(['daily','hourly','key','model'] as View[]).map(v => (
             <button key={v} onClick={() => setView(v)}
-              className={`px-4 py-2.5 text-xs border-b-2 -mb-px transition-all ${view === v ? 'border-gray-900 text-gray-900 font-semibold' : 'border-transparent text-gray-400 hover:text-gray-700'}`}>
+              className={`px-4 py-2.5 text-xs border-b-2 -mb-px transition-all ${view === v ? 'border-brand text-brand font-semibold' : 'border-transparent text-gray-400 hover:text-gray-700'}`}>
               {v === 'daily' ? 'Daily' : v === 'hourly' ? 'Hourly' : v === 'key' ? 'Per-Key' : 'Per-Model'}
             </button>
           ))}
@@ -293,17 +293,17 @@ export default function Report() {
           <table className="w-full text-xs whitespace-nowrap border-separate border-spacing-0">
             <thead>
               <tr>
-                {view === 'hourly' && <th className="sticky top-0 bg-gray-50 px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200">Hour</th>}
-                {view === 'daily' && <th className="sticky top-0 bg-gray-50 px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200">Date</th>}
-                {(view === 'hourly' || view === 'daily') && <th className="sticky top-0 bg-gray-50 px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200">Key</th>}
-                {view === 'key' && <th className="sticky top-0 bg-gray-50 px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200">Key</th>}
-                {view === 'model' && <th className="sticky top-0 bg-gray-50 px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200">Model</th>}
-                {view !== 'model' && view !== 'key' && <th className="sticky top-0 bg-gray-50 px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200">Model</th>}
-                <th className="sticky top-0 bg-gray-50 px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200">Requests</th>
-                <th className="sticky top-0 bg-gray-50 px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200">Input</th>
-                <th className="sticky top-0 bg-gray-50 px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200">Output</th>
-                <th className="sticky top-0 bg-gray-50 px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200">Total Tokens</th>
-                <th className="sticky top-0 bg-gray-50 px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200">Cost</th>
+                {view === 'hourly' && <th className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">Hour</th>}
+                {view === 'daily' && <th className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">Date</th>}
+                {(view === 'hourly' || view === 'daily') && <th className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">Key</th>}
+                {view === 'key' && <th className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">Key</th>}
+                {view === 'model' && <th className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">Model</th>}
+                {view !== 'model' && view !== 'key' && <th className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">Model</th>}
+                <th className="sticky top-0 bg-gray-50 px-3 py-2 text-right mono-label border-b border-gray-200">Requests</th>
+                <th className="sticky top-0 bg-gray-50 px-3 py-2 text-right mono-label border-b border-gray-200">Input</th>
+                <th className="sticky top-0 bg-gray-50 px-3 py-2 text-right mono-label border-b border-gray-200">Output</th>
+                <th className="sticky top-0 bg-gray-50 px-3 py-2 text-right mono-label border-b border-gray-200">Total Tokens</th>
+                <th className="sticky top-0 bg-gray-50 px-3 py-2 text-right mono-label border-b border-gray-200">Cost</th>
               </tr>
             </thead>
             <tbody>

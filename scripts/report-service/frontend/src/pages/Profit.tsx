@@ -5,7 +5,7 @@ import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
 import { api, DownstreamDaily, DownstreamPricing, FXRate, ProfitSummary, setProfitApiKey } from '../api'
 
-const COLORS = ['#2563eb','#059669','#d97706','#e11d48','#7c3aed','#ea580c','#0d9488','#c026d3','#3b82f6','#10b981']
+const COLORS = ['#2864FF','#3E8E4F','#C97A12','#e11d48','#4D83FF','#C97A12','#3E8E4F','#4D83FF','#2864FF','#3E8E4F']
 
 function today() { return new Date().toISOString().slice(0, 10) }
 function firstOfMonth() {
@@ -411,7 +411,7 @@ export default function Profit() {
       <input type="date" value={start} onChange={e => setStart(e.target.value)} className="border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white" />
       <span className="text-gray-300 text-xs">→</span>
       <input type="date" value={end} onChange={e => setEnd(e.target.value)} className="border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white" />
-      <button onClick={load} disabled={loading} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-50">
+      <button onClick={load} disabled={loading} className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-50">
         {loading ? '加载中...' : '查询'}
       </button>
       <button
@@ -475,28 +475,28 @@ export default function Profit() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
         <div className="bg-white border border-gray-200 rounded-xl p-4">
-          <h3 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">Daily Profit ($)</h3>
+          <h3 className="mono-label mb-3">Daily Profit ($)</h3>
           <ResponsiveContainer width="100%" height={200}>
             <BarChart data={dailyChart} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#D9DDD7" />
               <XAxis dataKey="date" tick={{ fontSize: 10 }} />
               <YAxis tick={{ fontSize: 10 }} tickFormatter={v => '$' + v} />
               <Tooltip formatter={(v: number) => ['$' + v.toFixed(2), 'Profit']} />
-              <Bar dataKey="profit" fill="#10b981" radius={[3,3,0,0]} />
+              <Bar dataKey="profit" fill="#3E8E4F" radius={[3,3,0,0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
         <div className="bg-white border border-gray-200 rounded-xl p-4">
-          <h3 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-3">Profit by Tag ($)</h3>
+          <h3 className="mono-label mb-3">Profit by Tag ($)</h3>
           <ResponsiveContainer width="100%" height={200}>
             <BarChart data={tagProfitChart} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#D9DDD7" />
               <XAxis dataKey="name" tick={{ fontSize: 9 }} />
               <YAxis tick={{ fontSize: 10 }} tickFormatter={v => '$' + v.toFixed(0)} />
               <Tooltip formatter={(v: number) => ['$' + v.toFixed(2), '毛利']} />
               <Bar dataKey="profit" radius={[3,3,0,0]}>
                 {tagProfitChart.map((d, i) => (
-                  <Cell key={i} fill={d.profit >= 0 ? '#10b981' : '#e11d48'} />
+                  <Cell key={i} fill={d.profit >= 0 ? "#3E8E4F" : "#e11d48"} />
                 ))}
               </Bar>
             </BarChart>
@@ -508,7 +508,7 @@ export default function Profit() {
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 gap-3 flex-wrap">
           <div>
             <div className="text-sm font-semibold">按供应商（Tag）分组</div>
-            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">每个上游供应商的用量与成本</div>
+            <div className="mono-label mt-0.5">每个上游供应商的用量与成本</div>
           </div>
           {pipiStatus?.configured && (
             <div className="flex items-center gap-2">
@@ -543,14 +543,14 @@ export default function Profit() {
           <table className="w-full text-xs whitespace-nowrap">
             <thead>
               <tr className="bg-gray-50">
-                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">来源</th>
-                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Tag</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">Key 数</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">用量 USD</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">上游成本 USD</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">下游收入 USD</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">毛利 USD</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">毛利率</th>
+                <th className="px-3 py-2 text-left mono-label">来源</th>
+                <th className="px-3 py-2 text-left mono-label">Tag</th>
+                <th className="px-3 py-2 text-right mono-label">Key 数</th>
+                <th className="px-3 py-2 text-right mono-label">用量 USD</th>
+                <th className="px-3 py-2 text-right mono-label">上游成本 USD</th>
+                <th className="px-3 py-2 text-right mono-label">下游收入 USD</th>
+                <th className="px-3 py-2 text-right mono-label">毛利 USD</th>
+                <th className="px-3 py-2 text-right mono-label">毛利率</th>
               </tr>
             </thead>
             <tbody>
@@ -634,7 +634,7 @@ export default function Profit() {
           <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
             <div>
               <div className="text-sm font-semibold">Remote Channels 毛利 <span className="text-[10px] text-gray-400 font-normal">（已计入顶部合计）</span></div>
-              <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">
+              <div className="mono-label mt-0.5">
                 {profit.by_remote_channel!.length} channels across {aggRows.length} profile{aggRows.length === 1 ? '' : 's'} · used = ${(profit.remote_used_usd ?? 0).toFixed(2)} · cost = ${(profit.remote_cost_usd ?? 0).toFixed(2)} · revenue = ${(profit.remote_revenue_usd ?? 0).toFixed(2)} · profit = <span className={(profit.remote_profit_usd ?? 0) >= 0 ? 'text-emerald-600' : 'text-rose-700'}>${(profit.remote_profit_usd ?? 0).toFixed(2)}</span>
               </div>
             </div>
@@ -644,14 +644,14 @@ export default function Profit() {
               <thead className="bg-gray-50">
                 <tr>
                   <th className="px-2 py-2 w-6"></th>
-                  <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Profile</th>
-                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">渠道数</th>
-                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">用量 USD</th>
-                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400" title="profile 当日下游折扣 (最大值)">下游 ×</th>
-                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">上游成本 USD</th>
-                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">下游收入 USD</th>
-                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">毛利 USD</th>
-                  <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">毛利率</th>
+                  <th className="px-3 py-2 text-left mono-label">Profile</th>
+                  <th className="px-3 py-2 text-right mono-label">渠道数</th>
+                  <th className="px-3 py-2 text-right mono-label">用量 USD</th>
+                  <th className="px-3 py-2 text-right mono-label" title="profile 当日下游折扣 (最大值)">下游 ×</th>
+                  <th className="px-3 py-2 text-right mono-label">上游成本 USD</th>
+                  <th className="px-3 py-2 text-right mono-label">下游收入 USD</th>
+                  <th className="px-3 py-2 text-right mono-label">毛利 USD</th>
+                  <th className="px-3 py-2 text-right mono-label">毛利率</th>
                 </tr>
               </thead>
               <tbody>
@@ -712,20 +712,20 @@ export default function Profit() {
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
           <div>
             <div className="text-sm font-semibold">每日毛利明细</div>
-            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">Daily Breakdown</div>
+            <div className="mono-label mt-0.5">Daily Breakdown</div>
           </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-xs whitespace-nowrap">
             <thead>
               <tr className="bg-gray-50">
-                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">日期</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">汇率</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">用量 USD</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">上游成本 USD</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">下游收入 USD</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">毛利 USD</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">毛利率</th>
+                <th className="px-3 py-2 text-left mono-label">日期</th>
+                <th className="px-3 py-2 text-right mono-label">汇率</th>
+                <th className="px-3 py-2 text-right mono-label">用量 USD</th>
+                <th className="px-3 py-2 text-right mono-label">上游成本 USD</th>
+                <th className="px-3 py-2 text-right mono-label">下游收入 USD</th>
+                <th className="px-3 py-2 text-right mono-label">毛利 USD</th>
+                <th className="px-3 py-2 text-right mono-label">毛利率</th>
               </tr>
             </thead>
             <tbody>
@@ -760,7 +760,7 @@ export default function Profit() {
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 gap-3 flex-wrap">
           <div>
             <div className="text-sm font-semibold">每日汇率</div>
-            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">CNY per USD · 缺日期回退到默认</div>
+            <div className="mono-label mt-0.5">CNY per USD · 缺日期回退到默认</div>
           </div>
           <div className="flex items-center gap-2">
             <span className="text-[11px] text-gray-500">默认</span>
@@ -778,15 +778,15 @@ export default function Profit() {
             >
               更新默认
             </button>
-            <button onClick={submitFXRates} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85">保存改动</button>
+            <button onClick={submitFXRates} className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700">保存改动</button>
           </div>
         </div>
         <div className="overflow-x-auto max-h-[260px] overflow-y-auto">
           <table className="w-full text-xs whitespace-nowrap">
             <thead className="sticky top-0 bg-gray-50">
               <tr>
-                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">日期</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">汇率</th>
+                <th className="px-3 py-2 text-left mono-label">日期</th>
+                <th className="px-3 py-2 text-right mono-label">汇率</th>
                 <th className="px-3 py-2 w-12"></th>
               </tr>
             </thead>
@@ -845,17 +845,17 @@ export default function Profit() {
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
           <div>
             <div className="text-sm font-semibold">下游售价配置</div>
-            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">Per-Group discount (revenue_usd = used_usd × discount)</div>
+            <div className="mono-label mt-0.5">Per-Group discount (revenue_usd = used_usd × discount)</div>
           </div>
-          <button onClick={submitDownstream} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85">保存改动</button>
+          <button onClick={submitDownstream} className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700">保存改动</button>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-xs whitespace-nowrap">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Group</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">折扣</th>
-                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">备注</th>
+                <th className="px-3 py-2 text-left mono-label">Group</th>
+                <th className="px-3 py-2 text-right mono-label">折扣</th>
+                <th className="px-3 py-2 text-left mono-label">备注</th>
                 <th className="px-3 py-2 w-12"></th>
               </tr>
             </thead>
@@ -968,7 +968,7 @@ export default function Profit() {
         >
           <div>
             <div className="text-sm font-semibold">下游分段价格历史</div>
-            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">
+            <div className="mono-label mt-0.5">
               Per-group per-day discount · 每天自动从前一日 carry-forward · 手动改此表覆盖当日
             </div>
           </div>
@@ -980,7 +980,7 @@ export default function Profit() {
           <>
         <div className="p-4 border-b border-gray-100 flex flex-wrap items-end gap-3">
           <div>
-            <label className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">Group</label>
+            <label className="block mono-label mb-1">Group</label>
             <select
               value={ddsGroup}
               onChange={e => setDdsGroup(e.target.value)}
@@ -991,7 +991,7 @@ export default function Profit() {
             </select>
           </div>
           <div>
-            <label className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">生效日期 (UTC)</label>
+            <label className="block mono-label mb-1">生效日期 (UTC)</label>
             <input
               type="date"
               value={ddsNewDate}
@@ -1000,7 +1000,7 @@ export default function Profit() {
             />
           </div>
           <div>
-            <label className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">折扣 (×)</label>
+            <label className="block mono-label mb-1">折扣 (×)</label>
             <input
               type="number"
               step="0.0001"
@@ -1012,7 +1012,7 @@ export default function Profit() {
             />
           </div>
           <div className="flex-1 min-w-[120px]">
-            <label className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">备注</label>
+            <label className="block mono-label mb-1">备注</label>
             <input
               type="text"
               value={ddsNewNote}
@@ -1024,7 +1024,7 @@ export default function Profit() {
           <button
             onClick={submitDds}
             disabled={ddsSaving}
-            className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-40"
+            className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-40"
           >
             {ddsSaving ? '保存中…' : '保存 / 覆盖'}
           </button>
@@ -1033,10 +1033,10 @@ export default function Profit() {
           <table className="w-full text-xs whitespace-nowrap">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Group</th>
-                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">生效日期</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">折扣</th>
-                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">备注</th>
+                <th className="px-3 py-2 text-left mono-label">Group</th>
+                <th className="px-3 py-2 text-left mono-label">生效日期</th>
+                <th className="px-3 py-2 text-right mono-label">折扣</th>
+                <th className="px-3 py-2 text-left mono-label">备注</th>
                 <th className="px-3 py-2 w-12"></th>
               </tr>
             </thead>
@@ -1074,14 +1074,14 @@ export default function Profit() {
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
           <div>
             <div className="text-sm font-semibold">Remote 每日下游折扣</div>
-            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">
+            <div className="mono-label mt-0.5">
               Per-profile per-day multiplier · revenue_usd = used_usd × discount · 未配置日期沿用上一次
             </div>
           </div>
         </div>
         <div className="p-4 border-b border-gray-100 flex flex-wrap items-end gap-3">
           <div>
-            <label className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">Profile</label>
+            <label className="block mono-label mb-1">Profile</label>
             <select
               value={rdsProfileID ?? ''}
               onChange={e => setRdsProfileID(e.target.value ? Number(e.target.value) : null)}
@@ -1092,7 +1092,7 @@ export default function Profit() {
             </select>
           </div>
           <div>
-            <label className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">生效日期</label>
+            <label className="block mono-label mb-1">生效日期</label>
             <input
               type="date"
               value={rdsNewDate}
@@ -1101,7 +1101,7 @@ export default function Profit() {
             />
           </div>
           <div>
-            <label className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">折扣 (×)</label>
+            <label className="block mono-label mb-1">折扣 (×)</label>
             <input
               type="number"
               step="0.001"
@@ -1113,7 +1113,7 @@ export default function Profit() {
             />
           </div>
           <div className="flex-1 min-w-[120px]">
-            <label className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">备注</label>
+            <label className="block mono-label mb-1">备注</label>
             <input
               type="text"
               value={rdsNewNote}
@@ -1125,7 +1125,7 @@ export default function Profit() {
           <button
             onClick={submitRds}
             disabled={rdsSaving || rdsProfileID == null}
-            className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-40"
+            className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-40"
           >
             {rdsSaving ? '保存中…' : '保存 / 覆盖'}
           </button>
@@ -1134,10 +1134,10 @@ export default function Profit() {
           <table className="w-full text-xs whitespace-nowrap">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">Profile</th>
-                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">生效日期</th>
-                <th className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-gray-400">折扣</th>
-                <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400">备注</th>
+                <th className="px-3 py-2 text-left mono-label">Profile</th>
+                <th className="px-3 py-2 text-left mono-label">生效日期</th>
+                <th className="px-3 py-2 text-right mono-label">折扣</th>
+                <th className="px-3 py-2 text-left mono-label">备注</th>
                 <th className="px-3 py-2 w-12"></th>
               </tr>
             </thead>

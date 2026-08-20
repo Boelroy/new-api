@@ -153,7 +153,7 @@ export default function BalanceAlertPanel() {
         <button
           onClick={pushDigest}
           disabled={pushBusy || !status.lark_configured}
-          className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+          className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
         >
           {pushBusy ? '推送中…' : '推送各分组余额到 Lark'}
         </button>
@@ -177,7 +177,7 @@ export default function BalanceAlertPanel() {
                 {['分组', 'Key 数', '剩余 / 总额度', '最近1小时', '预计剩余时长', '余额阈值 ($)', '时长阈值 (h)', '备注', '状态', ''].map(h => (
                   <th
                     key={h}
-                    className="sticky top-0 bg-gray-50 px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200"
+                    className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200"
                   >
                     {h}
                   </th>
@@ -261,7 +261,7 @@ export default function BalanceAlertPanel() {
                         <button
                           onClick={() => save(g.group)}
                           disabled={busy}
-                          className="bg-gray-900 text-white rounded-md px-2.5 py-1 text-[11px] hover:opacity-85 disabled:opacity-40"
+                          className="bg-brand text-white rounded-md px-2.5 py-1 text-[11px] hover:bg-brand-700 disabled:opacity-40"
                         >
                           {busy ? '…' : '保存'}
                         </button>

@@ -21,10 +21,10 @@ const RUNS_REFRESH_MS = 4000
 
 function statusColor(s: string) {
   switch (s) {
-    case 'done': return 'bg-emerald-100 text-emerald-800'
+    case 'done': return 'bg-[#E6F4EE] text-success'
     case 'error': return 'bg-rose-100 text-rose-700'
     case 'cancelled': return 'bg-gray-100 text-gray-600'
-    case 'running': return 'bg-blue-100 text-blue-700'
+    case 'running': return 'bg-brand-50 text-brand'
     case 'grading': return 'bg-purple-100 text-purple-700'
     default: return 'bg-gray-100 text-gray-500'
   }
@@ -299,7 +299,7 @@ export default function ProviderTesting() {
         <div className="bg-white border border-gray-200 rounded-xl p-3 lg:sticky lg:top-4">
           <button
             onClick={() => setNewOpen(true)}
-            className="w-full bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 mb-3"
+            className="w-full bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 mb-3"
           >
             + 新建项目
           </button>
@@ -315,7 +315,7 @@ export default function ProviderTesting() {
                   onClick={() => navigate(`/testing/${p.id}`)}
                   className={`w-full text-left px-2.5 py-2 rounded-md text-xs transition-colors ${
                     params.projectId === p.id
-                      ? 'bg-gray-900 text-white'
+                      ? 'bg-brand text-white'
                       : 'text-gray-700 hover:bg-gray-100'
                   }`}
                 >
@@ -376,12 +376,12 @@ export default function ProviderTesting() {
               {/* New run form */}
               <div className="bg-white border border-gray-200 rounded-xl p-4">
                 <div className="flex items-center justify-between mb-3">
-                  <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">新建测试</div>
+                  <div className="mono-label">新建测试</div>
                   <div className="text-[10px] text-gray-400">每次测试自动跑 Detect + Eval，约 3-16 分钟</div>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Model</label>
+                    <label className="block mono-label mb-1.5">Model</label>
                     <div className="flex items-center gap-2 mb-2 text-[10px]">
                       <label className="flex items-center gap-1 text-gray-500">
                         <input type="radio" checked={modelMode === 'preset'} onChange={() => setModelMode('preset')} />
@@ -411,7 +411,7 @@ export default function ProviderTesting() {
                     )}
                   </div>
                   <div>
-                    <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Eval pass@N</label>
+                    <label className="block mono-label mb-1.5">Eval pass@N</label>
                     <select
                       value={passAt}
                       onChange={e => setPassAt(Number(e.target.value))}
@@ -424,7 +424,7 @@ export default function ProviderTesting() {
                   </div>
                   {selectedProject.grader_url && selectedProject.grader_api_key ? (
                     <div>
-                      <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">自动打分</label>
+                      <label className="block mono-label mb-1.5">自动打分</label>
                       <label className="flex items-center gap-2 text-xs text-gray-700">
                         <input
                           type="checkbox"
@@ -437,7 +437,7 @@ export default function ProviderTesting() {
                     </div>
                   ) : (
                     <div>
-                      <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">自动打分</label>
+                      <label className="block mono-label mb-1.5">自动打分</label>
                       <div className="text-[11px] text-gray-400 leading-relaxed">
                         本项目未配置 Grader URL / API Key，跑测试不会生成 report.md。<br />
                         <button
@@ -455,7 +455,7 @@ export default function ProviderTesting() {
                   <button
                     onClick={handleStart}
                     disabled={!canStart}
-                    className="bg-gray-900 text-white rounded-md px-4 py-1.5 text-xs hover:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="bg-brand text-white rounded-md px-4 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     {submitting ? '提交中 ...' : '开始测试'}
                   </button>
@@ -540,7 +540,7 @@ export default function ProviderTesting() {
           >
             <div className="text-base font-semibold text-gray-900">新建项目</div>
             <div>
-              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Name</label>
+              <label className="block mono-label mb-1.5">Name</label>
               <input
                 value={newName}
                 onChange={e => setNewName(e.target.value)}
@@ -548,7 +548,7 @@ export default function ProviderTesting() {
               />
             </div>
             <div>
-              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">URL</label>
+              <label className="block mono-label mb-1.5">URL</label>
               <input
                 value={newUrl}
                 onChange={e => setNewUrl(e.target.value)}
@@ -557,7 +557,7 @@ export default function ProviderTesting() {
               />
             </div>
             <div>
-              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">API Key</label>
+              <label className="block mono-label mb-1.5">API Key</label>
               <input
                 type="password"
                 value={newKey}
@@ -568,13 +568,13 @@ export default function ProviderTesting() {
             </div>
 
             <div className="pt-3 border-t border-gray-100">
-              <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1">Grader（可选）</div>
+              <div className="mono-label mb-1">Grader（可选）</div>
               <div className="text-[10px] text-gray-400 mb-2 leading-relaxed">
                 指定另一个 Anthropic 兼容 endpoint 来跑评分。留空则本项目跑测试时不生成 report.md。
               </div>
             </div>
             <div>
-              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Grader URL</label>
+              <label className="block mono-label mb-1.5">Grader URL</label>
               <input
                 value={newGraderUrl}
                 onChange={e => setNewGraderUrl(e.target.value)}
@@ -583,7 +583,7 @@ export default function ProviderTesting() {
               />
             </div>
             <div>
-              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Grader API Key</label>
+              <label className="block mono-label mb-1.5">Grader API Key</label>
               <input
                 type="password"
                 value={newGraderKey}
@@ -593,7 +593,7 @@ export default function ProviderTesting() {
               />
             </div>
             <div>
-              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Grader Model（可选，默认 claude-sonnet-4-6）</label>
+              <label className="block mono-label mb-1.5">Grader Model（可选，默认 claude-sonnet-4-6）</label>
               <input
                 value={newGraderModel}
                 onChange={e => setNewGraderModel(e.target.value)}
@@ -612,7 +612,7 @@ export default function ProviderTesting() {
               <button
                 onClick={handleCreateProject}
                 disabled={!newName.trim() || !newUrl.trim() || !newKey.trim()}
-                className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-40"
+                className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-40"
               >
                 创建
               </button>
@@ -633,7 +633,7 @@ export default function ProviderTesting() {
           >
             <div className="text-base font-semibold text-gray-900">编辑项目</div>
             <div>
-              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Name</label>
+              <label className="block mono-label mb-1.5">Name</label>
               <input
                 value={editName}
                 onChange={e => setEditName(e.target.value)}
@@ -641,7 +641,7 @@ export default function ProviderTesting() {
               />
             </div>
             <div>
-              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">URL</label>
+              <label className="block mono-label mb-1.5">URL</label>
               <input
                 value={editUrl}
                 onChange={e => setEditUrl(e.target.value)}
@@ -649,7 +649,7 @@ export default function ProviderTesting() {
               />
             </div>
             <div>
-              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">
+              <label className="block mono-label mb-1.5">
                 新 API Key（留空则不改）
               </label>
               <input
@@ -662,14 +662,14 @@ export default function ProviderTesting() {
             </div>
 
             <div className="pt-3 border-t border-gray-100">
-              <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1">Grader（可选）</div>
+              <div className="mono-label mb-1">Grader（可选）</div>
               <div className="text-[10px] text-gray-400 mb-2 leading-relaxed">
                 将 Grader URL 清空以关闭本项目的自动打分。当前存储的 grader key：
                 <span className="font-mono text-gray-500 ml-1">{selectedProject.grader_api_key || '（未设置）'}</span>
               </div>
             </div>
             <div>
-              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Grader URL</label>
+              <label className="block mono-label mb-1.5">Grader URL</label>
               <input
                 value={editGraderUrl}
                 onChange={e => setEditGraderUrl(e.target.value)}
@@ -678,7 +678,7 @@ export default function ProviderTesting() {
               />
             </div>
             <div>
-              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">
+              <label className="block mono-label mb-1.5">
                 新 Grader API Key（留空则不改）
               </label>
               <input
@@ -690,7 +690,7 @@ export default function ProviderTesting() {
               />
             </div>
             <div>
-              <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">Grader Model（可选）</label>
+              <label className="block mono-label mb-1.5">Grader Model（可选）</label>
               <input
                 value={editGraderModel}
                 onChange={e => setEditGraderModel(e.target.value)}
@@ -708,7 +708,7 @@ export default function ProviderTesting() {
               </button>
               <button
                 onClick={handleSaveEdit}
-                className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85"
+                className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700"
               >
                 保存
               </button>

@@ -24,8 +24,8 @@ function fmtTime(epoch: number) {
 }
 
 const STATUS_CLS: Record<LocalPendingKey['status'], string> = {
-  pending: 'bg-blue-100 text-blue-700',
-  active:  'bg-emerald-100 text-emerald-800',
+  pending: 'bg-brand-50 text-brand',
+  active:  'bg-[#E6F4EE] text-success',
   used:    'bg-gray-100 text-gray-500',
   failed:  'bg-red-100 text-red-700',
 }
@@ -263,7 +263,7 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
       {!studioLocked && (
       <div className="bg-white border border-gray-200 rounded-xl">
         <div className="flex flex-wrap items-center gap-3 px-4 py-2.5">
-          <div className="text-[10px] uppercase tracking-wider text-gray-500 font-medium">
+          <div className="mono-label">
             Pool 节流（全局）
           </div>
           <label className="flex items-center gap-1.5 text-xs text-gray-700">
@@ -326,7 +326,7 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
             <button
               onClick={saveCfg}
               disabled={!cfgDirty || cfgSaving}
-              className="bg-gray-900 text-white rounded px-2 py-0.5 text-xs hover:opacity-85 disabled:opacity-40"
+              className="bg-brand text-white rounded px-2 py-0.5 text-xs hover:bg-brand-700 disabled:opacity-40"
             >
               {cfgSaving ? '保存中…' : '保存'}
             </button>
@@ -344,7 +344,7 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
             knobs. Independent from batch_create_default_models on
             purpose so the two upload paths keep separate rotations. */}
         <div className="px-4 pb-2.5">
-          <label className="block text-[10px] uppercase tracking-wider text-gray-500 font-medium mb-1">
+          <label className="block mono-label mb-1">
             默认模型（本地 Pool 专用，与批量创建渠道独立）
           </label>
           <textarea
@@ -361,7 +361,7 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
             enqueue so mid-flight config changes don't retarget queued
             keys. */}
         <div className="px-4 pb-2.5">
-          <label className="block text-[10px] uppercase tracking-wider text-gray-500 font-medium mb-1">
+          <label className="block mono-label mb-1">
             默认分组（写入 channels."group"，空 = default）
           </label>
           <input
@@ -376,7 +376,7 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
             Applies to the local pool upload path only; enforced server-side
             at enqueue. Shared "保存" button up top persists it. */}
         <div className="px-4 pb-2.5">
-          <label className="block text-[10px] uppercase tracking-wider text-gray-500 font-medium mb-1">
+          <label className="block mono-label mb-1">
             工作室渠道类型限制（勾选 = 只能选这些；全不勾 = 不限制）
           </label>
           {studios.length === 0 ? (
@@ -532,7 +532,7 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
           <button
             onClick={submitEnqueue}
             disabled={enqueueBusy}
-            className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85 disabled:opacity-40"
+            className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-40"
           >
             {enqueueBusy ? '入队中…' : '入队到 Pool'}
           </button>
@@ -570,17 +570,17 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
           <table className="w-full text-xs">
             <thead className="bg-gray-50 border-b border-gray-100 text-gray-500">
               <tr>
-                <th className="px-3 py-2 text-left font-medium">ID</th>
-                <th className="px-3 py-2 text-left font-medium">Studio</th>
-                <th className="px-3 py-2 text-left font-medium">Group</th>
-                <th className="px-3 py-2 text-left font-medium">Key</th>
-                <th className="px-3 py-2 text-left font-medium">Status</th>
-                <th className="px-3 py-2 text-right font-medium">Priority</th>
-                <th className="px-3 py-2 text-right font-medium">Quota</th>
-                <th className="px-3 py-2 text-right font-medium">Channel</th>
-                <th className="px-3 py-2 text-right font-medium">Try</th>
-                <th className="px-3 py-2 text-left font-medium">Error / 更新</th>
-                <th className="px-3 py-2 text-right font-medium">操作</th>
+                <th className="px-3 py-2 text-left mono-label">ID</th>
+                <th className="px-3 py-2 text-left mono-label">Studio</th>
+                <th className="px-3 py-2 text-left mono-label">Group</th>
+                <th className="px-3 py-2 text-left mono-label">Key</th>
+                <th className="px-3 py-2 text-left mono-label">Status</th>
+                <th className="px-3 py-2 text-right mono-label">Priority</th>
+                <th className="px-3 py-2 text-right mono-label">Quota</th>
+                <th className="px-3 py-2 text-right mono-label">Channel</th>
+                <th className="px-3 py-2 text-right mono-label">Try</th>
+                <th className="px-3 py-2 text-left mono-label">Error / 更新</th>
+                <th className="px-3 py-2 text-right mono-label">操作</th>
               </tr>
             </thead>
             <tbody>

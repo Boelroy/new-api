@@ -319,16 +319,16 @@ export default function Sidebar({ open, onClose }: Props) {
       />
 
       <aside
-        className={`fixed inset-y-0 left-0 w-60 bg-white border-r border-gray-200 z-40 flex flex-col transition-transform lg:translate-x-0 lg:w-56 ${
+        className={`fixed inset-y-0 left-0 w-60 bg-white border-r border-border z-40 flex flex-col transition-transform lg:translate-x-0 lg:w-56 ${
           open ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
         <div className="px-5 pt-6 pb-5 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-gray-900 text-white flex items-center justify-center text-sm font-semibold tracking-tight">R</div>
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-md bg-brand text-white flex items-center justify-center text-sm font-bold tracking-tight">R</div>
             <div>
-              <div className="text-sm font-semibold tracking-tight text-gray-900 leading-none">Report Service</div>
-              <div className="text-[10px] text-gray-400 mt-1 uppercase tracking-wider">Admin</div>
+              <div className="text-sm font-bold tracking-tight text-ink leading-none">Report Service</div>
+              <div className="mono-label mt-1.5 block">Admin</div>
             </div>
           </div>
           <button
@@ -344,7 +344,7 @@ export default function Sidebar({ open, onClose }: Props) {
         </div>
 
         <nav className="flex-1 px-3 space-y-0.5 overflow-y-auto">
-          <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-gray-400 font-medium">Overview</div>
+          <div className="mono-label px-2 pt-2 pb-2 block">Overview</div>
           {items.map(item => (
             <NavLink
               key={item.to}
@@ -352,10 +352,10 @@ export default function Sidebar({ open, onClose }: Props) {
               end={item.end}
               onClick={onClose}
               className={({ isActive }) =>
-                `flex items-center gap-2.5 px-2.5 py-2 rounded-md text-sm transition-colors ${
+                `flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm transition-colors ${
                   isActive
-                    ? 'bg-gray-900 text-white shadow-sm'
-                    : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+                    ? 'bg-brand-50 text-brand font-medium'
+                    : 'text-secondary hover:bg-canvas hover:text-ink'
                 }`
               }
             >
@@ -365,10 +365,10 @@ export default function Sidebar({ open, onClose }: Props) {
           ))}
         </nav>
 
-        <div className="px-3 pb-5 border-t border-gray-100 pt-4">
+        <div className="px-3 pb-5 border-t border-border pt-4">
           <button
             onClick={handleLogout}
-            className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-md text-sm text-gray-500 hover:bg-gray-100 hover:text-gray-900 transition-colors"
+            className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm text-secondary hover:bg-canvas hover:text-ink transition-colors"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />

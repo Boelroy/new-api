@@ -21,9 +21,9 @@ const STATUS_LABEL: Record<number, string> = {
   3: '自动禁用',
 }
 const STATUS_CLS: Record<number, string> = {
-  1: 'bg-emerald-100 text-emerald-800',
+  1: 'text-success bg-[#E6F4EE]',
   2: 'bg-red-100 text-red-700',
-  3: 'bg-amber-100 text-amber-700',
+  3: 'text-warning bg-[#FBF0DC]',
 }
 
 const DEFAULT_ANTHROPIC_MODELS = [
@@ -254,7 +254,7 @@ function VertexAdminInputSection({
                 type="button"
                 onClick={() => onKeyModeChange(m.id)}
                 className={`px-3 py-1 text-[11px] border-r border-gray-200 last:border-r-0 transition-colors ${
-                  active ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                  active ? 'bg-brand text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
                 }`}
               >
                 {m.label}
@@ -1838,7 +1838,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
       <button
         onClick={fetchChannels}
         disabled={!selectedID || fetching}
-        className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-50"
+        className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-50"
       >
         {fetching ? 'Fetching…' : 'Fetch channels'}
       </button>
@@ -1855,7 +1855,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
         {/* Profile selector */}
         <section className="bg-white border border-gray-200 rounded-xl p-4">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">Profile</h2>
+            <h2 className="mono-label">Profile</h2>
             {loadingProfiles && <span className="text-[11px] text-gray-400">loading…</span>}
           </div>
           {profiles.length === 0 && !loadingProfiles && (
@@ -1916,7 +1916,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
             额度是否设置。 */}
         <section className="bg-white border border-gray-200 rounded-xl p-4">
           <div className="flex items-center justify-between mb-2">
-            <h2 className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">
+            <h2 className="mono-label">
               到额自动禁用（全局）
             </h2>
             {autoDisableMsg && (
@@ -1982,7 +1982,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
             >
               <div className="text-sm font-semibold text-gray-900 flex items-center gap-2">
                 上 Key 队列
-                <span className="text-[10px] text-gray-400 uppercase tracking-wider">
+                <span className="mono-label">
                   {pending.filter(p => p.status === 'pending').length} pending ·{' '}
                   {pending.filter(p => p.status === 'active').length} active ·{' '}
                   {pending.filter(p => p.status === 'used').length} used ·{' '}
@@ -2002,7 +2002,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
               className="flex flex-wrap items-center gap-3 px-4 py-2.5 border-b border-gray-100 bg-gray-50/50"
               onClick={e => e.stopPropagation()}
             >
-              <div className="text-[10px] uppercase tracking-wider text-gray-500 font-medium">
+              <div className="mono-label">
                 Pool 节流
               </div>
               <label className="flex items-center gap-1.5 text-xs text-gray-700">
@@ -2060,7 +2060,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                 type="button"
                 onClick={savePoolTuning}
                 disabled={poolSaving || !poolDirty}
-                className="bg-gray-900 text-white rounded px-2 py-0.5 text-xs hover:opacity-85 disabled:opacity-40"
+                className="bg-brand text-white rounded px-2 py-0.5 text-xs hover:bg-brand-700 disabled:opacity-40"
               >
                 {poolSaving ? '保存中…' : '保存'}
               </button>
@@ -2100,7 +2100,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                         <td className="px-3 py-2 font-mono text-[11px]">{row.key_masked}</td>
                         <td className="px-3 py-2">
                           <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] ${
-                            row.status === 'active' ? 'bg-emerald-100 text-emerald-800'
+                            row.status === 'active' ? 'text-success bg-[#E6F4EE]'
                               : row.status === 'used' ? 'bg-gray-100 text-gray-500'
                               : row.status === 'failed' ? 'bg-red-100 text-red-700'
                               : 'bg-blue-100 text-blue-700'
@@ -2171,7 +2171,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                       <td className="px-3 py-2 font-mono">{p.studio}</td>
                       <td className="px-3 py-2">
                         {p.accepting_keys ? (
-                          <span className="inline-block px-2 py-0.5 rounded-full text-[10px] bg-emerald-100 text-emerald-800">
+                          <span className="inline-block px-2 py-0.5 rounded-full text-[10px] text-success bg-[#E6F4EE]">
                             接收{p.has_row ? '' : '（默认）'}
                           </span>
                         ) : (
@@ -2447,7 +2447,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
               <button
                 onClick={submitBulkCost}
                 disabled={bulkCostBusy}
-                className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85 disabled:opacity-50"
+                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
               >
                 {bulkCostBusy ? '保存中…' : `保存 (${selectedIDs.size})`}
               </button>
@@ -2524,7 +2524,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
               <button
                 onClick={submitBulkPrio}
                 disabled={bulkPrioBusy}
-                className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85 disabled:opacity-50"
+                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
               >
                 {bulkPrioBusy ? `保存中… ${bulkPrioProgress?.done ?? 0}/${bulkPrioProgress?.total ?? 0}` : `保存 (${selectedIDs.size})`}
               </button>
@@ -2768,7 +2768,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                         type="button"
                         onClick={() => setBatchAwsKeyMode('ak_sk')}
                         className={`px-3 py-1.5 text-xs border-r border-gray-200 transition-colors ${
-                          batchAwsKeyMode === 'ak_sk' ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                          batchAwsKeyMode === 'ak_sk' ? 'bg-brand text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
                         }`}
                       >
                         AK/SK
@@ -2777,7 +2777,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                         type="button"
                         onClick={() => setBatchAwsKeyMode('api_key')}
                         className={`px-3 py-1.5 text-xs transition-colors ${
-                          batchAwsKeyMode === 'api_key' ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                          batchAwsKeyMode === 'api_key' ? 'bg-brand text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
                         }`}
                       >
                         API Key
@@ -2956,7 +2956,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
               <button
                 onClick={submitRowEdit}
                 disabled={rowBusy}
-                className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85 disabled:opacity-50"
+                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
               >
                 {rowBusy ? '保存中…' : '保存'}
               </button>
@@ -3019,7 +3019,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                   operator only has to type the "middle" segment of the
                   channel name and pick keys. */}
               <div className="pt-2 border-t border-gray-100">
-                <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-2">
+                <div className="mono-label mb-2">
                   批量上传默认值
                 </div>
                 <Field label="默认 Group (Anthropic)">
@@ -3080,7 +3080,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                   One or more selected = only those users may see the profile
                   in the operator picker AND pass the upload preflight. */}
               <div className="pt-2 border-t border-gray-100">
-                <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-2 flex items-center gap-2">
+                <div className="mono-label mb-2 flex items-center gap-2">
                   <span>Remote Studio Operator 可见性</span>
                   {visLoading && <span className="text-gray-300">加载中…</span>}
                 </div>
@@ -3142,7 +3142,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
               <button
                 onClick={submitForm}
                 disabled={formBusy}
-                className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85 disabled:opacity-50"
+                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
               >
                 {formBusy ? '保存中…' : '保存'}
               </button>
@@ -3538,7 +3538,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function MetricCard({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
     <div className="bg-white border border-gray-200 rounded-xl p-3">
-      <div className="text-[10px] text-gray-400 uppercase tracking-wider">{label}</div>
+      <div className="mono-label">{label}</div>
       <div className={`mt-1 text-lg font-semibold tabular-nums ${color ?? 'text-gray-900'}`}>{value}</div>
     </div>
   )

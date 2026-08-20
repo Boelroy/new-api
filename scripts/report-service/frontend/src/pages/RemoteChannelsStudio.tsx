@@ -198,8 +198,8 @@ const STATUS_LABEL: Record<PendingKey['status'], string> = {
   failed:  '失败',
 }
 const STATUS_CLS: Record<PendingKey['status'], string> = {
-  pending: 'bg-amber-100 text-amber-700',
-  active:  'bg-emerald-100 text-emerald-800',
+  pending: 'text-warning bg-[#FBF0DC]',
+  active:  'text-success bg-[#E6F4EE]',
   used:    'bg-gray-100 text-gray-600',
   failed:  'bg-rose-100 text-rose-700',
 }
@@ -215,7 +215,7 @@ function channelStatusLabel(status: number): string {
   return `状态 ${status}`
 }
 function channelStatusCls(status: number): string {
-  if (status === 1) return 'bg-emerald-100 text-emerald-800'
+  if (status === 1) return 'text-success bg-[#E6F4EE]'
   if (status === 3) return 'bg-rose-100 text-rose-700'
   return 'bg-gray-100 text-gray-600'
 }
@@ -289,7 +289,7 @@ function VertexInputSection({
                 type="button"
                 onClick={() => onKeyModeChange(m.id)}
                 className={`px-3 py-1 text-[11px] border-r border-gray-200 last:border-r-0 transition-colors ${
-                  active ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                  active ? 'bg-brand text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
                 }`}
               >
                 {m.label}
@@ -477,7 +477,7 @@ function AwsInputSection({
               type="button"
               onClick={() => onKeyModeChange('ak_sk')}
               className={`px-3 py-1.5 text-xs border-r border-gray-200 transition-colors ${
-                keyMode === 'ak_sk' ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                keyMode === 'ak_sk' ? 'bg-brand text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
               }`}
             >
               AK/SK
@@ -486,7 +486,7 @@ function AwsInputSection({
               type="button"
               onClick={() => onKeyModeChange('api_key')}
               className={`px-3 py-1.5 text-xs transition-colors ${
-                keyMode === 'api_key' ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                keyMode === 'api_key' ? 'bg-brand text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
               }`}
             >
               API Key
@@ -1236,7 +1236,7 @@ export default function RemoteChannelsStudio() {
           <button
             onClick={openBatch}
             disabled={!selectedID}
-            className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85 disabled:opacity-50"
+            className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
           >
             批量上 5刀key (Pool)
           </button>
@@ -1280,7 +1280,7 @@ export default function RemoteChannelsStudio() {
               <button
                 onClick={() => void refreshRemoteUsage()}
                 disabled={refreshingRemote || !selectedID}
-                className="text-xs text-white bg-gray-900 rounded-md px-2 py-1 hover:opacity-85 disabled:opacity-50"
+                className="text-xs text-white bg-brand rounded-md px-2 py-1 hover:bg-brand-700 disabled:opacity-50"
                 title="向远端 new-api 发起一次拉取，更新用量数据"
               >
                 {refreshingRemote ? '拉取中…' : '获取用量'}
@@ -1295,7 +1295,7 @@ export default function RemoteChannelsStudio() {
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
-              <thead className="bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500">
+              <thead className="bg-gray-50 mono-label">
                 <tr>
                   <th className="text-left px-4 py-2 font-medium">名称</th>
                   <th className="text-left px-4 py-2 font-medium">状态</th>
@@ -1389,7 +1389,7 @@ export default function RemoteChannelsStudio() {
               <button
                 onClick={() => void loadUsage()}
                 disabled={usageLoading}
-                className="text-xs text-white bg-gray-900 rounded-md px-2 py-1 hover:opacity-85 disabled:opacity-50"
+                className="text-xs text-white bg-brand rounded-md px-2 py-1 hover:bg-brand-700 disabled:opacity-50"
               >
                 {usageLoading ? '拉取中…' : '刷新'}
               </button>
@@ -1402,7 +1402,7 @@ export default function RemoteChannelsStudio() {
           )}
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
-              <thead className="bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500">
+              <thead className="bg-gray-50 mono-label">
                 <tr>
                   <th className="text-left px-4 py-2 font-medium">名称</th>
                   <th className="text-left px-4 py-2 font-medium">Group</th>
@@ -1482,7 +1482,7 @@ export default function RemoteChannelsStudio() {
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
-              <thead className="bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500">
+              <thead className="bg-gray-50 mono-label">
                 <tr>
                   <th className="text-left px-4 py-2 font-medium">Key</th>
                   <th className="text-left px-4 py-2 font-medium">状态</th>
@@ -1696,7 +1696,7 @@ export default function RemoteChannelsStudio() {
               <button
                 onClick={submitBatch}
                 disabled={batchBusy}
-                className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85 disabled:opacity-50"
+                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
               >
                 {batchBusy ? '入队中…' : '入队上传'}
               </button>
@@ -1830,7 +1830,7 @@ export default function RemoteChannelsStudio() {
               <button
                 onClick={submitImmediate}
                 disabled={immBusy}
-                className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85 disabled:opacity-50"
+                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
               >
                 {immBusy ? '上传中…' : '立即上传'}
               </button>

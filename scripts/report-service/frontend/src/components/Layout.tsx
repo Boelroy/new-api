@@ -12,16 +12,16 @@ export default function Layout({ title, subtitle, actions, children }: Props) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900">
+    <div className="min-h-screen bg-canvas text-ink">
       <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
       <main className="lg:pl-56">
         <div className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-7">
-          <header className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4 mb-5 sm:mb-6">
+          <header className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4 mb-5 sm:mb-6 pb-5 border-b border-border">
             <div className="flex items-start gap-2">
               <button
                 onClick={() => setSidebarOpen(true)}
-                className="lg:hidden mt-0.5 -ml-1 p-1.5 rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-900"
+                className="lg:hidden mt-0.5 -ml-1 p-1.5 rounded-lg text-secondary hover:bg-canvas hover:text-ink"
                 aria-label="打开菜单"
               >
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -31,8 +31,8 @@ export default function Layout({ title, subtitle, actions, children }: Props) {
                 </svg>
               </button>
               <div>
-                <h1 className="text-lg sm:text-[22px] font-semibold tracking-tight leading-tight">{title}</h1>
-                {subtitle && <p className="text-[11px] sm:text-xs text-gray-400 mt-1">{subtitle}</p>}
+                <h1 className="display text-xl sm:text-[26px] leading-tight">{title}</h1>
+                {subtitle && <p className="text-[11px] sm:text-xs text-secondary mt-1.5">{subtitle}</p>}
               </div>
             </div>
             {actions && (

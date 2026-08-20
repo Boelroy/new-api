@@ -116,7 +116,7 @@ export default function CacheReport() {
       <input type="date" value={start} onChange={ev => setStart(ev.target.value)} className="border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-white" />
       <span className="text-gray-300 text-xs">→</span>
       <input type="date" value={end} onChange={ev => setEnd(ev.target.value)} className="border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-white" />
-      <button onClick={applyQuery} disabled={loading} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-50">
+      <button onClick={applyQuery} disabled={loading} className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-50">
         {loading ? '加载中...' : '查询'}
       </button>
     </>
@@ -138,34 +138,34 @@ export default function CacheReport() {
       ]} />
 
       <div className="bg-white border border-gray-200 rounded-xl p-4 mb-4">
-        <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-2">命中率 (%) 与 复用倍数 (×)</div>
+        <div className="mono-label mb-2">命中率 (%) 与 复用倍数 (×)</div>
         <div className="w-full h-72">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartData} margin={{ top: 10, right: 20, left: 0, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#D9DDD7" />
               <XAxis dataKey="label" tick={{ fontSize: 10 }} />
               <YAxis yAxisId="pct" domain={[0, 100]} tick={{ fontSize: 10 }} label={{ value: '命中率 %', angle: -90, position: 'insideLeft', fontSize: 10 }} />
               <YAxis yAxisId="reuse" orientation="right" tick={{ fontSize: 10 }} label={{ value: 'reuse ×', angle: 90, position: 'insideRight', fontSize: 10 }} />
               <Tooltip wrapperStyle={{ fontSize: 11 }} />
               <Legend wrapperStyle={{ fontSize: 11 }} />
-              <Line yAxisId="pct" type="monotone" dataKey="hit_pct" name="命中率 %" stroke="#10b981" dot={false} strokeWidth={2} />
-              <Line yAxisId="reuse" type="monotone" dataKey="reuse_x" name="reuse ×" stroke="#6366f1" dot={false} strokeWidth={2} />
+              <Line yAxisId="pct" type="monotone" dataKey="hit_pct" name="命中率 %" stroke="#3E8E4F" dot={false} strokeWidth={2} />
+              <Line yAxisId="reuse" type="monotone" dataKey="reuse_x" name="reuse ×" stroke="#4D83FF" dot={false} strokeWidth={2} />
             </LineChart>
           </ResponsiveContainer>
         </div>
       </div>
 
       <div className="bg-white border border-gray-200 rounded-xl p-4 mb-4">
-        <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-2">Cache tokens (M)</div>
+        <div className="mono-label mb-2">Cache tokens (M)</div>
         <div className="w-full h-56">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartData} margin={{ top: 10, right: 20, left: 0, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#D9DDD7" />
               <XAxis dataKey="label" tick={{ fontSize: 10 }} />
               <YAxis tick={{ fontSize: 10 }} label={{ value: 'M tokens', angle: -90, position: 'insideLeft', fontSize: 10 }} />
               <Tooltip wrapperStyle={{ fontSize: 11 }} />
               <Legend wrapperStyle={{ fontSize: 11 }} />
-              <Line type="monotone" dataKey="cache_read_m"  name="Read"  stroke="#059669" dot={false} strokeWidth={2} />
+              <Line type="monotone" dataKey="cache_read_m"  name="Read"  stroke="#3E8E4F" dot={false} strokeWidth={2} />
               <Line type="monotone" dataKey="cache_write_m" name="Write" stroke="#dc2626" dot={false} strokeWidth={2} />
             </LineChart>
           </ResponsiveContainer>
@@ -178,7 +178,7 @@ export default function CacheReport() {
             <thead>
               <tr>
                 {['时段','请求数','命中率','reuse ×','Prompt Tokens','Cache Read','Cache Write','Completion'].map(h => (
-                  <th key={h} className="sticky top-0 bg-gray-50 px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200">{h}</th>
+                  <th key={h} className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">{h}</th>
                 ))}
               </tr>
             </thead>

@@ -259,7 +259,7 @@ export default function RunDetailPanels({ run, onClose, onDeleted }: Props) {
       {!isTerminal && (
         <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
           <div className="flex items-center justify-between px-4 py-2 border-b border-gray-100">
-            <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">Live log (stderr)</div>
+            <div className="mono-label">Live log (stderr)</div>
             {live?.stderr_trimmed && <span className="text-[10px] text-amber-700">头部已截断</span>}
           </div>
           <pre
@@ -309,7 +309,7 @@ export default function RunDetailPanels({ run, onClose, onDeleted }: Props) {
               </div>
               {detectResult.classification.signals.length > 0 && (
                 <div className="pt-2 border-t border-gray-100 space-y-1.5">
-                  <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1">命中信号 ({detectResult.classification.signals.length})</div>
+                  <div className="mono-label mb-1">命中信号 ({detectResult.classification.signals.length})</div>
                   {detectResult.classification.signals.map((s, i) => (
                     <div key={i} className="flex items-start gap-2 text-xs">
                       <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold ${tierColor(s.tier)}`}>
@@ -323,7 +323,7 @@ export default function RunDetailPanels({ run, onClose, onDeleted }: Props) {
               )}
               {detectResult.classification.notes && detectResult.classification.notes.length > 0 && (
                 <div className="pt-2 border-t border-gray-100">
-                  <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1">备注</div>
+                  <div className="mono-label mb-1">备注</div>
                   {detectResult.classification.notes.map((n, i) => (
                     <div key={i} className="text-xs text-gray-600">· {n}</div>
                   ))}
@@ -357,7 +357,7 @@ export default function RunDetailPanels({ run, onClose, onDeleted }: Props) {
         {isTerminal && run.detect_trace_bytes > 0 && (
           <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
             <div className="flex items-center justify-between px-4 py-2 border-b border-gray-100">
-              <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">Detect trace ({fmtBytes(run.detect_trace_bytes)})</div>
+              <div className="mono-label">Detect trace ({fmtBytes(run.detect_trace_bytes)})</div>
               <div className="flex items-center gap-2">
                 {run.detect_trace_bytes >= 200_000 && !showDetectTraceFull && (
                   <button onClick={() => setShowDetectTraceFull(true)} className="border border-gray-200 rounded-md px-3 py-1 text-[11px] bg-white hover:bg-gray-50 text-gray-700">加载完整</button>
@@ -421,7 +421,7 @@ export default function RunDetailPanels({ run, onClose, onDeleted }: Props) {
         {isTerminal && run.eval_trace_bytes > 0 && (
           <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
             <div className="flex items-center justify-between px-4 py-2 border-b border-gray-100">
-              <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">Eval trace ({fmtBytes(run.eval_trace_bytes)})</div>
+              <div className="mono-label">Eval trace ({fmtBytes(run.eval_trace_bytes)})</div>
               <div className="flex items-center gap-2">
                 {run.eval_trace_bytes >= 200_000 && !showEvalTraceFull && (
                   <button onClick={() => setShowEvalTraceFull(true)} className="border border-gray-200 rounded-md px-3 py-1 text-[11px] bg-white hover:bg-gray-50 text-gray-700">加载完整</button>
@@ -460,7 +460,7 @@ export default function RunDetailPanels({ run, onClose, onDeleted }: Props) {
       {isTerminal && run.stderr_bytes > 0 && (
         <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
           <div className="flex items-center justify-between px-4 py-2 border-b border-gray-100">
-            <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">stderr ({fmtBytes(run.stderr_bytes)})</div>
+            <div className="mono-label">stderr ({fmtBytes(run.stderr_bytes)})</div>
             <a
               href={detail?.files['stderr']}
               download={`${run.model}-${run.id}-stderr.log`}

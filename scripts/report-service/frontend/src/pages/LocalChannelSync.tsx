@@ -5,7 +5,7 @@ import { api, SyncableCredential, LocalSyncResult } from '../api'
 const btnCls =
   'border border-gray-200 rounded-md px-3 py-1.5 text-xs bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed'
 const primaryBtnCls =
-  'border border-gray-900 bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed'
+  'border border-brand bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-40 disabled:cursor-not-allowed'
 
 function fmtTime(ts: number) {
   if (!ts) return '—'

@@ -148,7 +148,7 @@ export default function KeyTester() {
         <button
           onClick={handleRun}
           disabled={parsedKeys.length === 0}
-          className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-50"
+          className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-50"
         >
           开始测试 ({parsedKeys.length})
         </button>
@@ -172,7 +172,7 @@ export default function KeyTester() {
       <div className="grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-6 items-start">
         <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
           <div>
-            <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">服务商</label>
+            <label className="mono-label mb-1.5 block">服务商</label>
             <div className="grid grid-cols-2 gap-1 bg-gray-100 rounded-md p-0.5">
               {(['claude', 'openai'] as Provider[]).map(p => (
                 <button
@@ -190,7 +190,7 @@ export default function KeyTester() {
           </div>
 
           <div>
-            <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">模型</label>
+            <label className="mono-label mb-1.5 block">模型</label>
             <select
               value={model}
               onChange={e => setModel(e.target.value)}
@@ -203,7 +203,7 @@ export default function KeyTester() {
           </div>
 
           <div>
-            <label className="block text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">
+            <label className="mono-label mb-1.5 block">
               Keys <span className="text-gray-300 normal-case">（每行一个）</span>
             </label>
             <textarea
@@ -242,7 +242,7 @@ export default function KeyTester() {
                     {['#', '状态', 'Key', 'HTTP', '延迟', '说明'].map(h => (
                       <th
                         key={h}
-                        className="sticky top-0 bg-gray-50 px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200"
+                        className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200"
                       >
                         {h}
                       </th>
@@ -256,7 +256,7 @@ export default function KeyTester() {
                       <td className="px-3 py-1.5 border-b border-gray-50">
                         <span
                           className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                            r.ok ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-700'
+                            r.ok ? 'text-success bg-[#E6F4EE]' : 'text-red-700 bg-red-50'
                           }`}
                         >
                           <span

@@ -110,7 +110,7 @@ export default function KeyCapacity() {
   const etaFmt = fmtETA(totalETA)
 
   const actions = (
-    <button onClick={load} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85">
+    <button onClick={load} className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700">
       刷新数据
     </button>
   )
@@ -187,7 +187,7 @@ export default function KeyCapacity() {
               <button
                 onClick={handleBulkPriority}
                 disabled={bulkBusy || selected.size === 0}
-                className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {bulkBusy ? '应用中…' : '设置选中优先级'}
               </button>
@@ -211,7 +211,7 @@ export default function KeyCapacity() {
                     />
                   </th>
                   {['ID','名称','Key 末尾','优先级','已用 ($)','额度 ($)','剩余 ($)','剩余%','最近1小时消耗 ($)','预计剩余时长'].map(h => (
-                    <th key={h} className="sticky top-0 bg-gray-50 px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200">{h}</th>
+                    <th key={h} className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">{h}</th>
                   ))}
                 </tr>
               </thead>

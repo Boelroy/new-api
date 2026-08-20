@@ -1,3 +1,5 @@
+import { MonoLabel } from './ui'
+
 type Card = { label: string; value: string; color?: string }
 
 export default function SummaryCards({ cards }: { cards: Card[] }) {
@@ -6,10 +8,10 @@ export default function SummaryCards({ cards }: { cards: Card[] }) {
       {cards.map((c) => (
         <div
           key={c.label}
-          className="bg-white border border-gray-200 rounded-xl px-4 py-3 hover:border-gray-300 transition-colors"
+          className="card card-hover px-4 py-3"
         >
-          <div className="text-[10px] font-medium uppercase tracking-wider text-gray-400">{c.label}</div>
-          <div className={`text-[19px] font-semibold mt-1 tabular-nums leading-tight ${c.color ?? 'text-gray-900'}`}>
+          <MonoLabel>{c.label}</MonoLabel>
+          <div className={`text-[19px] font-semibold mt-1.5 tnum tracking-tightest leading-tight ${c.color ?? 'text-ink'}`}>
             {c.value}
           </div>
         </div>

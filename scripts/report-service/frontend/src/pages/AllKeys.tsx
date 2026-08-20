@@ -6,9 +6,9 @@ import { api, ChannelRow, ROLE_ADMIN, ROLE_STUDIO_OPERATOR } from '../api'
 
 const STATUS_LABEL: Record<number, string> = { 1: '启用', 2: '手动禁用', 3: '自动禁用' }
 const STATUS_CLS: Record<number, string> = {
-  1: 'bg-emerald-100 text-emerald-800',
-  2: 'bg-red-100 text-red-700',
-  3: 'bg-amber-100 text-amber-700',
+  1: 'text-success bg-[#E6F4EE]',
+  2: 'text-red-700 bg-red-50',
+  3: 'text-warning bg-[#FBF0DC]',
 }
 
 function today() { return new Date().toISOString().slice(0, 10) }
@@ -177,7 +177,7 @@ export default function AllKeys() {
       <input type="date" value={start} onChange={e => setStart(e.target.value)} className="border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white" />
       <span className="text-gray-300 text-xs">→</span>
       <input type="date" value={end} onChange={e => setEnd(e.target.value)} className="border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white" />
-      <button onClick={handleQuery} disabled={loading} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-50">
+      <button onClick={handleQuery} disabled={loading} className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-50">
         {loading ? '加载中...' : '查询'}
       </button>
       <button onClick={handleAll} className="border border-gray-200 rounded-md px-3 py-1.5 text-xs bg-white hover:bg-gray-50">全部</button>
@@ -215,9 +215,9 @@ export default function AllKeys() {
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
           <div>
             <div className="text-sm font-semibold">批量导入上游单价</div>
-            <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-0.5">每行 "key 价格"，按 channel.key 精确匹配</div>
+            <div className="mono-label mt-0.5">每行 "key 价格"，按 channel.key 精确匹配</div>
           </div>
-          <button onClick={submitBulk} disabled={bulkSubmitting} className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-50">
+          <button onClick={submitBulk} disabled={bulkSubmitting} className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-50">
             {bulkSubmitting ? '导入中...' : '导入'}
           </button>
         </div>
@@ -276,7 +276,7 @@ export default function AllKeys() {
             <button
               onClick={submitPrices}
               disabled={saving || Object.keys(priceEdits).length === 0}
-              className="bg-gray-900 text-white rounded-md px-3 py-1.5 text-xs hover:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
+              className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {saving ? '保存中…' : '保存价格改动'}
             </button>
@@ -287,7 +287,7 @@ export default function AllKeys() {
             <thead>
               <tr>
                 {['ID','名称','Key 末尾','状态','单价 CNY','总已用 ($)','额度 ($)','总剩余 ($)','剩余%'].map(h => (
-                  <th key={h} className="sticky top-0 bg-gray-50 px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-400 border-b border-gray-200">{h}</th>
+                  <th key={h} className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">{h}</th>
                 ))}
               </tr>
             </thead>
