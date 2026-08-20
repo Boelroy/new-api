@@ -13,8 +13,9 @@ export default {
         ink: '#0B1020',
         secondary: '#687083',
         border: '#D9DDD7',
-        canvas: '#F4F5F0',
-        paper: '#F4F5F0',
+        // Reverted to the original neutral app background.
+        canvas: '#F9FAFB',
+        paper: '#F9FAFB',
         brand: {
           DEFAULT: '#2864FF',
           50: '#E9EBFF',
@@ -33,25 +34,6 @@ export default {
         },
         success: '#3E8E4F',
         warning: '#C97A12',
-        // Remapped neutral ramp: 50–200 warm paper / hairline, 500–900 cool ink.
-        // Keeps every legacy bg-gray-50 / text-gray-900 / border-gray-200 working
-        // while shifting the whole app onto the blueprint tones.
-        gray: {
-          50: '#F4F5F0',
-          100: '#ECEEE8',
-          200: '#D9DDD7',
-          300: '#C7CBC2',
-          400: '#8A93A0',
-          500: '#687083',
-          600: '#545B69',
-          700: '#3A414E',
-          800: '#1C2230',
-          900: '#0B1020',
-        },
-      },
-      fontFamily: {
-        sans: ['Inter', 'PingFang SC', 'Helvetica Neue', 'system-ui', 'sans-serif'],
-        mono: ['DM Mono', 'IBM Plex Mono', 'ui-monospace', 'monospace'],
       },
       // Sharp corners: cards/inputs near-square, buttons crisp, pills/avatars stay round.
       borderRadius: {

@@ -16,7 +16,6 @@ body {
   @apply bg-canvas text-ink font-sans antialiased;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  font-feature-settings: 'cv02', 'cv03', 'cv04', 'ss01';
 }
 
 @layer base {
