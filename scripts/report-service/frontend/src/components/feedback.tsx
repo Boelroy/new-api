@@ -1,4 +1,5 @@
 import { useEffect, useSyncExternalStore } from 'react'
+import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
 import { Button, cx } from './ui'
 
@@ -140,7 +141,11 @@ export function Modal({
   }, [open, onClose])
 
   if (!open) return null
-  return (
+  // Portal to <body>: the modal is rendered from inside a page container that
+  // runs a transform animation (.page-enter), and a transformed ancestor makes
+  // position:fixed resolve against it instead of the viewport — which would
+  // leave the sticky header uncovered. Portalling escapes that containing block.
+  return createPortal(
     <div
       className="fixed inset-0 z-[110] flex items-start justify-center overflow-y-auto bg-ink/40 p-4 sm:items-center"
       onClick={onClose}
@@ -163,7 +168,8 @@ export function Modal({
         </button>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
