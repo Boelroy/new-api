@@ -1139,10 +1139,43 @@ func backfillMissingDays() {
 	}
 }
 
+// reportRefreshDays is how many trailing UTC days (including today) the
+// periodic refresh re-aggregates each tick. Re-aggregating recent PAST days —
+// not just today — lets late-arriving and UTC-midnight-boundary logs get
+// folded in, so each day's report_daily_agg converges to the raw logs instead
+// of freezing a few percent short the moment the UTC date rolls over (which is
+// why the report used to read lower than the live newapi log totals).
+// Tunable via REPORT_REFRESH_DAYS (default 3; 1 restores the old today-only
+// behaviour).
+func reportRefreshDays() int {
+	if v := strings.TrimSpace(os.Getenv("REPORT_REFRESH_DAYS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 30 {
+			return n
+		}
+	}
+	return 3
+}
+
+// refreshRecentDays re-aggregates the trailing window of UTC days, oldest
+// first, so a completed day keeps catching up for reportRefreshDays()-1 more
+// days before it stops being touched.
+func refreshRecentDays() {
+	now := time.Now().UTC()
+	for i := reportRefreshDays() - 1; i >= 0; i-- {
+		d := now.AddDate(0, 0, -i).Format("2006-01-02")
+		if err := aggregateDay(d); err != nil {
+			log.Printf("recent-day refresh %s error: %v", d, err)
+		}
+	}
+}
+
 func startDailyRefresh() {
 	go func() {
 		if IsLeader() {
 			backfillMissingDays()
+			// Correct already-present-but-stale recent days immediately on
+			// boot (backfillMissingDays only fills days with zero rows).
+			refreshRecentDays()
 		}
 	}()
 	ticker := time.NewTicker(time.Hour)
@@ -1151,10 +1184,7 @@ func startDailyRefresh() {
 			if !IsLeader() {
 				continue
 			}
-			today := time.Now().UTC().Format("2006-01-02")
-			if err := aggregateDay(today); err != nil {
-				log.Printf("daily refresh error: %v", err)
-			}
+			refreshRecentDays()
 		}
 	}()
 }
