@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import Layout from '../components/Layout'
 import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_01, ROLE_TESTER, ROLE_USER, type AuthMe, type AuthUser } from '../api'
+import { confirmDialog } from '../components/feedback'
 
 const ROLE_OPTIONS: { value: number; label: string }[] = [
   { value: ROLE_USER, label: 'User (All Keys only)' },
@@ -204,7 +205,7 @@ export default function Users() {
   const handleToggleStatus = async (u: AuthUser) => {
     const disable = u.status === 1
     const verb = disable ? '禁用' : '重新启用'
-    if (!window.confirm(`${verb}用户 "${u.username}"？${disable ? '\n\n他现有的登录 token 会立即失效，需要重新登录（如果重新启用他）。' : ''}`)) return
+    if (!(await confirmDialog({ message: `${verb}用户 "${u.username}"？${disable ? '\n\n他现有的登录 token 会立即失效，需要重新登录（如果重新启用他）。' : ''}`, danger: disable, confirmText: verb }))) return
     setBusyId(u.id)
     setError(null)
     try {
@@ -219,7 +220,7 @@ export default function Users() {
   }
 
   const handleDelete = async (u: AuthUser) => {
-    if (!window.confirm(`Delete user "${u.username}"? This cannot be undone.`)) return
+    if (!(await confirmDialog({ message: `Delete user "${u.username}"? This cannot be undone.`, danger: true, confirmText: '删除' }))) return
     setBusyId(u.id)
     setError(null)
     try {

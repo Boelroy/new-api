@@ -1447,6 +1447,11 @@ func handleAuthConfig(c *gin.Context) {
 		"r2_configured":            r2Configured(),
 		"supplier_account_enabled":      supplierAccountEnabled(),
 		"supplier_account_openapi_ready": supplierOpenAPIConfigured(),
+		// Per-role sidebar visibility overrides for THIS deployment. Map of
+		// role value (as string) -> list of hidden nav item keys (route
+		// paths). Empty/absent ⇒ default sidebar. The frontend Sidebar reads
+		// this to hide items a super admin has switched off per role.
+		"sidebar_overrides": sidebarOverridesMap(),
 	}
 	if mainServiceURL != "" {
 		resp["sso_url"] = mainServiceURL + "/sign-in"
@@ -1454,6 +1459,67 @@ func handleAuthConfig(c *gin.Context) {
 		resp["sso_url"] = nil
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// cfgSidebarOverrides is the report_config key holding the per-role sidebar
+// visibility overrides for this deployment (JSON: role -> hidden item keys).
+const cfgSidebarOverrides = "sidebar_overrides"
+
+// sidebarOverridesMap reads the per-role hidden-item map from report_config.
+// Returns an empty (non-nil) map when unset or malformed so callers and JSON
+// consumers always see an object, never null.
+func sidebarOverridesMap() map[string][]string {
+	out := map[string][]string{}
+	raw := supplierConfigGet(cfgSidebarOverrides)
+	if raw == "" {
+		return out
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return map[string][]string{}
+	}
+	return out
+}
+
+func handleSidebarConfigGet(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"overrides": sidebarOverridesMap()})
+}
+
+func handleSidebarConfigSet(c *gin.Context) {
+	var body struct {
+		Overrides map[string][]string `json:"overrides"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	// Normalise: drop empty lists so the stored blob stays minimal, and
+	// de-dup keys within each role.
+	clean := map[string][]string{}
+	for role, keys := range body.Overrides {
+		seen := map[string]bool{}
+		var out []string
+		for _, k := range keys {
+			k = strings.TrimSpace(k)
+			if k == "" || seen[k] {
+				continue
+			}
+			seen[k] = true
+			out = append(out, k)
+		}
+		if len(out) > 0 {
+			clean[role] = out
+		}
+	}
+	blob, err := json.Marshal(clean)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err := supplierConfigSet(cfgSidebarOverrides, string(blob)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "overrides": clean})
 }
 
 // Brute-force defenses on /api/login. Tunable in one place: 5 wrong passwords
@@ -4325,6 +4391,12 @@ func main() {
 	// the group's admin-or-supplier gate to admin+).
 	supplierAPI.GET("/settings", requireRole(minAdminRole), handleSupplierSettingsGet)
 	supplierAPI.PUT("/settings", requireRole(minAdminRole), handleSupplierSettingsSet)
+
+	// Per-role sidebar visibility config — super admin only. GET is also
+	// used by the settings page to prefill; the live Sidebar reads the same
+	// data from /api/auth/config.
+	api.GET("/sidebar-config", requireRole(minSuperAdminRole), handleSidebarConfigGet)
+	api.PUT("/sidebar-config", requireRole(minSuperAdminRole), handleSidebarConfigSet)
 
 	adminAPI := api.Group("", requireRole(minAdminRole))
 	adminAPI.GET("/report", handleReport)

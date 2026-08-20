@@ -3,6 +3,8 @@ import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
 import BatchCreatePanel from '../components/BatchCreatePanel'
 import { api, ChannelRow, ROLE_ADMIN, ROLE_STUDIO_OPERATOR } from '../api'
+import { toast } from '../components/feedback'
+import { LivePollChip } from '../components/ui'
 
 const STATUS_LABEL: Record<number, string> = { 1: '启用', 2: '手动禁用', 3: '自动禁用' }
 const STATUS_CLS: Record<number, string> = {
@@ -43,7 +45,7 @@ export default function AllKeys() {
   const [start, setStart] = useState(today())
   const [end, setEnd] = useState(today())
   const [loading, setLoading] = useState(false)
-  const [refreshedAt, setRefreshedAt] = useState('')
+  const [refreshedAt, setRefreshedAt] = useState<number | null>(null)
   // System-wide realtime RPM from /api/allkeys/rpm. Not derived from `rows`
   // so studio_operator sees the global count instead of a studio-scoped sum.
   const [globalRpm, setGlobalRpm] = useState<number | null>(null)
@@ -85,9 +87,9 @@ export default function AllKeys() {
     try {
       const data = await api.getAllKeys(s, e)
       setRows(data.sort((a, b) => a.id - b.id))
-      setRefreshedAt(new Date().toLocaleTimeString('zh-CN'))
+      setRefreshedAt(Date.now())
       setPriceEdits({})
-    } catch (err) { console.error(err) }
+    } catch (err) { console.error(err); toast.error(err) }
     finally { setLoading(false) }
     try {
       const r = await api.getAllKeysRpm()
@@ -174,6 +176,7 @@ export default function AllKeys() {
 
   const actions = (
     <>
+      <LivePollChip at={refreshedAt} className="mr-1" />
       <input type="date" value={start} onChange={e => setStart(e.target.value)} className="border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white" />
       <span className="text-gray-300 text-xs">→</span>
       <input type="date" value={end} onChange={e => setEnd(e.target.value)} className="border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white" />
@@ -188,7 +191,7 @@ export default function AllKeys() {
   return (
     <Layout
       title="All Keys"
-      subtitle={`所有 Key 的总用量与容量（按创建时间筛选）${refreshedAt ? ` · 更新于 ${refreshedAt}` : ''}`}
+      subtitle="所有 Key 的总用量与容量（按创建时间筛选）"
       actions={actions}
     >
       <SummaryCards cards={[

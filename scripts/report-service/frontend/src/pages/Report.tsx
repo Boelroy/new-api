@@ -3,6 +3,7 @@ import { BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, Cartes
 import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
 import { api, LogRow } from '../api'
+import { toast } from '../components/feedback'
 
 const COLORS = ['#2864FF','#3E8E4F','#C97A12','#e11d48','#4D83FF','#7c3aed','#0d9488','#c026d3','#8DB7FF','#D9FF43']
 
@@ -38,6 +39,7 @@ export default function Report() {
       setRefreshedAt(new Date().toLocaleTimeString('zh-CN'))
     } catch (err) {
       console.error(err)
+      toast.error(err)
     } finally {
       setLoading(false)
     }

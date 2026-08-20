@@ -16,7 +16,9 @@ import RemoteChannels from './pages/RemoteChannels'
 import LocalChannelSync from './pages/LocalChannelSync'
 import PoolUploadStudio from './pages/PoolUploadStudio'
 import SupplierAccounts from './pages/SupplierAccounts'
+import SidebarSettings from './pages/SidebarSettings'
 import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_01, ROLE_TESTER } from './api'
+import { Toaster, ConfirmHost } from './components/feedback'
 
 // RoleGate guards a page against unauthorized roles. While the role is being
 // fetched it renders null so we don't flash protected content; on denial it
@@ -85,6 +87,8 @@ function RoleGate({ min, allow, children }: GateProps) {
 export default function App() {
   return (
     <BrowserRouter basename={BASE_PATH || undefined}>
+      <Toaster />
+      <ConfirmHost />
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<RoleGate min={ROLE_ADMIN}><Report /></RoleGate>} />
@@ -102,6 +106,7 @@ export default function App() {
         <Route path="/local-sync" element={<RoleGate min={ROLE_ADMIN}><LocalChannelSync /></RoleGate>} />
         <Route path="/pool-upload" element={<RoleGate allow={r => r === ROLE_STUDIO_OPERATOR}><PoolUploadStudio /></RoleGate>} />
         <Route path="/supplier-accounts" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_01}><SupplierAccounts /></RoleGate>} />
+        <Route path="/sidebar-settings" element={<RoleGate min={ROLE_SUPER_ADMIN}><SidebarSettings /></RoleGate>} />
         <Route path="/detect" element={<Navigate to="/testing" replace />} />
         <Route path="/eval" element={<Navigate to="/testing" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />

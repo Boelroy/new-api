@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Layout from '../components/Layout'
+import { toast, confirmDialog } from '../components/feedback'
 import {
   api,
   ROLE_STUDIO_OPERATOR,
@@ -691,6 +692,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
       })
     } catch (e) {
       console.error(e)
+      toast.error(e)
     } finally {
       setLoadingProfiles(false)
     }
@@ -874,7 +876,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   }
 
   const deleteProfile = async (p: RemoteProfile) => {
-    if (!window.confirm(`Delete profile "${p.name}"? Cannot be undone.`)) return
+    if (!(await confirmDialog({ message: `Delete profile "${p.name}"? Cannot be undone.`, danger: true, confirmText: '删除' }))) return
     try {
       await api.remoteProfileDelete(p.id)
       if (selectedID === p.id) setSelectedID(null)
@@ -1253,7 +1255,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
 
   const cancelPending = async (row: PendingKey) => {
     if (row.status !== 'pending' && row.status !== 'failed') return
-    if (!window.confirm(`删除队列条目 (${row.key_masked})？只能删 pending/failed 的。`)) return
+    if (!(await confirmDialog({ message: `删除队列条目 (${row.key_masked})？只能删 pending/failed 的。`, danger: true, confirmText: '删除' }))) return
     try {
       await api.remotePendingDelete(row.id)
       await reloadPending()
@@ -1639,7 +1641,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
 
   const deleteRow = async (ch: RemoteChannel) => {
     if (!selectedID) return
-    if (!window.confirm(`确认删除 "${ch.name}"？此操作会同时删除远端渠道，不可恢复。`)) return
+    if (!(await confirmDialog({ message: `确认删除 "${ch.name}"？此操作会同时删除远端渠道，不可恢复。`, danger: true, confirmText: '删除' }))) return
     try {
       await api.remoteChannelDelete(selectedID, ch.id)
       setChannels(prev => prev.filter(c => c.id !== ch.id))

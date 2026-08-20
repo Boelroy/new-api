@@ -5,6 +5,7 @@ import BatchCreatePanel from '../components/BatchCreatePanel'
 import LocalPoolPanel from '../components/LocalPoolPanel'
 import BalanceAlertPanel from '../components/BalanceAlertPanel'
 import { api, ChannelRow, ROLE_PROJECT_ADMIN, ROLE_SUPER_ADMIN } from '../api'
+import { toast } from '../components/feedback'
 import { getCachedRole, loadRole } from '../App'
 
 function fmtETA(hours: number | null): { text: string; cls: string } {
@@ -59,7 +60,7 @@ export default function KeyCapacity() {
       setChannels(res.channels)
       setTotalLastHour(res.total_last_hour)
       setRefreshedAt(new Date().toLocaleTimeString('zh-CN'))
-    } catch (err) { console.error(err) }
+    } catch (err) { console.error(err); toast.error(err) }
   }, [])
 
   useEffect(() => {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import Layout from '../components/Layout'
 import { api, type PendingKey, type RemoteChannel, type RemoteProfile } from '../api'
 import { readRememberedProfileID, writeRememberedProfileID } from '../lib/rememberProfile'
+import { confirmDialog } from '../components/feedback'
 
 // Studio-operator slim view of Remote Channels. Deliberately does NOT
 // share code with the super_admin RemoteChannels.tsx — that page has
@@ -1209,7 +1210,7 @@ export default function RemoteChannelsStudio() {
 
   const cancelPending = async (row: PendingKey) => {
     if (row.status !== 'pending' && row.status !== 'failed') return
-    if (!window.confirm(`删除队列条目 (${row.key_masked})？只能删 pending/failed 的。`)) return
+    if (!(await confirmDialog({ message: `删除队列条目 (${row.key_masked})？只能删 pending/failed 的。`, danger: true, confirmText: '删除' }))) return
     try {
       await api.remotePendingDelete(row.id)
       await reloadPending()

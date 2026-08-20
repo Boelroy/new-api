@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import type { ReactNode, ButtonHTMLAttributes } from 'react'
 
 // Tiny local classnames joiner so we don't take a hard dependency on `clsx`
@@ -94,6 +95,47 @@ export function ProgressBar({ value, className }: { value: number; className?: s
 
 export function Divider({ className }: { className?: string }) {
   return <div className={cx('h-px w-full bg-border', className)} />
+}
+
+/** Pulsing brand dot signalling a live / auto-refreshing surface. */
+export function LiveDot({ className }: { className?: string }) {
+  return (
+    <span className={cx('relative inline-flex h-2 w-2', className)}>
+      <span className="absolute inline-flex h-full w-full animate-pulseRing rounded-full bg-brand" />
+      <span className="relative inline-flex h-2 w-2 rounded-full bg-brand" />
+    </span>
+  )
+}
+
+/** Renders a timestamp as an auto-ticking relative label ("刚刚", "12s 前"). */
+export function RelativeTime({ at, className }: { at: number | null; className?: string }) {
+  const [, force] = useState(0)
+  useEffect(() => {
+    if (!at) return
+    const id = setInterval(() => force((n) => n + 1), 5000)
+    return () => clearInterval(id)
+  }, [at])
+  if (!at) return null
+  const secs = Math.max(0, Math.floor((Date.now() - at) / 1000))
+  const label =
+    secs < 5 ? '刚刚' : secs < 60 ? `${secs}s 前` : secs < 3600 ? `${Math.floor(secs / 60)}m 前` : `${Math.floor(secs / 3600)}h 前`
+  return <span className={cx('tnum', className)}>{label}</span>
+}
+
+/** Auto-refresh chip: live dot + "自动刷新 · N 前". Pass the last refresh epoch (ms). */
+export function LivePollChip({ at, className }: { at: number | null; className?: string }) {
+  return (
+    <span className={cx('inline-flex items-center gap-1.5 text-[11px] text-secondary', className)}>
+      <LiveDot />
+      <span>自动刷新</span>
+      {at != null && (
+        <>
+          <span className="text-border">·</span>
+          <RelativeTime at={at} />
+        </>
+      )}
+    </span>
+  )
 }
 
 export function Check({ className }: { className?: string }) {

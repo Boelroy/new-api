@@ -4,6 +4,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGri
 import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
 import { api, DownstreamDaily, DownstreamPricing, FXRate, ProfitSummary, setProfitApiKey } from '../api'
+import { toast } from '../components/feedback'
 
 const COLORS = ['#2864FF','#3E8E4F','#C97A12','#e11d48','#4D83FF','#C97A12','#3E8E4F','#4D83FF','#2864FF','#3E8E4F']
 
@@ -191,7 +192,7 @@ export default function Profit() {
       setFxEdits({})
     } catch (err) {
       console.error(err)
-      alert('加载失败：' + (err as Error).message)
+      toast.error('加载失败：' + (err as Error).message)
     } finally {
       setLoading(false)
     }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, type LocalPendingKey, type LocalPoolConfig } from '../api'
+import { confirmDialog } from './feedback'
 
 // Channel types the local pool can serve. Mirrors localPoolSupportedTypes in
 // the backend (14 Anthropic, 20 OpenRouter).
@@ -236,7 +237,7 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
 
   const cancelPending = async (row: LocalPendingKey) => {
     if (row.status !== 'pending' && row.status !== 'failed') return
-    if (!window.confirm(`删除队列条目 (${row.key_masked})？只能删 pending/failed 的。`)) return
+    if (!(await confirmDialog({ message: `删除队列条目 (${row.key_masked})？只能删 pending/failed 的。`, danger: true, confirmText: '删除' }))) return
     try {
       await api.localPoolDelete(row.id)
       await loadPending()

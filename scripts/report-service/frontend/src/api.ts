@@ -725,6 +725,16 @@ export const api = {
 
   getAuthMe: () => request<AuthMe>('/api/auth/me'),
 
+  // Per-role sidebar visibility overrides (super admin only). `overrides`
+  // maps a role value (as string) to the list of hidden nav item keys.
+  getSidebarConfig: () => request<{ overrides: Record<string, string[]> }>('/api/sidebar-config'),
+  setSidebarConfig: (overrides: Record<string, string[]>) =>
+    request<{ ok: boolean; overrides: Record<string, string[]> }>('/api/sidebar-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ overrides }),
+    }),
+
   listUsers: () => request<{ users: AuthUser[] }>('/api/users'),
 
   createUser: (payload: { username: string; password: string; role: number; studio?: string }) =>

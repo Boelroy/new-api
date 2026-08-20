@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
+import { LivePollChip } from '../components/ui'
 import {
   api,
   LocalHealthConfig,
@@ -82,6 +83,7 @@ export default function ModelHealth() {
   const [stateFilter, setStateFilter] = useState('')
   const [tagFilter, setTagFilter] = useState('')
   const [editing, setEditing] = useState<Partial<LocalHealthRule> | null>(null)
+  const [refreshedAt, setRefreshedAt] = useState<number | null>(null)
 
   const reload = useCallback(async () => {
     try {
@@ -94,6 +96,7 @@ export default function ModelHealth() {
       setRules(r.rules)
       setEvents(e.events)
       setError(null)
+      setRefreshedAt(Date.now())
     } catch (err) {
       setError((err as Error).message || String(err))
     }
@@ -125,6 +128,7 @@ export default function ModelHealth() {
       subtitle="按规则探测本地渠道的模型可用性，自动收敛 models 并开关渠道"
       actions={
         <>
+          <LivePollChip at={refreshedAt} className="mr-1" />
           <button className={btnCls} onClick={() => void reload()}>
             刷新
           </button>

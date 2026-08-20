@@ -3,12 +3,17 @@ import { NavLink } from 'react-router-dom'
 import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_01, ROLE_TESTER } from '../api'
 import { withBase } from '../basePath'
 
-type Item = {
+export type Item = {
   to: string
   label: string
   icon: JSX.Element
   end?: boolean
 }
+
+// Route key of the super-admin sidebar-settings page. It is appended to the
+// nav for super admins and is intentionally NOT part of the toggleable
+// catalog, so a super admin can never hide the page that unhides things.
+export const SIDEBAR_SETTINGS_KEY = '/sidebar-settings'
 
 const USAGE_REPORT_ITEM: Item = {
   to: '/',
@@ -206,6 +211,73 @@ const PROFIT_ITEM: Item = {
   ),
 }
 
+// Super-admin-only: configure which sidebar items each role sees on this
+// deployment. Appended in the render path, never in baselineItemsFor.
+const SIDEBAR_SETTINGS_ITEM: Item = {
+  to: SIDEBAR_SETTINGS_KEY,
+  label: '侧边栏设置',
+  icon: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="4" y1="21" x2="4" y2="14" />
+      <line x1="4" y1="10" x2="4" y2="3" />
+      <line x1="12" y1="21" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12" y2="3" />
+      <line x1="20" y1="21" x2="20" y2="16" />
+      <line x1="20" y1="12" x2="20" y2="3" />
+      <line x1="1" y1="14" x2="7" y2="14" />
+      <line x1="9" y1="8" x2="15" y2="8" />
+      <line x1="17" y1="16" x2="23" y2="16" />
+    </svg>
+  ),
+}
+
+// SidebarFlags gates items that only exist when this deployment wired up the
+// corresponding backend feature.
+export type SidebarFlags = { showProfit: boolean; showTesting: boolean; showSupplier: boolean }
+
+// baselineItemsFor returns the items a role sees BEFORE per-role visibility
+// overrides are applied. This is the single source of truth shared by the
+// live Sidebar and the SidebarSettings matrix. It excludes SIDEBAR_SETTINGS_ITEM.
+export function baselineItemsFor(role: number, flags: SidebarFlags): Item[] {
+  const { showProfit, showTesting, showSupplier } = flags
+  if (role >= ROLE_ADMIN) {
+    let items = ADMIN_NAV_ITEMS.slice()
+    // Users + Remote Channels are available to admin+ (Remote Channels
+    // in a read-only-for-profile mode; profile CRUD is still super
+    // admin only). Super admin gets extras: Profit, Provider Testing.
+    items = [...items, REMOTE_CHANNELS_ITEM, LOCAL_SYNC_ITEM, USERS_ITEM]
+    if (showSupplier) items = [...items, SUPPLIER_ACCOUNTS_ITEM]
+    if (role >= ROLE_SUPER_ADMIN) {
+      if (showProfit) items = [items[0], PROFIT_ITEM, ...items.slice(1)]
+      if (showTesting) items = [...items, TESTING_ITEM]
+    }
+    return items
+  }
+  if (role === ROLE_SUPPLIER_01) {
+    // Supplier: only the account portal upload/usage page.
+    return [SUPPLIER_ACCOUNTS_ITEM]
+  }
+  if (role === ROLE_TESTER) {
+    // Tester is scoped to Key Tester (always) and Provider Testing
+    // (only when R2 is wired up, since Provider Testing needs it).
+    return showTesting ? [KEY_TESTER_ITEM, TESTING_ITEM] : [KEY_TESTER_ITEM]
+  }
+  if (role === ROLE_PROJECT_ADMIN) {
+    // Project admin sees Key Capacity + Key Tester only.
+    return [KEY_CAPACITY_ITEM, KEY_TESTER_ITEM]
+  }
+  if (role === ROLE_STUDIO_OPERATOR) {
+    // Studio operator: All Keys + Key Tester + a dedicated Pool upload page.
+    return [ALL_KEYS_ITEM, POOL_UPLOAD_ITEM, KEY_TESTER_ITEM]
+  }
+  if (role === ROLE_REMOTE_STUDIO_OPERATOR) {
+    // Remote studio operator: All Keys + Remote Channels slim page + Key Tester.
+    return [ALL_KEYS_ITEM, REMOTE_CHANNELS_ITEM, KEY_TESTER_ITEM]
+  }
+  // Regular users only see All Keys.
+  return [ALL_KEYS_ITEM]
+}
+
 type Props = {
   open: boolean
   onClose: () => void
@@ -214,9 +286,18 @@ type Props = {
 // Module-level cache so route changes (which remount Layout → Sidebar) reuse
 // the already-fetched values instead of flashing an empty nav for the ~50ms
 // each /api/auth/me + /api/auth/config round trip takes.
-type SidebarBoot = { role: number; showProfit: boolean; showTesting: boolean; showSupplier: boolean }
+// overrides: map of role value (string) -> hidden nav item keys for THIS
+// deployment, configured by a super admin via /sidebar-settings.
+type SidebarOverrides = Record<string, string[]>
+type SidebarBoot = { role: number; showProfit: boolean; showTesting: boolean; showSupplier: boolean; overrides: SidebarOverrides }
 let cachedBoot: SidebarBoot | null = null
 let inflightBoot: Promise<SidebarBoot> | null = null
+
+// Drop the boot cache so the next Sidebar mount refetches /api/auth/config.
+// Called by SidebarSettings after saving overrides.
+export function invalidateSidebarBoot() {
+  cachedBoot = null
+}
 
 async function loadSidebarBoot(): Promise<SidebarBoot> {
   if (cachedBoot) return cachedBoot
@@ -233,6 +314,7 @@ async function loadSidebarBoot(): Promise<SidebarBoot> {
       showProfit: cfg?.profit_enabled === true,
       showTesting: cfg?.r2_configured === true,
       showSupplier: cfg?.supplier_account_enabled === true,
+      overrides: (cfg?.sidebar_overrides && typeof cfg.sidebar_overrides === 'object') ? cfg.sidebar_overrides as SidebarOverrides : {},
     }
     cachedBoot = boot
     return boot
@@ -246,6 +328,7 @@ export default function Sidebar({ open, onClose }: Props) {
   const [showProfit, setShowProfit] = useState(cachedBoot?.showProfit ?? false)
   const [showTesting, setShowTesting] = useState(cachedBoot?.showTesting ?? false)
   const [showSupplier, setShowSupplier] = useState(cachedBoot?.showSupplier ?? false)
+  const [overrides, setOverrides] = useState<SidebarOverrides>(cachedBoot?.overrides ?? {})
   const [role, setRole] = useState<number | null>(cachedBoot ? cachedBoot.role : null)
 
   useEffect(() => {
@@ -256,51 +339,23 @@ export default function Sidebar({ open, onClose }: Props) {
       setShowProfit(boot.showProfit)
       setShowTesting(boot.showTesting)
       setShowSupplier(boot.showSupplier)
+      setOverrides(boot.overrides)
     })()
   }, [])
 
   // Render nothing until we know the role, to avoid flashing admin items
-  // to a regular user.
+  // to a regular user. Otherwise compute the role's baseline items, drop the
+  // ones a super admin hid for this role on this deployment, then append the
+  // (never-hideable) settings entry for super admins.
   let items: Item[]
   if (role === null) {
     items = []
-  } else if (role >= ROLE_ADMIN) {
-    items = ADMIN_NAV_ITEMS.slice()
-    // Users + Remote Channels are available to admin+ (Remote Channels
-    // in a read-only-for-profile mode; profile CRUD is still super
-    // admin only). Super admin gets extras: Profit, Provider Testing.
-    items = [...items, REMOTE_CHANNELS_ITEM, LOCAL_SYNC_ITEM, USERS_ITEM]
-    if (showSupplier) items = [...items, SUPPLIER_ACCOUNTS_ITEM]
-    if (role >= ROLE_SUPER_ADMIN) {
-      if (showProfit) items = [items[0], PROFIT_ITEM, ...items.slice(1)]
-      if (showTesting) items = [...items, TESTING_ITEM]
-    }
-  } else if (role === ROLE_SUPPLIER_01) {
-    // Supplier: only the account portal upload/usage page.
-    items = [SUPPLIER_ACCOUNTS_ITEM]
-  } else if (role === ROLE_TESTER) {
-    // Tester is scoped to Key Tester (always) and Provider Testing
-    // (only when R2 is wired up, since Provider Testing needs it).
-    items = showTesting ? [KEY_TESTER_ITEM, TESTING_ITEM] : [KEY_TESTER_ITEM]
-  } else if (role === ROLE_PROJECT_ADMIN) {
-    // Project admin sees Key Capacity + Key Tester only.
-    items = [KEY_CAPACITY_ITEM, KEY_TESTER_ITEM]
-  } else if (role === ROLE_STUDIO_OPERATOR) {
-    // Studio operator: All Keys (visibility into their studio's local
-    // channels) + Key Tester + a dedicated Pool upload page. The pool
-    // page wraps LocalPoolPanel with lockedStudio from JWT so operators
-    // can drip 5-USD keys into the local pool without touching the
-    // super-admin Remote Channels surface.
-    items = [ALL_KEYS_ITEM, POOL_UPLOAD_ITEM, KEY_TESTER_ITEM]
-  } else if (role === ROLE_REMOTE_STUDIO_OPERATOR) {
-    // Remote studio operator: same shape as studio_operator but the
-    // batch-upload surface lives on the Remote Channels slim page
-    // instead of Pool upload. All Keys stays visible so the operator
-    // can eyeball their studio's active channels.
-    items = [ALL_KEYS_ITEM, REMOTE_CHANNELS_ITEM, KEY_TESTER_ITEM]
   } else {
-    // Regular users only see All Keys.
-    items = [ALL_KEYS_ITEM]
+    const hidden = new Set(overrides[String(role)] ?? [])
+    items = baselineItemsFor(role, { showProfit, showTesting, showSupplier }).filter(it => !hidden.has(it.to))
+    if (role >= ROLE_SUPER_ADMIN) {
+      items = [...items, SIDEBAR_SETTINGS_ITEM]
+    }
   }
 
   const handleLogout = async () => {

@@ -12,6 +12,7 @@ import {
 import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
 import { api, type CacheStatsResponse } from '../api'
+import { toast } from '../components/feedback'
 
 function today(offsetDays = 0): string {
   const d = new Date()
@@ -59,6 +60,7 @@ export default function CacheReport() {
       setRefreshedAt(new Date().toLocaleTimeString('zh-CN'))
     } catch (err) {
       console.error(err)
+      toast.error(err)
       setData(null)
     } finally {
       setLoading(false)
