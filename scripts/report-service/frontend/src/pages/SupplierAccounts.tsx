@@ -107,6 +107,8 @@ export default function SupplierAccounts() {
   const [savingWebhook, setSavingWebhook] = useState(false)
   const [fxInput, setFxInput] = useState('')
   const [savingFx, setSavingFx] = useState(false)
+  const [tickInput, setTickInput] = useState('')
+  const [savingTick, setSavingTick] = useState(false)
   const [settingsMsg, setSettingsMsg] = useState<string | null>(null)
   const [settingsErr, setSettingsErr] = useState<string | null>(null)
 
@@ -177,6 +179,9 @@ export default function SupplierAccounts() {
           if (typeof s.fx_rate === 'number' && s.fx_rate > 0) {
             setFxRate(s.fx_rate)
             setFxInput(String(s.fx_rate))
+          }
+          if (typeof s.quota_tick_sec === 'number' && s.quota_tick_sec > 0) {
+            setTickInput(String(s.quota_tick_sec))
           }
         } catch {
           /* settings panel just won't prefill */
@@ -411,6 +416,29 @@ export default function SupplierAccounts() {
     }
   }
 
+  async function handleSaveTick() {
+    setSettingsMsg(null)
+    setSettingsErr(null)
+    const sec = Number(tickInput.trim())
+    if (!Number.isInteger(sec) || sec < 300 || sec > 86400) {
+      setSettingsErr('检查间隔需为 300–86400 秒之间的整数')
+      return
+    }
+    setSavingTick(true)
+    try {
+      const s = await api.setSupplierSettings({ quota_tick_sec: sec })
+      setSettings(s)
+      if (typeof s.quota_tick_sec === 'number' && s.quota_tick_sec > 0) {
+        setTickInput(String(s.quota_tick_sec))
+      }
+      setSettingsMsg(`额度检查间隔已保存：每 ${s.quota_tick_sec} 秒`)
+    } catch (e: any) {
+      setSettingsErr(e?.message || String(e))
+    } finally {
+      setSavingTick(false)
+    }
+  }
+
   return (
     <Layout
       title="账号上号 / 账号资源录入"
@@ -539,6 +567,26 @@ export default function SupplierAccounts() {
                 </button>
               </div>
               <p className="text-[11px] text-gray-400 mt-1">号池成本按 RMB 计，账号成本与额度均按此汇率折算为 USD。</p>
+            </div>
+
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">额度检查间隔（秒，300–86400）</label>
+              <div className="flex gap-2">
+                <input
+                  value={tickInput}
+                  onChange={e => setTickInput(e.target.value)}
+                  placeholder="3600"
+                  className="w-32 border border-gray-300 rounded-md px-2.5 py-2 text-sm"
+                />
+                <button
+                  onClick={handleSaveTick}
+                  disabled={savingTick}
+                  className="bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 whitespace-nowrap"
+                >
+                  {savingTick ? '保存中…' : '保存间隔'}
+                </button>
+              </div>
+              <p className="text-[11px] text-gray-400 mt-1">额度报警循环多久检查一次用量。默认 3600 秒（1 小时），保存后下个周期生效。</p>
             </div>
           </div>
 

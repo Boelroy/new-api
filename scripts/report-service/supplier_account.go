@@ -1024,6 +1024,7 @@ func handleSupplierSettingsGet(c *gin.Context) {
 		"quota_webhook_set":   webhook != "",
 		"quota_webhook_last4": whLast4,
 		"fx_rate":             supplierFxRate(),
+		"quota_tick_sec":      supplierQuotaTickSeconds(),
 	})
 }
 
@@ -1043,6 +1044,7 @@ func handleSupplierSettingsSet(c *gin.Context) {
 		ProviderDefaults *map[string]supplierProviderDefault `json:"provider_defaults"`
 		QuotaWebhook     *string                             `json:"quota_webhook"`
 		FxRate           *float64                            `json:"fx_rate"`
+		QuotaTickSec     *int                                `json:"quota_tick_sec"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
@@ -1066,6 +1068,20 @@ func handleSupplierSettingsSet(c *gin.Context) {
 			return
 		}
 		if err := supplierConfigSet(cfgSupplierFxRate, strconv.FormatFloat(*body.FxRate, 'f', -1, 64)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.QuotaTickSec != nil {
+		// Clamp to the loop's accepted range before persisting.
+		n := *body.QuotaTickSec
+		if n < supplierQuotaTickMin {
+			n = supplierQuotaTickMin
+		}
+		if n > supplierQuotaTickMax {
+			n = supplierQuotaTickMax
+		}
+		if err := supplierConfigSet(cfgSupplierQuotaTickSec, strconv.Itoa(n)); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}

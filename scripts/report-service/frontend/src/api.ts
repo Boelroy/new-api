@@ -527,6 +527,8 @@ export type SupplierSettings = {
   quota_webhook_last4: string
   // RMB->USD divisor used to display cost and evaluate quotas.
   fx_rate: number
+  // How often the quota alert loop checks usage (seconds).
+  quota_tick_sec: number
 }
 
 export type SupplierMetric = {
@@ -1698,6 +1700,7 @@ export const api = {
     provider_defaults?: Record<string, SupplierProviderDefault>
     quota_webhook?: string
     fx_rate?: number
+    quota_tick_sec?: number
   }) =>
     request<SupplierSettings>('/api/supplier-account/settings', {
       method: 'PUT',
