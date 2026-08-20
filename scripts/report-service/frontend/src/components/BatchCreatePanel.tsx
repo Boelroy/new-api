@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api'
+import { ProviderOption } from './ProviderMark'
 
 type Props = {
   onCreated: () => void
@@ -147,6 +148,8 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   // edited them (tracked by `modelsDirty` / `groupDirty`).
   const [presetID, setPresetID] = useState<PresetID>('anthropic')
   const preset = PRESETS.find(p => p.id === presetID) ?? PRESETS[0]
+  // Custom provider dropdown open state (native <select> can't render logos).
+  const [typeOpen, setTypeOpen] = useState(false)
   // Operator's per-studio channel-type limit (empty = unrestricted). Filters
   // the provider dropdown so operators only see types their studio may use;
   // the backend enforces the same rule regardless.
@@ -462,22 +465,54 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       <h2 className="mono-label mb-3">批量创建渠道</h2>
       <div className="mb-3">
         <label className="block text-[11px] text-gray-500 mb-1">渠道类型</label>
-        <select
-          value={presetID}
-          onChange={e => {
-            setPresetID(e.target.value as PresetID)
-            // Reset dirty flags on switch so the new preset's fallback
-            // models/group re-seed; the user can still edit after the seed
-            // and it'll stick until they switch presets again.
-            setModelsDirty(false)
-            setGroupDirty(false)
-          }}
-          className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm bg-white focus:outline-none focus:border-gray-900"
-        >
-          {visiblePresets.map(p => (
-            <option key={p.id} value={p.id}>{p.label}</option>
-          ))}
-        </select>
+        {/* Custom dropdown so each provider shows its coloured logo — a native
+            <select> can't render SVG marks inside <option>. */}
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setTypeOpen(v => !v)}
+            className="w-full flex items-center justify-between gap-2 border border-gray-300 rounded-md px-2 py-1.5 text-sm bg-white focus:outline-none focus:border-gray-900"
+          >
+            <ProviderOption type={preset.type} label={preset.label} size={20} />
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`text-gray-400 transition-transform ${typeOpen ? 'rotate-180' : ''}`}>
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </button>
+          {typeOpen && (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setTypeOpen(false)} />
+              <ul className="absolute z-20 mt-1 w-full max-h-72 overflow-auto rounded-md border border-gray-200 bg-white py-1 shadow-pop">
+                {visiblePresets.map(p => {
+                  const active = p.id === presetID
+                  return (
+                    <li key={p.id}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPresetID(p.id)
+                          // Reset dirty flags on switch so the new preset's fallback
+                          // models/group re-seed; the user can still edit after the
+                          // seed and it'll stick until they switch presets again.
+                          setModelsDirty(false)
+                          setGroupDirty(false)
+                          setTypeOpen(false)
+                        }}
+                        className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-sm text-left hover:bg-gray-50 ${active ? 'bg-brand-50/60 text-brand' : 'text-gray-800'}`}
+                      >
+                        <ProviderOption type={p.type} label={p.label} size={20} />
+                        {active && (
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" className="ml-auto">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                        )}
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            </>
+          )}
+        </div>
       </div>
       <div className="grid grid-cols-2 gap-2 mb-2">
         <div>

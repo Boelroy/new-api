@@ -1,11 +1,12 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo, Fragment } from 'react'
 import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
 import BatchCreatePanel from '../components/BatchCreatePanel'
 import LocalPoolPanel from '../components/LocalPoolPanel'
 import BalanceAlertPanel from '../components/BalanceAlertPanel'
 import { api, ChannelRow, ROLE_PROJECT_ADMIN, ROLE_SUPER_ADMIN } from '../api'
-import { toast } from '../components/feedback'
+import { toast, Modal } from '../components/feedback'
+import { ProviderMark } from '../components/ProviderMark'
 import { getCachedRole, loadRole } from '../App'
 
 function fmtETA(hours: number | null): { text: string; cls: string } {
@@ -54,6 +55,11 @@ export default function KeyCapacity() {
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkMsg, setBulkMsg] = useState<string | null>(null)
 
+  // 批量创建渠道弹窗开关。面板自带卡片外壳，弹窗只提供遮罩 + 关闭。
+  const [createOpen, setCreateOpen] = useState(false)
+  // 已折叠的分组名集合（默认全部展开）。
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+
   const load = useCallback(async () => {
     try {
       const res = await api.getKeysData()
@@ -80,6 +86,40 @@ export default function KeyCapacity() {
 
   const toggleAll = (checked: boolean) => {
     setSelected(checked ? new Set(channels.map(c => c.id)) : new Set())
+  }
+
+  // 按 channels."group" 分组展示。同一渠道可能服务多个逗号分隔的 group，
+  // 这里以整串原值作为分组键（与后台一致），不再二次拆分。未设置 group 的
+  // 归入占位组。分组按名称排序，组内保留原有顺序。
+  const groups = useMemo(() => {
+    const m = new Map<string, ChannelRow[]>()
+    for (const ch of channels) {
+      const g = ch.group?.trim() || '（未分组）'
+      const arr = m.get(g)
+      if (arr) arr.push(ch)
+      else m.set(g, [ch])
+    }
+    return Array.from(m.entries()).sort((a, b) => a[0].localeCompare(b[0], 'zh-CN'))
+  }, [channels])
+
+  const toggleGroupCollapse = (name: string) => {
+    setCollapsed(prev => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+  }
+
+  const toggleGroupSelect = (rows: ChannelRow[], checked: boolean) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      for (const ch of rows) {
+        if (checked) next.add(ch.id)
+        else next.delete(ch.id)
+      }
+      return next
+    })
   }
 
   const handleBulkPriority = async () => {
@@ -111,9 +151,21 @@ export default function KeyCapacity() {
   const etaFmt = fmtETA(totalETA)
 
   const actions = (
-    <button onClick={load} className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700">
-      刷新数据
-    </button>
+    <div className="flex items-center gap-2">
+      <button
+        onClick={() => setCreateOpen(true)}
+        className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 text-white px-3 py-1.5 text-xs font-medium hover:opacity-85"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+          <line x1="12" y1="5" x2="12" y2="19" />
+          <line x1="5" y1="12" x2="19" y2="12" />
+        </svg>
+        批量创建渠道
+      </button>
+      <button onClick={load} className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700">
+        刷新数据
+      </button>
+    </div>
   )
 
   const tabDefs = isProjectAdmin
@@ -161,98 +213,148 @@ export default function KeyCapacity() {
         { label: '预计剩余时长', value: etaFmt.text, color: etaFmt.cls },
       ]} />
 
-      <div className="grid grid-cols-1 lg:grid-cols-[420px_1fr] gap-6 items-start">
-        <div className="space-y-4">
-          <BatchCreatePanel onCreated={load} />
-        </div>
-
-        <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-          {/* 批量改优先级工具栏 */}
-          <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100 gap-3 flex-wrap">
-            <div className="flex items-center gap-2 text-xs text-gray-500">
-              <span>已选 <span className="tabular-nums font-medium text-gray-900">{selected.size}</span> / {channels.length}</span>
-              {selected.size > 0 && (
-                <button onClick={() => setSelected(new Set())} className="text-gray-400 hover:text-gray-700">清空</button>
-              )}
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                step="1"
-                min="1"
-                value={bulkPriority}
-                onChange={e => setBulkPriority(e.target.value)}
-                placeholder="优先级 (例如 2)"
-                className="w-32 border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-white focus:outline-none focus:border-gray-900"
-              />
-              <button
-                onClick={handleBulkPriority}
-                disabled={bulkBusy || selected.size === 0}
-                className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                {bulkBusy ? '应用中…' : '设置选中优先级'}
-              </button>
-            </div>
+      <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+        {/* 批量改优先级工具栏 */}
+        <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100 gap-3 flex-wrap">
+          <div className="flex items-center gap-2 text-xs text-gray-500">
+            <span>已选 <span className="tabular-nums font-medium text-gray-900">{selected.size}</span> / {channels.length}</span>
+            {selected.size > 0 && (
+              <button onClick={() => setSelected(new Set())} className="text-gray-400 hover:text-gray-700">清空</button>
+            )}
+            <span className="text-gray-300">·</span>
+            <span>{groups.length} 个分组</span>
           </div>
-          {bulkMsg && (
-            <div className={`px-4 py-1.5 text-[11px] border-b border-gray-100 ${bulkMsg.startsWith('已更新') ? 'text-emerald-600 bg-emerald-50/40' : 'text-rose-600 bg-rose-50/40'}`}>{bulkMsg}</div>
-          )}
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              step="1"
+              min="1"
+              value={bulkPriority}
+              onChange={e => setBulkPriority(e.target.value)}
+              placeholder="优先级 (例如 2)"
+              className="w-32 border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-white focus:outline-none focus:border-gray-900"
+            />
+            <button
+              onClick={handleBulkPriority}
+              disabled={bulkBusy || selected.size === 0}
+              className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {bulkBusy ? '应用中…' : '设置选中优先级'}
+            </button>
+          </div>
+        </div>
+        {bulkMsg && (
+          <div className={`px-4 py-1.5 text-[11px] border-b border-gray-100 ${bulkMsg.startsWith('已更新') ? 'text-emerald-600 bg-emerald-50/40' : 'text-rose-600 bg-rose-50/40'}`}>{bulkMsg}</div>
+        )}
 
-          <div className="overflow-x-auto max-h-[70vh] overflow-y-auto">
-            <table className="w-full text-xs whitespace-nowrap border-separate border-spacing-0">
-              <thead>
-                <tr>
-                  <th className="sticky top-0 bg-gray-50 px-3 py-2 text-left border-b border-gray-200 w-8">
-                    <input
-                      type="checkbox"
-                      checked={channels.length > 0 && selected.size === channels.length}
-                      ref={el => { if (el) el.indeterminate = selected.size > 0 && selected.size < channels.length }}
-                      onChange={e => toggleAll(e.target.checked)}
-                      className="rounded border-gray-300"
-                    />
-                  </th>
-                  {['ID','名称','Key 末尾','优先级','已用 ($)','额度 ($)','剩余 ($)','剩余%','最近1小时消耗 ($)','预计剩余时长'].map(h => (
-                    <th key={h} className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {channels.map(ch => {
-                  const quota = ch.quota_usd
-                  const remaining = quota != null ? quota - ch.used_usd : null
-                  const pct = quota && quota > 0 ? (remaining! / quota) * 100 : null
-                  const eta = remaining != null && ch.last_hour_usd > 0 ? remaining / ch.last_hour_usd : remaining != null && remaining > 0 ? Infinity : null
-                  const etaF = fmtETA(eta)
-                  const isSelected = selected.has(ch.id)
-                  return (
-                    <tr key={ch.id} className={isSelected ? 'bg-blue-50/40 hover:bg-blue-50' : 'hover:bg-gray-50'}>
-                      <td className="px-3 py-1.5 border-b border-gray-50 w-8">
+        <div className="overflow-x-auto max-h-[74vh] overflow-y-auto">
+          <table className="w-full text-xs whitespace-nowrap border-separate border-spacing-0">
+            <thead>
+              <tr>
+                <th className="sticky top-0 z-10 bg-gray-50 px-3 py-2 text-left border-b border-gray-200 w-8">
+                  <input
+                    type="checkbox"
+                    checked={channels.length > 0 && selected.size === channels.length}
+                    ref={el => { if (el) el.indeterminate = selected.size > 0 && selected.size < channels.length }}
+                    onChange={e => toggleAll(e.target.checked)}
+                    className="rounded border-gray-300"
+                  />
+                </th>
+                {['ID','名称','Key 末尾','优先级','已用 ($)','额度 ($)','剩余 ($)','剩余%','最近1小时消耗 ($)','预计剩余时长'].map(h => (
+                  <th key={h} className="sticky top-0 z-10 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {groups.map(([groupName, rows]) => {
+                const isCollapsed = collapsed.has(groupName)
+                const selCount = rows.reduce((n, ch) => n + (selected.has(ch.id) ? 1 : 0), 0)
+                const allSel = selCount === rows.length
+                const someSel = selCount > 0 && !allSel
+                let gUsed = 0, gQuota = 0, gRemaining = 0, gLastHour = 0, gQuotaSet = false
+                rows.forEach(ch => {
+                  gUsed += ch.used_usd
+                  gLastHour += ch.last_hour_usd
+                  if (ch.quota_usd != null) { gQuotaSet = true; gQuota += ch.quota_usd; gRemaining += Math.max(0, ch.quota_usd - ch.used_usd) }
+                })
+                return (
+                  <Fragment key={groupName}>
+                    {/* 分组标题行：勾选整组 / 折叠 / 组内小计 */}
+                    <tr className="bg-gray-100/80">
+                      <td className="px-3 py-1.5 border-b border-gray-200 w-8">
                         <input
                           type="checkbox"
-                          checked={isSelected}
-                          onChange={() => toggleRow(ch.id)}
+                          checked={allSel}
+                          ref={el => { if (el) el.indeterminate = someSel }}
+                          onChange={e => toggleGroupSelect(rows, e.target.checked)}
                           className="rounded border-gray-300"
                         />
                       </td>
-                      <td className="px-3 py-1.5 border-b border-gray-50">{ch.id}</td>
-                      <td className="px-3 py-1.5 border-b border-gray-50">{ch.name}</td>
-                      <td className="px-3 py-1.5 border-b border-gray-50 font-mono text-gray-400">{ch.key}</td>
-                      <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{ch.priority || <span className="text-gray-300">—</span>}</td>
-                      <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">${ch.used_usd.toFixed(4)}</td>
-                      <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{quota != null ? '$' + quota.toFixed(2) : <span className="text-gray-300">未设置</span>}</td>
-                      <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{remaining != null ? '$' + remaining.toFixed(4) : '—'}</td>
-                      <td className="px-3 py-1.5 border-b border-gray-50">{pct != null ? <ProgressBar pct={pct} /> : <span className="text-gray-300">—</span>}</td>
-                      <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{ch.last_hour_usd > 0 ? '$' + ch.last_hour_usd.toFixed(4) : <span className="text-gray-300">0</span>}</td>
-                      <td className={`px-3 py-1.5 border-b border-gray-50 font-medium ${etaF.cls}`}>{etaF.text}</td>
+                      <td colSpan={10} className="px-3 py-1.5 border-b border-gray-200">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <button
+                            onClick={() => toggleGroupCollapse(groupName)}
+                            className="inline-flex items-center gap-1.5 text-gray-800 font-semibold hover:text-gray-900"
+                          >
+                            <span className="text-gray-400 text-[10px] w-3 inline-block">{isCollapsed ? '▶' : '▼'}</span>
+                            <span className="font-mono">{groupName}</span>
+                            <span className="text-gray-400 font-normal">· {rows.length} keys</span>
+                          </button>
+                          <span className="text-[11px] text-gray-500 tabular-nums">
+                            已用 <span className="text-rose-600">${gUsed.toFixed(2)}</span>
+                            {gQuotaSet && <> / 额度 ${gQuota.toFixed(2)} · 剩 <span className="text-emerald-600">${gRemaining.toFixed(2)}</span></>}
+                            {gLastHour > 0 && <> · 近1h ${gLastHour.toFixed(4)}</>}
+                          </span>
+                        </div>
+                      </td>
                     </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
+                    {!isCollapsed && rows.map(ch => {
+                      const quota = ch.quota_usd
+                      const remaining = quota != null ? quota - ch.used_usd : null
+                      const pct = quota && quota > 0 ? (remaining! / quota) * 100 : null
+                      const eta = remaining != null && ch.last_hour_usd > 0 ? remaining / ch.last_hour_usd : remaining != null && remaining > 0 ? Infinity : null
+                      const etaF = fmtETA(eta)
+                      const isSelected = selected.has(ch.id)
+                      return (
+                        <tr key={ch.id} className={isSelected ? 'bg-blue-50/40 hover:bg-blue-50' : 'hover:bg-gray-50'}>
+                          <td className="px-3 py-1.5 border-b border-gray-50 w-8">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => toggleRow(ch.id)}
+                              className="rounded border-gray-300"
+                            />
+                          </td>
+                          <td className="px-3 py-1.5 border-b border-gray-50">{ch.id}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-50">
+                            <span className="inline-flex items-center gap-2">
+                              <ProviderMark type={ch.type} size={18} />
+                              <span>{ch.name}</span>
+                            </span>
+                          </td>
+                          <td className="px-3 py-1.5 border-b border-gray-50 font-mono text-gray-400">{ch.key}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{ch.priority || <span className="text-gray-300">—</span>}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">${ch.used_usd.toFixed(4)}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{quota != null ? '$' + quota.toFixed(2) : <span className="text-gray-300">未设置</span>}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{remaining != null ? '$' + remaining.toFixed(4) : '—'}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-50">{pct != null ? <ProgressBar pct={pct} /> : <span className="text-gray-300">—</span>}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{ch.last_hour_usd > 0 ? '$' + ch.last_hour_usd.toFixed(4) : <span className="text-gray-300">0</span>}</td>
+                          <td className={`px-3 py-1.5 border-b border-gray-50 font-medium ${etaF.cls}`}>{etaF.text}</td>
+                        </tr>
+                      )
+                    })}
+                  </Fragment>
+                )
+              })}
+            </tbody>
+          </table>
         </div>
       </div>
       </>)}
+
+      <Modal open={createOpen} onClose={() => setCreateOpen(false)}>
+        <BatchCreatePanel onCreated={load} />
+      </Modal>
     </Layout>
   )
 }

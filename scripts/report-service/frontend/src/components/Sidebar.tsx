@@ -25,6 +25,31 @@ function navIndex(to: string): number {
   return i === -1 ? NAV_ORDER.length : i
 }
 
+// Per-item accent colour for the nav icon. Keeps the sidebar lively without
+// touching label colours (which still follow the active/hover state). Values
+// are picked to stay distinct within each group.
+const NAV_COLORS: Record<string, string> = {
+  '/': '#2864FF',            // Usage Report — brand blue
+  '/profit': '#16A34A',      // Profit — green
+  '/billing': '#7C3AED',     // Billing — violet
+  '/cache': '#0EA5E9',       // Cache — sky
+  '/errors': '#EF4444',      // Error Center — red
+  '/model-health': '#EC4899',// Model Health — pink
+  '/keys': '#F59E0B',        // Key Capacity — amber
+  '/allkeys': '#0D9488',     // All Keys — teal
+  '/tester': '#22C55E',      // Key Tester — green
+  '/remote-channels': '#6366F1', // Remote NewAPI — indigo
+  '/pool-upload': '#06B6D4', // Pool Upload — cyan
+  '/local-sync': '#3B82F6',  // Local Sync — blue
+  '/users': '#8B5CF6',       // User — violet
+  '/settings': '#64748B',    // Settings — slate
+  '/testing': '#14B8A6',     // Provider Testing — teal
+  '/supplier-accounts': '#F97316', // Third-party Systems — orange
+}
+function navColor(to: string): string {
+  return NAV_COLORS[to] ?? '#687083'
+}
+
 export type Item = {
   to: string
   label: string
@@ -339,22 +364,28 @@ export default function Sidebar({ open, onClose }: Props) {
     window.location.href = withBase('/login')
   }
 
-  const link = (item: Item) => (
-    <NavLink
-      key={item.to}
-      to={item.to}
-      end={item.end}
-      onClick={onClose}
-      className={({ isActive }) =>
-        `flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm transition-colors ${
-          isActive ? 'bg-brand-50 text-brand font-medium' : 'text-secondary hover:bg-canvas hover:text-ink'
-        }`
-      }
-    >
-      <span className="opacity-90">{item.icon}</span>
-      <span className="leading-none">{item.label}</span>
-    </NavLink>
-  )
+  const link = (item: Item) => {
+    const color = navColor(item.to)
+    return (
+      <NavLink
+        key={item.to}
+        to={item.to}
+        end={item.end}
+        onClick={onClose}
+        className={({ isActive }) =>
+          `group flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm transition-colors ${
+            isActive ? 'font-medium text-ink' : 'text-secondary hover:bg-canvas hover:text-ink'
+          }`
+        }
+        style={({ isActive }) => (isActive ? { background: color + '1A' } : undefined)}
+      >
+        {/* Icon always carries its accent colour so the nav reads as colourful
+            regardless of active/hover state. */}
+        <span className="shrink-0" style={{ color }}>{item.icon}</span>
+        <span className="leading-none">{item.label}</span>
+      </NavLink>
+    )
+  }
 
   const sections = GROUP_ORDER.map(g => ({
     group: g,
