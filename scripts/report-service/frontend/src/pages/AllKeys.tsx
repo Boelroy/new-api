@@ -4,6 +4,7 @@ import SummaryCards from '../components/SummaryCards'
 import BatchCreatePanel from '../components/BatchCreatePanel'
 import { api, ChannelRow, ROLE_ADMIN, ROLE_STUDIO_OPERATOR } from '../api'
 import { toast } from '../components/feedback'
+import { ProviderMark } from '../components/ProviderMark'
 import { LivePollChip } from '../components/ui'
 
 const STATUS_LABEL: Record<number, string> = { 1: '启用', 2: '手动禁用', 3: '自动禁用' }
@@ -307,7 +308,12 @@ export default function AllKeys() {
                 return (
                   <tr key={r.id} className={`hover:bg-gray-50 ${isMissingPrice ? 'bg-amber-50/40' : ''}`}>
                     <td className="px-3 py-1.5 border-b border-gray-50">{r.id}</td>
-                    <td className="px-3 py-1.5 border-b border-gray-50">{r.name}</td>
+                    <td className="px-3 py-1.5 border-b border-gray-50">
+                      <span className="inline-flex items-center gap-2">
+                        <ProviderMark type={r.type} size={18} />
+                        <span>{r.name}</span>
+                      </span>
+                    </td>
                     <td className="px-3 py-1.5 border-b border-gray-50 font-mono text-gray-400">{r.key}</td>
                     <td className="px-3 py-1.5 border-b border-gray-50">
                       <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold ${STATUS_CLS[r.status] ?? 'bg-gray-100 text-gray-600'}`}>
