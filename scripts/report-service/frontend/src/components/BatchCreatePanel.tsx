@@ -138,6 +138,12 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   // 'asc'  = key[i] gets priorityInput + i.
   const [prioMode, setPrioMode] = useState<'same' | 'desc' | 'asc'>('same')
   const [input, setInput] = useState('')
+  // Key/额度 entry has two interchangeable modes: 'paste' (the CSV textarea)
+  // and 'table' (a per-row editor). They share the same parsed output on
+  // submit; toggling converts between the textarea and the row list so no
+  // data is lost.
+  const [inputMode, setInputMode] = useState<'paste' | 'table'>('paste')
+  const [keyRows, setKeyRows] = useState<{ key: string; quota: string }[]>([{ key: '', quota: '' }])
   const [submitting, setSubmitting] = useState(false)
   const [result, setResult] = useState<string | null>(null)
   const [studios, setStudios] = useState<string[]>([])
@@ -311,6 +317,51 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
     }
   }
 
+  // Toggle between paste/table, carrying data across. paste→table parses the
+  // CSV lines into rows; table→paste serialises non-empty rows back to text.
+  const switchInputMode = (mode: 'paste' | 'table') => {
+    if (mode === inputMode) return
+    if (mode === 'table') {
+      const parsed: { key: string; quota: string }[] = []
+      for (const line of input.split('\n')) {
+        const t = line.trim()
+        if (!t || t.startsWith('#')) continue
+        const parts = t.split(/[\s,]+/)
+        if (!parts[0]) continue
+        parsed.push({ key: parts[0], quota: parts[1] ?? '' })
+      }
+      setKeyRows(parsed.length ? parsed : [{ key: '', quota: '' }])
+    } else {
+      const text = keyRows.filter(r => r.key.trim()).map(r => `${r.key.trim()} ${r.quota.trim()}`.trim()).join('\n')
+      setInput(text)
+    }
+    setInputMode(mode)
+  }
+
+  // Collect {key, quota_usd} from whichever entry mode is active. Skips blank
+  // / non-positive-quota rows the same way for both modes.
+  const collectKeyChannels = (): { key: string; quota_usd: number }[] => {
+    const out: { key: string; quota_usd: number }[] = []
+    if (inputMode === 'table') {
+      for (const r of keyRows) {
+        const k = r.key.trim()
+        const q = parseFloat(r.quota.trim())
+        if (!k || isNaN(q) || q <= 0) continue
+        out.push({ key: k, quota_usd: q })
+      }
+    } else {
+      for (const line of input.split('\n')) {
+        const t = line.trim()
+        if (!t || t.startsWith('#')) continue
+        const parts = t.split(/[\s,]+/)
+        const q = parseFloat(parts[1])
+        if (!parts[0] || isNaN(q) || q <= 0) continue
+        out.push({ key: parts[0], quota_usd: q })
+      }
+    }
+    return out
+  }
+
   const handleSubmit = async () => {
     setResult(null)
     // When studio is locked, we trust the JWT-side enforcement and just
@@ -415,18 +466,9 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       return
     }
 
-    const channels: { key: string; quota_usd: number; priority?: number }[] = []
-    input.split('\n').forEach(line => {
-      const t = line.trim()
-      if (!t || t.startsWith('#')) return
-      const parts = t.split(/[\s,]+/)
-      if (parts.length < 2) return
-      const q = parseFloat(parts[1])
-      if (!parts[0] || isNaN(q) || q <= 0) return
-      channels.push({ key: parts[0], quota_usd: q })
-    })
+    const channels: { key: string; quota_usd: number; priority?: number }[] = collectKeyChannels()
     if (channels.length === 0) {
-      setResult('未解析到有效行')
+      setResult(inputMode === 'table' ? '请至少填写一行有效的 key 与额度' : '未解析到有效行')
       return
     }
 
@@ -452,6 +494,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       const res = await api.batchCreateChannels(studio.trim(), suffix.trim(), channels, baseDefaults)
       setResult(`成功创建 ${res.count} 个渠道`)
       setInput('')
+      setKeyRows([{ key: '', quota: '' }])
       onCreated()
     } catch (e: any) {
       setResult(`失败: ${e.message || e}`)
@@ -879,15 +922,103 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
               </div>
             </div>
           )}
-          <textarea
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            rows={8}
-            placeholder={preset.id === 'aws'
-              ? (awsKeyMode === 'ak_sk' ? '每行: ak|sk 额度（USD）\n\nAKIA...|wJalr... 220' : '每行: apikey 额度（USD）\n\nBedrockAPIKey... 220')
-              : '每行: key 额度（USD）\n\nsk-... 220\nsk-... 500'}
-            className="w-full border border-gray-200 rounded-md p-2.5 text-xs font-mono resize-y bg-gray-50 focus:outline-none focus:border-gray-900"
-          />
+          {(() => {
+            const keyLabel = preset.id === 'aws'
+              ? (awsKeyMode === 'ak_sk' ? 'ak|sk' : 'apikey')
+              : 'key'
+            return (
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-[11px] text-gray-500">Key 与额度</label>
+                  {/* 粘贴 / 表格 两种录入方式，切换时数据互转 */}
+                  <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
+                    {([
+                      { id: 'paste', label: '粘贴' },
+                      { id: 'table', label: '表格' },
+                    ] as { id: 'paste' | 'table'; label: string }[]).map(m => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => switchInputMode(m.id)}
+                        className={`px-3 py-1 text-[11px] border-r border-gray-200 last:border-r-0 transition-colors ${
+                          inputMode === m.id ? 'bg-brand text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+                        }`}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {inputMode === 'paste' ? (
+                  <textarea
+                    value={input}
+                    onChange={e => setInput(e.target.value)}
+                    rows={8}
+                    placeholder={preset.id === 'aws'
+                      ? (awsKeyMode === 'ak_sk' ? '每行: ak|sk 额度（USD）\n\nAKIA...|wJalr... 220' : '每行: apikey 额度（USD）\n\nBedrockAPIKey... 220')
+                      : '每行: key 额度（USD）\n\nsk-... 220\nsk-... 500'}
+                    className="w-full border border-gray-200 rounded-md p-2.5 text-xs font-mono resize-y bg-gray-50 focus:outline-none focus:border-gray-900"
+                  />
+                ) : (
+                  <div className="border border-gray-200 rounded-md overflow-hidden">
+                    <div className="grid grid-cols-[1fr_5.5rem_2rem] gap-2 px-2 py-1.5 bg-gray-50 border-b border-gray-200 text-[10px] text-gray-500 uppercase tracking-wide">
+                      <span>{keyLabel}</span>
+                      <span>额度 USD</span>
+                      <span />
+                    </div>
+                    <div className="max-h-64 overflow-y-auto divide-y divide-gray-100">
+                      {keyRows.map((r, i) => (
+                        <div key={i} className="grid grid-cols-[1fr_5.5rem_2rem] gap-2 px-2 py-1 items-center">
+                          <input
+                            value={r.key}
+                            onChange={e => setKeyRows(prev => prev.map((x, j) => j === i ? { ...x, key: e.target.value } : x))}
+                            placeholder={keyLabel}
+                            className="w-full border border-gray-200 rounded px-2 py-1 text-[11px] font-mono bg-white focus:outline-none focus:border-gray-900"
+                          />
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={r.quota}
+                            onChange={e => setKeyRows(prev => prev.map((x, j) => j === i ? { ...x, quota: e.target.value } : x))}
+                            placeholder="220"
+                            className="w-full border border-gray-200 rounded px-2 py-1 text-[11px] tabular-nums bg-white focus:outline-none focus:border-gray-900"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setKeyRows(prev => prev.length > 1 ? prev.filter((_, j) => j !== i) : [{ key: '', quota: '' }])}
+                            title="删除该行"
+                            className="text-gray-400 hover:text-rose-600 flex items-center justify-center"
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <line x1="18" y1="6" x2="6" y2="18" />
+                              <line x1="6" y1="6" x2="18" y2="18" />
+                            </svg>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex items-center justify-between px-2 py-1.5 border-t border-gray-200 bg-gray-50/60">
+                      <button
+                        type="button"
+                        onClick={() => setKeyRows(prev => [...prev, { key: '', quota: '' }])}
+                        className="inline-flex items-center gap-1 text-[11px] text-brand hover:text-brand-700"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
+                          <line x1="12" y1="5" x2="12" y2="19" />
+                          <line x1="5" y1="12" x2="19" y2="12" />
+                        </svg>
+                        添加一行
+                      </button>
+                      <span className="text-[10px] text-gray-400 tabular-nums">
+                        {keyRows.filter(r => r.key.trim() && parseFloat(r.quota) > 0).length} 条有效
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })()}
         </>
       )}
       <p className="text-[10px] text-gray-400 mt-2 leading-relaxed">
