@@ -744,6 +744,16 @@ export const api = {
       body: JSON.stringify({ timezone }),
     }),
 
+  // AWS Bedrock config (super admin). default_regions = the list pre-selected in
+  // the batch-create picker; region_prefix_map = region→inference-prefix
+  // overrides. Read from /api/auth/config; set here.
+  setAwsConfig: (payload: { default_regions?: string[]; region_prefix_map?: Record<string, string> }) =>
+    request<{ ok: boolean; default_regions: string[]; region_prefix_map: Record<string, string> }>('/api/aws-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
   listUsers: () => request<{ users: AuthUser[] }>('/api/users'),
 
   createUser: (payload: { username: string; password: string; role: number; studio?: string }) =>
@@ -811,10 +821,13 @@ export const api = {
       other?: string          // Vertex region / Azure api-version
       settings?: string       // pre-serialised JSON string, e.g. '{"vertex_key_type":"json"}'
       base_url?: string       // Azure resource endpoint (https://<res>.openai.azure.com)
-      // AWS Bedrock (type=33): region is the SigV4 signing region baked into
-      // the key. model_prefix is the cross-region inference prefix for the
-      // server-built Claude model_mapping (global/us/eu/apac); empty → global.
+      // AWS Bedrock (type=33): one key fans out to one channel per region.
+      // `regions` is the multi-region list; `region` stays for back-compat.
+      // The per-region model_mapping prefix is derived server-side from the
+      // admin-configured region→prefix map (aws-config), so model_prefix is no
+      // longer sent from the multi-region path.
       region?: string
+      regions?: string[]
       key_type?: 'ak_sk' | 'api_key'
       model_prefix?: string
     },

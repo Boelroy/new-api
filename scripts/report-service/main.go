@@ -1571,6 +1571,11 @@ func handleAuthConfig(c *gin.Context) {
 		// Deployment-wide statistics timezone for the Usage Report (IANA
 		// name). Everyone reads this; only a super admin can change it.
 		"report_timezone": reportTimezone(),
+		// AWS Bedrock batch-create config: the default region list pre-selected
+		// in the picker, and the region->prefix override map that drives each
+		// channel's model_mapping. Read here; set via PUT /api/aws-config.
+		"aws_default_regions":   awsDefaultRegions(),
+		"aws_region_prefix_map": loadAwsRegionPrefixMap(),
 	}
 	if mainServiceURL != "" {
 		resp["sso_url"] = mainServiceURL + "/sign-in"
@@ -1611,6 +1616,116 @@ func reportTimezone() string {
 		return "Asia/Tokyo"
 	}
 	return v
+}
+
+// AWS Bedrock deployment config (report_config keys). Both are per-deployment
+// and super-admin managed via the Settings page:
+//   - cfgAwsDefaultRegions: comma-separated region list pre-selected in the
+//     batch-create AWS picker (e.g. "us-east-1,us-west-2,ap-southeast-1").
+//   - cfgAwsRegionPrefixMap: JSON map of AWS region -> cross-region inference
+//     prefix override (e.g. {"us-west-1":"us","ap-west-1":"global"}). Used to
+//     build each channel's Claude model_mapping; unmapped regions fall back to
+//     awsBedrockRegionPrefix() derivation.
+const (
+	cfgAwsDefaultRegions  = "aws_default_regions"
+	cfgAwsRegionPrefixMap = "aws_region_prefix_map"
+)
+
+// awsDefaultRegions returns the configured default region list (trimmed, empties
+// dropped). Empty slice when unset — the frontend then starts with no chips.
+func awsDefaultRegions() []string {
+	raw := strings.TrimSpace(supplierConfigGet(cfgAwsDefaultRegions))
+	if raw == "" {
+		return []string{}
+	}
+	out := []string{}
+	seen := map[string]bool{}
+	for _, r := range strings.Split(raw, ",") {
+		r = strings.TrimSpace(r)
+		if r == "" || seen[r] {
+			continue
+		}
+		seen[r] = true
+		out = append(out, r)
+	}
+	return out
+}
+
+// loadAwsRegionPrefixMap reads the region->prefix override map. Always returns a
+// non-nil map so JSON consumers see an object, never null.
+func loadAwsRegionPrefixMap() map[string]string {
+	out := map[string]string{}
+	raw := strings.TrimSpace(supplierConfigGet(cfgAwsRegionPrefixMap))
+	if raw == "" {
+		return out
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return map[string]string{}
+	}
+	return out
+}
+
+// awsRegionModelPrefix returns the cross-region inference prefix for a region:
+// the admin-configured override wins, otherwise the built-in derivation
+// (awsBedrockRegionPrefix). e.g. region "ap-west-1" mapped to "global" yields
+// "global.anthropic.…"; an unmapped "us-east-1" derives "us".
+func awsRegionModelPrefix(region string) string {
+	region = strings.TrimSpace(region)
+	if p, ok := loadAwsRegionPrefixMap()[region]; ok && strings.TrimSpace(p) != "" {
+		return strings.TrimSpace(p)
+	}
+	return awsBedrockRegionPrefix(region)
+}
+
+// handleAwsConfigSet lets a super admin set the AWS default region list and the
+// region->prefix override map. Both fields are optional; only provided fields
+// are updated.
+func handleAwsConfigSet(c *gin.Context) {
+	var body struct {
+		DefaultRegions  *[]string          `json:"default_regions"`
+		RegionPrefixMap *map[string]string `json:"region_prefix_map"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	if body.DefaultRegions != nil {
+		seen := map[string]bool{}
+		var clean []string
+		for _, r := range *body.DefaultRegions {
+			r = strings.TrimSpace(r)
+			if r == "" || seen[r] {
+				continue
+			}
+			seen[r] = true
+			clean = append(clean, r)
+		}
+		if err := supplierConfigSet(cfgAwsDefaultRegions, strings.Join(clean, ",")); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.RegionPrefixMap != nil {
+		clean := map[string]string{}
+		for region, prefix := range *body.RegionPrefixMap {
+			region = strings.TrimSpace(region)
+			prefix = strings.TrimSpace(prefix)
+			if region == "" || prefix == "" {
+				continue
+			}
+			clean[region] = prefix
+		}
+		blob, err := json.Marshal(clean)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if err := supplierConfigSet(cfgAwsRegionPrefixMap, string(blob)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "default_regions": awsDefaultRegions(), "region_prefix_map": loadAwsRegionPrefixMap()})
 }
 
 // handleReportSettingsSet lets a super admin set the deployment statistics
@@ -2602,10 +2717,14 @@ func handleBatchCreateChannels(c *gin.Context) {
 		// leave these empty.
 		Region  string `json:"region"`
 		KeyType string `json:"key_type"`
+		// AWS Bedrock: one key can be deployed to several regions at once. Each
+		// (key, region) pair becomes its own channel. `Regions` is the new
+		// multi-region field; `Region` stays for backward compat (single).
+		Regions []string `json:"regions"`
 		// AWS Bedrock cross-region inference prefix for the model_mapping
-		// (global./us./eu./apac.). Empty → "global" (the global inference
-		// profile). Decoupled from Region, which stays the real signing
-		// region baked into channel.key.
+		// (global./us./eu./apac.). Legacy single-region override; the multi-
+		// region path derives the prefix per region from awsRegionModelPrefix
+		// (the admin-configured region->prefix map) instead.
 		ModelPrefix string `json:"model_prefix"`
 		// Default priority + unit price applied to every channel that does not
 		// override them in the per-row entry. Lets the form set a single value
@@ -2720,9 +2839,9 @@ func handleBatchCreateChannels(c *gin.Context) {
 	// channelType == 20 block below). channelType keeps the requested value so
 	// model-list / group / studio-limit resolution stays keyed to the preset.
 	storedType := channelType
-	// awsRegion / awsKeyType are only meaningful for channel type 33; used
-	// in the channel loop to bake the region into each key.
-	awsRegion := ""
+	// awsRegions / awsKeyType are only meaningful for channel type 33; used
+	// in the channel loop to bake each region into a per-region channel.
+	awsRegions := []string{}
 	awsKeyType := ""
 	if channelType == 41 {
 		// Vertex accepts either a bare region string or a JSON model→region
@@ -2752,14 +2871,22 @@ func handleBatchCreateChannels(c *gin.Context) {
 		}
 	}
 	if channelType == 33 {
-		// AWS Bedrock: region is required (baked into the key for SigV4
-		// signing). KeyType picks the auth flavour written to channel.settings.
-		// The Claude model_mapping is built server-side from ModelPrefix,
-		// which is decoupled from the signing region and defaults to the
-		// "global" inference profile.
-		awsRegion = strings.TrimSpace(payload.Region)
-		if awsRegion == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "region is required for AWS channels (e.g. us-east-1)"})
+		// AWS Bedrock: one key can be deployed to several regions at once. Each
+		// region is baked into its own channel.key (SigV4 signing) and drives a
+		// per-region Claude model_mapping (prefix from awsRegionModelPrefix).
+		// Accept the multi-region `Regions` field, falling back to the legacy
+		// single `Region`. De-dup and trim.
+		seen := map[string]bool{}
+		for _, r := range append(append([]string{}, payload.Regions...), payload.Region) {
+			r = strings.TrimSpace(r)
+			if r == "" || seen[r] {
+				continue
+			}
+			seen[r] = true
+			awsRegions = append(awsRegions, r)
+		}
+		if len(awsRegions) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "at least one region is required for AWS channels (e.g. us-east-1)"})
 			return
 		}
 		awsKeyType = strings.TrimSpace(payload.KeyType)
@@ -2773,13 +2900,8 @@ func handleBatchCreateChannels(c *gin.Context) {
 		if settings == "" {
 			settings = fmt.Sprintf(`{"aws_key_type":"%s"}`, awsKeyType)
 		}
-		// Prefix defaults to "global"; operator can override with us/eu/apac.
-		mm, err := buildAwsBedrockModelMapping(payload.ModelPrefix)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "build model mapping: " + err.Error()})
-			return
-		}
-		modelMapping = mm
+		// model_mapping is per-region (built in the expansion below), so nothing
+		// is precomputed here.
 	}
 	if channelType == 20 {
 		// OpenRouter: models are addressed by anthropic/* slug, so map the
@@ -2823,31 +2945,69 @@ func handleBatchCreateChannels(c *gin.Context) {
 	}
 	results := make([]created, 0, len(payload.Channels))
 
+	// Expand the submitted rows into concrete channels. Every preset yields one
+	// channel per key, EXCEPT AWS Bedrock, where each key fans out to one
+	// channel per selected region (own key-with-region, own per-region
+	// model_mapping, and a "-<region>" name suffix so the channels stay
+	// distinguishable in the list).
+	type batchEntry struct {
+		key          string
+		quotaUSD     float64
+		priorityPtr  *int
+		unitPricePtr *float64
+		modelMapping string
+		nameSuffix   string
+	}
+	entries := make([]batchEntry, 0, len(payload.Channels))
 	for _, ch := range payload.Channels {
 		key := strings.TrimSpace(ch.Key)
 		if key == "" || ch.QuotaUSD <= 0 {
 			continue
 		}
-		// AWS Bedrock: the operator enters the credential (ak|sk or apikey);
-		// the region is appended here so channel.key matches the format
-		// new-api's AWS adaptor splits on "|" (ak|sk|region → 3 parts;
-		// apikey|region → 2 parts). Malformed rows are skipped, mirroring
-		// the empty-key skip above.
 		if channelType == 33 {
+			// AWS Bedrock: append each region so channel.key matches the format
+			// new-api's AWS adaptor splits on "|" (ak|sk|region → 3 parts;
+			// apikey|region → 2 parts). Each region gets its own model_mapping
+			// prefix from the admin-configured region->prefix map. Malformed
+			// rows are skipped.
 			wantParts := 3
 			if awsKeyType == "api_key" {
 				wantParts = 2
 			}
-			key = key + "|" + awsRegion
-			if len(strings.Split(key, "|")) != wantParts {
-				continue
+			for _, region := range awsRegions {
+				keyWithRegion := key + "|" + region
+				if len(strings.Split(keyWithRegion, "|")) != wantParts {
+					continue
+				}
+				mm, err := buildAwsBedrockModelMapping(awsRegionModelPrefix(region))
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "build model mapping: " + err.Error()})
+					return
+				}
+				entries = append(entries, batchEntry{
+					key: keyWithRegion, quotaUSD: ch.QuotaUSD, priorityPtr: ch.Priority,
+					unitPricePtr: ch.UnitPriceCNY, modelMapping: mm, nameSuffix: "-" + region,
+				})
 			}
+			continue
 		}
-		quotaInt := int(ch.QuotaUSD)
-		name := fmt.Sprintf("%s-%s-%s-%d", dateStr, studio, suffix, quotaInt)
+		entries = append(entries, batchEntry{
+			key: key, quotaUSD: ch.QuotaUSD, priorityPtr: ch.Priority,
+			unitPricePtr: ch.UnitPriceCNY, modelMapping: modelMapping,
+		})
+	}
+	if len(entries) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no valid channels to create"})
+		return
+	}
+
+	for _, e := range entries {
+		key := e.key
+		quotaInt := int(e.quotaUSD)
+		name := fmt.Sprintf("%s-%s-%s-%d%s", dateStr, studio, suffix, quotaInt, e.nameSuffix)
 		priority := defaultPriority
-		if ch.Priority != nil && *ch.Priority > 0 {
-			priority = *ch.Priority
+		if e.priorityPtr != nil && *e.priorityPtr > 0 {
+			priority = *e.priorityPtr
 		}
 
 		var channelID int
@@ -2865,7 +3025,7 @@ func handleBatchCreateChannels(c *gin.Context) {
 			        $13, '', $8, 1, 0, $9::json, $10, $11, $12, $14)
 			RETURNING id`,
 			storedType, key, name, now, baseUrl, groupName, activeModels,
-			priority, channelInfoDefault, studio, other, settings, modelMapping, paramOverride,
+			priority, channelInfoDefault, studio, other, settings, e.modelMapping, paramOverride,
 		).Scan(&channelID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("insert channel: %v", err)})
@@ -2887,8 +3047,8 @@ func handleBatchCreateChannels(c *gin.Context) {
 		// Persist quota + optional unit_price_cny in a single upsert so the
 		// All Keys page picks them up without a second round trip.
 		unitPrice := payload.UnitPriceCNY
-		if ch.UnitPriceCNY != nil {
-			unitPrice = *ch.UnitPriceCNY
+		if e.unitPricePtr != nil {
+			unitPrice = *e.unitPricePtr
 		}
 		if unitPrice > 0 {
 			_, err = tx.Exec(`
@@ -2896,13 +3056,13 @@ func handleBatchCreateChannels(c *gin.Context) {
 				VALUES ($1, $2, $3, $4)
 				ON CONFLICT (channel_id)
 				DO UPDATE SET quota_usd=$2, unit_price_cny=$3, updated_at=$4`,
-				channelID, ch.QuotaUSD, unitPrice, now)
+				channelID, e.quotaUSD, unitPrice, now)
 		} else {
 			_, err = tx.Exec(`
 				INSERT INTO report_key_quotas (channel_id, quota_usd, updated_at)
 				VALUES ($1, $2, $3)
 				ON CONFLICT (channel_id) DO UPDATE SET quota_usd=$2, updated_at=$3`,
-				channelID, ch.QuotaUSD, now)
+				channelID, e.quotaUSD, now)
 		}
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("insert quota: %v", err)})
@@ -4562,6 +4722,10 @@ func main() {
 	// Deployment statistics timezone — read via /api/auth/config, set here
 	// by super admin only.
 	api.PUT("/report-settings", requireRole(minSuperAdminRole), handleReportSettingsSet)
+
+	// AWS Bedrock default regions + region->prefix map — read via
+	// /api/auth/config, set here by super admin only.
+	api.PUT("/aws-config", requireRole(minSuperAdminRole), handleAwsConfigSet)
 
 	adminAPI := api.Group("", requireRole(minAdminRole))
 	adminAPI.GET("/report", handleReport)

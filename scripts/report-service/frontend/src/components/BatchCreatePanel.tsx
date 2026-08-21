@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api'
+import { withBase } from '../basePath'
 import { ProviderOption } from './ProviderMark'
 
 type Props = {
@@ -118,6 +119,15 @@ const PRESETS: PresetSpec[] = [
 // backend so batch-created channels don't drift from admin-UI ones.
 const AZURE_DEFAULT_API_VERSION = '2025-04-01-preview'
 
+// AWS Bedrock: common regions offered as quick-pick chips. The operator can
+// still type any region id; the pre-selected set is seeded from the
+// deployment's aws_default_regions config.
+const AWS_COMMON_REGIONS = [
+  'us-east-1', 'us-east-2', 'us-west-2',
+  'ap-northeast-1', 'ap-northeast-2', 'ap-southeast-1', 'ap-southeast-2', 'ap-south-1',
+  'eu-central-1', 'eu-west-1', 'eu-west-3',
+]
+
 // Default value for the Vertex Deployment Region input. Written to
 // channels.other; the JSON-map form works for both the Gemini and
 // Anthropic-on-Vertex adaptors so we don't split per preset.
@@ -187,15 +197,14 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   // and apiVersion is channels.other. The whole batch shares one resource.
   const [azureBaseUrl, setAzureBaseUrl] = useState('')
   const [azureApiVersion, setAzureApiVersion] = useState(AZURE_DEFAULT_API_VERSION)
-  // AWS Bedrock-only state. awsRegion is appended to each key by the backend
-  // and drives the region-prefixed Claude model_mapping; awsKeyMode selects
-  // the auth flavour (ak_sk default / api_key).
-  const [awsRegion, setAwsRegion] = useState('us-east-1')
+  // AWS Bedrock-only state. One key deploys to every selected region (each
+  // becomes its own channel). The selection is prefilled from the deployment's
+  // aws_default_regions config; awsKeyMode selects the auth flavour. The
+  // per-region model_mapping prefix comes from the admin region→prefix map on
+  // the backend — no per-batch prefix picker any more.
+  const [awsRegions, setAwsRegions] = useState<string[]>([])
+  const [awsRegionInput, setAwsRegionInput] = useState('')
   const [awsKeyMode, setAwsKeyMode] = useState<'ak_sk' | 'api_key'>('ak_sk')
-  // Cross-region inference prefix for the Bedrock model_mapping. Decoupled
-  // from awsRegion (which is the SigV4 signing region). Defaults to the
-  // global inference profile; operator can switch to us/eu/apac.
-  const [awsModelPrefix, setAwsModelPrefix] = useState('global')
 
   // 可配置的默认 model 列表 —— 按预设分开存（rc.154+）。key 是 preset.id，
   // value 是服务端保存的 models 字符串；'' 或缺失表示尚未保存过（前端会
@@ -208,6 +217,21 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   const [modelsMsg, setModelsMsg] = useState<string | null>(null)
 
   const studioLocked = !!lockedStudio
+
+  // AWS: seed the region selection from the deployment's aws_default_regions
+  // config the first time the AWS preset is opened (unless already chosen).
+  const [awsDefaultsLoaded, setAwsDefaultsLoaded] = useState(false)
+  useEffect(() => {
+    if (preset.kind !== 'aws' || awsDefaultsLoaded) return
+    setAwsDefaultsLoaded(true)
+    void (async () => {
+      try {
+        const cfg = await fetch(withBase('/api/auth/config')).then(r => r.json())
+        const def: string[] = Array.isArray(cfg?.aws_default_regions) ? cfg.aws_default_regions : []
+        if (def.length) setAwsRegions(prev => (prev.length ? prev : def))
+      } catch { /* leave empty on error */ }
+    })()
+  }, [preset.kind, awsDefaultsLoaded])
 
   // Operator: fetch this studio's channel-type limit to filter the dropdown.
   useEffect(() => {
@@ -387,6 +411,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       settings?: string
       base_url?: string
       region?: string
+      regions?: string[]
       key_type?: 'ak_sk' | 'api_key'
       model_prefix?: string
     } = {
@@ -405,15 +430,15 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       baseDefaults.other = azureApiVersion.trim() || AZURE_DEFAULT_API_VERSION
     }
     // AWS Bedrock uses the plain per-line key textarea (same as text presets):
-    // each row is a credential (ak|sk or apikey) + quota. The backend appends
-    // the region to the key and builds the region-prefixed Claude model
-    // mapping + aws_key_type settings, so we only pass region + key_type here.
+    // each row is a credential (ak|sk or apikey) + quota. One key fans out to
+    // one channel per selected region; the backend appends each region to the
+    // key and builds a per-region Claude model_mapping (prefix from the admin
+    // region→prefix map) + aws_key_type settings.
     if (preset.kind === 'aws') {
-      const region = awsRegion.trim()
-      if (!region) return setResult('AWS 需要填写 Region (例: us-east-1)')
-      baseDefaults.region = region
+      const regions = awsRegions.map(r => r.trim()).filter(Boolean)
+      if (regions.length === 0) return setResult('AWS 需要至少选择一个 Region (例: us-east-1)')
+      baseDefaults.regions = regions
       baseDefaults.key_type = awsKeyMode
-      baseDefaults.model_prefix = awsModelPrefix.trim() || 'global'
     }
 
     // Vertex takes JSON files or plain API keys + a shared region, so it
@@ -864,35 +889,71 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
             </div>
           )}
           {preset.id === 'aws' && (
-            <div className="mb-2 grid grid-cols-2 gap-2">
+            <div className="mb-2 space-y-2 border border-dashed border-gray-300 rounded-md p-3 bg-gray-50/50">
               <div>
                 <label className="block text-[11px] text-gray-500 mb-1">
-                  Region <span className="text-rose-500">*</span>
+                  Regions <span className="text-rose-500">*</span>
+                  <span className="text-gray-400 font-normal"> · 每个 key 会在每个所选区域各建一个渠道</span>
                 </label>
-                <input
-                  value={awsRegion}
-                  onChange={e => setAwsRegion(e.target.value)}
-                  placeholder="us-east-1"
-                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
-                />
-                <p className="text-[10px] text-gray-400 mt-1">SigV4 签名区域，拼进 channels.key（模型映射前缀单独选，见右侧）。</p>
-              </div>
-              <div>
-                <label className="block text-[11px] text-gray-500 mb-1">模型映射前缀</label>
-                <input
-                  value={awsModelPrefix}
-                  onChange={e => setAwsModelPrefix(e.target.value)}
-                  placeholder="global"
-                  list="aws-model-prefix-options"
-                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
-                />
-                <datalist id="aws-model-prefix-options">
-                  <option value="global" />
-                  <option value="us" />
-                  <option value="eu" />
-                  <option value="apac" />
-                </datalist>
-                <p className="text-[10px] text-gray-400 mt-1">Claude 模型映射前缀，默认 <code className="font-mono">global</code>（全局推理配置），可改 us/eu/apac。</p>
+                {/* Selected region chips */}
+                <div className="flex flex-wrap gap-1.5 mb-2 min-h-[1.5rem]">
+                  {awsRegions.length === 0 && <span className="text-[10px] text-gray-400">未选择区域</span>}
+                  {awsRegions.map(r => (
+                    <span key={r} className="inline-flex items-center gap-1 rounded-full bg-brand-50 text-brand px-2 py-0.5 text-[11px] font-mono">
+                      {r}
+                      <button
+                        type="button"
+                        onClick={() => setAwsRegions(prev => prev.filter(x => x !== r))}
+                        className="hover:text-brand-700"
+                        title="移除"
+                      >
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                {/* Quick-pick common regions */}
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {AWS_COMMON_REGIONS.filter(r => !awsRegions.includes(r)).map(r => (
+                    <button
+                      key={r}
+                      type="button"
+                      onClick={() => setAwsRegions(prev => prev.includes(r) ? prev : [...prev, r])}
+                      className="rounded-full border border-gray-300 bg-white px-2 py-0.5 text-[11px] font-mono text-gray-600 hover:border-brand hover:text-brand"
+                    >
+                      + {r}
+                    </button>
+                  ))}
+                </div>
+                {/* Free-form add */}
+                <div className="flex gap-1">
+                  <input
+                    value={awsRegionInput}
+                    onChange={e => setAwsRegionInput(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        const v = awsRegionInput.trim()
+                        if (v && !awsRegions.includes(v)) setAwsRegions(prev => [...prev, v])
+                        setAwsRegionInput('')
+                      }
+                    }}
+                    placeholder="自定义区域，回车添加（例 me-central-1）"
+                    className="flex-1 border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const v = awsRegionInput.trim()
+                      if (v && !awsRegions.includes(v)) setAwsRegions(prev => [...prev, v])
+                      setAwsRegionInput('')
+                    }}
+                    className="border border-gray-300 rounded-md px-3 text-xs text-gray-600 hover:bg-gray-50"
+                  >添加</button>
+                </div>
+                <p className="text-[10px] text-gray-400 mt-1">
+                  区域拼进 channels.key（SigV4 签名）。模型映射前缀由后台 <span className="font-mono">Settings → AWS</span> 的「区域→前缀」映射自动决定（未配置的区域按 us/eu/apac 推导）。默认区域也在那里配置。
+                </p>
               </div>
               <div>
                 <label className="block text-[11px] text-gray-500 mb-1">认证方式</label>
