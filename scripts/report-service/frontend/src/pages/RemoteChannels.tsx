@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Layout from '../components/Layout'
 import { toast, confirmDialog } from '../components/feedback'
+import { ProviderOption } from '../components/ProviderMark'
+import { withBase } from '../basePath'
 import {
   api,
   ROLE_STUDIO_OPERATOR,
@@ -90,6 +92,14 @@ const CHANNEL_TYPE_GEMINI = 24
 const CHANNEL_TYPE_VERTEX = 41
 const CHANNEL_TYPE_AZURE = 3
 const CHANNEL_TYPE_AWS = 33
+
+// AWS Bedrock: common regions offered as quick-pick chips; the pre-selected
+// set is seeded from the deployment's aws_default_regions config.
+const AWS_COMMON_REGIONS = [
+  'us-east-1', 'us-east-2', 'us-west-2',
+  'ap-northeast-1', 'ap-northeast-2', 'ap-southeast-1', 'ap-southeast-2', 'ap-south-1',
+  'eu-central-1', 'eu-west-1', 'eu-west-3',
+]
 const CHANNEL_TYPE_OPENROUTER = 20
 
 // Claude-on-Bedrock model list advertised by the AWS preset. The backend
@@ -618,10 +628,26 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   // handleAzureChannelCreate on the backend.
   const [batchAzureBaseUrl, setBatchAzureBaseUrl] = useState('')
   const [batchAzureApiVersion, setBatchAzureApiVersion] = useState(AZURE_DEFAULT_API_VERSION)
-  // AWS Bedrock preset state. Bypasses the pending queue too (per-batch
-  // region drives channel.key + model_mapping, plus aws_key_type settings).
-  // Region reuses batchRegion. batchAwsKeyMode selects the auth flavour.
+  // AWS Bedrock preset state. Bypasses the pending queue too. One key fans out
+  // to one channel per selected region (region→prefix from the admin config).
   const [batchAwsKeyMode, setBatchAwsKeyMode] = useState<'ak_sk' | 'api_key'>('ak_sk')
+  const [batchAwsRegions, setBatchAwsRegions] = useState<string[]>([])
+  const [batchAwsRegionInput, setBatchAwsRegionInput] = useState('')
+  // Deployment default region list (aws_default_regions), fetched once.
+  const [awsDefaultRegions, setAwsDefaultRegions] = useState<string[]>([])
+  useEffect(() => {
+    void (async () => {
+      try {
+        const cfg = await fetch(withBase('/api/auth/config')).then(r => r.json())
+        if (Array.isArray(cfg?.aws_default_regions)) setAwsDefaultRegions(cfg.aws_default_regions)
+      } catch { /* leave empty */ }
+    })()
+  }, [])
+  // Custom preset dropdown open state (native <select> can't render logos).
+  const [batchTypeOpen, setBatchTypeOpen] = useState(false)
+  // Key entry mode: 'paste' (CSV textarea) or 'table' (per-row editor).
+  const [batchInputMode, setBatchInputMode] = useState<'paste' | 'table'>('paste')
+  const [batchKeyRows, setBatchKeyRows] = useState<{ key: string; quota: string; note: string }[]>([{ key: '', quota: '', note: '' }])
 
   // Row edit modal.
   const [rowOpen, setRowOpen] = useState(false)
@@ -1292,6 +1318,11 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setBatchAzureBaseUrl('')
     setBatchAzureApiVersion(AZURE_DEFAULT_API_VERSION)
     setBatchAwsKeyMode('ak_sk')
+    setBatchAwsRegions([])
+    setBatchAwsRegionInput('')
+    setBatchInputMode('paste')
+    setBatchKeyRows([{ key: '', quota: '', note: '' }])
+    setBatchTypeOpen(false)
     setBatchOpen(true)
   }
 
@@ -1303,6 +1334,61 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     const m = String(d.getMonth() + 1).padStart(2, '0')
     const dd = String(d.getDate()).padStart(2, '0')
     return `${y}${m}${dd}`
+  }
+
+  // Toggle paste/table, carrying data across (key [quota] [note] per line).
+  const switchBatchInputMode = (mode: 'paste' | 'table') => {
+    if (mode === batchInputMode) return
+    if (mode === 'table') {
+      const rows: { key: string; quota: string; note: string }[] = []
+      for (const line of batchInput.split('\n')) {
+        const t = line.trim()
+        if (!t || t.startsWith('#')) continue
+        const parts = t.split(/[\s,]+/)
+        if (!parts[0]) continue
+        rows.push({ key: parts[0], quota: parts[1] ?? '', note: parts.slice(2).join(' ') })
+      }
+      setBatchKeyRows(rows.length ? rows : [{ key: '', quota: '', note: '' }])
+    } else {
+      const text = batchKeyRows
+        .filter(r => r.key.trim())
+        .map(r => [r.key.trim(), r.quota.trim(), r.note.trim()].filter(Boolean).join(' '))
+        .join('\n')
+      setBatchInput(text)
+    }
+    setBatchInputMode(mode)
+  }
+
+  // Collect {key, quota_usd?, note?} from whichever entry mode is active.
+  const collectBatchItems = (): { key: string; quota_usd?: number; note?: string }[] => {
+    const out: { key: string; quota_usd?: number; note?: string }[] = []
+    if (batchInputMode === 'table') {
+      for (const r of batchKeyRows) {
+        const key = r.key.trim()
+        if (!key) continue
+        const item: { key: string; quota_usd?: number; note?: string } = { key }
+        const q = parseFloat(r.quota.trim())
+        if (!isNaN(q) && q > 0) item.quota_usd = q
+        if (r.note.trim()) item.note = r.note.trim()
+        out.push(item)
+      }
+    } else {
+      for (const raw of batchInput.split('\n')) {
+        const t = raw.trim()
+        if (!t || t.startsWith('#')) continue
+        const parts = t.split(/[\s,]+/)
+        const key = parts[0]
+        if (!key) continue
+        const item: { key: string; quota_usd?: number; note?: string } = { key }
+        if (parts[1]) {
+          const q = parseFloat(parts[1])
+          if (!isNaN(q) && q > 0) item.quota_usd = q
+        }
+        if (parts.length > 2) item.note = parts.slice(2).join(' ')
+        out.push(item)
+      }
+    }
+    return out
   }
 
   const submitBatch = async () => {
@@ -1386,22 +1472,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     // per-batch region (baked into the key + model_mapping) and an
     // aws_key_type setting, so it bypasses the pending queue like Vertex.
     if (preset?.kind === 'aws') {
-      if (!batchRegion.trim()) return setBatchErr('AWS 需要填写 Region (例: us-east-1)')
-      const awsItems: { key: string; quota_usd?: number; note?: string }[] = []
-      for (const raw of batchInput.split('\n')) {
-        const t = raw.trim()
-        if (!t || t.startsWith('#')) continue
-        const parts = t.split(/[\s,]+/)
-        const key = parts[0]
-        if (!key) continue
-        const item: { key: string; quota_usd?: number; note?: string } = { key }
-        if (parts[1]) {
-          const q = parseFloat(parts[1])
-          if (!isNaN(q) && q > 0) item.quota_usd = q
-        }
-        if (parts.length > 2) item.note = parts.slice(2).join(' ')
-        awsItems.push(item)
-      }
+      const regions = batchAwsRegions.map(r => r.trim()).filter(Boolean)
+      if (regions.length === 0) return setBatchErr('AWS 需要至少选择一个 Region (例: us-east-1)')
+      const awsItems = collectBatchItems()
       if (awsItems.length === 0) return setBatchErr('未解析到有效行')
       setBatchBusy(true)
       try {
@@ -1410,16 +1483,20 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           name_prefix: fullNamePrefix,
           models: batchModels.trim(),
           group: batchGroup.trim() || 'claude-aws',
-          region: batchRegion.trim(),
+          regions,
           key_type: batchAwsKeyMode,
           items: awsItems,
         })
+        // Backend fans out item×region (item outer, region inner), so map each
+        // result index back to its source key for the masked display.
         setBatchResults(
-          res.results.map((r, idx) => {
-            const raw = awsItems[idx]?.key ?? ''
+          res.results.map((r) => {
+            const itemIdx = Math.floor((r.index ?? 0) / regions.length)
+            const raw = awsItems[itemIdx]?.key ?? ''
+            const region = regions[(r.index ?? 0) % regions.length] ?? ''
             const masked = raw.length > 8 ? `${raw.slice(0, 4)}…${raw.slice(-4)}` : raw
             return {
-              key: masked,
+              key: region ? `${masked} @ ${region}` : masked,
               ok: r.ok,
               channel_id: r.channel_id,
               error: r.error,
@@ -1440,21 +1517,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     // pending queue and remoteChannelCreate lane like Vertex does.
     if (preset?.kind === 'azure') {
       if (!batchAzureBaseUrl.trim()) return setBatchErr('Azure 需要 Resource Endpoint (例: https://<resource>.openai.azure.com)')
-      const azureItems: { key: string; quota_usd?: number; note?: string }[] = []
-      for (const raw of batchInput.split('\n')) {
-        const t = raw.trim()
-        if (!t || t.startsWith('#')) continue
-        const parts = t.split(/[\s,]+/)
-        const key = parts[0]
-        if (!key) continue
-        const item: { key: string; quota_usd?: number; note?: string } = { key }
-        if (parts[1]) {
-          const q = parseFloat(parts[1])
-          if (!isNaN(q) && q > 0) item.quota_usd = q
-        }
-        if (parts.length > 2) item.note = parts.slice(2).join(' ')
-        azureItems.push(item)
-      }
+      const azureItems = collectBatchItems()
       if (azureItems.length === 0) return setBatchErr('未解析到有效行')
       setBatchBusy(true)
       try {
@@ -1488,23 +1551,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
       return
     }
 
-    const items: { key: string; quota_usd?: number; note?: string; priority?: number }[] = []
-    for (const raw of batchInput.split('\n')) {
-      const t = raw.trim()
-      if (!t || t.startsWith('#')) continue
-      const parts = t.split(/[\s,]+/)
-      const key = parts[0]
-      if (!key) continue
-      const item: { key: string; quota_usd?: number; note?: string; priority?: number } = { key }
-      if (parts[1]) {
-        const q = parseFloat(parts[1])
-        if (!isNaN(q) && q > 0) item.quota_usd = q
-      }
-      if (parts.length > 2) {
-        item.note = parts.slice(2).join(' ')
-      }
-      items.push(item)
-    }
+    const items: { key: string; quota_usd?: number; note?: string; priority?: number }[] = collectBatchItems()
     if (items.length === 0) return setBatchErr('未解析到有效行')
 
     const basePriority = batchPriority.trim() ? parseInt(batchPriority.trim(), 10) : NaN
@@ -2636,30 +2683,60 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
               )}
             </div>
             <Field label="渠道类型">
-              <select
-                value={batchPresetID}
-                onChange={e => {
-                  const p = CHANNEL_TYPE_PRESETS.find(x => x.id === (e.target.value as PresetID))
-                  if (!p) return
-                  setBatchPresetID(p.id)
-                  // Rewrite both models and group. Each resolver picks the
-                  // profile-saved value first, then preset fallback — field
-                  // is never empty.
-                  const prof = profiles.find(x => x.id === selectedID)
-                  setBatchModels(resolvePresetModels(p, prof))
-                  setBatchGroup(resolvePresetGroup(p, prof))
-                  // Region default per preset: AWS needs a real region (baked
-                  // into the key + model mapping), Vertex defaults to the
-                  // {"default":"global"} map (global endpoint for every model).
-                  if (p.kind === 'aws') setBatchRegion('us-east-1')
-                  else if (p.kind === 'vertex') setBatchRegion('{"default": "global"}')
-                }}
-                className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm bg-white focus:outline-none focus:border-gray-900"
-              >
-                {CHANNEL_TYPE_PRESETS.map(p => (
-                  <option key={p.id} value={p.id}>{p.label}</option>
-                ))}
-              </select>
+              {/* Custom dropdown so each provider shows its coloured logo. */}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setBatchTypeOpen(v => !v)}
+                  className="w-full flex items-center justify-between gap-2 border border-gray-300 rounded-md px-2 py-1.5 text-sm bg-white focus:outline-none focus:border-gray-900"
+                >
+                  {(() => {
+                    const cur = CHANNEL_TYPE_PRESETS.find(x => x.id === batchPresetID) ?? CHANNEL_TYPE_PRESETS[0]
+                    return <ProviderOption type={cur.type} label={cur.label} size={20} />
+                  })()}
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`text-gray-400 transition-transform ${batchTypeOpen ? 'rotate-180' : ''}`}>
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                </button>
+                {batchTypeOpen && (
+                  <>
+                    <div className="fixed inset-0 z-10" onClick={() => setBatchTypeOpen(false)} />
+                    <ul className="absolute z-20 mt-1 w-full max-h-72 overflow-auto rounded-md border border-gray-200 bg-white py-1 shadow-lg">
+                      {CHANNEL_TYPE_PRESETS.map(p => {
+                        const active = p.id === batchPresetID
+                        return (
+                          <li key={p.id}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setBatchPresetID(p.id)
+                                const prof = profiles.find(x => x.id === selectedID)
+                                setBatchModels(resolvePresetModels(p, prof))
+                                setBatchGroup(resolvePresetGroup(p, prof))
+                                if (p.kind === 'aws') {
+                                  setBatchRegion('us-east-1')
+                                  setBatchAwsRegions(prev => (prev.length ? prev : awsDefaultRegions))
+                                } else if (p.kind === 'vertex') {
+                                  setBatchRegion('{"default": "global"}')
+                                }
+                                setBatchTypeOpen(false)
+                              }}
+                              className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-sm text-left hover:bg-gray-50 ${active ? 'bg-brand-50/60 text-brand' : 'text-gray-800'}`}
+                            >
+                              <ProviderOption type={p.type} label={p.label} size={20} />
+                              {active && (
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" className="ml-auto">
+                                  <polyline points="20 6 9 17 4 12" />
+                                </svg>
+                              )}
+                            </button>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </>
+                )}
+              </div>
               <p className="text-[10px] text-gray-400 mt-1">
                 切换预设会同步重写下方的 <span className="font-mono">Models</span> 和 <span className="font-mono">Group</span>。Gemini 用站点上配置的 <span className="font-mono">default_gemini_group</span> / <span className="font-mono">default_gemini_models</span>；未设置则回退到内置默认。
               </p>
@@ -2672,26 +2749,67 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                 className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-gray-900"
               />
             </Field>
-            <div className="mt-3">
-              <label className="block text-[11px] text-gray-500 mb-1">
-                {batchPresetID === 'aws' ? (
-                  <>Keys —— 每行 <code className="text-gray-700 bg-gray-100 px-1">{batchAwsKeyMode === 'ak_sk' ? 'ak|sk' : 'apikey'} [额度USD] [备注...]</code></>
-                ) : (
-                  <>Keys —— 每行 <code className="text-gray-700 bg-gray-100 px-1">key [额度USD] [备注...]</code></>
-                )}
-              </label>
-              <textarea
-                value={batchInput}
-                onChange={e => setBatchInput(e.target.value)}
-                rows={8}
-                placeholder={'sk-ant-api03-xxxx 220\nsk-ant-api03-yyyy 500 备注文字\n# 井号开头的行会被忽略'}
-                className="w-full border border-gray-300 rounded-md p-2 text-[11px] font-mono resize-y focus:outline-none focus:border-gray-900"
-                disabled={batchPresetID === 'vertex' || batchPresetID === 'vertex-claude'}
-              />
-              <p className="text-[10px] text-gray-400 mt-1">
-                额度和备注可省。额度写在本地 remote_channel_meta；key 明文只走一次 POST，不落本地。
-              </p>
-            </div>
+            {!(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude') && (() => {
+              const keyLabel = batchPresetID === 'aws' ? (batchAwsKeyMode === 'ak_sk' ? 'ak|sk' : 'apikey') : 'key'
+              return (
+                <div className="mt-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[11px] text-gray-500">
+                      Keys —— <code className="text-gray-700 bg-gray-100 px-1">{keyLabel} [额度USD] [备注...]</code>
+                    </label>
+                    <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
+                      {([{ id: 'paste', label: '粘贴' }, { id: 'table', label: '表格' }] as { id: 'paste' | 'table'; label: string }[]).map(m => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => switchBatchInputMode(m.id)}
+                          className={`px-3 py-1 text-[11px] border-r border-gray-200 last:border-r-0 transition-colors ${batchInputMode === m.id ? 'bg-brand text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
+                        >
+                          {m.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {batchInputMode === 'paste' ? (
+                    <textarea
+                      value={batchInput}
+                      onChange={e => setBatchInput(e.target.value)}
+                      rows={8}
+                      placeholder={'sk-ant-api03-xxxx 220\nsk-ant-api03-yyyy 500 备注文字\n# 井号开头的行会被忽略'}
+                      className="w-full border border-gray-300 rounded-md p-2 text-[11px] font-mono resize-y focus:outline-none focus:border-gray-900"
+                    />
+                  ) : (
+                    <div className="border border-gray-200 rounded-md overflow-hidden">
+                      <div className="grid grid-cols-[1fr_5rem_1fr_2rem] gap-2 px-2 py-1.5 bg-gray-50 border-b border-gray-200 text-[10px] text-gray-500 uppercase tracking-wide">
+                        <span>{keyLabel}</span><span>额度 USD</span><span>备注</span><span />
+                      </div>
+                      <div className="max-h-64 overflow-y-auto divide-y divide-gray-100">
+                        {batchKeyRows.map((r, i) => (
+                          <div key={i} className="grid grid-cols-[1fr_5rem_1fr_2rem] gap-2 px-2 py-1 items-center">
+                            <input value={r.key} onChange={e => setBatchKeyRows(prev => prev.map((x, j) => j === i ? { ...x, key: e.target.value } : x))} placeholder={keyLabel} className="w-full border border-gray-200 rounded px-2 py-1 text-[11px] font-mono bg-white focus:outline-none focus:border-gray-900" />
+                            <input type="number" step="0.01" min="0" value={r.quota} onChange={e => setBatchKeyRows(prev => prev.map((x, j) => j === i ? { ...x, quota: e.target.value } : x))} placeholder="可选" className="w-full border border-gray-200 rounded px-2 py-1 text-[11px] tabular-nums bg-white focus:outline-none focus:border-gray-900" />
+                            <input value={r.note} onChange={e => setBatchKeyRows(prev => prev.map((x, j) => j === i ? { ...x, note: e.target.value } : x))} placeholder="可选" className="w-full border border-gray-200 rounded px-2 py-1 text-[11px] bg-white focus:outline-none focus:border-gray-900" />
+                            <button type="button" onClick={() => setBatchKeyRows(prev => prev.length > 1 ? prev.filter((_, j) => j !== i) : [{ key: '', quota: '', note: '' }])} title="删除该行" className="text-gray-400 hover:text-rose-600 flex items-center justify-center">
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex items-center justify-between px-2 py-1.5 border-t border-gray-200 bg-gray-50/60">
+                        <button type="button" onClick={() => setBatchKeyRows(prev => [...prev, { key: '', quota: '', note: '' }])} className="inline-flex items-center gap-1 text-[11px] text-brand hover:text-brand-700">
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+                          添加一行
+                        </button>
+                        <span className="text-[10px] text-gray-400 tabular-nums">{batchKeyRows.filter(r => r.key.trim()).length} 条</span>
+                      </div>
+                    </div>
+                  )}
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    额度和备注可省。额度写在本地 remote_channel_meta；key 明文只走一次 POST，不落本地。
+                  </p>
+                </div>
+              )
+            })()}
             {(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude') && (
               <div className="mt-3 space-y-3 border border-dashed border-gray-300 rounded-md p-3 bg-gray-50/50">
                 <p className="text-[11px] text-gray-500">
@@ -2748,49 +2866,57 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
             {batchPresetID === 'aws' && (
               <div className="mt-3 space-y-2 border border-dashed border-gray-300 rounded-md p-3 bg-gray-50/50">
                 <p className="text-[11px] text-gray-500">
-                  AWS Bedrock 走独立通道，绕过 Pending 队列 —— 直接创建远端渠道。同批凭证共享同一 Region；Region 会拼进 channel.key 并按区域生成 Claude 模型映射（例: us-east-1 → <span className="font-mono">us.anthropic.*</span>）。
+                  AWS Bedrock 走独立通道，绕过 Pending 队列。每个 key 会在每个所选 Region 各建一个渠道；Region 拼进 channel.key，模型映射前缀由后台 <span className="font-mono">Settings → AWS</span> 的区域→前缀映射自动决定。
                 </p>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-[11px] text-gray-500 mb-1">
-                      Region <span className="text-rose-500">*</span>
-                    </label>
+                <div>
+                  <label className="block text-[11px] text-gray-500 mb-1">
+                    Regions <span className="text-rose-500">*</span>
+                  </label>
+                  <div className="flex flex-wrap gap-1.5 mb-2 min-h-[1.5rem]">
+                    {batchAwsRegions.length === 0 && <span className="text-[10px] text-gray-400">未选择区域</span>}
+                    {batchAwsRegions.map(r => (
+                      <span key={r} className="inline-flex items-center gap-1 rounded-full bg-brand-50 text-brand px-2 py-0.5 text-[11px] font-mono">
+                        {r}
+                        <button type="button" onClick={() => setBatchAwsRegions(prev => prev.filter(x => x !== r))} className="hover:text-brand-700" title="移除">
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    {AWS_COMMON_REGIONS.filter(r => !batchAwsRegions.includes(r)).map(r => (
+                      <button key={r} type="button" onClick={() => setBatchAwsRegions(prev => prev.includes(r) ? prev : [...prev, r])} className="rounded-full border border-gray-300 bg-white px-2 py-0.5 text-[11px] font-mono text-gray-600 hover:border-brand hover:text-brand">
+                        + {r}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex gap-1">
                     <input
-                      value={batchRegion}
-                      onChange={e => setBatchRegion(e.target.value)}
-                      placeholder="us-east-1"
-                      className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
+                      value={batchAwsRegionInput}
+                      onChange={e => setBatchAwsRegionInput(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault()
+                          const v = batchAwsRegionInput.trim()
+                          if (v && !batchAwsRegions.includes(v)) setBatchAwsRegions(prev => [...prev, v])
+                          setBatchAwsRegionInput('')
+                        }
+                      }}
+                      placeholder="自定义区域，回车添加（例 me-central-1）"
+                      className="flex-1 border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
                     />
-                    <p className="text-[10px] text-gray-400 mt-1">前缀自动推导：us→us、eu→eu、ap→apac。</p>
+                    <button type="button" onClick={() => { const v = batchAwsRegionInput.trim(); if (v && !batchAwsRegions.includes(v)) setBatchAwsRegions(prev => [...prev, v]); setBatchAwsRegionInput('') }} className="border border-gray-300 rounded-md px-3 text-xs text-gray-600 hover:bg-gray-50">添加</button>
                   </div>
-                  <div>
-                    <label className="block text-[11px] text-gray-500 mb-1">认证方式</label>
-                    <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
-                      <button
-                        type="button"
-                        onClick={() => setBatchAwsKeyMode('ak_sk')}
-                        className={`px-3 py-1.5 text-xs border-r border-gray-200 transition-colors ${
-                          batchAwsKeyMode === 'ak_sk' ? 'bg-brand text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
-                        }`}
-                      >
-                        AK/SK
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setBatchAwsKeyMode('api_key')}
-                        className={`px-3 py-1.5 text-xs transition-colors ${
-                          batchAwsKeyMode === 'api_key' ? 'bg-brand text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
-                        }`}
-                      >
-                        API Key
-                      </button>
-                    </div>
-                    <p className="text-[10px] text-gray-400 mt-1">
-                      {batchAwsKeyMode === 'ak_sk'
-                        ? '每行填 ak|sk（Region 自动追加）。'
-                        : '每行填 apikey（Region 自动追加）。'}
-                    </p>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-gray-500 mb-1">认证方式</label>
+                  <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
+                    <button type="button" onClick={() => setBatchAwsKeyMode('ak_sk')} className={`px-3 py-1.5 text-xs border-r border-gray-200 transition-colors ${batchAwsKeyMode === 'ak_sk' ? 'bg-brand text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}>AK/SK</button>
+                    <button type="button" onClick={() => setBatchAwsKeyMode('api_key')} className={`px-3 py-1.5 text-xs transition-colors ${batchAwsKeyMode === 'api_key' ? 'bg-brand text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}>API Key</button>
                   </div>
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    {batchAwsKeyMode === 'ak_sk' ? '每行填 ak|sk（Region 自动追加）。' : '每行填 apikey（Region 自动追加）。'}
+                  </p>
                 </div>
               </div>
             )}

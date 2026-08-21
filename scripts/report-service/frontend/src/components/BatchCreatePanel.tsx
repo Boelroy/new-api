@@ -84,6 +84,7 @@ const DEFAULT_AWS_CLAUDE_MODELS = [
   'claude-opus-4-6',
   'claude-opus-4-5-20251101',
   'claude-sonnet-4-6',
+  'claude-sonnet-5',
   'claude-sonnet-4-5-20250929',
   'claude-haiku-4-5-20251001',
 ].join(',')

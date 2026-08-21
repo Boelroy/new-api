@@ -1260,7 +1260,9 @@ export const api = {
     name_prefix: string
     models: string
     group?: string
-    region: string
+    // region = legacy single; regions = one channel per region. Prefer regions.
+    region?: string
+    regions?: string[]
     key_type?: 'ak_sk' | 'api_key'
     items: { key: string; quota_usd?: number; note?: string }[]
   }) =>

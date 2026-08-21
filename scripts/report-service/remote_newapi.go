@@ -2743,6 +2743,7 @@ var awsBedrockClaudeModelBase = []struct{ Name, ID string }{
 	{"claude-opus-4-6", "anthropic.claude-opus-4-6-v1"},
 	{"claude-opus-4-1-20250805", "anthropic.claude-opus-4-1-20250805-v1:0"},
 	{"claude-opus-5", "anthropic.claude-opus-5"},
+	{"claude-sonnet-5", "anthropic.claude-sonnet-5"},
 	{"claude-opus-4-7", "anthropic.claude-opus-4-7"},
 	{"claude-opus-4-8", "anthropic.claude-opus-4-8"},
 	{"claude-fable-5", "anthropic.claude-fable-5"},
@@ -2873,6 +2874,10 @@ func handleAwsChannelCreate(c *gin.Context) {
 		Group      string `json:"group"`
 		Tag        string `json:"tag"`
 		Region     string `json:"region"`
+		// Regions: one key fans out to one channel per region (each with its own
+		// region-appended key and per-region model_mapping). Region stays for
+		// backward compat (single).
+		Regions []string `json:"regions"`
 		// KeyType selects AWS auth mode: "ak_sk" (default) or "api_key".
 		KeyType string `json:"key_type"`
 		Items   []struct {
@@ -2909,8 +2914,20 @@ func handleAwsChannelCreate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "models is required"})
 		return
 	}
-	if body.Region == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "region is required (e.g. us-east-1)"})
+	// Resolve the region list: multi-region Regions, falling back to the legacy
+	// single Region. De-dup + trim.
+	regions := []string{}
+	seenRegion := map[string]bool{}
+	for _, r := range append(append([]string{}, body.Regions...), body.Region) {
+		r = strings.TrimSpace(r)
+		if r == "" || seenRegion[r] {
+			continue
+		}
+		seenRegion[r] = true
+		regions = append(regions, r)
+	}
+	if len(regions) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "at least one region is required (e.g. us-east-1)"})
 		return
 	}
 	if body.Group == "" {
@@ -2962,14 +2979,9 @@ func handleAwsChannelCreate(c *gin.Context) {
 		settingsJSON = `{"aws_key_type":"ak_sk"}`
 	}
 
-	// model_mapping is region-derived here (remote upload keeps its existing
-	// per-region behaviour): friendly Claude names → region-prefixed Bedrock
-	// model ids. Built once per batch (region is per-batch).
-	modelMapping, err := buildAwsBedrockModelMapping(awsBedrockRegionPrefix(body.Region))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "build model mapping: " + err.Error()})
-		return
-	}
+	// model_mapping is built per region inside the loop below: friendly Claude
+	// names → region-prefixed Bedrock model ids, prefix from awsRegionModelPrefix
+	// (the admin-configured region→prefix map, falling back to us/eu/apac).
 
 	// wantParts is the exact "|"-separated part count the final channel.key
 	// must have for this mode, so a malformed credential fails loud instead of
@@ -2982,121 +2994,118 @@ func handleAwsChannelCreate(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
 	defer cancel()
 
-	results := make([]gin.H, 0, len(body.Items))
+	results := make([]gin.H, 0, len(body.Items)*len(regions))
 	okCount := 0
-	for idx, it := range body.Items {
+	total := 0
+	// Each key fans out to one channel per region: region-appended key, per-
+	// region model_mapping (prefix from the admin region→prefix map), and a
+	// "-<region>" name suffix so the channels stay distinguishable.
+	for _, it := range body.Items {
 		cred := strings.TrimSpace(it.Key)
-		if cred == "" {
-			results = append(results, gin.H{
-				"index": idx,
-				"ok":    false,
-				"error": "empty credential",
-			})
-			continue
-		}
-		// Region is appended here so the operator only enters it once per batch.
-		fullKey := cred + "|" + body.Region
-		if len(strings.Split(fullKey, "|")) != wantParts {
-			msg := "ak_sk mode expects '<ak>|<sk>' per line"
-			if body.KeyType == "api_key" {
-				msg = "api_key mode expects a single '<apikey>' per line"
+		for _, region := range regions {
+			ridx := total
+			total++
+			if cred == "" {
+				results = append(results, gin.H{"index": ridx, "ok": false, "error": "empty credential"})
+				continue
 			}
-			results = append(results, gin.H{
-				"index": idx,
-				"ok":    false,
-				"error": msg,
+			fullKey := cred + "|" + region
+			if len(strings.Split(fullKey, "|")) != wantParts {
+				msg := "ak_sk mode expects '<ak>|<sk>' per line"
+				if body.KeyType == "api_key" {
+					msg = "api_key mode expects a single '<apikey>' per line"
+				}
+				results = append(results, gin.H{"index": ridx, "ok": false, "error": msg})
+				continue
+			}
+			modelMapping, mmErr := buildAwsBedrockModelMapping(awsRegionModelPrefix(region))
+			if mmErr != nil {
+				results = append(results, gin.H{"index": ridx, "ok": false, "error": "build model mapping: " + mmErr.Error()})
+				continue
+			}
+			namePrefixRegion := body.NamePrefix + "-" + region
+			chID, err := uploadOneKeyToRemote(ctx, uploadOneKeyParams{
+				Host:         host,
+				Token:        token,
+				UserID:       userID,
+				ProfileID:    body.ProfileID,
+				Key:          fullKey,
+				NamePrefix:   namePrefixRegion,
+				Type:         33, // constant/channel.go ChannelTypeAws
+				Models:       body.Models,
+				Group:        body.Group,
+				Tag:          body.Tag,
+				Priority:     0,
+				Settings:     settingsJSON,
+				ModelMapping: modelMapping,
+				QuotaUSD:     it.QuotaUSD,
+				Note:         it.Note,
 			})
-			continue
-		}
-		chID, err := uploadOneKeyToRemote(ctx, uploadOneKeyParams{
-			Host:         host,
-			Token:        token,
-			UserID:       userID,
-			ProfileID:    body.ProfileID,
-			Key:          fullKey,
-			NamePrefix:   body.NamePrefix,
-			Type:         33, // constant/channel.go ChannelTypeAws
-			Models:       body.Models,
-			Group:        body.Group,
-			Tag:          body.Tag,
-			Priority:     0,
-			Settings:     settingsJSON,
-			ModelMapping: modelMapping,
-			QuotaUSD:     it.QuotaUSD,
-			Note:         it.Note,
-		})
-		if err != nil {
-			results = append(results, gin.H{
-				"index": idx,
-				"ok":    false,
-				"error": err.Error(),
-			})
-			continue
-		}
+			if err != nil {
+				results = append(results, gin.H{"index": ridx, "ok": false, "error": err.Error()})
+				continue
+			}
 
-		// Attribution + credential rows mirror handleVertexChannelCreate so
-		// 我的远程渠道 and 上传队列 render AWS uploads consistently.
-		noteStr := strings.TrimSpace(it.Note)
-		quota := 0.0
-		if it.QuotaUSD != nil {
-			quota = *it.QuotaUSD
-		}
-		enc, encErr := encryptRemoteToken(fullKey)
-		if encErr == nil {
-			nowTS := time.Now().Unix()
-			if _, err := db.Exec(
-				`INSERT INTO remote_pending_key
-				 (profile_id, key_hash, key_encrypted, quota_usd, note, name_prefix,
-				  group_name, tag, models, priority, pool_size, status, channel_type, uploaded_by,
-				  remote_channel_id, activated_at, created_at, updated_at)
-				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0,0,'active',33,$10,$11,$12,$12,$12)
-				 ON CONFLICT (profile_id, key_hash) DO UPDATE SET
-				   remote_channel_id = EXCLUDED.remote_channel_id,
-				   status            = 'active',
-				   activated_at      = EXCLUDED.activated_at,
-				   uploaded_by       = EXCLUDED.uploaded_by,
-				   tag               = EXCLUDED.tag,
-				   updated_at        = EXCLUDED.updated_at,
-				   failed_reason     = ''`,
-				body.ProfileID, pendingKeyHash(fullKey), enc, quota, noteStr, body.NamePrefix,
-				body.Group, body.Tag, body.Models, uploadedBy,
-				chID, nowTS,
-			); err != nil {
-				log.Printf("[aws-create] attribution insert profile=%d channel=%d: %v", body.ProfileID, chID, err)
+			// Attribution + credential rows mirror handleVertexChannelCreate so
+			// 我的远程渠道 and 上传队列 render AWS uploads consistently.
+			noteStr := strings.TrimSpace(it.Note)
+			quota := 0.0
+			if it.QuotaUSD != nil {
+				quota = *it.QuotaUSD
 			}
-			if _, err := db.Exec(
-				`INSERT INTO remote_channel_credential
-				 (profile_id, remote_channel_id, channel_type, key_type, key_encrypted,
-				  region, settings_json, uploaded_by, created_at, updated_at)
-				 VALUES ($1,$2,33,$3,$4,$5,$6,$7,$8,$8)
-				 ON CONFLICT (profile_id, remote_channel_id) DO UPDATE SET
-				   channel_type   = EXCLUDED.channel_type,
-				   key_type       = EXCLUDED.key_type,
-				   key_encrypted  = EXCLUDED.key_encrypted,
-				   region         = EXCLUDED.region,
-				   settings_json  = EXCLUDED.settings_json,
-				   uploaded_by    = EXCLUDED.uploaded_by,
-				   updated_at     = EXCLUDED.updated_at`,
-				body.ProfileID, chID, body.KeyType, enc,
-				body.Region, settingsJSON, uploadedBy, nowTS,
-			); err != nil {
-				log.Printf("[aws-create] credential insert profile=%d channel=%d: %v", body.ProfileID, chID, err)
+			enc, encErr := encryptRemoteToken(fullKey)
+			if encErr == nil {
+				nowTS := time.Now().Unix()
+				if _, err := db.Exec(
+					`INSERT INTO remote_pending_key
+					 (profile_id, key_hash, key_encrypted, quota_usd, note, name_prefix,
+					  group_name, tag, models, priority, pool_size, status, channel_type, uploaded_by,
+					  remote_channel_id, activated_at, created_at, updated_at)
+					 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0,0,'active',33,$10,$11,$12,$12,$12)
+					 ON CONFLICT (profile_id, key_hash) DO UPDATE SET
+					   remote_channel_id = EXCLUDED.remote_channel_id,
+					   status            = 'active',
+					   activated_at      = EXCLUDED.activated_at,
+					   uploaded_by       = EXCLUDED.uploaded_by,
+					   tag               = EXCLUDED.tag,
+					   updated_at        = EXCLUDED.updated_at,
+					   failed_reason     = ''`,
+					body.ProfileID, pendingKeyHash(fullKey), enc, quota, noteStr, namePrefixRegion,
+					body.Group, body.Tag, body.Models, uploadedBy,
+					chID, nowTS,
+				); err != nil {
+					log.Printf("[aws-create] attribution insert profile=%d channel=%d: %v", body.ProfileID, chID, err)
+				}
+				if _, err := db.Exec(
+					`INSERT INTO remote_channel_credential
+					 (profile_id, remote_channel_id, channel_type, key_type, key_encrypted,
+					  region, settings_json, uploaded_by, created_at, updated_at)
+					 VALUES ($1,$2,33,$3,$4,$5,$6,$7,$8,$8)
+					 ON CONFLICT (profile_id, remote_channel_id) DO UPDATE SET
+					   channel_type   = EXCLUDED.channel_type,
+					   key_type       = EXCLUDED.key_type,
+					   key_encrypted  = EXCLUDED.key_encrypted,
+					   region         = EXCLUDED.region,
+					   settings_json  = EXCLUDED.settings_json,
+					   uploaded_by    = EXCLUDED.uploaded_by,
+					   updated_at     = EXCLUDED.updated_at`,
+					body.ProfileID, chID, body.KeyType, enc,
+					region, settingsJSON, uploadedBy, nowTS,
+				); err != nil {
+					log.Printf("[aws-create] credential insert profile=%d channel=%d: %v", body.ProfileID, chID, err)
+				}
+			} else {
+				log.Printf("[aws-create] encrypt key for attribution profile=%d channel=%d: %v", body.ProfileID, chID, encErr)
 			}
-		} else {
-			log.Printf("[aws-create] encrypt key for attribution profile=%d channel=%d: %v", body.ProfileID, chID, encErr)
-		}
 
-		results = append(results, gin.H{
-			"index":      idx,
-			"ok":         true,
-			"channel_id": chID,
-		})
-		okCount++
+			results = append(results, gin.H{"index": ridx, "ok": true, "channel_id": chID})
+			okCount++
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"results": results,
 		"ok":      okCount,
-		"total":   len(body.Items),
+		"total":   total,
 	})
 }
 

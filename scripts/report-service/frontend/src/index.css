@@ -90,9 +90,14 @@ body {
    Site-wide entrance + interaction polish. Applied at the CSS layer so every
    page benefits without per-page edits. Fully disabled under reduced-motion. */
 @media (prefers-reduced-motion: no-preference) {
-  /* Page content fades/slides in on each navigation (Layout remounts per route). */
+  /* Page content fades/slides in on each navigation (Layout remounts per route).
+     NOTE: no `both` fill-mode on purpose. fadeUp ends at transform: translateY(0),
+     and a retained non-none transform would make .page-enter a containing block
+     for every position:fixed modal rendered inside it — clipping their full-screen
+     backdrop below the sticky header. Letting the transform drop after the
+     animation keeps fixed overlays anchored to the viewport. */
   .page-enter {
-    animation: fadeUp 0.3s ease-out both;
+    animation: fadeUp 0.3s ease-out;
   }
   /* Staggered entrance for grid children (e.g. summary cards). */
   .stagger > * {
