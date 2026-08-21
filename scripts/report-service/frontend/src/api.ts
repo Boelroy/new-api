@@ -747,8 +747,8 @@ export const api = {
   // AWS Bedrock config (super admin). default_regions = the list pre-selected in
   // the batch-create picker; region_prefix_map = region→inference-prefix
   // overrides. Read from /api/auth/config; set here.
-  setAwsConfig: (payload: { default_regions?: string[]; region_prefix_map?: Record<string, string> }) =>
-    request<{ ok: boolean; default_regions: string[]; region_prefix_map: Record<string, string> }>('/api/aws-config', {
+  setAwsConfig: (payload: { default_regions?: string[]; region_prefix_map?: Record<string, string>; default_group?: string; default_models?: string }) =>
+    request<{ ok: boolean; default_regions: string[]; region_prefix_map: Record<string, string>; default_group: string; default_models: string }>('/api/aws-config', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),

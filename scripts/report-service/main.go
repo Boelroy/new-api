@@ -1576,6 +1576,8 @@ func handleAuthConfig(c *gin.Context) {
 		// channel's model_mapping. Read here; set via PUT /api/aws-config.
 		"aws_default_regions":   awsDefaultRegions(),
 		"aws_region_prefix_map": loadAwsRegionPrefixMap(),
+		"aws_default_group":     awsDefaultGroup(),
+		"aws_default_models":    getBatchCreateModels(33),
 	}
 	if mainServiceURL != "" {
 		resp["sso_url"] = mainServiceURL + "/sign-in"
@@ -1629,7 +1631,20 @@ func reportTimezone() string {
 const (
 	cfgAwsDefaultRegions  = "aws_default_regions"
 	cfgAwsRegionPrefixMap = "aws_region_prefix_map"
+	// cfgAwsDefaultGroup is the report_config key for the default channel group
+	// AWS batch-create seeds into new channels. Empty → "claude-aws".
+	cfgAwsDefaultGroup = "aws_default_group"
 )
+
+// awsDefaultGroup returns the configured default AWS channel group, defaulting
+// to "claude-aws" when unset.
+func awsDefaultGroup() string {
+	v := strings.TrimSpace(supplierConfigGet(cfgAwsDefaultGroup))
+	if v == "" {
+		return "claude-aws"
+	}
+	return v
+}
 
 // awsDefaultRegions returns the configured default region list (trimmed, empties
 // dropped). Empty slice when unset — the frontend then starts with no chips.
@@ -1684,10 +1699,33 @@ func handleAwsConfigSet(c *gin.Context) {
 	var body struct {
 		DefaultRegions  *[]string          `json:"default_regions"`
 		RegionPrefixMap *map[string]string `json:"region_prefix_map"`
+		DefaultGroup    *string            `json:"default_group"`
+		DefaultModels   *string            `json:"default_models"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
+	}
+	if body.DefaultGroup != nil {
+		if err := supplierConfigSet(cfgAwsDefaultGroup, strings.TrimSpace(*body.DefaultGroup)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.DefaultModels != nil {
+		// AWS default models reuse the per-type batch-models config (type 33),
+		// so the Settings tab and the batch-create model editor stay in sync.
+		models := strings.TrimSpace(*body.DefaultModels)
+		now := time.Now().Unix()
+		if _, err := db.Exec(
+			`INSERT INTO report_config (key, value, updated_at)
+			 VALUES ($1, $2, $3)
+			 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`,
+			batchModelsConfigKey(33), models, now,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
 	if body.DefaultRegions != nil {
 		seen := map[string]bool{}
@@ -1725,7 +1763,13 @@ func handleAwsConfigSet(c *gin.Context) {
 			return
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "default_regions": awsDefaultRegions(), "region_prefix_map": loadAwsRegionPrefixMap()})
+	c.JSON(http.StatusOK, gin.H{
+		"ok":                true,
+		"default_regions":   awsDefaultRegions(),
+		"region_prefix_map": loadAwsRegionPrefixMap(),
+		"default_group":     awsDefaultGroup(),
+		"default_models":    getBatchCreateModels(33),
+	})
 }
 
 // handleReportSettingsSet lets a super admin set the deployment statistics
@@ -2818,7 +2862,7 @@ func handleBatchCreateChannels(c *gin.Context) {
 		case 24, 41:
 			groupName = "gemini"
 		case 33:
-			groupName = "claude-aws"
+			groupName = awsDefaultGroup()
 		default:
 			groupName = "default"
 		}

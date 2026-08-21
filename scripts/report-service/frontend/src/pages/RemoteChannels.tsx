@@ -635,11 +635,15 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   const [batchAwsRegionInput, setBatchAwsRegionInput] = useState('')
   // Deployment default region list (aws_default_regions), fetched once.
   const [awsDefaultRegions, setAwsDefaultRegions] = useState<string[]>([])
+  const [awsDefaultGroup, setAwsDefaultGroup] = useState('')
+  const [awsDefaultModels, setAwsDefaultModels] = useState('')
   useEffect(() => {
     void (async () => {
       try {
         const cfg = await fetch(withBase('/api/auth/config')).then(r => r.json())
         if (Array.isArray(cfg?.aws_default_regions)) setAwsDefaultRegions(cfg.aws_default_regions)
+        if (typeof cfg?.aws_default_group === 'string') setAwsDefaultGroup(cfg.aws_default_group.trim())
+        if (typeof cfg?.aws_default_models === 'string') setAwsDefaultModels(cfg.aws_default_models.trim())
       } catch { /* leave empty */ }
     })()
   }, [])
@@ -2716,6 +2720,8 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                                 if (p.kind === 'aws') {
                                   setBatchRegion('us-east-1')
                                   setBatchAwsRegions(prev => (prev.length ? prev : awsDefaultRegions))
+                                  if (awsDefaultGroup) setBatchGroup(awsDefaultGroup)
+                                  if (awsDefaultModels) setBatchModels(awsDefaultModels)
                                 } else if (p.kind === 'vertex') {
                                   setBatchRegion('{"default": "global"}')
                                 }

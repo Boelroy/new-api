@@ -222,6 +222,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   // AWS: seed the region selection from the deployment's aws_default_regions
   // config the first time the AWS preset is opened (unless already chosen).
   const [awsDefaultsLoaded, setAwsDefaultsLoaded] = useState(false)
+  const [awsDefaultGroup, setAwsDefaultGroup] = useState('')
   useEffect(() => {
     if (preset.kind !== 'aws' || awsDefaultsLoaded) return
     setAwsDefaultsLoaded(true)
@@ -230,9 +231,15 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
         const cfg = await fetch(withBase('/api/auth/config')).then(r => r.json())
         const def: string[] = Array.isArray(cfg?.aws_default_regions) ? cfg.aws_default_regions : []
         if (def.length) setAwsRegions(prev => (prev.length ? prev : def))
+        const g = typeof cfg?.aws_default_group === 'string' ? cfg.aws_default_group.trim() : ''
+        if (g) {
+          setAwsDefaultGroup(g)
+          // Seed the group field unless the operator already edited it.
+          if (!groupDirty) setGroup(g)
+        }
       } catch { /* leave empty on error */ }
     })()
-  }, [preset.kind, awsDefaultsLoaded])
+  }, [preset.kind, awsDefaultsLoaded, groupDirty])
 
   // Operator: fetch this studio's channel-type limit to filter the dropdown.
   useEffect(() => {
@@ -296,7 +303,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       setModels(modelsCfg && modelsCfg.trim() ? modelsCfg : preset.fallbackModels)
     }
     if (!groupDirty) {
-      setGroup(preset.fallbackGroup)
+      setGroup(preset.id === 'aws' && awsDefaultGroup ? awsDefaultGroup : preset.fallbackGroup)
     }
     if (!regionDirty) {
       setRegion(VERTEX_REGION_DEFAULT)

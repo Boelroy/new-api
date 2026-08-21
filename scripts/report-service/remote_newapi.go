@@ -2931,7 +2931,7 @@ func handleAwsChannelCreate(c *gin.Context) {
 		return
 	}
 	if body.Group == "" {
-		body.Group = "claude-aws"
+		body.Group = awsDefaultGroup()
 	}
 	if len(body.Items) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no items provided"})

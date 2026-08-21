@@ -56,6 +56,8 @@ function AwsSettings() {
   const [regionInput, setRegionInput] = useState('')
   // Prefix map kept as an editable row list so keys can be typed freely.
   const [rows, setRows] = useState<{ region: string; prefix: string }[]>([])
+  const [defaultGroup, setDefaultGroup] = useState('')
+  const [defaultModels, setDefaultModels] = useState('')
   const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
 
@@ -67,6 +69,8 @@ function AwsSettings() {
         const map: Record<string, string> = (cfg?.aws_region_prefix_map && typeof cfg.aws_region_prefix_map === 'object') ? cfg.aws_region_prefix_map : {}
         setRegions(def)
         setRows(Object.entries(map).map(([region, prefix]) => ({ region, prefix: String(prefix) })))
+        setDefaultGroup(typeof cfg?.aws_default_group === 'string' ? cfg.aws_default_group : '')
+        setDefaultModels(typeof cfg?.aws_default_models === 'string' ? cfg.aws_default_models : '')
       } finally {
         setLoaded(true)
       }
@@ -88,7 +92,12 @@ function AwsSettings() {
         const prefix = r.prefix.trim()
         if (region && prefix) region_prefix_map[region] = prefix
       }
-      await api.setAwsConfig({ default_regions: regions.map(r => r.trim()).filter(Boolean), region_prefix_map })
+      await api.setAwsConfig({
+        default_regions: regions.map(r => r.trim()).filter(Boolean),
+        region_prefix_map,
+        default_group: defaultGroup.trim(),
+        default_models: defaultModels.trim(),
+      })
       toast.success('已保存')
     } catch (err) {
       toast.error(err)
@@ -169,6 +178,31 @@ function AwsSettings() {
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
             添加映射
           </button>
+        </Card>
+
+        <Card className="p-5">
+          <MonoLabel>Default Group</MonoLabel>
+          <div className="text-sm font-semibold text-ink mt-1 mb-1">默认分组</div>
+          <p className="text-xs text-secondary mb-3">批量创建 AWS 渠道时写入 channels."group" 的默认分组（本地与远端上 key 都用它作缺省）。缺省 <code className="font-mono">claude-aws</code>。</p>
+          <input
+            value={defaultGroup}
+            onChange={e => setDefaultGroup(e.target.value)}
+            placeholder="claude-aws"
+            className="w-full border border-border rounded-lg px-3 py-2 text-sm font-mono bg-canvas focus:outline-none focus:border-brand"
+          />
+        </Card>
+
+        <Card className="p-5">
+          <MonoLabel>Default Models</MonoLabel>
+          <div className="text-sm font-semibold text-ink mt-1 mb-1">默认模型（逗号分隔）</div>
+          <p className="text-xs text-secondary mb-3">批量创建 AWS 渠道预填的模型列表（与批量创建面板的「AWS 默认模型列表」同一份配置）。</p>
+          <textarea
+            value={defaultModels}
+            onChange={e => setDefaultModels(e.target.value)}
+            rows={4}
+            placeholder="claude-opus-4-6,claude-sonnet-4-6,claude-sonnet-5,..."
+            className="w-full border border-border rounded-lg px-3 py-2 text-[12px] font-mono resize-y bg-canvas focus:outline-none focus:border-brand"
+          />
         </Card>
       </div>
     </>
