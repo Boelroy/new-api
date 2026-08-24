@@ -632,6 +632,8 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   // to one channel per selected region (region→prefix from the admin config).
   const [batchAwsKeyMode, setBatchAwsKeyMode] = useState<'ak_sk' | 'api_key'>('ak_sk')
   const [batchAwsRegions, setBatchAwsRegions] = useState<string[]>([])
+  // Optional outbound proxy for every AWS channel (channel.settings.proxy). Empty → none.
+  const [batchAwsProxy, setBatchAwsProxy] = useState('')
   const [batchAwsRegionInput, setBatchAwsRegionInput] = useState('')
   // Deployment default region list (aws_default_regions), fetched once.
   const [awsDefaultRegions, setAwsDefaultRegions] = useState<string[]>([])
@@ -1323,6 +1325,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setBatchAzureApiVersion(AZURE_DEFAULT_API_VERSION)
     setBatchAwsKeyMode('ak_sk')
     setBatchAwsRegions([])
+    setBatchAwsProxy('')
     setBatchAwsRegionInput('')
     setBatchInputMode('paste')
     setBatchKeyRows([{ key: '', quota: '', note: '' }])
@@ -1489,6 +1492,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           group: batchGroup.trim() || 'claude-aws',
           regions,
           key_type: batchAwsKeyMode,
+          ...(batchAwsProxy.trim() ? { proxy: batchAwsProxy.trim() } : {}),
           items: awsItems,
         })
         // Backend fans out item×region (item outer, region inner), so map each
@@ -2923,6 +2927,16 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                   <p className="text-[10px] text-gray-400 mt-1">
                     {batchAwsKeyMode === 'ak_sk' ? '每行填 ak|sk（Region 自动追加）。' : '每行填 apikey（Region 自动追加）。'}
                   </p>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-gray-500 mb-1">Proxy（可选）</label>
+                  <input
+                    value={batchAwsProxy}
+                    onChange={e => setBatchAwsProxy(e.target.value)}
+                    placeholder="http://user:pass@host:port（留空则不走代理）"
+                    className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
+                  />
+                  <p className="text-[10px] text-gray-400 mt-1">写入 channel.settings.proxy，作用于本批全部渠道；默认为空。</p>
                 </div>
               </div>
             )}

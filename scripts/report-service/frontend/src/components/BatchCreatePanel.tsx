@@ -206,6 +206,9 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   const [awsRegions, setAwsRegions] = useState<string[]>([])
   const [awsRegionInput, setAwsRegionInput] = useState('')
   const [awsKeyMode, setAwsKeyMode] = useState<'ak_sk' | 'api_key'>('ak_sk')
+  // Optional outbound proxy applied to every AWS channel (channel.settings.proxy).
+  // Empty by default → no proxy.
+  const [awsProxy, setAwsProxy] = useState('')
 
   // 可配置的默认 model 列表 —— 按预设分开存（rc.154+）。key 是 preset.id，
   // value 是服务端保存的 models 字符串；'' 或缺失表示尚未保存过（前端会
@@ -422,6 +425,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       regions?: string[]
       key_type?: 'ak_sk' | 'api_key'
       model_prefix?: string
+      proxy?: string
     } = {
       type: preset.type,
       group: group.trim() || preset.fallbackGroup,
@@ -447,6 +451,8 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       if (regions.length === 0) return setResult('AWS 需要至少选择一个 Region (例: us-east-1)')
       baseDefaults.regions = regions
       baseDefaults.key_type = awsKeyMode
+      const proxy = awsProxy.trim()
+      if (proxy) baseDefaults.proxy = proxy
     }
 
     // Vertex takes JSON files or plain API keys + a shared region, so it
@@ -988,6 +994,16 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
                 <p className="text-[10px] text-gray-400 mt-1">
                   {awsKeyMode === 'ak_sk' ? '每行填 ak|sk 额度（Region 自动追加）。' : '每行填 apikey 额度（Region 自动追加）。'}
                 </p>
+              </div>
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">Proxy（可选）</label>
+                <input
+                  value={awsProxy}
+                  onChange={e => setAwsProxy(e.target.value)}
+                  placeholder="http://user:pass@host:port（留空则不走代理）"
+                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
+                />
+                <p className="text-[10px] text-gray-400 mt-1">写入 channel.settings.proxy，作用于本批全部渠道；默认为空。</p>
               </div>
             </div>
           )}

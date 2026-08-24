@@ -830,6 +830,8 @@ export const api = {
       regions?: string[]
       key_type?: 'ak_sk' | 'api_key'
       model_prefix?: string
+      // AWS Bedrock: optional outbound proxy URL → channel.settings.proxy.
+      proxy?: string
     },
   ) =>
     request<{ created: { id: number; name: string }[]; count: number }>('/api/channels/batch-create', {
@@ -1264,6 +1266,9 @@ export const api = {
     region?: string
     regions?: string[]
     key_type?: 'ak_sk' | 'api_key'
+    // Optional outbound proxy URL stamped into channel.settings.proxy on every
+    // created channel. Omit / empty → no proxy.
+    proxy?: string
     items: { key: string; quota_usd?: number; note?: string }[]
   }) =>
     request<{

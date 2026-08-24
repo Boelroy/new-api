@@ -2880,7 +2880,11 @@ func handleAwsChannelCreate(c *gin.Context) {
 		Regions []string `json:"regions"`
 		// KeyType selects AWS auth mode: "ak_sk" (default) or "api_key".
 		KeyType string `json:"key_type"`
-		Items   []struct {
+		// Proxy is an optional outbound proxy URL for every created channel
+		// (persisted into channel.settings.proxy; new-api's AWS adaptor routes
+		// SigV4 requests through it). Empty → no proxy key written.
+		Proxy string `json:"proxy"`
+		Items []struct {
 			Key      string   `json:"key"`
 			QuotaUSD *float64 `json:"quota_usd,omitempty"`
 			Note     string   `json:"note,omitempty"`
@@ -2895,6 +2899,7 @@ func handleAwsChannelCreate(c *gin.Context) {
 	body.Group = strings.TrimSpace(body.Group)
 	body.Region = strings.TrimSpace(body.Region)
 	body.KeyType = strings.TrimSpace(body.KeyType)
+	body.Proxy = strings.TrimSpace(body.Proxy)
 	if body.KeyType == "" {
 		body.KeyType = "ak_sk"
 	}
@@ -2972,12 +2977,18 @@ func handleAwsChannelCreate(c *gin.Context) {
 	}
 
 	// settings.aws_key_type drives new-api's AWS adaptor client selection.
-	var settingsJSON string
-	if body.KeyType == "api_key" {
-		settingsJSON = `{"aws_key_type":"api_key"}`
-	} else {
-		settingsJSON = `{"aws_key_type":"ak_sk"}`
+	// An optional proxy is folded into the same settings object so every
+	// created channel routes its upstream SigV4 calls through it.
+	awsSettings := map[string]string{"aws_key_type": body.KeyType}
+	if body.Proxy != "" {
+		awsSettings["proxy"] = body.Proxy
 	}
+	settingsBytes, err := json.Marshal(awsSettings)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "marshal settings: " + err.Error()})
+		return
+	}
+	settingsJSON := string(settingsBytes)
 
 	// model_mapping is built per region inside the loop below: friendly Claude
 	// names → region-prefixed Bedrock model ids, prefix from awsRegionModelPrefix

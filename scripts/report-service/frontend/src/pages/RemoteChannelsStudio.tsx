@@ -447,11 +447,15 @@ function AwsInputSection({
   onRegionChange,
   keyMode,
   onKeyModeChange,
+  proxy,
+  onProxyChange,
 }: {
   region: string
   onRegionChange: (v: string) => void
   keyMode: AwsKeyMode
   onKeyModeChange: (v: AwsKeyMode) => void
+  proxy: string
+  onProxyChange: (v: string) => void
 }) {
   return (
     <div className="space-y-2 border border-dashed border-gray-300 rounded-md p-3 bg-gray-50/50">
@@ -497,6 +501,16 @@ function AwsInputSection({
             {keyMode === 'ak_sk' ? '每行填 ak|sk（Region 自动追加）。' : '每行填 apikey（Region 自动追加）。'}
           </p>
         </div>
+      </div>
+      <div>
+        <label className="block text-[11px] text-gray-500 mb-1">Proxy（可选）</label>
+        <input
+          value={proxy}
+          onChange={e => onProxyChange(e.target.value)}
+          placeholder="http://user:pass@host:port（留空则不走代理）"
+          className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-gray-900"
+        />
+        <p className="text-[10px] text-gray-400 mt-1">写入 channel.settings.proxy，作用于本批全部渠道；默认为空。</p>
       </div>
     </div>
   )
@@ -579,6 +593,9 @@ export default function RemoteChannelsStudio() {
   // auth flavour (ak_sk default / api_key) posted to remoteAwsCreate.
   const [batchAwsKeyMode, setBatchAwsKeyMode] = useState<AwsKeyMode>('ak_sk')
   const [immAwsKeyMode, setImmAwsKeyMode] = useState<AwsKeyMode>('ak_sk')
+  // Optional outbound proxy for AWS channels (channel.settings.proxy). Empty → none.
+  const [batchAwsProxy, setBatchAwsProxy] = useState('')
+  const [immAwsProxy, setImmAwsProxy] = useState('')
 
   // Key usage list. Two YYYY-MM-DD date inputs (interpreted in local
   // time, so "2026-07-23" = local 00:00 that day). Default range = today
@@ -789,6 +806,7 @@ export default function RemoteChannelsStudio() {
     setBatchAzureBaseUrl('')
     setBatchAzureApiVersion(AZURE_DEFAULT_API_VERSION)
     setBatchAwsKeyMode('ak_sk')
+    setBatchAwsProxy('')
     setBatchErr(null)
     setBatchOpen(true)
   }
@@ -932,6 +950,7 @@ export default function RemoteChannelsStudio() {
           group: batchGroup.trim() || 'claude-aws',
           region: batchRegion.trim(),
           key_type: batchAwsKeyMode,
+          ...(batchAwsProxy.trim() ? { proxy: batchAwsProxy.trim() } : {}),
           items: awsItems,
         })
         const failed = res.results.filter(r => !r.ok)
@@ -1010,6 +1029,7 @@ export default function RemoteChannelsStudio() {
     setImmAzureBaseUrl('')
     setImmAzureApiVersion(AZURE_DEFAULT_API_VERSION)
     setImmAwsKeyMode('ak_sk')
+    setImmAwsProxy('')
     setImmErr(null)
     setImmOpen(true)
   }
@@ -1149,6 +1169,7 @@ export default function RemoteChannelsStudio() {
           group: immGroup.trim() || 'claude-aws',
           region: immRegion.trim(),
           key_type: immAwsKeyMode,
+          ...(immAwsProxy.trim() ? { proxy: immAwsProxy.trim() } : {}),
           items: awsItems,
         })
         const failed = res.results.filter(r => !r.ok)
@@ -1673,6 +1694,8 @@ export default function RemoteChannelsStudio() {
                   onRegionChange={setBatchRegion}
                   keyMode={batchAwsKeyMode}
                   onKeyModeChange={setBatchAwsKeyMode}
+                  proxy={batchAwsProxy}
+                  onProxyChange={setBatchAwsProxy}
                 />
               )}
               <p className="text-[11px] text-gray-400">
@@ -1816,6 +1839,8 @@ export default function RemoteChannelsStudio() {
                   onRegionChange={setImmRegion}
                   keyMode={immAwsKeyMode}
                   onKeyModeChange={setImmAwsKeyMode}
+                  proxy={immAwsProxy}
+                  onProxyChange={setImmAwsProxy}
                 />
               )}
               {immErr && <p className="text-xs text-rose-600">{immErr}</p>}

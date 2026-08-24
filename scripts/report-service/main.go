@@ -2761,6 +2761,10 @@ func handleBatchCreateChannels(c *gin.Context) {
 		// leave these empty.
 		Region  string `json:"region"`
 		KeyType string `json:"key_type"`
+		// AWS Bedrock: optional outbound proxy URL folded into
+		// channel.settings.proxy so new-api routes the channel's SigV4 calls
+		// through it. Empty → no proxy key written.
+		Proxy string `json:"proxy"`
 		// AWS Bedrock: one key can be deployed to several regions at once. Each
 		// (key, region) pair becomes its own channel. `Regions` is the new
 		// multi-region field; `Region` stays for backward compat (single).
@@ -2942,7 +2946,16 @@ func handleBatchCreateChannels(c *gin.Context) {
 			return
 		}
 		if settings == "" {
-			settings = fmt.Sprintf(`{"aws_key_type":"%s"}`, awsKeyType)
+			awsSettings := map[string]string{"aws_key_type": awsKeyType}
+			if proxy := strings.TrimSpace(payload.Proxy); proxy != "" {
+				awsSettings["proxy"] = proxy
+			}
+			b, err := json.Marshal(awsSettings)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "marshal settings: " + err.Error()})
+				return
+			}
+			settings = string(b)
 		}
 		// model_mapping is per-region (built in the expansion below), so nothing
 		// is precomputed here.
