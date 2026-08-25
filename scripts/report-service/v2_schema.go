@@ -99,6 +99,29 @@ var v2SchemaStatements = []string{
 	// idempotent ALTER so existing deployments migrate on startup.
 	`ALTER TABLE rs_supplier_account ADD COLUMN IF NOT EXISTS quota_usd DOUBLE PRECISION NOT NULL DEFAULT 0`,
 	`ALTER TABLE rs_supplier_account ADD COLUMN IF NOT EXISTS quota_alerted_at BIGINT NOT NULL DEFAULT 0`,
+
+	// -- Model auto-cleanup ------------------------------------------------
+	// Append-only audit of the log-driven model auto-cleanup loop
+	// (model_cleanup.go): one row every time it strips a model from a
+	// channel (or would have, in dry-run). This is the record that survives
+	// log rotation when the loop removes a model from a production channel.
+	`CREATE TABLE IF NOT EXISTS rs_model_cleanup_event (
+		id           BIGSERIAL PRIMARY KEY,
+		channel_id   BIGINT NOT NULL DEFAULT 0,
+		channel_name TEXT   NOT NULL DEFAULT '',
+		model        TEXT   NOT NULL DEFAULT '',
+		grp          TEXT   NOT NULL DEFAULT '',
+		err_count    INT    NOT NULL DEFAULT 0,
+		window_sec   INT    NOT NULL DEFAULT 0,
+		kind         TEXT   NOT NULL,
+		detail       TEXT   NOT NULL DEFAULT '',
+		dry_run      BOOLEAN NOT NULL DEFAULT FALSE,
+		created_at   BIGINT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_model_cleanup_event_time
+	   ON rs_model_cleanup_event(created_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_model_cleanup_event_channel
+	   ON rs_model_cleanup_event(channel_id, id DESC)`,
 }
 
 // initV2Schema applies all V2 DDLs. Panics on failure — startup should not

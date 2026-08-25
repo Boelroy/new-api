@@ -4666,6 +4666,7 @@ func main() {
 	startRemotePendingScheduler()
 	startLocalPendingScheduler()
 	startLocalHealthLoop()
+	startModelCleanupLoop()
 	startRemoteErrorLogSync()
 	startRemoteAutoDisableLoop()
 	startSupplierQuotaAlertLoop()
@@ -4820,6 +4821,13 @@ func main() {
 	adminAPI.GET("/local-health/status", handleLocalHealthStatus)
 	adminAPI.GET("/local-health/events", handleLocalHealthEvents)
 	adminAPI.POST("/local-health/probe", handleLocalHealthProbeNow)
+	// Log-driven model auto-cleanup (model_cleanup.go). Admin-only for the
+	// same reason as local-health: it edits channels' models lists. Ships
+	// disabled; the run-now endpoint executes one pass on demand.
+	adminAPI.GET("/model-cleanup/config", handleModelCleanupConfigGet)
+	adminAPI.POST("/model-cleanup/config", handleModelCleanupConfigSet)
+	adminAPI.GET("/model-cleanup/events", handleModelCleanupEvents)
+	adminAPI.POST("/model-cleanup/run", handleModelCleanupRunNow)
 	// Key Tester: admin+, tester (role=5), studio_operator (role=2),
 	// remote_studio_operator (role=3), and project_admin (role=7). Tester
 	// is scoped to Key Tester + Provider Testing (see the testingAPI group

@@ -442,6 +442,41 @@ export type CacheStatsResponse = {
   }
 }
 
+// ---- Model auto-cleanup types ----
+export type ModelCleanupConfig = {
+  enabled: boolean
+  models: string[]
+  groups: string[]
+  window_sec: number
+  tick_sec: number
+  max_actions: number
+  dry_run: boolean
+  error_substr: string
+  token_configured: boolean
+}
+
+export type ModelCleanupEvent = {
+  id: number
+  channel_id: number
+  channel_name: string
+  model: string
+  group: string
+  err_count: number
+  window_sec: number
+  kind: string
+  detail: string
+  dry_run: boolean
+  created_at: number
+}
+
+export type ModelCleanupSummary = {
+  scanned: number
+  removed: number
+  would_remove: number
+  skipped: number
+  errors: number
+}
+
 // Mirrors the role tiers enforced on the backend. ROLE_TESTER,
 // ROLE_STUDIO_OPERATOR and ROLE_PROJECT_ADMIN are horizontal
 // specializations (Key Tester + Provider Testing / batch-create scoped to
@@ -1665,6 +1700,31 @@ export const api = {
         body: JSON.stringify(payload),
       },
     ),
+
+  // ---- Model auto-cleanup (Model Cleanup page) ----
+  // Log-driven: strips a model from channels that fail it outright (0 success +
+  // "Operation not allowed" errors) within a window. No billed probes.
+
+  modelCleanupGetConfig: () => request<ModelCleanupConfig>('/api/model-cleanup/config'),
+
+  modelCleanupSetConfig: (payload: Partial<ModelCleanupConfig>) =>
+    request<ModelCleanupConfig>('/api/model-cleanup/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  modelCleanupEvents: (params?: { channel_id?: number; kind?: string; limit?: number }) => {
+    const qs = new URLSearchParams()
+    if (params?.channel_id != null) qs.set('channel_id', String(params.channel_id))
+    if (params?.kind) qs.set('kind', params.kind)
+    if (params?.limit != null) qs.set('limit', String(params.limit))
+    const suffix = qs.toString()
+    return request<{ events: ModelCleanupEvent[] }>(`/api/model-cleanup/events${suffix ? '?' + suffix : ''}`)
+  },
+
+  modelCleanupRunNow: () =>
+    request<{ summary: ModelCleanupSummary; dry_run: boolean }>('/api/model-cleanup/run', { method: 'POST' }),
 
   // Local Channel Sync: list stored credentials that can be stood up as
   // local channels, and sync a batch of them. Admin+ only (server gate).

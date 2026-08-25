@@ -13,6 +13,7 @@ import Users from './pages/Users'
 import CacheReport from './pages/CacheReport'
 import ErrorCenter from './pages/ErrorCenter'
 import ModelHealth from './pages/ModelHealth'
+import ModelCleanup from './pages/ModelCleanup'
 import RemoteChannels from './pages/RemoteChannels'
 import LocalChannelSync from './pages/LocalChannelSync'
 import PoolUploadStudio from './pages/PoolUploadStudio'
@@ -101,6 +102,7 @@ export default function App() {
         <Route path="/cache" element={<RoleGate min={ROLE_ADMIN}><CacheReport /></RoleGate>} />
         <Route path="/errors" element={<RoleGate min={ROLE_ADMIN}><ErrorCenter /></RoleGate>} />
         <Route path="/model-health" element={<RoleGate min={ROLE_ADMIN}><ModelHealth /></RoleGate>} />
+        <Route path="/model-cleanup" element={<RoleGate min={ROLE_ADMIN}><ModelCleanup /></RoleGate>} />
         <Route path="/testing" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
         <Route path="/testing/:projectId" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
         <Route path="/users" element={<RoleGate min={ROLE_ADMIN}><Users /></RoleGate>} />
