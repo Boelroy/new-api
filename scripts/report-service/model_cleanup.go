@@ -84,6 +84,7 @@ func nudgeModelCleanup() {
 func loadModelCleanupConfig() modelCleanupConfig {
 	out := modelCleanupConfig{
 		Models:          append([]string(nil), modelCleanupDefaultModels...),
+		Groups:          []string{},
 		WindowSec:       modelCleanupWindowDef,
 		TickSec:         modelCleanupTickDef,
 		MaxActions:      modelCleanupActionsDef,
@@ -497,6 +498,37 @@ func handleModelCleanupEvents(c *gin.Context) {
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"events": items})
+}
+
+// handleModelCleanupStats reports, for every model currently listed on an
+// enabled channel, how many enabled channels carry it. A channel listing N
+// models contributes to N counts — this is the per-model live channel fan-out,
+// which is what an operator wants to see before/after a cleanup pass.
+func handleModelCleanupStats(c *gin.Context) {
+	rows, err := db.Query(`
+		SELECT m, count(*) AS n FROM (
+			SELECT unnest(string_to_array(models, ',')) AS m
+			  FROM channels WHERE status=1
+		) t
+		WHERE trim(m) <> ''
+		GROUP BY m
+		ORDER BY n DESC, m ASC`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	items := make([]gin.H, 0, 64)
+	for rows.Next() {
+		var model string
+		var n int
+		if err := rows.Scan(&model, &n); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		items = append(items, gin.H{"model": strings.TrimSpace(model), "enabled_channels": n})
+	}
+	c.JSON(http.StatusOK, gin.H{"stats": items})
 }
 
 // handleModelCleanupRunNow runs one tick synchronously against the current

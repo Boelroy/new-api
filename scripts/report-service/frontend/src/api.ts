@@ -477,6 +477,11 @@ export type ModelCleanupSummary = {
   errors: number
 }
 
+export type ModelCleanupStat = {
+  model: string
+  enabled_channels: number
+}
+
 // Mirrors the role tiers enforced on the backend. ROLE_TESTER,
 // ROLE_STUDIO_OPERATOR and ROLE_PROJECT_ADMIN are horizontal
 // specializations (Key Tester + Provider Testing / batch-create scoped to
@@ -1722,6 +1727,9 @@ export const api = {
     const suffix = qs.toString()
     return request<{ events: ModelCleanupEvent[] }>(`/api/model-cleanup/events${suffix ? '?' + suffix : ''}`)
   },
+
+  modelCleanupStats: () =>
+    request<{ stats: ModelCleanupStat[] }>('/api/model-cleanup/stats'),
 
   modelCleanupRunNow: () =>
     request<{ summary: ModelCleanupSummary; dry_run: boolean }>('/api/model-cleanup/run', { method: 'POST' }),

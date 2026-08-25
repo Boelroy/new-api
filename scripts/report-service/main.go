@@ -4827,6 +4827,7 @@ func main() {
 	adminAPI.GET("/model-cleanup/config", handleModelCleanupConfigGet)
 	adminAPI.POST("/model-cleanup/config", handleModelCleanupConfigSet)
 	adminAPI.GET("/model-cleanup/events", handleModelCleanupEvents)
+	adminAPI.GET("/model-cleanup/stats", handleModelCleanupStats)
 	adminAPI.POST("/model-cleanup/run", handleModelCleanupRunNow)
 	// Key Tester: admin+, tester (role=5), studio_operator (role=2),
 	// remote_studio_operator (role=3), and project_admin (role=7). Tester

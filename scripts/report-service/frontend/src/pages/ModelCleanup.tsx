@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import Layout from '../components/Layout'
 import { Button, Card } from '../components/ui'
 import { toast } from '../components/feedback'
-import { api, type ModelCleanupConfig, type ModelCleanupEvent, type ModelCleanupSummary } from '../api'
+import { api, type ModelCleanupConfig, type ModelCleanupEvent, type ModelCleanupStat, type ModelCleanupSummary } from '../api'
 
 // Model Cleanup: configure the log-driven auto-removal of dead models from
 // channels. A model is stripped from a channel when, in the last window, that
@@ -11,6 +11,12 @@ import { api, type ModelCleanupConfig, type ModelCleanupEvent, type ModelCleanup
 // enabled; only the dead model is removed.
 
 const inputCls = 'border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900'
+
+// The backend may serialize an unset list as JSON null; coerce so the UI never
+// calls .length/.includes/.filter on null.
+function normalizeCfg(c: ModelCleanupConfig): ModelCleanupConfig {
+  return { ...c, models: c.models ?? [], groups: c.groups ?? [] }
+}
 
 function fmtTime(unix: number): string {
   if (!unix) return '—'
@@ -48,6 +54,7 @@ export default function ModelCleanup() {
   const [saving, setSaving] = useState(false)
   const [running, setRunning] = useState(false)
   const [events, setEvents] = useState<ModelCleanupEvent[]>([])
+  const [stats, setStats] = useState<ModelCleanupStat[]>([])
   const [modelInput, setModelInput] = useState('')
   const [groupInput, setGroupInput] = useState('')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -61,16 +68,27 @@ export default function ModelCleanup() {
     }
   }
 
+  const loadStats = async () => {
+    try {
+      const res = await api.modelCleanupStats()
+      setStats(res.stats ?? [])
+    } catch (e) {
+      // silent
+    }
+  }
+
+  const refresh = () => { void loadEvents(); void loadStats() }
+
   useEffect(() => {
     void (async () => {
       try {
-        setCfg(await api.modelCleanupGetConfig())
+        setCfg(normalizeCfg(await api.modelCleanupGetConfig()))
       } catch (e) {
         toast.error(e instanceof Error ? e.message : String(e))
       }
     })()
-    void loadEvents()
-    pollRef.current = setInterval(loadEvents, 15000)
+    refresh()
+    pollRef.current = setInterval(refresh, 15000)
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [])
 
@@ -78,13 +96,13 @@ export default function ModelCleanup() {
   const save = async (patch: Partial<ModelCleanupConfig>) => {
     setSaving(true)
     try {
-      const next = await api.modelCleanupSetConfig(patch)
+      const next = normalizeCfg(await api.modelCleanupSetConfig(patch))
       setCfg(next)
       return next
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e))
       // Re-pull to discard the optimistic edit.
-      try { setCfg(await api.modelCleanupGetConfig()) } catch { /* ignore */ }
+      try { setCfg(normalizeCfg(await api.modelCleanupGetConfig())) } catch { /* ignore */ }
       return null
     } finally {
       setSaving(false)
@@ -99,13 +117,16 @@ export default function ModelCleanup() {
       toast.success(
         `${res.dry_run ? '演练' : '执行'}完成：命中 ${s.scanned}，${res.dry_run ? `将下线 ${s.would_remove}` : `已下线 ${s.removed}`}，跳过 ${s.skipped}，失败 ${s.errors}`,
       )
-      void loadEvents()
+      refresh()
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e))
     } finally {
       setRunning(false)
     }
   }
+
+  // Highlight the models the loop is configured to police.
+  const watched = new Set(cfg?.models ?? [])
 
   const addModel = () => {
     const v = modelInput.trim()
@@ -145,7 +166,7 @@ export default function ModelCleanup() {
           </div>
         )}
 
-        <Card>
+        <Card className="p-5">
           <div className="flex items-center justify-between mb-3">
             <div className="text-sm font-semibold">调度</div>
             <label className="flex items-center gap-2 text-xs">
@@ -205,7 +226,7 @@ export default function ModelCleanup() {
         </Card>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <Card>
+          <Card className="p-5">
             <div className="text-sm font-semibold mb-2">检查的模型</div>
             <ChipList items={cfg.models} tone="brand" onRemove={v => void save({ models: cfg.models.filter(x => x !== v) })} />
             <div className="flex gap-1">
@@ -219,7 +240,7 @@ export default function ModelCleanup() {
             </div>
           </Card>
 
-          <Card>
+          <Card className="p-5">
             <div className="text-sm font-semibold mb-2">检查的分组</div>
             <ChipList items={cfg.groups} tone="slate" onRemove={v => void save({ groups: cfg.groups.filter(x => x !== v) })} />
             <div className="flex gap-1">
@@ -233,6 +254,33 @@ export default function ModelCleanup() {
             </div>
             <span className="text-[10px] text-gray-400 mt-1 block">空 = 不限分组,检查所有渠道</span>
           </Card>
+        </div>
+
+        <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+          <div className="px-4 py-2 border-b border-gray-100 text-[11px] font-medium text-gray-700 flex items-center justify-between">
+            <span>各模型当前活跃(启用)渠道数</span>
+            <button className="text-[11px] text-gray-400 hover:text-gray-700" onClick={() => void loadStats()}>刷新</button>
+          </div>
+          <div className="p-3">
+            {stats.length === 0
+              ? <div className="text-xs text-gray-400 px-1 py-2">暂无数据</div>
+              : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                  {stats.map(s => (
+                    <div
+                      key={s.model}
+                      className={`flex items-center justify-between rounded-lg border px-3 py-2 ${
+                        watched.has(s.model) ? 'border-brand-200 bg-brand-50' : 'border-gray-200 bg-gray-50'
+                      }`}
+                      title={watched.has(s.model) ? '已纳入自动清理' : ''}
+                    >
+                      <span className="font-mono text-[11px] text-gray-700 truncate mr-2">{s.model}</span>
+                      <span className="tabular-nums text-sm font-semibold text-ink">{s.enabled_channels}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+          </div>
         </div>
 
         <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
