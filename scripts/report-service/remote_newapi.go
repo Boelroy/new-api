@@ -97,7 +97,8 @@ type remoteProfile struct {
 	Name                string `json:"name"`
 	Host                string `json:"host"`
 	UserID              int64  `json:"user_id"`
-	HasToken            bool   `json:"has_token"` // token never returned; UI shows only whether set
+	HasToken            bool   `json:"has_token"`       // token never returned; UI shows only whether set
+	Proxy               string `json:"proxy,omitempty"` // outbound proxy for reaching this remote; super-admin only
 	DefaultModels       string `json:"default_models"`
 	DefaultGroup        string `json:"default_group"`
 	DefaultGeminiGroup  string `json:"default_gemini_group"`
@@ -403,7 +404,7 @@ func handleRemoteProfileList(c *gin.Context) {
 		        default_models, default_group, default_gemini_group, default_gemini_models, default_vertex_models,
 		        default_openai_group, default_openai_models,
 		        pool_interval_sec, pool_batch_size,
-		        auto_mode, rpm_base, rpm_min,
+		        auto_mode, rpm_base, rpm_min, proxy,
 		        created_at, updated_at
 		 FROM remote_newapi_profile ORDER BY name ASC`,
 	)
@@ -440,7 +441,7 @@ func handleRemoteProfileList(c *gin.Context) {
 			&p.DefaultModels, &p.DefaultGroup, &p.DefaultGeminiGroup, &p.DefaultGeminiModels, &p.DefaultVertexModels,
 			&p.DefaultOpenAIGroup, &p.DefaultOpenAIModels,
 			&p.PoolIntervalSec, &p.PoolBatchSize,
-			&p.AutoMode, &p.RPMBase, &p.RPMMin,
+			&p.AutoMode, &p.RPMBase, &p.RPMMin, &p.Proxy,
 			&p.CreatedAt, &p.UpdatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -491,6 +492,7 @@ func handleRemoteProfileCreate(c *gin.Context) {
 		Host                string `json:"host"`
 		UserID              int64  `json:"user_id"`
 		AccessToken         string `json:"access_token"`
+		Proxy               string `json:"proxy"`
 		DefaultModels       string `json:"default_models"`
 		DefaultGroup        string `json:"default_group"`
 		DefaultGeminiGroup  string `json:"default_gemini_group"`
@@ -534,6 +536,11 @@ func handleRemoteProfileCreate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	proxy, err := normalizeProxy(body.Proxy)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	// Missing pool tuning values fall back to the schema default via the
 	// same clamp — keeps create + update paths converging on the same
 	// safety bounds without duplicating the constants.
@@ -557,13 +564,13 @@ func handleRemoteProfileCreate(c *gin.Context) {
 		 (name, host, user_id, access_token_enc, default_models, default_group, default_gemini_group, default_gemini_models, default_vertex_models,
 		  default_openai_group, default_openai_models,
 		  pool_interval_sec, pool_batch_size,
-		  auto_mode, rpm_base, rpm_min,
+		  auto_mode, rpm_base, rpm_min, proxy,
 		  created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $17) RETURNING id`,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18) RETURNING id`,
 		body.Name, host, body.UserID, enc, body.DefaultModels, body.DefaultGroup, body.DefaultGeminiGroup, body.DefaultGeminiModels, body.DefaultVertexModels,
 		body.DefaultOpenAIGroup, body.DefaultOpenAIModels,
 		poolInterval, poolBatch,
-		autoMode, rpmBase, rpmMin, now,
+		autoMode, rpmBase, rpmMin, proxy, now,
 	).Scan(&id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -571,7 +578,7 @@ func handleRemoteProfileCreate(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, remoteProfile{
 		ID: id, Name: body.Name, Host: host, UserID: body.UserID,
-		HasToken: true, DefaultModels: body.DefaultModels, DefaultGroup: body.DefaultGroup,
+		HasToken: true, Proxy: proxy, DefaultModels: body.DefaultModels, DefaultGroup: body.DefaultGroup,
 		DefaultGeminiGroup:  body.DefaultGeminiGroup,
 		DefaultGeminiModels: body.DefaultGeminiModels,
 		DefaultVertexModels: body.DefaultVertexModels,
@@ -595,6 +602,7 @@ func handleRemoteProfileUpdate(c *gin.Context) {
 		Host                *string `json:"host,omitempty"`
 		UserID              *int64  `json:"user_id,omitempty"`
 		AccessToken         *string `json:"access_token,omitempty"` // empty string = leave unchanged
+		Proxy               *string `json:"proxy,omitempty"`        // empty string = clear proxy (direct)
 		DefaultModels       *string `json:"default_models,omitempty"`
 		DefaultGroup        *string `json:"default_group,omitempty"`
 		DefaultGeminiGroup  *string `json:"default_gemini_group,omitempty"`
@@ -720,6 +728,19 @@ func handleRemoteProfileUpdate(c *gin.Context) {
 			return
 		}
 		if _, err := db.Exec(`UPDATE remote_newapi_profile SET access_token_enc=$1, updated_at=$2 WHERE id=$3`, enc, now, id); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.Proxy != nil {
+		// Unlike host/token, an empty proxy is meaningful: it clears any
+		// configured proxy so the remote is reached directly.
+		p, err := normalizeProxy(*body.Proxy)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if _, err := db.Exec(`UPDATE remote_newapi_profile SET proxy=$1, updated_at=$2 WHERE id=$3`, p, now, id); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -1042,6 +1063,78 @@ type remoteEnvelope struct {
 	Data    json.RawMessage `json:"data"`
 }
 
+// normalizeProxy validates an outbound proxy URL for a remote profile.
+// Empty is valid and means "connect directly" (clears any prior proxy).
+// Otherwise the URL must parse and use a scheme we can actually route
+// through: http/https (http.Transport native) or socks5/socks5h.
+func normalizeProxy(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", nil
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return "", fmt.Errorf("invalid proxy: %v", err)
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return "", errors.New("proxy must start with http://, https://, socks5:// or socks5h://")
+	}
+	if u.Host == "" {
+		return "", errors.New("proxy is missing host:port")
+	}
+	return s, nil
+}
+
+// remoteProxyForHost resolves the outbound proxy configured for the remote
+// deployment at `host`, or "" to connect directly. Read fresh from the DB
+// on every call: report-service runs multi-node, so an in-memory cache would
+// go stale on the other node after a proxy edit; the extra indexed SELECT is
+// negligible against the 20–90s network calls it fronts. host isn't UNIQUE
+// in the schema (name is), but one host == one remote deployment in practice,
+// so any matching row's proxy is the right one for reaching that host.
+func remoteProxyForHost(host string) string {
+	var proxy string
+	if err := db.QueryRow(
+		`SELECT proxy FROM remote_newapi_profile WHERE host=$1 LIMIT 1`,
+		host,
+	).Scan(&proxy); err != nil {
+		// No row (ad-hoc host typed in place) or read error ⇒ direct.
+		return ""
+	}
+	return strings.TrimSpace(proxy)
+}
+
+// remoteHTTPClients caches one *http.Client per proxy URL ("" = direct) so
+// keep-alive connection pools survive across calls and we don't rebuild a
+// Transport per request.
+var (
+	remoteHTTPClientsMu sync.Mutex
+	remoteHTTPClients   = map[string]*http.Client{}
+)
+
+// remoteHTTPClient returns the client that routes through proxyURL, building
+// and caching it on first use. Empty proxyURL (or an unparseable one) yields
+// a plain direct client with the standard 20s timeout.
+func remoteHTTPClient(proxyURL string) *http.Client {
+	remoteHTTPClientsMu.Lock()
+	defer remoteHTTPClientsMu.Unlock()
+	if cl, ok := remoteHTTPClients[proxyURL]; ok {
+		return cl
+	}
+	cl := &http.Client{Timeout: 20 * time.Second}
+	if proxyURL != "" {
+		if u, err := url.Parse(proxyURL); err == nil {
+			cl.Transport = &http.Transport{Proxy: http.ProxyURL(u)}
+		} else {
+			log.Printf("[remote-proxy] invalid proxy %q, using direct: %v", proxyURL, err)
+		}
+	}
+	remoteHTTPClients[proxyURL] = cl
+	return cl
+}
+
 // remoteDoJSON performs an authenticated HTTP call against a remote new-api.
 // On 2xx + success=true it returns the raw `data` payload. On any other
 // outcome it returns a wrapped error including a snippet of the body.
@@ -1072,7 +1165,7 @@ func remoteDoJSON(ctx context.Context, method, host, path, token string, userID 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := remoteHTTPClient(remoteProxyForHost(host))
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http: %v", err)
@@ -1692,12 +1785,12 @@ func handlePendingKeyEnqueue(c *gin.Context) {
 		NamePrefix string `json:"name_prefix"`
 		// Channel type integer (newapi constant/channel.go); default
 		// 14 = Anthropic. 24 = Gemini is the other one Argus supports.
-		Type       int    `json:"type"`
-		Group      string `json:"group"`
-		Tag        string `json:"tag"`
-		Models     string `json:"models"`
-		Priority   int64  `json:"priority"`
-		PoolSize   int    `json:"pool_size"`
+		Type     int    `json:"type"`
+		Group    string `json:"group"`
+		Tag      string `json:"tag"`
+		Models   string `json:"models"`
+		Priority int64  `json:"priority"`
+		PoolSize int    `json:"pool_size"`
 		// Studio operator switch: when true the row goes into the
 		// pool_size=0 "immediate" lane instead of the FIFO pool. Only
 		// meaningful for studio operator callers — super admin picks
@@ -3151,14 +3244,14 @@ func poolTickMark(profileID int64, next time.Time) {
 
 // startRemotePendingScheduler runs the drip logic. Every 20s (or on
 // nudge) it, for each profile with any pending/active row:
-//   • Marks active keys as `used` when their remote channel is disabled
+//   - Marks active keys as `used` when their remote channel is disabled
 //     (status ≠ 1) or missing from the local mirror.
-//   • Uploads all pool_size=0 pending items (immediate lane, unchanged).
-//   • Runs the pool refill (pool_size > 0) at most once per profile
+//   - Uploads all pool_size=0 pending items (immediate lane, unchanged).
+//   - Runs the pool refill (pool_size > 0) at most once per profile
 //     pool_interval_sec, and only when zero active pool rows remain —
 //     the "batch drip" invariant: no new keys go up until the last
 //     batch has fully died on the remote.
-//   • On upload failure attempts++; ≥ 3 → status='failed' (treated as
+//   - On upload failure attempts++; ≥ 3 → status='failed' (treated as
 //     "done" for pool-refill purposes so a poisoned key can't lock the
 //     queue forever).
 func startRemotePendingScheduler() {
@@ -3321,8 +3414,9 @@ func runPendingTickForProfile(profileID int64) {
 }
 
 // autoBatchSize maps live RPM to a tick batch. Rules:
-//   • rpm < rpm_min → 0 (queue idles until traffic returns)
-//   • else n = ceil(rpm / rpm_base), capped at cap (= pool_batch_size)
+//   - rpm < rpm_min → 0 (queue idles until traffic returns)
+//   - else n = ceil(rpm / rpm_base), capped at cap (= pool_batch_size)
+//
 // Ceiling matches the operator model ("one key handles rpm_base RPM, so
 // once we're past that base we already need a second key online"). cap
 // is the admin's hard ceiling for how many keys they're willing to burn
@@ -3719,10 +3813,10 @@ func handleRemoteChannelsRefresh(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"ok":         true,
-		"fetched":    len(channels),
-		"total":      total,
-		"refreshed":  time.Now().Unix(),
+		"ok":        true,
+		"fetched":   len(channels),
+		"total":     total,
+		"refreshed": time.Now().Unix(),
 	})
 }
 
@@ -3870,7 +3964,7 @@ type remoteChannelCreateItem struct {
 
 // batchCreateResult mirrors what the frontend renders per key.
 type batchCreateResult struct {
-	Key       string `json:"key"`                 // last 8 chars only
+	Key       string `json:"key"` // last 8 chars only
 	OK        bool   `json:"ok"`
 	ChannelID int64  `json:"channel_id,omitempty"`
 	Name      string `json:"name,omitempty"`
@@ -3884,14 +3978,14 @@ type batchCreateResult struct {
 // (quota_usd, note) is stored locally against the returned channel id.
 func handleRemoteChannelCreate(c *gin.Context) {
 	var body struct {
-		ProfileID  int64                     `json:"profile_id"`
-		NamePrefix string                    `json:"name_prefix"`
-		Type       int                       `json:"type"`
-		Models     string                    `json:"models"`
-		Group      string                    `json:"group"`
-		Tag        string                    `json:"tag,omitempty"`
-		Priority   int64                     `json:"priority,omitempty"`
-		BaseURL    string                    `json:"base_url,omitempty"`
+		ProfileID  int64  `json:"profile_id"`
+		NamePrefix string `json:"name_prefix"`
+		Type       int    `json:"type"`
+		Models     string `json:"models"`
+		Group      string `json:"group"`
+		Tag        string `json:"tag,omitempty"`
+		Priority   int64  `json:"priority,omitempty"`
+		BaseURL    string `json:"base_url,omitempty"`
 		// Optional channel.other override — Azure uses it for api-version,
 		// Vertex bypasses this handler entirely so no vertex region here.
 		Other string                    `json:"other,omitempty"`
@@ -3998,7 +4092,7 @@ type uploadOneKeyParams struct {
 	ProfileID  int64
 	Key        string
 	NamePrefix string
-	Type       int    // new-api channel type; 0 → default 14 (Anthropic)
+	Type       int // new-api channel type; 0 → default 14 (Anthropic)
 	Models     string
 	Group      string // upstream group; empty → "default"
 	Tag        string
@@ -4322,10 +4416,10 @@ const statSummaryTTL = 30 * time.Second
 // days inherit the value until a new row overrides.
 func handleRemoteDownstreamBulk(c *gin.Context) {
 	var body struct {
-		ProfileID     int64    `json:"profile_id"`
-		ChannelIDs    []int64  `json:"channel_ids"`
-		DownstreamCNY float64  `json:"downstream_cny"`
-		Date          string   `json:"date"` // YYYY-MM-DD; empty = today UTC
+		ProfileID     int64   `json:"profile_id"`
+		ChannelIDs    []int64 `json:"channel_ids"`
+		DownstreamCNY float64 `json:"downstream_cny"`
+		Date          string  `json:"date"` // YYYY-MM-DD; empty = today UTC
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -4798,10 +4892,10 @@ var (
 )
 
 const (
-	usageRangeTTL             = 60 * time.Second
-	usageRangeMaxConcurrent   = 8
-	usageRangeMaxChannels     = 500
-	usageRangeMaxWindowSec    = 90 * 24 * 3600 // 90 days
+	usageRangeTTL           = 60 * time.Second
+	usageRangeMaxConcurrent = 8
+	usageRangeMaxChannels   = 500
+	usageRangeMaxWindowSec  = 90 * 24 * 3600 // 90 days
 )
 
 func handleRemoteChannelUsageRange(c *gin.Context) {
@@ -5018,9 +5112,9 @@ const errorBreakdownTTL = 5 * time.Minute
 
 // errorBreakdownEntry caches one breakdown per (profile_id, channel_id, window).
 type errorBreakdownEntry struct {
-	total       int64
-	buckets     []errorBucket
-	fetched     time.Time
+	total   int64
+	buckets []errorBucket
+	fetched time.Time
 }
 
 type errorBucket struct {
@@ -5041,15 +5135,16 @@ var (
 // repeated inspection doesn't hammer the remote.
 //
 // Response:
-//   {
-//     "total":   425,
-//     "buckets": [{"error_type":"openai_error","status_code":429,"count":300}, ...]
-//   }
+//
+//	{
+//	  "total":   425,
+//	  "buckets": [{"error_type":"openai_error","status_code":429,"count":300}, ...]
+//	}
 func handleRemoteChannelErrors(c *gin.Context) {
 	var body struct {
-		ProfileID  int64 `json:"profile_id"`
-		ChannelID  int64 `json:"channel_id"`
-		WindowSec  int64 `json:"window_sec"`
+		ProfileID int64 `json:"profile_id"`
+		ChannelID int64 `json:"channel_id"`
+		WindowSec int64 `json:"window_sec"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -5186,7 +5281,8 @@ var (
 // channel (type=2 success, type=5 error).
 //
 // Response:
-//   {"data": {"123": {"success": 8123, "errors": 425}, ...}, "window_sec": 3600}
+//
+//	{"data": {"123": {"success": 8123, "errors": 425}, ...}, "window_sec": 3600}
 func handleRemoteChannelCounts(c *gin.Context) {
 	var body struct {
 		ProfileID  int64   `json:"profile_id"`
@@ -5343,18 +5439,19 @@ var (
 //     bucket counts are scaled proportionally so the numbers reconcile.
 //
 // Response:
-//   {
-//     "total_success": 12345,
-//     "total_errors":  678,
-//     "error_rate":    0.0521,
-//     "buckets": [
-//       {"error_type":"openai_error","status_code":429,"count":300,"share":0.442},
-//       ...
-//     ],
-//     "sample_size":  500,
-//     "truncated":    true,
-//     "window_sec":   3600
-//   }
+//
+//	{
+//	  "total_success": 12345,
+//	  "total_errors":  678,
+//	  "error_rate":    0.0521,
+//	  "buckets": [
+//	    {"error_type":"openai_error","status_code":429,"count":300,"share":0.442},
+//	    ...
+//	  ],
+//	  "sample_size":  500,
+//	  "truncated":    true,
+//	  "window_sec":   3600
+//	}
 func handleRemoteProfileErrorSummary(c *gin.Context) {
 	profileID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || profileID <= 0 {
@@ -5543,7 +5640,7 @@ const (
 	errorLogContentTrim = 512
 	// errorLogRetention drops rows older than this age. Kept aligned
 	// with remote_channel_snapshot's default retention semantics.
-	errorLogRetention = 14 * 24 * time.Hour
+	errorLogRetention         = 14 * 24 * time.Hour
 	errorLogRetentionInterval = time.Hour
 )
 
@@ -5923,12 +6020,12 @@ func handleRemoteAutoDisableConfigSet(c *gin.Context) {
 // quota - reserve threshold since the last sync. Kept private to this
 // file — the loop assembles it from the join and never returns it.
 type autoDisableCandidate struct {
-	ProfileID int64
-	ChannelID int64
-	Name      string
-	QuotaUSD  float64
+	ProfileID  int64
+	ChannelID  int64
+	Name       string
+	QuotaUSD   float64
 	ReserveUSD float64
-	UsedUSD   float64
+	UsedUSD    float64
 }
 
 // usedQuotaPerUSD mirrors new-api's Channel.UsedQuota unit: 500000 raw

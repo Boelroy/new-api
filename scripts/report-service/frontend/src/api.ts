@@ -593,6 +593,7 @@ export type RemoteProfile = {
   host?: string
   user_id?: number
   has_token?: boolean
+  proxy?: string           // outbound proxy for reaching this remote; super_admin only, empty = direct
   default_models: string   // preloaded into the batch-upload models field (anthropic)
   default_group: string    // preloaded into the batch-upload group field (anthropic uploads)
   // Preloaded into the batch-upload group + models fields when the Gemini
@@ -986,6 +987,7 @@ export const api = {
     host: string
     user_id: number
     access_token: string
+    proxy?: string
     default_models?: string
     default_group?: string
     default_gemini_group?: string
@@ -1011,6 +1013,7 @@ export const api = {
       host?: string
       user_id?: number
       access_token?: string
+      proxy?: string
       default_models?: string
       default_group?: string
       default_gemini_group?: string

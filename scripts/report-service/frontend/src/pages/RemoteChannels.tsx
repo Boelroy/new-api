@@ -537,6 +537,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   const [editingID, setEditingID] = useState<number | null>(null)
   const [formName, setFormName] = useState('')
   const [formHost, setFormHost] = useState('')
+  const [formProxy, setFormProxy] = useState('')
   const [formUserID, setFormUserID] = useState('')
   const [formToken, setFormToken] = useState('')
   // Batch-upload defaults preloaded into the create modal from the
@@ -772,6 +773,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setEditingID(0)
     setFormName('')
     setFormHost('')
+    setFormProxy('')
     setFormUserID('')
     setFormToken('')
     setFormDefaultModels(DEFAULT_ANTHROPIC_MODELS)
@@ -816,6 +818,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     // way the upstream URL isn't visible to anyone glancing at the
     // modal, and screenshots of the edit form don't leak it either.
     setFormHost('')
+    // Proxy isn't a secret like host/token; prefill so the admin sees the
+    // current value and can clear it by blanking the field.
+    setFormProxy(p.proxy || '')
     setFormUserID(p.user_id != null ? String(p.user_id) : '')
     setFormToken('')
     setFormDefaultModels(p.default_models || '')
@@ -861,6 +866,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           host: formHost.trim(),
           user_id: uid,
           access_token: formToken.trim(),
+          proxy: formProxy.trim(),
           default_models: formDefaultModels.trim(),
           default_group: formDefaultGroup.trim(),
           default_gemini_group: formDefaultGeminiGroup.trim(),
@@ -875,6 +881,8 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
         const patch: Parameters<typeof api.remoteProfileUpdate>[1] = {
           name: formName.trim(),
           user_id: uid,
+          // Always sent (empty clears the proxy → direct connection).
+          proxy: formProxy.trim(),
           default_models: formDefaultModels.trim(),
           default_group: formDefaultGroup.trim(),
           default_gemini_group: formDefaultGeminiGroup.trim(),
@@ -3140,6 +3148,14 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                   value={formHost}
                   onChange={e => setFormHost(e.target.value)}
                   placeholder={editingID === 0 ? 'http://example.com' : '留空 = 保持原 host 不变'}
+                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900"
+                />
+              </Field>
+              <Field label="Proxy (可选)">
+                <input
+                  value={formProxy}
+                  onChange={e => setFormProxy(e.target.value)}
+                  placeholder="http://user:pass@host:port（留空 = 直连，不走代理）"
                   className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900"
                 />
               </Field>

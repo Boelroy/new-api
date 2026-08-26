@@ -4279,6 +4279,11 @@ func main() {
 		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS auto_mode BOOL NOT NULL DEFAULT false`,
 		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS rpm_base  INT  NOT NULL DEFAULT 150`,
 		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS rpm_min   INT  NOT NULL DEFAULT 50`,
+		// Optional outbound proxy for reaching this remote new-api. Every
+		// admin-API call report-service makes to the remote (channel fetch,
+		// key upload, log/stat, auto-disable) is routed through it when set.
+		// Empty ⇒ connect directly. Resolved by host inside remoteDoJSON.
+		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS proxy TEXT NOT NULL DEFAULT ''`,
 		// Per-(profile, studio) accept/reject flag for studio operator key
 		// uploads. Missing row = accepting; accepting=false rejects the
 		// enqueue with 403. Super admin toggles this from the queue panel.
