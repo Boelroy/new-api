@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -37,8 +38,9 @@ const (
 	cfgModelCleanupWindowSec   = "model_cleanup_window_sec"
 	cfgModelCleanupTickSec     = "model_cleanup_tick_sec"
 	cfgModelCleanupMaxActions  = "model_cleanup_max_actions"
-	cfgModelCleanupDryRun      = "model_cleanup_dry_run"
-	cfgModelCleanupErrorSubstr = "model_cleanup_error_substr"
+	cfgModelCleanupDryRun       = "model_cleanup_dry_run"
+	cfgModelCleanupErrorSubstr  = "model_cleanup_error_substr"  // legacy single-keyword key (read-only migration)
+	cfgModelCleanupErrorSubstrs = "model_cleanup_error_substrs" // JSON array of keywords
 
 	modelCleanupWindowDef, modelCleanupWindowMin, modelCleanupWindowMax = 180, 30, 3600
 	modelCleanupTickDef, modelCleanupTickMin, modelCleanupTickMax       = 60, 15, 600
@@ -59,11 +61,11 @@ type modelCleanupConfig struct {
 	Enabled     bool     `json:"enabled"`
 	Models      []string `json:"models"`
 	Groups      []string `json:"groups"`
-	WindowSec   int      `json:"window_sec"`
-	TickSec     int      `json:"tick_sec"`
-	MaxActions  int      `json:"max_actions"`
-	DryRun      bool     `json:"dry_run"`
-	ErrorSubstr string   `json:"error_substr"`
+	WindowSec    int      `json:"window_sec"`
+	TickSec      int      `json:"tick_sec"`
+	MaxActions   int      `json:"max_actions"`
+	DryRun       bool     `json:"dry_run"`
+	ErrorSubstrs []string `json:"error_substrs"` // match if an error contains ANY of these
 	// TokenConfigured reports whether MAIN_SERVICE_URL + MAIN_SERVICE_TOKEN
 	// are set. Without them the loop cannot mutate channels, and the UI needs
 	// to explain a silently idle scheduler.
@@ -88,7 +90,7 @@ func loadModelCleanupConfig() modelCleanupConfig {
 		WindowSec:       modelCleanupWindowDef,
 		TickSec:         modelCleanupTickDef,
 		MaxActions:      modelCleanupActionsDef,
-		ErrorSubstr:     modelCleanupErrorSubstrDef,
+		ErrorSubstrs:    []string{modelCleanupErrorSubstrDef},
 		TokenConfigured: localNewAPIConfigured(),
 	}
 	get := func(key string) (string, bool) {
@@ -122,9 +124,18 @@ func loadModelCleanupConfig() modelCleanupConfig {
 	if v, ok := get(cfgModelCleanupGroups); ok {
 		out.Groups = splitCSV(v)
 	}
-	if v, ok := get(cfgModelCleanupErrorSubstr); ok {
+	// Keywords: prefer the JSON list key; fall back to the legacy single-string
+	// key so deployments written before multi-keyword support keep working.
+	if v, ok := get(cfgModelCleanupErrorSubstrs); ok {
+		var arr []string
+		if err := json.Unmarshal([]byte(v), &arr); err == nil {
+			if cleaned := cleanCSVList(arr); len(cleaned) > 0 {
+				out.ErrorSubstrs = cleaned
+			}
+		}
+	} else if v, ok := get(cfgModelCleanupErrorSubstr); ok {
 		if s := strings.TrimSpace(v); s != "" {
-			out.ErrorSubstr = s
+			out.ErrorSubstrs = []string{s}
 		}
 	}
 	readInt(cfgModelCleanupWindowSec, &out.WindowSec)
@@ -208,12 +219,12 @@ type modelCleanupTarget struct {
 
 func runModelCleanupTick(ctx context.Context, cfg modelCleanupConfig) modelCleanupSummary {
 	var sum modelCleanupSummary
-	if len(cfg.Models) == 0 {
+	keywords := cleanCSVList(cfg.ErrorSubstrs)
+	if len(cfg.Models) == 0 || len(keywords) == 0 {
 		return sum
 	}
 	actionsLeft := cfg.MaxActions
 	cutoff := time.Now().Add(-time.Duration(cfg.WindowSec) * time.Second).Unix()
-	like := "%" + cfg.ErrorSubstr + "%"
 
 	for _, model := range cfg.Models {
 		if actionsLeft <= 0 {
@@ -224,7 +235,7 @@ func runModelCleanupTick(ctx context.Context, cfg modelCleanupConfig) modelClean
 		if !IsLeader() {
 			break
 		}
-		targets, err := findModelCleanupTargets(ctx, model, cfg.Groups, cutoff, like, actionsLeft)
+		targets, err := findModelCleanupTargets(ctx, model, cfg.Groups, cutoff, keywords, actionsLeft)
 		if err != nil {
 			log.Printf("[model-cleanup] query %s: %v", model, err)
 			continue
@@ -244,12 +255,12 @@ func runModelCleanupTick(ctx context.Context, cfg modelCleanupConfig) modelClean
 				// a channel that only ever served this one dead model is visible.
 				sum.Skipped++
 				logModelCleanupEvent(t, model, cfg.WindowSec, "skip_last_model", false,
-					fmt.Sprintf("%s is the channel's only model; left as-is (0 success, %d %q in %ds)",
-						model, t.errCount, cfg.ErrorSubstr, cfg.WindowSec))
+					fmt.Sprintf("%s is the channel's only model; left as-is (0 success, %d [%s] in %ds)",
+						model, t.errCount, strings.Join(keywords, " | "), cfg.WindowSec))
 				continue
 			}
-			detail := fmt.Sprintf("0 success, %d %q errors in last %ds; group=%s",
-				t.errCount, cfg.ErrorSubstr, cfg.WindowSec, t.group)
+			detail := fmt.Sprintf("0 success, %d errors matching [%s] in last %ds; group=%s",
+				t.errCount, strings.Join(keywords, " | "), cfg.WindowSec, t.group)
 			if cfg.DryRun {
 				sum.WouldRemove++
 				actionsLeft--
@@ -275,12 +286,24 @@ func runModelCleanupTick(ctx context.Context, cfg modelCleanupConfig) modelClean
 
 // findModelCleanupTargets returns enabled channels that currently list `model`,
 // optionally within `groups`, whose real traffic for that model in the window
-// is all failure: zero type=2 successes and at least one type=5 error matching
-// the substring. Bounded by `limit` so a tick never fetches more than its
-// remaining action budget.
+// is all failure: zero type=2 successes and at least one type=5 error whose
+// content contains ANY of `keywords` (case-insensitive). Bounded by `limit` so
+// a tick never fetches more than its remaining action budget.
 func findModelCleanupTargets(ctx context.Context, model string, groups []string,
-	cutoff int64, like string, limit int) ([]modelCleanupTarget, error) {
-	args := []any{model, cutoff, like}
+	cutoff int64, keywords []string, limit int) ([]modelCleanupTarget, error) {
+	if len(keywords) == 0 {
+		return nil, nil
+	}
+	args := []any{model, cutoff}
+	// Build "(l.content ILIKE $3 OR l.content ILIKE $4 ...)" once; both the
+	// count subquery and the EXISTS reference the same placeholders.
+	likes := make([]string, 0, len(keywords))
+	for _, kw := range keywords {
+		args = append(args, "%"+kw+"%")
+		likes = append(likes, fmt.Sprintf("l.content ILIKE $%d", len(args)))
+	}
+	likeClause := "(" + strings.Join(likes, " OR ") + ")"
+
 	groupClause := ""
 	if len(groups) > 0 {
 		args = append(args, pq.Array(groups))
@@ -293,7 +316,7 @@ func findModelCleanupTargets(ctx context.Context, model string, groups []string,
 		SELECT c.id, COALESCE(c.name,''), COALESCE(c.models,''), COALESCE(c."group",''),
 		       (SELECT count(*) FROM logs l
 		          WHERE l.channel_id=c.id AND l.model_name=$1 AND l.created_at>=$2
-		            AND l.type=5 AND l.content ILIKE $3) AS err_count
+		            AND l.type=5 AND ` + likeClause + `) AS err_count
 		  FROM channels c
 		 WHERE c.status=1
 		   AND $1 = ANY(string_to_array(c.models, ','))` + groupClause + `
@@ -301,7 +324,7 @@ func findModelCleanupTargets(ctx context.Context, model string, groups []string,
 		          WHERE l.channel_id=c.id AND l.model_name=$1 AND l.created_at>=$2 AND l.type=2)
 		   AND EXISTS (SELECT 1 FROM logs l
 		          WHERE l.channel_id=c.id AND l.model_name=$1 AND l.created_at>=$2
-		            AND l.type=5 AND l.content ILIKE $3)
+		            AND l.type=5 AND ` + likeClause + `)
 		 ORDER BY err_count DESC
 		 LIMIT $` + strconv.Itoa(limitPos)
 
@@ -365,8 +388,8 @@ func handleModelCleanupConfigSet(c *gin.Context) {
 		WindowSec   *int      `json:"window_sec,omitempty"`
 		TickSec     *int      `json:"tick_sec,omitempty"`
 		MaxActions  *int      `json:"max_actions,omitempty"`
-		DryRun      *bool     `json:"dry_run,omitempty"`
-		ErrorSubstr *string   `json:"error_substr,omitempty"`
+		DryRun       *bool     `json:"dry_run,omitempty"`
+		ErrorSubstrs *[]string `json:"error_substrs,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -417,9 +440,14 @@ func handleModelCleanupConfigSet(c *gin.Context) {
 		fail(setInt(cfgModelCleanupMaxActions, body.MaxActions, modelCleanupActionsMin, modelCleanupActionsMax)) {
 		return
 	}
-	if body.ErrorSubstr != nil {
-		if s := strings.TrimSpace(*body.ErrorSubstr); s != "" {
-			if fail(writeModelCleanupConfig(cfgModelCleanupErrorSubstr, s)) {
+	if body.ErrorSubstrs != nil {
+		if cleaned := cleanCSVList(*body.ErrorSubstrs); len(cleaned) > 0 {
+			blob, err := json.Marshal(cleaned)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			if fail(writeModelCleanupConfig(cfgModelCleanupErrorSubstrs, string(blob))) {
 				return
 			}
 		}

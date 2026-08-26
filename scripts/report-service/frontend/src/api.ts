@@ -451,7 +451,7 @@ export type ModelCleanupConfig = {
   tick_sec: number
   max_actions: number
   dry_run: boolean
-  error_substr: string
+  error_substrs: string[]
   token_configured: boolean
 }
 

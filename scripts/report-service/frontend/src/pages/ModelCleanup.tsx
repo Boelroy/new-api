@@ -15,7 +15,7 @@ const inputCls = 'border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-gra
 // The backend may serialize an unset list as JSON null; coerce so the UI never
 // calls .length/.includes/.filter on null.
 function normalizeCfg(c: ModelCleanupConfig): ModelCleanupConfig {
-  return { ...c, models: c.models ?? [], groups: c.groups ?? [] }
+  return { ...c, models: c.models ?? [], groups: c.groups ?? [], error_substrs: c.error_substrs ?? [] }
 }
 
 function fmtTime(unix: number): string {
@@ -57,6 +57,7 @@ export default function ModelCleanup() {
   const [stats, setStats] = useState<ModelCleanupStat[]>([])
   const [modelInput, setModelInput] = useState('')
   const [groupInput, setGroupInput] = useState('')
+  const [kwInput, setKwInput] = useState('')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const loadEvents = async () => {
@@ -138,6 +139,11 @@ export default function ModelCleanup() {
     if (v && cfg && !cfg.groups.includes(v)) void save({ groups: [...cfg.groups, v] })
     setGroupInput('')
   }
+  const addKeyword = () => {
+    const v = kwInput.trim()
+    if (v && cfg && !cfg.error_substrs.includes(v)) void save({ error_substrs: [...cfg.error_substrs, v] })
+    setKwInput('')
+  }
 
   if (!cfg) {
     return (
@@ -208,14 +214,20 @@ export default function ModelCleanup() {
           </div>
 
           <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <label className="block">
-              <span className="mono-label block mb-1">错误关键字</span>
-              <input
-                type="text" className={inputCls + ' w-full font-mono'} defaultValue={cfg.error_substr}
-                onBlur={e => { const v = e.target.value.trim(); if (v && v !== cfg.error_substr) void save({ error_substr: v }) }}
-              />
-              <span className="text-[10px] text-gray-400">报错内容需包含此串(默认 Operation not allowed)</span>
-            </label>
+            <div className="block">
+              <span className="mono-label block mb-1">错误关键字(命中任一即算)</span>
+              <ChipList items={cfg.error_substrs} tone="slate" onRemove={v => void save({ error_substrs: cfg.error_substrs.filter(x => x !== v) })} />
+              <div className="flex gap-1">
+                <input
+                  value={kwInput} onChange={e => setKwInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addKeyword() } }}
+                  placeholder="回车添加,例 Operation not allowed"
+                  className={inputCls + ' flex-1 font-mono'}
+                />
+                <Button variant="outline" size="sm" onClick={addKeyword}>添加</Button>
+              </div>
+              <span className="text-[10px] text-gray-400 mt-1 block">报错内容包含其中任意一个关键字即视为该模型不可用(大小写不敏感)</span>
+            </div>
             <label className="flex items-center gap-2 mt-6 text-xs">
               <input type="checkbox" checked={cfg.dry_run} disabled={saving} onChange={e => void save({ dry_run: e.target.checked })} />
               <span className={cfg.dry_run ? 'text-amber-700 font-medium' : 'text-gray-500'}>
