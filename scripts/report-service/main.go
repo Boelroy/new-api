@@ -4714,6 +4714,10 @@ func main() {
 	api.GET("/auth/me", handleAuthMe)
 	api.GET("/allkeys/data", handleAllKeysData)
 	api.GET("/allkeys/rpm", handleAllKeysRPM)
+	// Studio-facing remote usage of pushed-up keys. Server-side studio-scoped
+	// inside the handler (same gate as /allkeys/data), so studio operators see
+	// only their own; admin+ see all.
+	api.GET("/local-remote-sync/usage", handleLocalToRemoteUsage)
 	// Studio Operator (role=2) can batch-create channels scoped to their
 	// bound studio. The handler enforces the studio lock; admin+ retain
 	// full freedom. Project admin (role=7) is also allowed because they
@@ -4947,6 +4951,11 @@ func main() {
 	// and synced state; local-sync creates the local channel(s).
 	adminAPI.GET("/remote-newapi/local-sync/syncable", handleLocalSyncList)
 	adminAPI.POST("/remote-newapi/local-sync", handleLocalSyncCreate)
+	// Local → remote sync: push a local (studio-uploaded) channel up to a
+	// remote profile. Admin+ drives the sync; the usage view is mounted on the
+	// base api group below so studio operators can read their own remote burn.
+	adminAPI.GET("/local-remote-sync/syncable", handleLocalToRemoteSyncable)
+	adminAPI.POST("/local-remote-sync", handleLocalToRemoteSyncCreate)
 	adminAPI.POST("/remote-newapi/channels", handleRemoteFetchChannels)
 	adminAPI.GET("/remote-newapi/channels/:id", handleRemoteChannelGet)
 	adminAPI.POST("/remote-newapi/channels/create", handleRemoteChannelCreate)

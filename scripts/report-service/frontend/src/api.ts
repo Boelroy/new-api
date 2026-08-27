@@ -1824,6 +1824,37 @@ export const api = {
       },
     ),
 
+  // Local → Remote sync: push local (studio-uploaded) channels up to a chosen
+  // remote profile. syncable/create are Admin+; usage is studio-scoped on the
+  // server so studio operators see only their own pushed keys' remote burn.
+  localToRemoteSyncable: (profileID: number, opts?: { studio?: string; group?: string }) => {
+    const qs = new URLSearchParams({ profile_id: String(profileID) })
+    if (opts?.studio) qs.set('studio', opts.studio)
+    if (opts?.group) qs.set('group', opts.group)
+    return request<{ items: LocalToRemoteSyncable[] }>(`/api/local-remote-sync/syncable?${qs.toString()}`)
+  },
+
+  localToRemoteSync: (profileID: number, items: { local_channel_id: number }[]) =>
+    request<{ results: LocalToRemoteResult[]; ok: number; total: number }>(
+      '/api/local-remote-sync',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile_id: profileID, items }),
+      },
+    ),
+
+  localRemoteUsage: (opts?: { studio?: string; profile_id?: number; window_sec?: number }) => {
+    const qs = new URLSearchParams()
+    if (opts?.studio) qs.set('studio', opts.studio)
+    if (opts?.profile_id != null) qs.set('profile_id', String(opts.profile_id))
+    if (opts?.window_sec != null) qs.set('window_sec', String(opts.window_sec))
+    const suffix = qs.toString()
+    return request<{ items: LocalRemoteUsageRow[]; window_sec: number }>(
+      `/api/local-remote-sync/usage${suffix ? '?' + suffix : ''}`,
+    )
+  },
+
   // Supplier Account portal. providers/models proxy the third-party portal;
   // accounts/metrics are scoped by role on the server (suppliers see only
   // their own uploads, admin+ see all; cost is stripped for suppliers).
@@ -1923,6 +1954,50 @@ export type LocalSyncResult = {
   skipped: boolean
   channel_id?: number
   error?: string
+}
+
+// Local → Remote sync. localToRemoteSyncable lists local channels eligible to
+// push to a target profile (with already_synced state for that target); usage
+// reports each pushed key's remote consumption.
+export type LocalToRemoteSyncable = {
+  local_channel_id: number
+  name: string
+  studio: string
+  group: string
+  models: string
+  channel_type: number
+  channel_type_name: string
+  key_masked: string
+  quota_usd?: number
+  used_usd: number
+  status: number
+  already_synced: boolean
+  remote_channel_id: number
+}
+
+export type LocalToRemoteResult = {
+  local_channel_id: number
+  profile_id: number
+  ok: boolean
+  skipped: boolean
+  remote_channel_id?: number
+  error?: string
+}
+
+export type LocalRemoteUsageRow = {
+  local_channel_id: number
+  profile_id: number
+  profile_name: string
+  remote_channel_id: number
+  studio: string
+  name: string
+  remote_status: number
+  remote_used_usd: number
+  remote_quota_usd?: number
+  remote_remaining_usd?: number
+  remote_recent_usd?: number
+  local_used_usd: number
+  updated_at: number
 }
 
 export type LocalHealthConfig = {

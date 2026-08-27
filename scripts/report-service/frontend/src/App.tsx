@@ -17,6 +17,7 @@ import ModelCleanup from './pages/ModelCleanup'
 import ChannelPriority from './pages/ChannelPriority'
 import RemoteChannels from './pages/RemoteChannels'
 import LocalChannelSync from './pages/LocalChannelSync'
+import LocalToRemoteSync from './pages/LocalToRemoteSync'
 import PoolUploadStudio from './pages/PoolUploadStudio'
 import SupplierAccounts from './pages/SupplierAccounts'
 import Settings from './pages/Settings'
@@ -110,6 +111,7 @@ export default function App() {
         <Route path="/users" element={<RoleGate min={ROLE_ADMIN}><Users /></RoleGate>} />
         <Route path="/remote-channels" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_REMOTE_STUDIO_OPERATOR}><RemoteChannels /></RoleGate>} />
         <Route path="/local-sync" element={<RoleGate min={ROLE_ADMIN}><LocalChannelSync /></RoleGate>} />
+        <Route path="/local-remote-sync" element={<RoleGate min={ROLE_ADMIN}><LocalToRemoteSync /></RoleGate>} />
         <Route path="/pool-upload" element={<RoleGate allow={r => r === ROLE_STUDIO_OPERATOR}><PoolUploadStudio /></RoleGate>} />
         <Route path="/supplier-accounts" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_01}><SupplierAccounts /></RoleGate>} />
         <Route path="/settings" element={<RoleGate min={ROLE_SUPER_ADMIN}><Settings /></RoleGate>} />

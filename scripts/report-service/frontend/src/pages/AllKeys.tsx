@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import Layout from '../components/Layout'
 import SummaryCards from '../components/SummaryCards'
 import BatchCreatePanel from '../components/BatchCreatePanel'
-import { api, ChannelRow, ROLE_ADMIN, ROLE_STUDIO_OPERATOR } from '../api'
+import { api, ChannelRow, LocalRemoteUsageRow, ROLE_ADMIN, ROLE_STUDIO_OPERATOR } from '../api'
 import { toast } from '../components/feedback'
 import { ProviderMark } from '../components/ProviderMark'
 import { LivePollChip } from '../components/ui'
@@ -50,6 +50,10 @@ export default function AllKeys() {
   // System-wide realtime RPM from /api/allkeys/rpm. Not derived from `rows`
   // so studio_operator sees the global count instead of a studio-scoped sum.
   const [globalRpm, setGlobalRpm] = useState<number | null>(null)
+  // Remote usage of keys this caller pushed up (local→remote sync), keyed by
+  // local channel id. Studio-scoped on the server. Empty for deployments not
+  // using local→remote sync — the remote columns stay hidden in that case.
+  const [remoteUsage, setRemoteUsage] = useState<Record<number, LocalRemoteUsageRow>>({})
 
   // role gates the pricing-edit UI. /api/keys/pricing is admin-only on the
   // backend, so non-admins would just hit 403 — surface that by hiding the
@@ -96,6 +100,12 @@ export default function AllKeys() {
       const r = await api.getAllKeysRpm()
       setGlobalRpm(r.rpm)
     } catch (err) { console.warn('global rpm failed', err) }
+    try {
+      const u = await api.localRemoteUsage()
+      const byID: Record<number, LocalRemoteUsageRow> = {}
+      for (const row of u.items ?? []) byID[row.local_channel_id] = row
+      setRemoteUsage(byID)
+    } catch (err) { console.warn('remote usage failed', err) }
   }
 
   useEffect(() => { load(start, end) }, [])
@@ -128,6 +138,21 @@ export default function AllKeys() {
     if (!onlyUnpriced) return rows
     return rows.filter(r => r.unit_price_cny == null)
   }, [rows, onlyUnpriced])
+
+  // Show the remote-usage columns only when at least one visible key was
+  // pushed up to a remote instance.
+  const hasRemote = useMemo(
+    () => filteredRows.some(r => remoteUsage[r.id] != null),
+    [filteredRows, remoteUsage],
+  )
+  const remoteTotals = useMemo(() => {
+    let used = 0
+    for (const r of filteredRows) {
+      const u = remoteUsage[r.id]
+      if (u) used += u.remote_used_usd
+    }
+    return { used }
+  }, [filteredRows, remoteUsage])
 
   const submitPrices = async () => {
     const payload = Object.entries(priceEdits)
@@ -202,6 +227,7 @@ export default function AllKeys() {
         { label: '总已用', value: '$' + summary.totalUsed.toFixed(2), color: 'text-rose-600' },
         { label: '总额度', value: summary.totalQuota ? '$' + summary.totalQuota.toFixed(2) : '未配置' },
         { label: '总剩余', value: summary.totalRemaining ? '$' + summary.totalRemaining.toFixed(2) : '—', color: 'text-emerald-600' },
+        ...(hasRemote ? [{ label: '远程已用', value: '$' + remoteTotals.used.toFixed(2), color: 'text-indigo-600' }] : []),
       ]} />
 
       {canBatchCreate && (
@@ -290,7 +316,8 @@ export default function AllKeys() {
           <table className="w-full text-xs whitespace-nowrap border-separate border-spacing-0">
             <thead>
               <tr>
-                {['ID','名称','Key 末尾','状态','单价 CNY','总已用 ($)','额度 ($)','总剩余 ($)','剩余%'].map(h => (
+                {['ID','名称','Key 末尾','状态','单价 CNY','总已用 ($)','额度 ($)','总剩余 ($)','剩余%',
+                  ...(hasRemote ? ['远程已用 ($)','远程剩余 ($)','远程近期 ($)'] : [])].map(h => (
                   <th key={h} className="sticky top-0 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">{h}</th>
                 ))}
               </tr>
@@ -349,6 +376,25 @@ export default function AllKeys() {
                         </div>
                       ) : <span className="text-gray-300">—</span>}
                     </td>
+                    {hasRemote && (() => {
+                      const u = remoteUsage[r.id]
+                      if (!u) {
+                        return (
+                          <>
+                            <td className="px-3 py-1.5 border-b border-gray-50 text-right text-gray-300">—</td>
+                            <td className="px-3 py-1.5 border-b border-gray-50 text-right text-gray-300">—</td>
+                            <td className="px-3 py-1.5 border-b border-gray-50 text-right text-gray-300">—</td>
+                          </>
+                        )
+                      }
+                      return (
+                        <>
+                          <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums text-indigo-700" title={`${u.profile_name} · 远程渠道 #${u.remote_channel_id}`}>${u.remote_used_usd.toFixed(4)}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{u.remote_remaining_usd != null ? '$' + u.remote_remaining_usd.toFixed(4) : '—'}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{u.remote_recent_usd != null ? '$' + u.remote_recent_usd.toFixed(4) : '—'}</td>
+                        </>
+                      )
+                    })()}
                   </tr>
                 )
               })}

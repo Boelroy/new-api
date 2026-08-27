@@ -151,6 +151,31 @@ var v2SchemaStatements = []string{
 	   ON rs_channel_priority_event(created_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_channel_priority_event_channel
 	   ON rs_channel_priority_event(channel_id, id DESC)`,
+
+	// -- Local → remote channel sync ----------------------------------------
+	// Maps a LOCAL new-api channel (a studio-uploaded key) to the remote
+	// channel it was pushed up to, so re-syncing is idempotent and the studio
+	// usage view can join local key ↔ remote used_quota. The mirror image of
+	// remote_local_sync. studio is copied from the local channel's tag at sync
+	// time; key_hash correlates the same physical key across both instances.
+	// PK (local_channel_id, profile_id) lets one local key fan out to several
+	// remote targets.
+	`CREATE TABLE IF NOT EXISTS local_remote_sync (
+		local_channel_id  BIGINT  NOT NULL,
+		profile_id        BIGINT  NOT NULL,
+		remote_channel_id BIGINT  NOT NULL DEFAULT 0,
+		studio            TEXT    NOT NULL DEFAULT '',
+		key_hash          TEXT    NOT NULL DEFAULT '',
+		status            TEXT    NOT NULL DEFAULT 'active',
+		created_by        BIGINT  NOT NULL DEFAULT 0,
+		created_at        BIGINT  NOT NULL,
+		updated_at        BIGINT  NOT NULL,
+		PRIMARY KEY (local_channel_id, profile_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_local_remote_sync_studio
+	   ON local_remote_sync(studio)`,
+	`CREATE INDEX IF NOT EXISTS idx_local_remote_sync_remote
+	   ON local_remote_sync(profile_id, remote_channel_id)`,
 }
 
 // initV2Schema applies all V2 DDLs. Panics on failure — startup should not

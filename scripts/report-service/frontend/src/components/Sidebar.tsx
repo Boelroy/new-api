@@ -17,7 +17,7 @@ const GROUP_LABELS: Record<SidebarGroup, string> = {
 const NAV_ORDER = [
   '/', '/profit', '/billing', '/cache', '/errors', '/model-health',
   '/keys', '/allkeys', '/tester', '/remote-channels', '/pool-upload',
-  '/local-sync', '/model-cleanup', '/channel-priority', '/users', '/settings', '/testing',
+  '/local-sync', '/local-remote-sync', '/model-cleanup', '/channel-priority', '/users', '/settings', '/testing',
   '/supplier-accounts',
 ]
 function navIndex(to: string): number {
@@ -41,6 +41,7 @@ const NAV_COLORS: Record<string, string> = {
   '/remote-channels': '#6366F1', // Remote NewAPI — indigo
   '/pool-upload': '#06B6D4', // Pool Upload — cyan
   '/local-sync': '#3B82F6',  // Local Sync — blue
+  '/local-remote-sync': '#0EA5E9', // Local→Remote Sync — sky
   '/model-cleanup': '#DC2626', // Model Cleanup — red
   '/channel-priority': '#0891B2', // Channel Priority — cyan-700
   '/users': '#8B5CF6',       // User — violet
@@ -200,6 +201,16 @@ const LOCAL_SYNC_ITEM: Item = {
   ),
 }
 
+const LOCAL_TO_REMOTE_SYNC_ITEM: Item = {
+  to: '/local-remote-sync', label: 'Local→Remote Sync', group: 'admin',
+  icon: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 7h13l-3-3" />
+      <path d="M20 17H7l3 3" />
+    </svg>
+  ),
+}
+
 const MODEL_CLEANUP_ITEM: Item = {
   to: '/model-cleanup', label: 'Model Cleanup', group: 'admin',
   icon: (
@@ -292,7 +303,7 @@ export function baselineItemsFor(role: number, flags: SidebarFlags): Item[] {
     const items: Item[] = [
       USAGE_REPORT_ITEM, BILLING_ITEM, CACHE_REPORT_ITEM, ERROR_CENTER_ITEM, MODEL_HEALTH_ITEM,
       KEY_CAPACITY_ITEM, ALL_KEYS_ITEM, KEY_TESTER_ITEM, REMOTE_CHANNELS_ITEM,
-      LOCAL_SYNC_ITEM, MODEL_CLEANUP_ITEM, CHANNEL_PRIORITY_ITEM, USERS_ITEM,
+      LOCAL_SYNC_ITEM, LOCAL_TO_REMOTE_SYNC_ITEM, MODEL_CLEANUP_ITEM, CHANNEL_PRIORITY_ITEM, USERS_ITEM,
     ]
     if (showSupplier) items.push(SUPPLIER_ACCOUNTS_ITEM)
     if (role >= ROLE_SUPER_ADMIN) {
