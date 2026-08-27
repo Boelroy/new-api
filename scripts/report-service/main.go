@@ -4672,6 +4672,7 @@ func main() {
 	startLocalPendingScheduler()
 	startLocalHealthLoop()
 	startModelCleanupLoop()
+	startChannelPriorityLoop()
 	startRemoteErrorLogSync()
 	startRemoteAutoDisableLoop()
 	startSupplierQuotaAlertLoop()
@@ -4834,6 +4835,14 @@ func main() {
 	adminAPI.GET("/model-cleanup/events", handleModelCleanupEvents)
 	adminAPI.GET("/model-cleanup/stats", handleModelCleanupStats)
 	adminAPI.POST("/model-cleanup/run", handleModelCleanupRunNow)
+	// Channel priority auto-tuning (channel_priority.go). Demotes throttled
+	// channels out of rotation and restores them once 429s stop. Admin-only:
+	// it edits channel + ability priority.
+	adminAPI.GET("/channel-priority/config", handleChanPrioConfigGet)
+	adminAPI.POST("/channel-priority/config", handleChanPrioConfigSet)
+	adminAPI.GET("/channel-priority/events", handleChanPrioEvents)
+	adminAPI.GET("/channel-priority/status", handleChanPrioStatus)
+	adminAPI.POST("/channel-priority/run", handleChanPrioRunNow)
 	// Key Tester: admin+, tester (role=5), studio_operator (role=2),
 	// remote_studio_operator (role=3), and project_admin (role=7). Tester
 	// is scoped to Key Tester + Provider Testing (see the testingAPI group

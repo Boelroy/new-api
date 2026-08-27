@@ -122,6 +122,35 @@ var v2SchemaStatements = []string{
 	   ON rs_model_cleanup_event(created_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_model_cleanup_event_channel
 	   ON rs_model_cleanup_event(channel_id, id DESC)`,
+
+	// -- Channel priority auto-tuning ---------------------------------------
+	// Ledger of channels the priority loop has demoted, remembering the
+	// baseline priority to restore them to. A row exists only while a channel
+	// sits below its baseline; it is deleted once fully restored.
+	`CREATE TABLE IF NOT EXISTS rs_channel_priority_state (
+		channel_id    BIGINT PRIMARY KEY,
+		base_priority INT    NOT NULL,
+		updated_at    BIGINT NOT NULL
+	)`,
+	// Append-only audit of every demote/promote/restore the loop performs.
+	`CREATE TABLE IF NOT EXISTS rs_channel_priority_event (
+		id            BIGSERIAL PRIMARY KEY,
+		channel_id    BIGINT NOT NULL DEFAULT 0,
+		channel_name  TEXT   NOT NULL DEFAULT '',
+		grp           TEXT   NOT NULL DEFAULT '',
+		action        TEXT   NOT NULL,
+		from_priority INT    NOT NULL DEFAULT 0,
+		to_priority   INT    NOT NULL DEFAULT 0,
+		base_priority INT    NOT NULL DEFAULT 0,
+		throttle_count INT   NOT NULL DEFAULT 0,
+		detail        TEXT   NOT NULL DEFAULT '',
+		dry_run       BOOLEAN NOT NULL DEFAULT FALSE,
+		created_at    BIGINT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_channel_priority_event_time
+	   ON rs_channel_priority_event(created_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_channel_priority_event_channel
+	   ON rs_channel_priority_event(channel_id, id DESC)`,
 }
 
 // initV2Schema applies all V2 DDLs. Panics on failure — startup should not

@@ -482,6 +482,52 @@ export type ModelCleanupStat = {
   enabled_channels: number
 }
 
+// ---- Channel priority auto-tuning ----
+export type ChanPrioConfig = {
+  enabled: boolean
+  groups: string[]
+  down_window_sec: number
+  up_window_sec: number
+  tick_sec: number
+  step: number
+  max_drop: number
+  min_throttle: number
+  throttle_substr: string
+  max_actions: number
+  dry_run: boolean
+}
+
+export type ChanPrioEvent = {
+  id: number
+  channel_id: number
+  channel_name: string
+  group: string
+  action: string
+  from_priority: number
+  to_priority: number
+  base_priority: number
+  throttle_count: number
+  detail: string
+  dry_run: boolean
+  created_at: number
+}
+
+export type ChanPrioDemoted = {
+  channel_id: number
+  channel_name: string
+  group: string
+  priority: number
+  base_priority: number
+  updated_at: number
+}
+
+export type ChanPrioSummary = {
+  demoted: number
+  promoted: number
+  restored: number
+  errors: number
+}
+
 // Mirrors the role tiers enforced on the backend. ROLE_TESTER,
 // ROLE_STUDIO_OPERATOR and ROLE_PROJECT_ADMIN are horizontal
 // specializations (Key Tester + Provider Testing / batch-create scoped to
@@ -1736,6 +1782,32 @@ export const api = {
 
   modelCleanupRunNow: () =>
     request<{ summary: ModelCleanupSummary; dry_run: boolean }>('/api/model-cleanup/run', { method: 'POST' }),
+
+  // ---- Channel priority auto-tuning (Channel Priority page) ----
+
+  chanPrioGetConfig: () => request<ChanPrioConfig>('/api/channel-priority/config'),
+
+  chanPrioSetConfig: (payload: Partial<ChanPrioConfig>) =>
+    request<ChanPrioConfig>('/api/channel-priority/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  chanPrioEvents: (params?: { channel_id?: number; action?: string; limit?: number }) => {
+    const qs = new URLSearchParams()
+    if (params?.channel_id != null) qs.set('channel_id', String(params.channel_id))
+    if (params?.action) qs.set('action', params.action)
+    if (params?.limit != null) qs.set('limit', String(params.limit))
+    const suffix = qs.toString()
+    return request<{ events: ChanPrioEvent[] }>(`/api/channel-priority/events${suffix ? '?' + suffix : ''}`)
+  },
+
+  chanPrioStatus: () =>
+    request<{ demoted_count: number; demoted: ChanPrioDemoted[] }>('/api/channel-priority/status'),
+
+  chanPrioRunNow: () =>
+    request<{ summary: ChanPrioSummary; dry_run: boolean }>('/api/channel-priority/run', { method: 'POST' }),
 
   // Local Channel Sync: list stored credentials that can be stood up as
   // local channels, and sync a batch of them. Admin+ only (server gate).

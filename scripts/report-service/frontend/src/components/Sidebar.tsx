@@ -17,7 +17,7 @@ const GROUP_LABELS: Record<SidebarGroup, string> = {
 const NAV_ORDER = [
   '/', '/profit', '/billing', '/cache', '/errors', '/model-health',
   '/keys', '/allkeys', '/tester', '/remote-channels', '/pool-upload',
-  '/local-sync', '/model-cleanup', '/users', '/settings', '/testing',
+  '/local-sync', '/model-cleanup', '/channel-priority', '/users', '/settings', '/testing',
   '/supplier-accounts',
 ]
 function navIndex(to: string): number {
@@ -42,6 +42,7 @@ const NAV_COLORS: Record<string, string> = {
   '/pool-upload': '#06B6D4', // Pool Upload — cyan
   '/local-sync': '#3B82F6',  // Local Sync — blue
   '/model-cleanup': '#DC2626', // Model Cleanup — red
+  '/channel-priority': '#0891B2', // Channel Priority — cyan-700
   '/users': '#8B5CF6',       // User — violet
   '/settings': '#64748B',    // Settings — slate
   '/testing': '#14B8A6',     // Provider Testing — teal
@@ -212,6 +213,23 @@ const MODEL_CLEANUP_ITEM: Item = {
   ),
 }
 
+const CHANNEL_PRIORITY_ITEM: Item = {
+  to: '/channel-priority', label: 'Channel Priority', group: 'admin',
+  icon: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="4" y1="21" x2="4" y2="14" />
+      <line x1="4" y1="10" x2="4" y2="3" />
+      <line x1="12" y1="21" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12" y2="3" />
+      <line x1="20" y1="21" x2="20" y2="16" />
+      <line x1="20" y1="12" x2="20" y2="3" />
+      <line x1="1" y1="14" x2="7" y2="14" />
+      <line x1="9" y1="8" x2="15" y2="8" />
+      <line x1="17" y1="16" x2="23" y2="16" />
+    </svg>
+  ),
+}
+
 const USERS_ITEM: Item = {
   to: '/users', label: 'User', group: 'admin',
   icon: (
@@ -274,7 +292,7 @@ export function baselineItemsFor(role: number, flags: SidebarFlags): Item[] {
     const items: Item[] = [
       USAGE_REPORT_ITEM, BILLING_ITEM, CACHE_REPORT_ITEM, ERROR_CENTER_ITEM, MODEL_HEALTH_ITEM,
       KEY_CAPACITY_ITEM, ALL_KEYS_ITEM, KEY_TESTER_ITEM, REMOTE_CHANNELS_ITEM,
-      LOCAL_SYNC_ITEM, MODEL_CLEANUP_ITEM, USERS_ITEM,
+      LOCAL_SYNC_ITEM, MODEL_CLEANUP_ITEM, CHANNEL_PRIORITY_ITEM, USERS_ITEM,
     ]
     if (showSupplier) items.push(SUPPLIER_ACCOUNTS_ITEM)
     if (role >= ROLE_SUPER_ADMIN) {
