@@ -1834,13 +1834,22 @@ export const api = {
     return request<{ items: LocalToRemoteSyncable[] }>(`/api/local-remote-sync/syncable?${qs.toString()}`)
   },
 
-  localToRemoteSync: (profileID: number, items: { local_channel_id: number }[]) =>
+  localToRemoteSync: (
+    profileID: number,
+    items: { local_channel_id: number }[],
+    opts?: { group?: string; force?: boolean },
+  ) =>
     request<{ results: LocalToRemoteResult[]; ok: number; total: number }>(
       '/api/local-remote-sync',
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ profile_id: profileID, items }),
+        body: JSON.stringify({
+          profile_id: profileID,
+          items,
+          ...(opts?.group ? { group: opts.group } : {}),
+          ...(opts?.force ? { force: true } : {}),
+        }),
       },
     ),
 

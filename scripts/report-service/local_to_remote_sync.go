@@ -124,7 +124,9 @@ type localToRemoteResult struct {
 // failure doesn't abort the rest.
 func handleLocalToRemoteSyncCreate(c *gin.Context) {
 	var body struct {
-		ProfileID int64 `json:"profile_id"`
+		ProfileID int64  `json:"profile_id"`
+		Group     string `json:"group"` // optional: override the remote group for the whole batch
+		Force     bool   `json:"force"` // re-upload even if already synced to this profile
 		Items     []struct {
 			LocalChannelID int64 `json:"local_channel_id"`
 		} `json:"items"`
@@ -161,7 +163,7 @@ func handleLocalToRemoteSyncCreate(c *gin.Context) {
 	okCount := 0
 	for _, it := range body.Items {
 		res := localToRemoteResult{LocalChannelID: it.LocalChannelID, ProfileID: body.ProfileID}
-		remoteID, skipped, err := syncLocalChannelToRemote(ctx, it.LocalChannelID, body.ProfileID, callerID)
+		remoteID, skipped, err := syncLocalChannelToRemote(ctx, it.LocalChannelID, body.ProfileID, callerID, strings.TrimSpace(body.Group), body.Force)
 		if err != nil {
 			res.Error = err.Error()
 		} else {
@@ -176,10 +178,12 @@ func handleLocalToRemoteSyncCreate(c *gin.Context) {
 }
 
 // syncLocalChannelToRemote reads one local channel and creates the matching
-// channel on the remote profile. Returns skipped=true (with the existing
+// channel on the remote profile. groupOverride (when non-empty) replaces the
+// local channel's group on the remote. Returns skipped=true (with the existing
 // remote channel id) when this local channel — or the same key — already went
-// up to this profile, so re-syncing is a no-op.
-func syncLocalChannelToRemote(ctx context.Context, localChannelID, profileID, callerID int64) (remoteChannelID int64, skipped bool, err error) {
+// up to this profile and force is false, so a plain re-sync is a no-op. With
+// force=true it re-uploads regardless (e.g. to push into a different group).
+func syncLocalChannelToRemote(ctx context.Context, localChannelID, profileID, callerID int64, groupOverride string, force bool) (remoteChannelID int64, skipped bool, err error) {
 	var name, key, group, models, tag string
 	var chType int
 	var quotaUSD sql.NullFloat64
@@ -204,6 +208,9 @@ func syncLocalChannelToRemote(ctx context.Context, localChannelID, profileID, ca
 	if models == "" {
 		return 0, false, fmt.Errorf("local channel %d has no models", localChannelID)
 	}
+	if strings.TrimSpace(groupOverride) != "" {
+		group = strings.TrimSpace(groupOverride)
+	}
 	if strings.TrimSpace(group) == "" {
 		group = "default"
 	}
@@ -212,21 +219,25 @@ func syncLocalChannelToRemote(ctx context.Context, localChannelID, profileID, ca
 	}
 	keyHash := pendingKeyHash(key)
 
-	// Dedupe: this local channel already synced to this profile, or the same
-	// physical key already went up to this profile under another local channel.
-	var existingRemote int64
-	switch e := db.QueryRow(`
-		SELECT remote_channel_id FROM local_remote_sync
-		 WHERE profile_id = $1 AND (local_channel_id = $2 OR key_hash = $3) AND remote_channel_id > 0
-		 ORDER BY remote_channel_id DESC LIMIT 1`,
-		profileID, localChannelID, keyHash).Scan(&existingRemote); e {
-	case nil:
-		upsertLocalRemoteSyncMap(localChannelID, profileID, existingRemote, tag, keyHash, callerID)
-		return existingRemote, true, nil
-	case sql.ErrNoRows:
-		// fall through to upload
-	default:
-		return 0, false, e
+	// Dedupe (skipped unless force): this local channel already synced to this
+	// profile, or the same physical key already went up to this profile under
+	// another local channel. force re-uploads regardless — used to push into a
+	// different group or re-create a deleted remote channel.
+	if !force {
+		var existingRemote int64
+		switch e := db.QueryRow(`
+			SELECT remote_channel_id FROM local_remote_sync
+			 WHERE profile_id = $1 AND (local_channel_id = $2 OR key_hash = $3) AND remote_channel_id > 0
+			 ORDER BY remote_channel_id DESC LIMIT 1`,
+			profileID, localChannelID, keyHash).Scan(&existingRemote); e {
+		case nil:
+			upsertLocalRemoteSyncMap(localChannelID, profileID, existingRemote, tag, keyHash, callerID)
+			return existingRemote, true, nil
+		case sql.ErrNoRows:
+			// fall through to upload
+		default:
+			return 0, false, e
+		}
 	}
 
 	host, userID, token, err := loadRemoteProfileByID(profileID)

@@ -19,6 +19,11 @@ export default function LocalToRemoteSync() {
   const [profileID, setProfileID] = useState<number | null>(null)
   const [studio, setStudio] = useState('')
   const [group, setGroup] = useState('')
+  // Target remote group override (empty = keep each channel's own group).
+  const [targetGroup, setTargetGroup] = useState('')
+  // Force re-upload even when a row is already synced (e.g. push to a new group).
+  const [force, setForce] = useState(false)
+  const [selected, setSelected] = useState<Set<number>>(new Set())
   const [items, setItems] = useState<LocalToRemoteSyncable[]>([])
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -52,6 +57,7 @@ export default function LocalToRemoteSync() {
       })
       setItems(res.items ?? [])
       setResults({})
+      setSelected(new Set())
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
@@ -78,6 +84,7 @@ export default function LocalToRemoteSync() {
         const res = await api.localToRemoteSync(
           profileID,
           targets.map(t => ({ local_channel_id: t.local_channel_id })),
+          { group: targetGroup.trim() || undefined, force },
         )
         const byID: Record<number, LocalToRemoteResult> = {}
         for (const r of res.results ?? []) byID[r.local_channel_id] = r
@@ -106,7 +113,7 @@ export default function LocalToRemoteSync() {
         })
       }
     },
-    [profileID, load],
+    [profileID, load, targetGroup, force],
   )
 
   const syncAll = useCallback(async () => {
@@ -120,10 +127,39 @@ export default function LocalToRemoteSync() {
     }
   }, [unsynced, syncItems])
 
+  const selectedItems = useMemo(() => items.filter(i => selected.has(i.local_channel_id)), [items, selected])
+
+  const syncSelected = useCallback(async () => {
+    if (selectedItems.length === 0) return
+    setBulkBusy(true)
+    try {
+      await syncItems(selectedItems)
+      toast.success(`已同步 ${selectedItems.length} 条`)
+    } finally {
+      setBulkBusy(false)
+    }
+  }, [selectedItems, syncItems])
+
+  const toggleRow = (id: number, checked: boolean) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (checked) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+  const allSelected = items.length > 0 && items.every(i => selected.has(i.local_channel_id))
+  const toggleAll = (checked: boolean) => {
+    setSelected(checked ? new Set(items.map(i => i.local_channel_id)) : new Set())
+  }
+
   const actions = (
     <div className="flex items-center gap-2">
       <button className={btnCls} onClick={() => void load()} disabled={loading || !profileID}>
         刷新
+      </button>
+      <button className={btnCls} onClick={() => void syncSelected()} disabled={bulkBusy || selectedItems.length === 0}>
+        {bulkBusy ? '同步中…' : `同步选中 (${selectedItems.length})`}
       </button>
       <button className={primaryBtnCls} onClick={() => void syncAll()} disabled={bulkBusy || unsynced.length === 0}>
         {bulkBusy ? '同步中…' : `同步全部未同步 (${unsynced.length})`}
@@ -164,7 +200,7 @@ export default function LocalToRemoteSync() {
           />
         </label>
         <label className="block">
-          <span className="mono-label block mb-1">分组 (group)</span>
+          <span className="mono-label block mb-1">本地分组筛选</span>
           <input
             className={inputCls}
             value={group}
@@ -176,6 +212,20 @@ export default function LocalToRemoteSync() {
         <button className={btnCls} onClick={() => void load()} disabled={loading || !profileID}>
           应用筛选
         </button>
+        <div className="h-8 w-px bg-gray-200 mx-1" />
+        <label className="block">
+          <span className="mono-label block mb-1">目标远程分组</span>
+          <input
+            className={inputCls}
+            value={targetGroup}
+            placeholder="留空=沿用本地分组"
+            onChange={e => setTargetGroup(e.target.value)}
+          />
+        </label>
+        <label className="flex items-center gap-1.5 text-xs text-gray-600 pb-1.5" title="已同步的渠道也重新推送(可推到新分组)">
+          <input type="checkbox" checked={force} onChange={e => setForce(e.target.checked)} />
+          强制重推
+        </label>
       </div>
 
       {err && (
@@ -187,6 +237,9 @@ export default function LocalToRemoteSync() {
           <table className="w-full text-xs">
             <thead>
               <tr className="bg-gray-50 text-gray-500 text-left">
+                <th className="px-3 py-2 font-medium w-8">
+                  <input type="checkbox" checked={allSelected} onChange={e => toggleAll(e.target.checked)} title="全选" />
+                </th>
                 <th className="px-3 py-2 font-medium">本地渠道</th>
                 <th className="px-3 py-2 font-medium">工作室</th>
                 <th className="px-3 py-2 font-medium">类型</th>
@@ -200,12 +253,12 @@ export default function LocalToRemoteSync() {
             <tbody className="divide-y divide-gray-100">
               {loading && (
                 <tr>
-                  <td colSpan={8} className="px-3 py-8 text-center text-gray-400">加载中…</td>
+                  <td colSpan={9} className="px-3 py-8 text-center text-gray-400">加载中…</td>
                 </tr>
               )}
               {!loading && items.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="px-3 py-8 text-center text-gray-400">没有可同步的本地渠道</td>
+                  <td colSpan={9} className="px-3 py-8 text-center text-gray-400">没有可同步的本地渠道</td>
                 </tr>
               )}
               {!loading &&
@@ -214,6 +267,13 @@ export default function LocalToRemoteSync() {
                   const result = results[it.local_channel_id]
                   return (
                     <tr key={it.local_channel_id} className="hover:bg-gray-50/60 align-top">
+                      <td className="px-3 py-2">
+                        <input
+                          type="checkbox"
+                          checked={selected.has(it.local_channel_id)}
+                          onChange={e => toggleRow(it.local_channel_id, e.target.checked)}
+                        />
+                      </td>
                       <td className="px-3 py-2">
                         <div className="text-gray-900">{it.name || '—'}</div>
                         <div className="text-[10px] text-gray-400">#{it.local_channel_id}</div>
@@ -251,11 +311,15 @@ export default function LocalToRemoteSync() {
                       <td className="px-3 py-2 text-right">
                         <button
                           className={btnCls}
-                          disabled={rowBusy || it.already_synced || !it.models}
+                          disabled={rowBusy || !it.models || (it.already_synced && !force)}
                           onClick={() => void syncItems([it])}
-                          title={!it.models ? '该渠道没有模型' : undefined}
+                          title={
+                            !it.models ? '该渠道没有模型'
+                              : it.already_synced && !force ? '已同步；勾选"强制重推"可再次推送(可推到新分组)'
+                              : undefined
+                          }
                         >
-                          {rowBusy ? '同步中…' : it.already_synced ? '已同步' : '推送到远程'}
+                          {rowBusy ? '同步中…' : it.already_synced ? (force ? '重新同步' : '已同步') : '推送到远程'}
                         </button>
                       </td>
                     </tr>
