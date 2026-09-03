@@ -75,6 +75,8 @@ export default function SupplierAccounts() {
   const [modelSearch, setModelSearch] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [accountType, setAccountType] = useState(0)
+  const [tpm, setTpm] = useState('')
+  const [rpm, setRpm] = useState('')
   const [remark, setRemark] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [submitMsg, setSubmitMsg] = useState<string | null>(null)
@@ -111,6 +113,8 @@ export default function SupplierAccounts() {
   const [savingFx, setSavingFx] = useState(false)
   const [tickInput, setTickInput] = useState('')
   const [savingTick, setSavingTick] = useState(false)
+  const [discountInput, setDiscountInput] = useState('')
+  const [savingDiscount, setSavingDiscount] = useState(false)
   const [settingsMsg, setSettingsMsg] = useState<string | null>(null)
   const [settingsErr, setSettingsErr] = useState<string | null>(null)
 
@@ -185,6 +189,9 @@ export default function SupplierAccounts() {
           if (typeof s.quota_tick_sec === 'number' && s.quota_tick_sec > 0) {
             setTickInput(String(s.quota_tick_sec))
           }
+          if (s.default_discount) {
+            setDiscountInput(s.default_discount)
+          }
         } catch {
           /* settings panel just won't prefill */
         }
@@ -232,6 +239,15 @@ export default function SupplierAccounts() {
     if (selectedProvider && key.length < selectedProvider.key_min_len) {
       return setSubmitErr(`API Key 长度至少 ${selectedProvider.key_min_len} 位`)
     }
+    const tpmVal = tpm.trim()
+    const rpmVal = rpm.trim()
+    // 普通号 (account_type=0) must provide tpm/rpm; 速刷号 (1) may omit them.
+    const isNonNegInt = (s: string) => /^\d+$/.test(s)
+    if (accountType === 0 && (!tpmVal || !rpmVal)) {
+      return setSubmitErr('普通号必须填写 TPM 和 RPM')
+    }
+    if (tpmVal && !isNonNegInt(tpmVal)) return setSubmitErr('TPM 必须为非负整数')
+    if (rpmVal && !isNonNegInt(rpmVal)) return setSubmitErr('RPM 必须为非负整数')
     setSubmitting(true)
     try {
       const res = await api.supplierUploadAccount({
@@ -239,10 +255,14 @@ export default function SupplierAccounts() {
         model: modelList.join(','),
         api_key: key,
         account_type: accountType,
+        tpm: tpmVal || undefined,
+        rpm: rpmVal || undefined,
         remark: remark.trim() || undefined,
       })
       setSubmitMsg(`${res.msg}（别名：${res.alias}）`)
       setApiKey('')
+      setTpm('')
+      setRpm('')
       setRemark('')
       setSelectedModels(new Set())
       await loadAccounts()
@@ -418,6 +438,28 @@ export default function SupplierAccounts() {
     }
   }
 
+  async function handleSaveDiscount() {
+    setSettingsMsg(null)
+    setSettingsErr(null)
+    const d = discountInput.trim()
+    const v = Number(d)
+    if (!d || !Number.isFinite(v) || v < 0) {
+      setSettingsErr('默认折扣必须是非负数字（如 88）')
+      return
+    }
+    setSavingDiscount(true)
+    try {
+      const s = await api.setSupplierSettings({ default_discount: d })
+      setSettings(s)
+      if (s.default_discount) setDiscountInput(s.default_discount)
+      setSettingsMsg(`普通号默认折扣已保存：${s.default_discount}`)
+    } catch (e: any) {
+      setSettingsErr(e?.message || String(e))
+    } finally {
+      setSavingDiscount(false)
+    }
+  }
+
   async function handleSaveTick() {
     setSettingsMsg(null)
     setSettingsErr(null)
@@ -581,6 +623,26 @@ export default function SupplierAccounts() {
             </div>
 
             <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">普通号默认折扣（百分比，如 88）</label>
+              <div className="flex gap-2">
+                <input
+                  value={discountInput}
+                  onChange={e => setDiscountInput(e.target.value)}
+                  placeholder="88"
+                  className="w-32 border border-gray-300 rounded-md px-2.5 py-2 text-sm"
+                />
+                <button
+                  onClick={handleSaveDiscount}
+                  disabled={savingDiscount}
+                  className="bg-brand hover:bg-brand-700 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 whitespace-nowrap"
+                >
+                  {savingDiscount ? '保存中…' : '保存折扣'}
+                </button>
+              </div>
+              <p className="text-[11px] text-gray-400 mt-1">普通号上号时结算折扣统一按此值提交（上号表单不展示，速刷号不带折扣）。</p>
+            </div>
+
+            <div>
               <label className="text-xs font-medium text-gray-600 mb-1 block">额度检查间隔（秒，300–86400）</label>
               <div className="flex gap-2">
                 <input
@@ -737,6 +799,33 @@ export default function SupplierAccounts() {
             <option value={0}>普通</option>
             <option value={1}>速刷号</option>
           </select>
+
+          <div className="grid grid-cols-2 gap-3 mb-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                TPM{accountType === 0 ? ' *' : '（选填）'}
+              </label>
+              <input
+                value={tpm}
+                onChange={e => setTpm(e.target.value)}
+                inputMode="numeric"
+                placeholder="每分钟 Token 数"
+                className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                RPM{accountType === 0 ? ' *' : '（选填）'}
+              </label>
+              <input
+                value={rpm}
+                onChange={e => setRpm(e.target.value)}
+                inputMode="numeric"
+                placeholder="每分钟请求数"
+                className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm"
+              />
+            </div>
+          </div>
 
           <label className="block text-xs font-medium text-gray-600 mb-1">备注</label>
           <input

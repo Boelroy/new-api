@@ -615,6 +615,8 @@ export type SupplierSettings = {
   fx_rate: number
   // How often the quota alert loop checks usage (seconds).
   quota_tick_sec: number
+  // Default settlement discount (percentage) applied to 普通号 uploads.
+  default_discount: string
 }
 
 export type SupplierMetric = {
@@ -1896,6 +1898,8 @@ export const api = {
     api_key: string
     account_id?: string
     account_type?: number
+    tpm?: string
+    rpm?: string
     remark?: string
   }) =>
     request<{ id: number; alias: string; msg: string }>('/api/supplier-account/accounts', {
@@ -1923,6 +1927,7 @@ export const api = {
     quota_webhook?: string
     fx_rate?: number
     quota_tick_sec?: number
+    default_discount?: string
   }) =>
     request<SupplierSettings>('/api/supplier-account/settings', {
       method: 'PUT',

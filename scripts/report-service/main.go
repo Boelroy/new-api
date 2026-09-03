@@ -4676,6 +4676,7 @@ func main() {
 	startRemoteErrorLogSync()
 	startRemoteAutoDisableLoop()
 	startSupplierQuotaAlertLoop()
+	startSupplierAnnouncementLoop()
 	if profitEnabled {
 		startPipiSync()
 		startDownstreamDailyCarryForward()

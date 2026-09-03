@@ -38,6 +38,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -79,12 +80,31 @@ const (
 	cfgSupplierQuotaWebhook     = "supplier_quota_webhook"
 	cfgSupplierFxRate           = "supplier_fx_rate"
 	cfgSupplierQuotaTickSec     = "supplier_quota_tick_sec"
+	cfgSupplierDefaultDiscount  = "supplier_default_discount"
+	cfgSupplierAnnouncePushed   = "supplier_announce_pushed_max"
 	cfgDefaultFxRate            = "default_fx_rate"
 )
 
 // supplierDefaultFxRate is the RMB->USD divisor used when no rate is
 // configured. The portal reports cost in RMB; the UI and quotas are in USD.
 const supplierDefaultFxRate = 7.2
+
+// supplierDefaultDiscount is the settlement discount (percentage, % stripped)
+// applied to 普通号 uploads when the admin has not configured one. Not exposed
+// in the upload form — filled server-side from the admin config.
+const supplierDefaultDiscount = "88"
+
+// supplierAccountDiscount returns the admin-configured default settlement
+// discount for 普通号 uploads, falling back to supplierDefaultDiscount. Always
+// a valid non-negative number string.
+func supplierAccountDiscount() string {
+	if raw := strings.TrimSpace(supplierConfigGet(cfgSupplierDefaultDiscount)); raw != "" {
+		if v, err := strconv.ParseFloat(raw, 64); err == nil && v >= 0 {
+			return raw
+		}
+	}
+	return supplierDefaultDiscount
+}
 
 // supplierQuotaTickSec bounds for the alert loop interval (seconds).
 const (
@@ -512,6 +532,8 @@ func handleSupplierAccountCreate(c *gin.Context) {
 		APIKey      string `json:"api_key"`
 		AccountID   string `json:"account_id"`
 		AccountType int    `json:"account_type"`
+		Tpm         string `json:"tpm"`
+		Rpm         string `json:"rpm"`
 		Remark      string `json:"remark"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
@@ -521,6 +543,8 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	body.Provider = strings.TrimSpace(body.Provider)
 	body.Model = strings.TrimSpace(body.Model)
 	body.APIKey = strings.TrimSpace(body.APIKey)
+	body.Tpm = strings.TrimSpace(body.Tpm)
+	body.Rpm = strings.TrimSpace(body.Rpm)
 	if body.Provider == "" || body.Model == "" || body.APIKey == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider, model and api_key are required"})
 		return
@@ -528,6 +552,26 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	if body.AccountType != 0 && body.AccountType != 1 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "account_type must be 0 or 1"})
 		return
+	}
+	// tpm / rpm are mandatory for 普通号 (account_type=0); 速刷号
+	// (account_type=1) may omit them. When present they must be non-negative
+	// integers. discount is NOT user-facing — it is filled server-side from the
+	// admin-configured default (see supplierAccountDiscount).
+	if body.AccountType == 0 && (body.Tpm == "" || body.Rpm == "") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "普通号必须填写 tpm 和 rpm"})
+		return
+	}
+	if body.Tpm != "" {
+		if n, err := strconv.Atoi(body.Tpm); err != nil || n < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "tpm 必须为非负整数"})
+			return
+		}
+	}
+	if body.Rpm != "" {
+		if n, err := strconv.Atoi(body.Rpm); err != nil || n < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "rpm 必须为非负整数"})
+			return
+		}
 	}
 	// Suppliers may only upload for providers the admin has made visible.
 	if !callerIsSupplierAdmin(c) {
@@ -545,6 +589,17 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	}
 	if body.AccountID != "" {
 		upstreamReq["account_id"] = body.AccountID
+	}
+	if body.Tpm != "" {
+		upstreamReq["tpm"] = body.Tpm
+	}
+	if body.Rpm != "" {
+		upstreamReq["rpm"] = body.Rpm
+	}
+	// discount is server-side policy: 普通号 always settles at the admin default.
+	// 速刷号 leaves it unset (portal allows omitting it).
+	if body.AccountType == 0 {
+		upstreamReq["discount"] = supplierAccountDiscount()
 	}
 	if body.Remark != "" {
 		upstreamReq["remark"] = body.Remark
@@ -1025,6 +1080,7 @@ func handleSupplierSettingsGet(c *gin.Context) {
 		"quota_webhook_last4": whLast4,
 		"fx_rate":             supplierFxRate(),
 		"quota_tick_sec":      supplierQuotaTickSeconds(),
+		"default_discount":    supplierAccountDiscount(),
 	})
 }
 
@@ -1045,6 +1101,7 @@ func handleSupplierSettingsSet(c *gin.Context) {
 		QuotaWebhook     *string                             `json:"quota_webhook"`
 		FxRate           *float64                            `json:"fx_rate"`
 		QuotaTickSec     *int                                `json:"quota_tick_sec"`
+		DefaultDiscount  *string                             `json:"default_discount"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
@@ -1068,6 +1125,19 @@ func handleSupplierSettingsSet(c *gin.Context) {
 			return
 		}
 		if err := supplierConfigSet(cfgSupplierFxRate, strconv.FormatFloat(*body.FxRate, 'f', -1, 64)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.DefaultDiscount != nil {
+		d := strings.TrimSpace(*body.DefaultDiscount)
+		if d != "" {
+			if v, err := strconv.ParseFloat(d, 64); err != nil || v < 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "default_discount must be a non-negative number"})
+				return
+			}
+		}
+		if err := supplierConfigSet(cfgSupplierDefaultDiscount, d); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -1177,6 +1247,115 @@ func startSupplierQuotaAlertLoop() {
 			time.Sleep(time.Duration(supplierQuotaTickSeconds()) * time.Second)
 		}
 	}()
+}
+
+// supplierAnnouncement is one entry of the WEB /supplier/announcements list.
+// The portal returns {"list": [...]}; each notice carries an incrementing id
+// and its rendered content.
+type supplierAnnouncement struct {
+	ID        int64  `json:"id"`
+	Content   string `json:"content"`
+	CreatedAt string `json:"created_at"`
+}
+
+// startSupplierAnnouncementLoop pushes newly published supplier announcements to
+// the group chat (LARK_WEBHOOK) twice a day (10:00 / 22:00 portal time). Only
+// notices newer than the last-pushed id are sent, so the group never sees the
+// same announcement twice. Leader-gated; no-op when the portal WEB credentials
+// aren't configured.
+func startSupplierAnnouncementLoop() {
+	if supplierAccountBaseURL == "" || !supplierWebConfigured() {
+		return
+	}
+	go func() {
+		for {
+			now := time.Now().In(supplierPortalLoc)
+			var next time.Time
+			for _, h := range []int{10, 22} {
+				t := time.Date(now.Year(), now.Month(), now.Day(), h, 0, 0, 0, supplierPortalLoc)
+				if t.After(now) {
+					next = t
+					break
+				}
+			}
+			if next.IsZero() {
+				next = time.Date(now.Year(), now.Month(), now.Day(), 10, 0, 0, 0, supplierPortalLoc).AddDate(0, 0, 1)
+			}
+			time.Sleep(time.Until(next))
+			if IsLeader() {
+				runSupplierAnnouncementPush()
+			}
+		}
+	}()
+}
+
+// runSupplierAnnouncementPush fetches the supplier announcement list and sends
+// any not-yet-pushed notices (id above the stored high-water mark) to the group
+// webhook, oldest first. On the very first run it adopts the current max id
+// silently so the group isn't flooded with the historical backlog.
+func runSupplierAnnouncementPush() {
+	if larkWebhook == "" {
+		return
+	}
+	tok, err := getSupplierWebToken()
+	if err != nil {
+		log.Printf("[supplier-announce] web token: %v", err)
+		return
+	}
+	status, body, err := supplierProxy(http.MethodGet, "/supplier-account/api/supplier/announcements", tok, nil)
+	if err != nil {
+		log.Printf("[supplier-announce] fetch: %v", err)
+		return
+	}
+	if status < 200 || status >= 300 {
+		log.Printf("[supplier-announce] fetch status %d: %s", status, supplierErr(body))
+		return
+	}
+	var payload struct {
+		List []supplierAnnouncement `json:"list"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		log.Printf("[supplier-announce] decode: %v", err)
+		return
+	}
+	if len(payload.List) == 0 {
+		return
+	}
+	// Push oldest-first so the group reads them in order and the high-water mark
+	// advances monotonically.
+	sort.Slice(payload.List, func(i, j int) bool { return payload.List[i].ID < payload.List[j].ID })
+	maxID := payload.List[len(payload.List)-1].ID
+
+	stored := strings.TrimSpace(supplierConfigGet(cfgSupplierAnnouncePushed))
+	if stored == "" {
+		// First run: adopt the current max without replaying history.
+		if err := supplierConfigSet(cfgSupplierAnnouncePushed, strconv.FormatInt(maxID, 10)); err != nil {
+			log.Printf("[supplier-announce] init mark: %v", err)
+		}
+		return
+	}
+	lastMax, _ := strconv.ParseInt(stored, 10, 64)
+
+	pushed := lastMax
+	for _, a := range payload.List {
+		if a.ID <= lastMax {
+			continue
+		}
+		content := strings.TrimSpace(a.Content)
+		if content != "" {
+			msg := "📢 供应商公告\n" + content
+			if a.CreatedAt != "" {
+				msg += "\n\n发布时间：" + a.CreatedAt
+			}
+			sendLarkTo(larkWebhook, msg)
+		}
+		pushed = a.ID
+	}
+	if pushed > lastMax {
+		if err := supplierConfigSet(cfgSupplierAnnouncePushed, strconv.FormatInt(pushed, 10)); err != nil {
+			log.Printf("[supplier-announce] save mark: %v", err)
+		}
+	}
 }
 
 // quotaAccount is one account under quota evaluation.
