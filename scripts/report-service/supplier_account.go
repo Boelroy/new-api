@@ -1259,10 +1259,12 @@ type supplierAnnouncement struct {
 }
 
 // startSupplierAnnouncementLoop pushes newly published supplier announcements to
-// the group chat (LARK_WEBHOOK) twice a day (10:00 / 22:00 portal time). Only
-// notices newer than the last-pushed id are sent, so the group never sees the
-// same announcement twice. Leader-gated; no-op when the portal WEB credentials
-// aren't configured.
+// the supplier group chat twice a day (10:00 / 22:00 portal time). It reuses the
+// account portal's configured Lark webhook (the "额度报警 Webhook" on the 账号上号
+// page — supplier_quota_webhook / SUPPLIER_QUOTA_WEBHOOK), so no separate config
+// is needed. Only notices newer than the last-pushed id are sent, so the group
+// never sees the same announcement twice. Leader-gated; no-op when the portal WEB
+// credentials aren't configured.
 func startSupplierAnnouncementLoop() {
 	if supplierAccountBaseURL == "" || !supplierWebConfigured() {
 		return
@@ -1290,11 +1292,13 @@ func startSupplierAnnouncementLoop() {
 }
 
 // runSupplierAnnouncementPush fetches the supplier announcement list and sends
-// any not-yet-pushed notices (id above the stored high-water mark) to the group
-// webhook, oldest first. On the very first run it adopts the current max id
-// silently so the group isn't flooded with the historical backlog.
+// any not-yet-pushed notices (id above the stored high-water mark) to the
+// supplier portal's Lark webhook, oldest first. On the very first run it adopts
+// the current max id silently so the group isn't flooded with the historical
+// backlog.
 func runSupplierAnnouncementPush() {
-	if larkWebhook == "" {
+	webhook := effectiveQuotaWebhook()
+	if webhook == "" {
 		return
 	}
 	tok, err := getSupplierWebToken()
@@ -1347,7 +1351,7 @@ func runSupplierAnnouncementPush() {
 			if a.CreatedAt != "" {
 				msg += "\n\n发布时间：" + a.CreatedAt
 			}
-			sendLarkTo(larkWebhook, msg)
+			sendLarkTo(webhook, msg)
 		}
 		pushed = a.ID
 	}
