@@ -81,6 +81,8 @@ const (
 	cfgSupplierFxRate           = "supplier_fx_rate"
 	cfgSupplierQuotaTickSec     = "supplier_quota_tick_sec"
 	cfgSupplierDefaultDiscount  = "supplier_default_discount"
+	cfgSupplierDefaultTPM       = "supplier_default_tpm"
+	cfgSupplierDefaultRPM       = "supplier_default_rpm"
 	cfgSupplierAnnouncePushed   = "supplier_announce_pushed_max"
 	cfgDefaultFxRate            = "default_fx_rate"
 )
@@ -104,6 +106,35 @@ func supplierAccountDiscount() string {
 		}
 	}
 	return supplierDefaultDiscount
+}
+
+// supplierDefaultTPM / supplierDefaultRPM are the built-in fallbacks used to
+// prefill the 账号上号 form's TPM/RPM when the admin has not configured one.
+const (
+	supplierDefaultTPM = "4000000000"
+	supplierDefaultRPM = "10000"
+)
+
+// supplierAccountDefaultTPM / supplierAccountDefaultRPM return the admin-
+// configured TPM/RPM prefill for the upload form, falling back to the built-in
+// defaults. Always a valid non-negative integer string.
+func supplierAccountDefaultTPM() string {
+	return supplierConfigNonNegIntOr(cfgSupplierDefaultTPM, supplierDefaultTPM)
+}
+
+func supplierAccountDefaultRPM() string {
+	return supplierConfigNonNegIntOr(cfgSupplierDefaultRPM, supplierDefaultRPM)
+}
+
+// supplierConfigNonNegIntOr reads a report_config value that must be a
+// non-negative integer, returning def when unset or invalid.
+func supplierConfigNonNegIntOr(key, def string) string {
+	if raw := strings.TrimSpace(supplierConfigGet(key)); raw != "" {
+		if v, err := strconv.ParseInt(raw, 10, 64); err == nil && v >= 0 {
+			return raw
+		}
+	}
+	return def
 }
 
 // supplierQuotaTickSec bounds for the alert loop interval (seconds).
@@ -639,14 +670,16 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	}
 
 	// Upsert on remote_account_id so re-submitting the same account (portal
-	// dedupes by key) refreshes ownership/metadata instead of erroring.
+	// dedupes by key) refreshes metadata instead of erroring. uploaded_by is
+	// preserved on conflict so a later admin re-sync / re-submit never steals
+	// the account away from the studio that originally owns it.
 	if _, err := db.Exec(
 		`INSERT INTO rs_supplier_account
 		   (uploaded_by, studio, provider, models, remote_account_id, alias,
 		    account_type, remark, key_last8, key_hash, created_at, updated_at)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
 		 ON CONFLICT (remote_account_id) DO UPDATE SET
-		    uploaded_by=EXCLUDED.uploaded_by, studio=EXCLUDED.studio,
+		    studio=EXCLUDED.studio,
 		    provider=EXCLUDED.provider, models=EXCLUDED.models,
 		    alias=EXCLUDED.alias, account_type=EXCLUDED.account_type,
 		    remark=EXCLUDED.remark, key_last8=EXCLUDED.key_last8,
@@ -767,14 +800,16 @@ func handleSupplierAccountSync(c *gin.Context) {
 
 		// Upsert on remote_account_id. quota_usd / quota_alerted_at are omitted
 		// from the column list so a re-sync preserves any configured quota.
-		// created_at is preserved on conflict (only updated_at bumps).
+		// created_at is preserved on conflict (only updated_at bumps). uploaded_by
+		// is preserved too so a sync never reassigns an account away from the
+		// studio that owns it (a fresh account is still owned by the syncer).
 		if _, err := db.Exec(
 			`INSERT INTO rs_supplier_account
 			   (uploaded_by, studio, provider, models, remote_account_id, alias,
 			    account_type, remark, key_last8, key_hash, created_at, updated_at)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 			 ON CONFLICT (remote_account_id) DO UPDATE SET
-			    uploaded_by=EXCLUDED.uploaded_by, studio=EXCLUDED.studio,
+			    studio=EXCLUDED.studio,
 			    provider=EXCLUDED.provider, models=EXCLUDED.models,
 			    alias=EXCLUDED.alias, account_type=EXCLUDED.account_type,
 			    remark=EXCLUDED.remark, key_last8=EXCLUDED.key_last8,
@@ -1081,6 +1116,8 @@ func handleSupplierSettingsGet(c *gin.Context) {
 		"fx_rate":             supplierFxRate(),
 		"quota_tick_sec":      supplierQuotaTickSeconds(),
 		"default_discount":    supplierAccountDiscount(),
+		"default_tpm":         supplierAccountDefaultTPM(),
+		"default_rpm":         supplierAccountDefaultRPM(),
 	})
 }
 
@@ -1088,7 +1125,11 @@ func handleSupplierSettingsGet(c *gin.Context) {
 // Available to suppliers too (admin+supplier group) — the defaults are not
 // sensitive and drive the studio's form pre-selection.
 func handleSupplierProviderDefaults(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"defaults": supplierProviderDefaults()})
+	c.JSON(http.StatusOK, gin.H{
+		"defaults":    supplierProviderDefaults(),
+		"default_tpm": supplierAccountDefaultTPM(),
+		"default_rpm": supplierAccountDefaultRPM(),
+	})
 }
 
 func handleSupplierSettingsSet(c *gin.Context) {
@@ -1102,6 +1143,8 @@ func handleSupplierSettingsSet(c *gin.Context) {
 		FxRate           *float64                            `json:"fx_rate"`
 		QuotaTickSec     *int                                `json:"quota_tick_sec"`
 		DefaultDiscount  *string                             `json:"default_discount"`
+		DefaultTPM       *string                             `json:"default_tpm"`
+		DefaultRPM       *string                             `json:"default_rpm"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
@@ -1138,6 +1181,28 @@ func handleSupplierSettingsSet(c *gin.Context) {
 			}
 		}
 		if err := supplierConfigSet(cfgSupplierDefaultDiscount, d); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	for _, f := range []struct {
+		val *string
+		key string
+	}{
+		{body.DefaultTPM, cfgSupplierDefaultTPM},
+		{body.DefaultRPM, cfgSupplierDefaultRPM},
+	} {
+		if f.val == nil {
+			continue
+		}
+		n := strings.TrimSpace(*f.val)
+		if n != "" {
+			if v, err := strconv.ParseInt(n, 10, 64); err != nil || v < 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "default_tpm/default_rpm must be a non-negative integer"})
+				return
+			}
+		}
+		if err := supplierConfigSet(f.key, n); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}

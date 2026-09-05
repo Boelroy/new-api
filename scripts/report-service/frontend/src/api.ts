@@ -617,6 +617,9 @@ export type SupplierSettings = {
   quota_tick_sec: number
   // Default settlement discount (percentage) applied to 普通号 uploads.
   default_discount: string
+  // Default TPM/RPM prefilled in the 账号上号 form (non-negative integers).
+  default_tpm: string
+  default_rpm: string
 }
 
 export type SupplierMetric = {
@@ -1928,6 +1931,8 @@ export const api = {
     fx_rate?: number
     quota_tick_sec?: number
     default_discount?: string
+    default_tpm?: string
+    default_rpm?: string
   }) =>
     request<SupplierSettings>('/api/supplier-account/settings', {
       method: 'PUT',
@@ -1938,7 +1943,7 @@ export const api = {
   // Per-provider default models + account type, for prefilling the upload
   // form. Available to suppliers too.
   getSupplierProviderDefaults: () =>
-    request<{ defaults: Record<string, SupplierProviderDefault> }>('/api/supplier-account/provider-defaults'),
+    request<{ defaults: Record<string, SupplierProviderDefault>; default_tpm?: string; default_rpm?: string }>('/api/supplier-account/provider-defaults'),
 }
 
 // One stored credential and its resolved local-channel target. Mirrors the

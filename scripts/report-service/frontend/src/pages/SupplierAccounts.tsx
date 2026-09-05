@@ -28,9 +28,11 @@ import {
 
 const ACCOUNT_TYPE_LABELS: Record<number, string> = { 0: '普通', 1: '速刷号' }
 
-// Default TPM/RPM pre-filled when entering a new supplier account (账号上号).
-const DEFAULT_TPM = '200000000'
-const DEFAULT_RPM = '2500'
+// Client-side fallback for the 账号上号 TPM/RPM prefill, used until the server
+// config loads. The authoritative defaults are admin-configurable and returned
+// by the provider-defaults / settings endpoints.
+const DEFAULT_TPM = '4000000000'
+const DEFAULT_RPM = '10000'
 
 const STATUS_LABELS: Record<string, string> = {
   online: '在线',
@@ -81,6 +83,9 @@ export default function SupplierAccounts() {
   const [accountType, setAccountType] = useState(0)
   const [tpm, setTpm] = useState(DEFAULT_TPM)
   const [rpm, setRpm] = useState(DEFAULT_RPM)
+  // Admin-configured defaults for the TPM/RPM prefill (reset target on submit).
+  const [defaultTpm, setDefaultTpm] = useState(DEFAULT_TPM)
+  const [defaultRpm, setDefaultRpm] = useState(DEFAULT_RPM)
   const [remark, setRemark] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [submitMsg, setSubmitMsg] = useState<string | null>(null)
@@ -119,6 +124,9 @@ export default function SupplierAccounts() {
   const [savingTick, setSavingTick] = useState(false)
   const [discountInput, setDiscountInput] = useState('')
   const [savingDiscount, setSavingDiscount] = useState(false)
+  const [tpmInput, setTpmInput] = useState('')
+  const [rpmInput, setRpmInput] = useState('')
+  const [savingLimits, setSavingLimits] = useState(false)
   const [settingsMsg, setSettingsMsg] = useState<string | null>(null)
   const [settingsErr, setSettingsErr] = useState<string | null>(null)
 
@@ -177,6 +185,14 @@ export default function SupplierAccounts() {
       try {
         const d = await api.getSupplierProviderDefaults()
         setFormDefaults(d.defaults || {})
+        if (d.default_tpm) {
+          setDefaultTpm(d.default_tpm)
+          setTpm(d.default_tpm)
+        }
+        if (d.default_rpm) {
+          setDefaultRpm(d.default_rpm)
+          setRpm(d.default_rpm)
+        }
       } catch {
         /* form just won't prefill */
       }
@@ -196,6 +212,8 @@ export default function SupplierAccounts() {
           if (s.default_discount) {
             setDiscountInput(s.default_discount)
           }
+          if (s.default_tpm) setTpmInput(s.default_tpm)
+          if (s.default_rpm) setRpmInput(s.default_rpm)
         } catch {
           /* settings panel just won't prefill */
         }
@@ -265,8 +283,8 @@ export default function SupplierAccounts() {
       })
       setSubmitMsg(`${res.msg}（别名：${res.alias}）`)
       setApiKey('')
-      setTpm(DEFAULT_TPM)
-      setRpm(DEFAULT_RPM)
+      setTpm(defaultTpm)
+      setRpm(defaultRpm)
       setRemark('')
       setSelectedModels(new Set())
       await loadAccounts()
@@ -464,6 +482,38 @@ export default function SupplierAccounts() {
     }
   }
 
+  async function handleSaveLimits() {
+    setSettingsMsg(null)
+    setSettingsErr(null)
+    const t = tpmInput.trim()
+    const r = rpmInput.trim()
+    const isNonNegInt = (s: string) => /^\d+$/.test(s)
+    if (!isNonNegInt(t) || !isNonNegInt(r)) {
+      setSettingsErr('默认 TPM / RPM 必须为非负整数')
+      return
+    }
+    setSavingLimits(true)
+    try {
+      const s = await api.setSupplierSettings({ default_tpm: t, default_rpm: r })
+      setSettings(s)
+      if (s.default_tpm) {
+        setTpmInput(s.default_tpm)
+        setDefaultTpm(s.default_tpm)
+        setTpm(s.default_tpm)
+      }
+      if (s.default_rpm) {
+        setRpmInput(s.default_rpm)
+        setDefaultRpm(s.default_rpm)
+        setRpm(s.default_rpm)
+      }
+      setSettingsMsg(`默认 TPM / RPM 已保存：${s.default_tpm} / ${s.default_rpm}`)
+    } catch (e: any) {
+      setSettingsErr(e?.message || String(e))
+    } finally {
+      setSavingLimits(false)
+    }
+  }
+
   async function handleSaveTick() {
     setSettingsMsg(null)
     setSettingsErr(null)
@@ -644,6 +694,34 @@ export default function SupplierAccounts() {
                 </button>
               </div>
               <p className="text-[11px] text-gray-400 mt-1">普通号上号时结算折扣统一按此值提交（上号表单不展示，速刷号不带折扣）。</p>
+            </div>
+
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">上号默认 TPM / RPM（非负整数）</label>
+              <div className="flex gap-2">
+                <input
+                  value={tpmInput}
+                  onChange={e => setTpmInput(e.target.value)}
+                  inputMode="numeric"
+                  placeholder="TPM，如 4000000000"
+                  className="w-44 border border-gray-300 rounded-md px-2.5 py-2 text-sm"
+                />
+                <input
+                  value={rpmInput}
+                  onChange={e => setRpmInput(e.target.value)}
+                  inputMode="numeric"
+                  placeholder="RPM，如 10000"
+                  className="w-32 border border-gray-300 rounded-md px-2.5 py-2 text-sm"
+                />
+                <button
+                  onClick={handleSaveLimits}
+                  disabled={savingLimits}
+                  className="bg-brand hover:bg-brand-700 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 whitespace-nowrap"
+                >
+                  {savingLimits ? '保存中…' : '保存默认'}
+                </button>
+              </div>
+              <p className="text-[11px] text-gray-400 mt-1">上号表单的 TPM / RPM 会按此值预填（仍可手动修改），保存后即时生效，无需重新部署。</p>
             </div>
 
             <div>
