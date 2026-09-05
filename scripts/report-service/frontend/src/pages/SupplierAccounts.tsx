@@ -373,8 +373,12 @@ export default function SupplierAccounts() {
   async function handleRefreshMetrics() {
     setMetricsErr(null)
     setLoadingMetrics(true)
+    // Always query up to "now" rather than the end-time picker value, so a
+    // refresh reflects the latest usage even if the picker is stale.
+    const now = fmtLocal(new Date())
+    setEndTime(now)
     try {
-      const res = await api.supplierMetrics({ begin_time: beginTime, end_time: endTime })
+      const res = await api.supplierMetrics({ begin_time: beginTime, end_time: now })
       const map: Record<number, SupplierMetric> = {}
       for (const m of res.accounts || []) map[m.aid] = m
       setMetrics(map)
