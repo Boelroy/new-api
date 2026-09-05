@@ -28,6 +28,10 @@ import {
 
 const ACCOUNT_TYPE_LABELS: Record<number, string> = { 0: '普通', 1: '速刷号' }
 
+// Default TPM/RPM pre-filled when entering a new supplier account (账号上号).
+const DEFAULT_TPM = '3000000000'
+const DEFAULT_RPM = '10000'
+
 const STATUS_LABELS: Record<string, string> = {
   online: '在线',
   offline: '离线',
@@ -75,8 +79,8 @@ export default function SupplierAccounts() {
   const [modelSearch, setModelSearch] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [accountType, setAccountType] = useState(0)
-  const [tpm, setTpm] = useState('')
-  const [rpm, setRpm] = useState('')
+  const [tpm, setTpm] = useState(DEFAULT_TPM)
+  const [rpm, setRpm] = useState(DEFAULT_RPM)
   const [remark, setRemark] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [submitMsg, setSubmitMsg] = useState<string | null>(null)
@@ -261,8 +265,8 @@ export default function SupplierAccounts() {
       })
       setSubmitMsg(`${res.msg}（别名：${res.alias}）`)
       setApiKey('')
-      setTpm('')
-      setRpm('')
+      setTpm(DEFAULT_TPM)
+      setRpm(DEFAULT_RPM)
       setRemark('')
       setSelectedModels(new Set())
       await loadAccounts()
