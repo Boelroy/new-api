@@ -29,8 +29,8 @@ import {
 const ACCOUNT_TYPE_LABELS: Record<number, string> = { 0: '普通', 1: '速刷号' }
 
 // Default TPM/RPM pre-filled when entering a new supplier account (账号上号).
-const DEFAULT_TPM = '5000000'
-const DEFAULT_RPM = '5000'
+const DEFAULT_TPM = '20000000'
+const DEFAULT_RPM = '1000'
 
 const STATUS_LABELS: Record<string, string> = {
   online: '在线',
