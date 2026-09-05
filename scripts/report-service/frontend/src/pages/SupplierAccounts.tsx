@@ -29,8 +29,8 @@ import {
 const ACCOUNT_TYPE_LABELS: Record<number, string> = { 0: '普通', 1: '速刷号' }
 
 // Default TPM/RPM pre-filled when entering a new supplier account (账号上号).
-const DEFAULT_TPM = '3000000000'
-const DEFAULT_RPM = '10000'
+const DEFAULT_TPM = '5000000'
+const DEFAULT_RPM = '5000'
 
 const STATUS_LABELS: Record<string, string> = {
   online: '在线',
@@ -908,13 +908,12 @@ export default function SupplierAccounts() {
                 <thead>
                   <tr className="text-left border-b border-gray-200">
                     <th className="py-2 pr-3 mono-label">别名</th>
-                    <th className="py-2 pr-3 mono-label">厂商 / 模型</th>
+                    <th className="py-2 pr-3 mono-label">厂商</th>
                     {isAdmin && <th className="py-2 pr-3 mono-label">工作室 / 上传人</th>}
                     <th className="py-2 pr-3 mono-label">类型</th>
                     <th className="py-2 pr-3 mono-label">Key</th>
                     <th className="py-2 pr-3 mono-label">状态</th>
                     <th className="py-2 pr-3 mono-label text-right">请求数</th>
-                    <th className="py-2 pr-3 mono-label text-right">Tokens (入/出)</th>
                     <th className="py-2 pr-3 mono-label text-right">成功率</th>
                     <th className="py-2 pr-3 mono-label text-right">成本($)</th>
                     <th className="py-2 pr-3 mono-label text-right">额度($)</th>
@@ -935,7 +934,6 @@ export default function SupplierAccounts() {
                         </td>
                         <td className="py-2 pr-3">
                           <div>{a.provider}</div>
-                          <div className="text-[10px] text-gray-400 max-w-[220px] truncate" title={a.models}>{a.models}</div>
                         </td>
                         {isAdmin && (
                           <td className="py-2 pr-3">
@@ -947,9 +945,6 @@ export default function SupplierAccounts() {
                         <td className="py-2 pr-3 font-mono text-xs text-gray-500">…{a.key_last8}</td>
                         <td className="py-2 pr-3">{m ? statusBadge(m.status) : <span className="text-gray-300">—</span>}</td>
                         <td className="py-2 pr-3 text-right tabular-nums">{m?.requests ?? '—'}</td>
-                        <td className="py-2 pr-3 text-right tabular-nums text-xs">
-                          {m ? `${m.prompt_tokens ?? 0} / ${m.completion_tokens ?? 0}` : '—'}
-                        </td>
                         <td className="py-2 pr-3 text-right tabular-nums">
                           {m?.success_rate != null ? `${m.success_rate}%` : '—'}
                         </td>
