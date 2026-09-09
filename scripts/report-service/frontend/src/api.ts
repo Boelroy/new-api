@@ -1904,6 +1904,8 @@ export const api = {
     tpm?: string
     rpm?: string
     remark?: string
+    // Azure only: model endpoint URL, forwarded upstream as adc_config={"url":...}.
+    url?: string
   }) =>
     request<{ id: number; alias: string; msg: string }>('/api/supplier-account/accounts', {
       method: 'POST',

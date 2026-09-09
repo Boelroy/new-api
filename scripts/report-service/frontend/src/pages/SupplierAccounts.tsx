@@ -23,8 +23,8 @@ import {
 // for everyone; the raw name never reaches this page.
 //
 // Server enforces the scoping; the `isAdmin` flag here only drives which
-// columns are rendered. Only "keyonly"-shape providers are supported for
-// upload (the portal currently accepts API-key-only vendors).
+// columns are rendered. Uploadable providers are "keyonly"-shape (API key
+// only) plus "azure"-shape (API key + a model URL that yields resource_name).
 
 const ACCOUNT_TYPE_LABELS: Record<number, string> = { 0: '普通', 1: '速刷号' }
 
@@ -80,6 +80,9 @@ export default function SupplierAccounts() {
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set())
   const [modelSearch, setModelSearch] = useState('')
   const [apiKey, setApiKey] = useState('')
+  // Azure model endpoint URL, shared by every selected model. resource_name is
+  // derived from its first hostname label upstream.
+  const [modelUrl, setModelUrl] = useState('')
   const [accountType, setAccountType] = useState(0)
   const [tpm, setTpm] = useState(DEFAULT_TPM)
   const [rpm, setRpm] = useState(DEFAULT_RPM)
@@ -137,9 +140,10 @@ export default function SupplierAccounts() {
   const [defProvider, setDefProvider] = useState('')
   const [savingDefaults, setSavingDefaults] = useState(false)
 
-  // Only keyonly providers can be uploaded through this portal.
-  const keyonlyProviders = useMemo(
-    () => providers.filter(p => p.shape === 'keyonly'),
+  // Providers uploadable through this portal: pure API-key vendors plus Azure
+  // (API key + a model URL that yields resource_name upstream).
+  const uploadableProviders = useMemo(
+    () => providers.filter(p => p.shape === 'keyonly' || p.shape === 'azure'),
     [providers],
   )
 
@@ -150,7 +154,22 @@ export default function SupplierAccounts() {
     return list.filter(m => (m.model_name || m.value || '').toLowerCase().includes(q))
   }, [models, provider, modelSearch])
 
-  const selectedProvider = keyonlyProviders.find(p => p.name === provider)
+  const selectedProvider = uploadableProviders.find(p => p.name === provider)
+  // Azure providers additionally require a model URL; 速刷号 is not supported for
+  // them upstream, so the form pins them to 普通号.
+  const isAzure = selectedProvider?.shape === 'azure'
+  // resource_name preview: first label of the URL host (e.g.
+  // https://foo-bar.cognitiveservices.azure.com/... -> "foo-bar"). Upstream does
+  // the authoritative extraction; this is only a hint for the operator.
+  const resourceName = useMemo(() => {
+    const u = modelUrl.trim()
+    if (!u) return ''
+    try {
+      return new URL(u).hostname.split('.')[0] || ''
+    } catch {
+      return ''
+    }
+  }, [modelUrl])
 
   async function loadAccounts() {
     try {
@@ -237,9 +256,11 @@ export default function SupplierAccounts() {
   useEffect(() => {
     const d = formDefaults[provider]
     setSelectedModels(new Set(d?.models ?? []))
-    setAccountType(d?.account_type ?? 0)
+    // Azure does not support 速刷号 upstream — always 普通号.
+    setAccountType(isAzure ? 0 : (d?.account_type ?? 0))
     setModelSearch('')
-  }, [provider, formDefaults])
+    setModelUrl('')
+  }, [provider, formDefaults, isAzure])
 
   function toggleModel(value: string) {
     setSelectedModels(prev => {
@@ -261,6 +282,20 @@ export default function SupplierAccounts() {
     if (selectedProvider && key.length < selectedProvider.key_min_len) {
       return setSubmitErr(`API Key 长度至少 ${selectedProvider.key_min_len} 位`)
     }
+    const urlVal = modelUrl.trim()
+    if (isAzure) {
+      if (!urlVal) return setSubmitErr('请填写模型 URL')
+      let host = ''
+      try {
+        host = new URL(urlVal).hostname
+      } catch {
+        return setSubmitErr('模型 URL 格式不正确')
+      }
+      // resource_name is the first host label; a bare host with no dot can't yield one.
+      if (!host.includes('.') || !host.split('.')[0]) {
+        return setSubmitErr('模型 URL 无法提取 resource_name')
+      }
+    }
     const tpmVal = tpm.trim()
     const rpmVal = rpm.trim()
     // 普通号 (account_type=0) must provide tpm/rpm; 速刷号 (1) may omit them.
@@ -280,9 +315,11 @@ export default function SupplierAccounts() {
         tpm: tpmVal || undefined,
         rpm: rpmVal || undefined,
         remark: remark.trim() || undefined,
+        url: isAzure ? urlVal : undefined,
       })
       setSubmitMsg(`${res.msg}（别名：${res.alias}）`)
       setApiKey('')
+      setModelUrl('')
       setTpm(defaultTpm)
       setRpm(defaultRpm)
       setRemark('')
@@ -618,10 +655,10 @@ export default function SupplierAccounts() {
                 </button>
               </div>
               <div className="border border-gray-300 rounded-md max-h-40 overflow-y-auto p-1">
-                {keyonlyProviders.length === 0 ? (
+                {uploadableProviders.length === 0 ? (
                   <div className="text-xs text-gray-400 px-2 py-2">厂商加载中…</div>
                 ) : (
-                  keyonlyProviders.map(p => (
+                  uploadableProviders.map(p => (
                     <label key={p.name} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-50 cursor-pointer text-sm">
                       <input type="checkbox" checked={visibleSet.has(p.name)} onChange={() => toggleVisible(p.name)} />
                       <span>{p.name}</span>
@@ -767,7 +804,7 @@ export default function SupplierAccounts() {
               className="w-full sm:w-72 border border-gray-300 rounded-md px-2.5 py-2 text-sm mb-3 bg-white"
             >
               <option value="">选择厂商配置默认…</option>
-              {keyonlyProviders.map(p => {
+              {uploadableProviders.map(p => {
                 const n = defaultsDraft[p.name]?.models.length ?? 0
                 return <option key={p.name} value={p.name}>{p.name}{n ? ` · 默认 ${n} 模型` : ''}</option>
               })}
@@ -819,7 +856,7 @@ export default function SupplierAccounts() {
         {/* ---- Submit form ---- */}
         <section className="bg-white border border-gray-200 rounded-lg p-4 sm:p-5 h-fit">
           <h2 className="text-base font-semibold mb-1">提交 API 账号</h2>
-          <p className="text-[11px] text-gray-400 mb-4">目前仅支持「仅 API Key」类型厂商；代理统一按代理池处理。</p>
+          <p className="text-[11px] text-gray-400 mb-4">支持「仅 API Key」及 Azure（API Key + 模型 URL）类型厂商；代理统一按代理池处理。</p>
 
           <label className="block text-xs font-medium text-gray-600 mb-1">厂商 *</label>
           <select
@@ -828,7 +865,7 @@ export default function SupplierAccounts() {
             className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm mb-3 bg-white"
           >
             <option value="">请选择厂商</option>
-            {keyonlyProviders.map(p => (
+            {uploadableProviders.map(p => (
               <option key={p.name} value={p.name}>{p.name}</option>
             ))}
           </select>
@@ -871,19 +908,36 @@ export default function SupplierAccounts() {
           <textarea
             value={apiKey}
             onChange={e => setApiKey(e.target.value)}
-            placeholder="sk-xxxxxxxxxxxxxxxx"
+            placeholder={isAzure ? '请填写 Azure OpenAI 的 API Key' : 'sk-xxxxxxxxxxxxxxxx'}
             rows={2}
             className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm mb-3 font-mono"
           />
+
+          {isAzure && (
+            <>
+              <label className="block text-xs font-medium text-gray-600 mb-1">模型 URL *</label>
+              <input
+                value={modelUrl}
+                onChange={e => setModelUrl(e.target.value)}
+                placeholder="https://xxx.cognitiveservices.azure.com/openai/responses?api-version=..."
+                className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm font-mono"
+              />
+              <p className="text-[11px] text-gray-400 mt-1 mb-3">
+                所有选中模型共用该 URL，只需填写一次。resource_name 由域名首段自动提取
+                {resourceName ? <>：<span className="font-mono text-gray-600">{resourceName}</span></> : '。'}
+              </p>
+            </>
+          )}
 
           <label className="block text-xs font-medium text-gray-600 mb-1">账号类型</label>
           <select
             value={accountType}
             onChange={e => setAccountType(Number(e.target.value))}
-            className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm mb-3 bg-white"
+            disabled={isAzure}
+            className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm mb-3 bg-white disabled:bg-gray-50 disabled:text-gray-400"
           >
             <option value={0}>普通</option>
-            <option value={1}>速刷号</option>
+            {!isAzure && <option value={1}>速刷号</option>}
           </select>
 
           <div className="grid grid-cols-2 gap-3 mb-3">

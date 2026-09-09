@@ -566,6 +566,11 @@ func handleSupplierAccountCreate(c *gin.Context) {
 		Tpm         string `json:"tpm"`
 		Rpm         string `json:"rpm"`
 		Remark      string `json:"remark"`
+		// URL is the Azure model endpoint (e.g.
+		// https://<res>.cognitiveservices.azure.com/openai/...). Shared by every
+		// selected model; the portal extracts resource_name from its first
+		// hostname label. Forwarded upstream as adc_config={"url":...}.
+		URL string `json:"url"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
@@ -576,6 +581,7 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	body.APIKey = strings.TrimSpace(body.APIKey)
 	body.Tpm = strings.TrimSpace(body.Tpm)
 	body.Rpm = strings.TrimSpace(body.Rpm)
+	body.URL = strings.TrimSpace(body.URL)
 	if body.Provider == "" || body.Model == "" || body.APIKey == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider, model and api_key are required"})
 		return
@@ -634,6 +640,13 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	}
 	if body.Remark != "" {
 		upstreamReq["remark"] = body.Remark
+	}
+	// Azure needs the model endpoint URL. The portal's OpenAPI lane takes it as
+	// adc_config — a JSON *string* {"url":"..."} — and extracts resource_name
+	// from the URL upstream (all selected models share the one URL).
+	if body.URL != "" {
+		adc, _ := json.Marshal(map[string]string{"url": body.URL})
+		upstreamReq["adc_config"] = string(adc)
 	}
 	reqBytes, _ := json.Marshal(upstreamReq)
 
