@@ -571,6 +571,14 @@ func handleSupplierAccountCreate(c *gin.Context) {
 		// selected model; the portal extracts resource_name from its first
 		// hostname label. Forwarded upstream as adc_config={"url":...}.
 		URL string `json:"url"`
+		// AWS (aws_third) ARN mode: Region is the account register region
+		// (US/SG/TW/JP/MY/ID); AWSRegion/AWSProjectID are the Bedrock region and
+		// account id; Arns is the per-model ARN map forwarded upstream as
+		// adc_config={"arns":{...}}.
+		Region       string            `json:"region"`
+		AWSRegion    string            `json:"aws_region"`
+		AWSProjectID string            `json:"aws_project_id"`
+		Arns         map[string]string `json:"arns"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
@@ -582,6 +590,9 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	body.Tpm = strings.TrimSpace(body.Tpm)
 	body.Rpm = strings.TrimSpace(body.Rpm)
 	body.URL = strings.TrimSpace(body.URL)
+	body.Region = strings.TrimSpace(body.Region)
+	body.AWSRegion = strings.TrimSpace(body.AWSRegion)
+	body.AWSProjectID = strings.TrimSpace(body.AWSProjectID)
 	if body.Provider == "" || body.Model == "" || body.APIKey == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider, model and api_key are required"})
 		return
@@ -641,12 +652,26 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	if body.Remark != "" {
 		upstreamReq["remark"] = body.Remark
 	}
-	// Azure needs the model endpoint URL. The portal's OpenAPI lane takes it as
-	// adc_config — a JSON *string* {"url":"..."} — and extracts resource_name
-	// from the URL upstream (all selected models share the one URL).
-	if body.URL != "" {
+	// Provider-specific extras go into adc_config, a JSON *string* on the portal's
+	// OpenAPI lane. Azure carries the model endpoint URL (resource_name extracted
+	// upstream); aws_third (ARN mode) carries the per-model ARN map plus register
+	// region / AWS region / account id as top-level fields.
+	switch {
+	case body.URL != "":
 		adc, _ := json.Marshal(map[string]string{"url": body.URL})
 		upstreamReq["adc_config"] = string(adc)
+	case len(body.Arns) > 0:
+		adc, _ := json.Marshal(map[string]any{"arns": body.Arns})
+		upstreamReq["adc_config"] = string(adc)
+		if body.Region != "" {
+			upstreamReq["region"] = body.Region
+		}
+		if body.AWSRegion != "" {
+			upstreamReq["aws_region"] = body.AWSRegion
+		}
+		if body.AWSProjectID != "" {
+			upstreamReq["aws_project_id"] = body.AWSProjectID
+		}
 	}
 	reqBytes, _ := json.Marshal(upstreamReq)
 

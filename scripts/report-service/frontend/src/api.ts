@@ -571,6 +571,13 @@ export type SupplierProvider = {
   key_min_len: number
 }
 
+// Account register region option (label/value) returned alongside the provider
+// list; required by aws-shape providers (need_region).
+export type SupplierRegion = {
+  label: string
+  value: string
+}
+
 export type SupplierModel = {
   id: number
   label: string
@@ -1873,7 +1880,9 @@ export const api = {
   // accounts/metrics are scoped by role on the server (suppliers see only
   // their own uploads, admin+ see all; cost is stripped for suppliers).
   supplierProviders: () =>
-    request<{ list: SupplierProvider[] }>('/api/supplier-account/providers'),
+    request<{ list: SupplierProvider[]; account_regions?: SupplierRegion[] }>(
+      '/api/supplier-account/providers',
+    ),
 
   supplierModels: () =>
     request<{ list: SupplierModel[] }>('/api/supplier-account/models'),
@@ -1906,6 +1915,12 @@ export const api = {
     remark?: string
     // Azure only: model endpoint URL, forwarded upstream as adc_config={"url":...}.
     url?: string
+    // AWS (aws_third) ARN mode: account register region + AWS region/account id,
+    // plus a per-model ARN map forwarded upstream as adc_config={"arns":{...}}.
+    region?: string
+    aws_region?: string
+    aws_project_id?: string
+    arns?: Record<string, string>
   }) =>
     request<{ id: number; alias: string; msg: string }>('/api/supplier-account/accounts', {
       method: 'POST',

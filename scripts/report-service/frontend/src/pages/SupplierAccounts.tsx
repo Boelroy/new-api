@@ -9,6 +9,7 @@ import {
   type SupplierModel,
   type SupplierProvider,
   type SupplierProviderDefault,
+  type SupplierRegion,
   type SupplierSettings,
 } from '../api'
 
@@ -23,8 +24,8 @@ import {
 // for everyone; the raw name never reaches this page.
 //
 // Server enforces the scoping; the `isAdmin` flag here only drives which
-// columns are rendered. Uploadable providers are "keyonly"-shape (API key
-// only) plus "azure"-shape (API key + a model URL that yields resource_name).
+// columns are rendered. Uploadable providers: "keyonly" (API key only),
+// "azure" (API key + model URL), and "aws" (API key + per-model ARN, ARN mode).
 
 const ACCOUNT_TYPE_LABELS: Record<number, string> = { 0: '普通', 1: '速刷号' }
 
@@ -72,6 +73,7 @@ export default function SupplierAccounts() {
   const [isAdmin, setIsAdmin] = useState(false)
   const [openapiReady, setOpenapiReady] = useState(true)
   const [providers, setProviders] = useState<SupplierProvider[]>([])
+  const [accountRegions, setAccountRegions] = useState<SupplierRegion[]>([])
   const [models, setModels] = useState<SupplierModel[]>([])
   const [bootErr, setBootErr] = useState<string | null>(null)
 
@@ -83,6 +85,12 @@ export default function SupplierAccounts() {
   // Azure model endpoint URL, shared by every selected model. resource_name is
   // derived from its first hostname label upstream.
   const [modelUrl, setModelUrl] = useState('')
+  // AWS (aws_third) ARN mode: account register region, optional AWS region /
+  // account id (auto-derived from ARN when blank), and a per-model ARN map.
+  const [awsRegion, setAwsRegion] = useState('')
+  const [regionValue, setRegionValue] = useState('')
+  const [awsProjectId, setAwsProjectId] = useState('')
+  const [arns, setArns] = useState<Record<string, string>>({})
   const [accountType, setAccountType] = useState(0)
   const [tpm, setTpm] = useState(DEFAULT_TPM)
   const [rpm, setRpm] = useState(DEFAULT_RPM)
@@ -140,10 +148,10 @@ export default function SupplierAccounts() {
   const [defProvider, setDefProvider] = useState('')
   const [savingDefaults, setSavingDefaults] = useState(false)
 
-  // Providers uploadable through this portal: pure API-key vendors plus Azure
-  // (API key + a model URL that yields resource_name upstream).
+  // Providers uploadable through this portal: pure API-key vendors, Azure (API
+  // key + model URL), and AWS Bedrock (API key + per-model ARN, ARN mode).
   const uploadableProviders = useMemo(
-    () => providers.filter(p => p.shape === 'keyonly' || p.shape === 'azure'),
+    () => providers.filter(p => p.shape === 'keyonly' || p.shape === 'azure' || p.shape === 'aws'),
     [providers],
   )
 
@@ -158,6 +166,13 @@ export default function SupplierAccounts() {
   // Azure providers additionally require a model URL; 速刷号 is not supported for
   // them upstream, so the form pins them to 普通号.
   const isAzure = selectedProvider?.shape === 'azure'
+  // AWS (aws_third) ARN mode: needs a register region, a per-model ARN map, and
+  // AWS region / account id (auto-derived from the first ARN when blank). No 速刷号.
+  const isAws = selectedProvider?.shape === 'aws'
+  // First label of an ARN identifies its region (index 3) and account id
+  // (index 4): arn:aws:bedrock:<region>:<account>:inference-profile/...
+  const arnRegion = (arn: string) => (arn.trim().split(':')[3] || '').trim()
+  const arnAccount = (arn: string) => (arn.trim().split(':')[4] || '').trim()
   // resource_name preview: first label of the URL host (e.g.
   // https://foo-bar.cognitiveservices.azure.com/... -> "foo-bar"). Upstream does
   // the authoritative extraction; this is only a hint for the operator.
@@ -240,6 +255,7 @@ export default function SupplierAccounts() {
       try {
         const [prov, mod] = await Promise.all([api.supplierProviders(), api.supplierModels()])
         setProviders(prov.list || [])
+        setAccountRegions(prov.account_regions || [])
         setModels(mod.list || [])
       } catch (e: any) {
         setBootErr(e?.message || String(e))
@@ -256,11 +272,15 @@ export default function SupplierAccounts() {
   useEffect(() => {
     const d = formDefaults[provider]
     setSelectedModels(new Set(d?.models ?? []))
-    // Azure does not support 速刷号 upstream — always 普通号.
-    setAccountType(isAzure ? 0 : (d?.account_type ?? 0))
+    // Azure/AWS do not support 速刷号 upstream — always 普通号.
+    setAccountType(isAzure || isAws ? 0 : (d?.account_type ?? 0))
     setModelSearch('')
     setModelUrl('')
-  }, [provider, formDefaults, isAzure])
+    setArns({})
+    setAwsRegion('')
+    setAwsProjectId('')
+    setRegionValue(isAws ? (accountRegions[0]?.value ?? '') : '')
+  }, [provider, formDefaults, isAzure, isAws, accountRegions])
 
   function toggleModel(value: string) {
     setSelectedModels(prev => {
@@ -296,6 +316,31 @@ export default function SupplierAccounts() {
         return setSubmitErr('模型 URL 无法提取 resource_name')
       }
     }
+    // AWS ARN mode: every selected model needs an ARN; AWS region / account id
+    // come from the fields or are derived from the first ARN, and all ARNs must
+    // share one region (matches the portal's own validation).
+    let awsRegionVal = ''
+    let awsProjectVal = ''
+    const arnMap: Record<string, string> = {}
+    if (isAws) {
+      if (!regionValue) return setSubmitErr('请选择账号注册地')
+      for (const m of modelList) {
+        const arn = (arns[m] || '').trim()
+        if (!arn) return setSubmitErr(`请填写模型「${m}」的 ARN`)
+        arnMap[m] = arn
+      }
+      const first = arnMap[modelList[0]]
+      awsRegionVal = awsRegion.trim() || arnRegion(first)
+      awsProjectVal = awsProjectId.trim() || arnAccount(first)
+      if (!awsRegionVal) return setSubmitErr('AWS Region 无法从 ARN 识别，请显式填写')
+      if (!awsProjectVal) return setSubmitErr('AWS 账号ID 无法从 ARN 识别，请显式填写')
+      for (const m of modelList) {
+        const r = arnRegion(arnMap[m])
+        if (r && r !== awsRegionVal) {
+          return setSubmitErr(`模型「${m}」的 ARN Region（${r}）与 ${awsRegionVal} 不一致`)
+        }
+      }
+    }
     const tpmVal = tpm.trim()
     const rpmVal = rpm.trim()
     // 普通号 (account_type=0) must provide tpm/rpm; 速刷号 (1) may omit them.
@@ -316,10 +361,17 @@ export default function SupplierAccounts() {
         rpm: rpmVal || undefined,
         remark: remark.trim() || undefined,
         url: isAzure ? urlVal : undefined,
+        region: isAws ? regionValue : undefined,
+        aws_region: isAws ? awsRegionVal : undefined,
+        aws_project_id: isAws ? awsProjectVal : undefined,
+        arns: isAws ? arnMap : undefined,
       })
       setSubmitMsg(`${res.msg}（别名：${res.alias}）`)
       setApiKey('')
       setModelUrl('')
+      setArns({})
+      setAwsRegion('')
+      setAwsProjectId('')
       setTpm(defaultTpm)
       setRpm(defaultRpm)
       setRemark('')
@@ -856,7 +908,7 @@ export default function SupplierAccounts() {
         {/* ---- Submit form ---- */}
         <section className="bg-white border border-gray-200 rounded-lg p-4 sm:p-5 h-fit">
           <h2 className="text-base font-semibold mb-1">提交 API 账号</h2>
-          <p className="text-[11px] text-gray-400 mb-4">支持「仅 API Key」及 Azure（API Key + 模型 URL）类型厂商；代理统一按代理池处理。</p>
+          <p className="text-[11px] text-gray-400 mb-4">支持「仅 API Key」、Azure（API Key + 模型 URL）及 AWS（API Key + 各模型 ARN）类型厂商；代理统一按代理池处理。</p>
 
           <label className="block text-xs font-medium text-gray-600 mb-1">厂商 *</label>
           <select
@@ -908,10 +960,77 @@ export default function SupplierAccounts() {
           <textarea
             value={apiKey}
             onChange={e => setApiKey(e.target.value)}
-            placeholder={isAzure ? '请填写 Azure OpenAI 的 API Key' : 'sk-xxxxxxxxxxxxxxxx'}
+            placeholder={
+              isAzure
+                ? '请填写 Azure OpenAI 的 API Key'
+                : isAws
+                  ? '请填写 Bedrock 长 API Key（ARN 方式）'
+                  : 'sk-xxxxxxxxxxxxxxxx'
+            }
             rows={2}
             className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm mb-3 font-mono"
           />
+
+          {isAws && (
+            <>
+              <label className="block text-xs font-medium text-gray-600 mb-1">账号注册地 *</label>
+              <select
+                value={regionValue}
+                onChange={e => setRegionValue(e.target.value)}
+                className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm mb-3 bg-white"
+              >
+                {accountRegions.length === 0 && <option value="">（暂无可选注册地）</option>}
+                {accountRegions.map(r => (
+                  <option key={r.value} value={r.value}>{r.label}</option>
+                ))}
+              </select>
+
+              <div className="grid grid-cols-2 gap-3 mb-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">AWS Region</label>
+                  <input
+                    value={awsRegion}
+                    onChange={e => setAwsRegion(e.target.value)}
+                    placeholder="us-east-1（留空从 ARN 识别）"
+                    className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">AWS 账号ID</label>
+                  <input
+                    value={awsProjectId}
+                    onChange={e => setAwsProjectId(e.target.value)}
+                    placeholder="留空从 ARN 识别"
+                    className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm font-mono"
+                  />
+                </div>
+              </div>
+
+              <label className="block text-xs font-medium text-gray-600 mb-1">各模型 ARN *</label>
+              {selectedModels.size === 0 ? (
+                <div className="text-xs text-gray-400 border border-dashed border-gray-200 rounded-md px-2.5 py-3 mb-3">
+                  请先在上方选择模型，再为每个模型填写 ARN
+                </div>
+              ) : (
+                <div className="space-y-2 mb-1">
+                  {Array.from(selectedModels).map(m => (
+                    <div key={m}>
+                      <div className="text-[11px] text-gray-500 mb-0.5 font-mono">{m}</div>
+                      <input
+                        value={arns[m] || ''}
+                        onChange={e => setArns(prev => ({ ...prev, [m]: e.target.value }))}
+                        placeholder="arn:aws:bedrock:us-east-1:123456789012:inference-profile/..."
+                        className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm font-mono"
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+              <p className="text-[11px] text-gray-400 mt-1 mb-3">
+                每个选中模型都需填写 ARN；AWS Region / 账号ID 留空时自动从首个 ARN 识别，所有 ARN 需同一 Region。
+              </p>
+            </>
+          )}
 
           {isAzure && (
             <>
@@ -933,11 +1052,11 @@ export default function SupplierAccounts() {
           <select
             value={accountType}
             onChange={e => setAccountType(Number(e.target.value))}
-            disabled={isAzure}
+            disabled={isAzure || isAws}
             className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm mb-3 bg-white disabled:bg-gray-50 disabled:text-gray-400"
           >
             <option value={0}>普通</option>
-            {!isAzure && <option value={1}>速刷号</option>}
+            {!isAzure && !isAws && <option value={1}>速刷号</option>}
           </select>
 
           <div className="grid grid-cols-2 gap-3 mb-3">
