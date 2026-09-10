@@ -1115,7 +1115,7 @@ export default function SupplierAccounts() {
           <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-4">
             <div>
               <h2 className="text-base font-semibold">历史提交记录 · 实时数据</h2>
-              <p className="text-[11px] text-gray-400 mt-0.5">实时数据延迟约 2 分钟，时间跨度最长 7 天。</p>
+              <p className="text-[11px] text-gray-400 mt-0.5">请求/Token 为实时数据（延迟约 2 分钟，跨度最长 7 天）；消费为离线账单（按自然日统计，延迟约 2 小时）。</p>
             </div>
             <div className="flex flex-wrap items-end gap-2">
               <div>

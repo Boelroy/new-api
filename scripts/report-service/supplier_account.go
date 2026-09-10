@@ -1006,6 +1006,75 @@ type supplierMetric struct {
 	CompletionTokens *int64   `json:"completion_tokens"`
 }
 
+// ---- Offline bill (cost source) — OpenAPI token ----
+//
+// The realtime metrics endpoint's `cost` is no longer reliable, so cost is
+// sourced from the offline bill endpoint (/openapi/bill/query, ~2h delayed).
+// Bill rows are keyed by the portal account id (== our remote_account_id), so
+// no alias re-keying is needed. The realtime endpoint still supplies
+// requests / tokens / status / success_rate.
+
+// supplierBillMaxLookbackDays bounds a bill/query start date; the portal rejects
+// start dates earlier than this many days back.
+const supplierBillMaxLookbackDays = 90
+
+// supplierBillItem is one entry of the /openapi/bill/query response.
+type supplierBillItem struct {
+	ID   int64   `json:"id"`
+	Cost float64 `json:"cost"`
+}
+
+// supplierBillDate formats a unix time as the portal-TZ date (YYYY-MM-DD).
+func supplierBillDate(unix int64) string {
+	return time.Unix(unix, 0).In(supplierPortalLoc).Format("2006-01-02")
+}
+
+// supplierBillStartDate returns the bill/query start date (YYYY-MM-DD, portal
+// TZ) for a requested start, clamped to the portal's 90-day lower bound.
+func supplierBillStartDate(startUnix int64) string {
+	earliest := time.Now().In(supplierPortalLoc).AddDate(0, 0, -supplierBillMaxLookbackDays)
+	start := time.Unix(startUnix, 0).In(supplierPortalLoc)
+	if start.Before(earliest) {
+		start = earliest
+	}
+	return start.Format("2006-01-02")
+}
+
+// supplierBillCostRMB sums each account's offline-billed cost (RMB) over
+// [startDs, endDs] (YYYY-MM-DD), batching the 100-id-per-query cap. Cost is
+// keyed by the portal account id (== remote_account_id).
+func supplierBillCostRMB(ids []int64, startDs, endDs string) (map[int64]float64, error) {
+	out := make(map[int64]float64, len(ids))
+	for start := 0; start < len(ids); start += 100 {
+		end := start + 100
+		if end > len(ids) {
+			end = len(ids)
+		}
+		reqBytes, _ := json.Marshal(map[string]any{
+			"account_ids": ids[start:end],
+			"start_ds":    startDs,
+			"end_ds":      endDs,
+		})
+		status, body, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/bill/query", effectiveOpenAPIToken(), reqBytes)
+		if err != nil {
+			return nil, err
+		}
+		if status < 200 || status >= 300 {
+			return nil, errors.New(supplierErr(body))
+		}
+		var parsed struct {
+			List []supplierBillItem `json:"list"`
+		}
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			return nil, err
+		}
+		for _, it := range parsed.List {
+			out[it.ID] += it.Cost
+		}
+	}
+	return out, nil
+}
+
 func handleSupplierMetrics(c *gin.Context) {
 	if supplierAccountBaseURL == "" {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier account portal not configured"})
@@ -1116,12 +1185,35 @@ func handleSupplierMetrics(c *gin.Context) {
 
 	// Re-key each row onto the queried remote_account_id (via the shared alias)
 	// so the client can join metrics to accounts, then mask the supplier name
-	// embedded in the alias. Cost is shown to studios as well as admins.
+	// embedded in the alias.
 	for i := range merged {
 		if rid, ok := aliasToRemoteID[merged[i].AccountAlias]; ok {
 			merged[i].AID = rid
 		}
 		merged[i].AccountAlias = maskSupplierAlias(merged[i].AccountAlias)
+	}
+
+	// Cost comes from the offline bill endpoint (the realtime `cost` is no longer
+	// reliable). Bill is date-granular in portal TZ and ~2h delayed, so it won't
+	// line up exactly with the realtime request window — this is the intended
+	// tradeoff. Bill rows are keyed by remote_account_id, matching merged[i].AID.
+	// A bill failure only drops cost (nil), leaving the realtime stats intact.
+	startDs := supplierBillStartDate(parsePortalCreatedAt(body.BeginTime, time.Now().Unix()))
+	endDs := supplierBillDate(parsePortalCreatedAt(body.EndTime, time.Now().Unix()))
+	if billCost, err := supplierBillCostRMB(ids, startDs, endDs); err != nil {
+		log.Printf("[supplier] bill cost query failed, cost omitted: %v", err)
+		for i := range merged {
+			merged[i].Cost = nil
+		}
+	} else {
+		for i := range merged {
+			if v, ok := billCost[merged[i].AID]; ok {
+				cost := v
+				merged[i].Cost = &cost
+			} else {
+				merged[i].Cost = nil
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"accounts": merged})
@@ -1310,8 +1402,6 @@ func handleSupplierSettingsSet(c *gin.Context) {
 
 // ---- Per-account quota alert loop (leader-gated) — OpenAPI token ----
 
-const supplierQuotaLookbackDays = 180
-
 // supplierQuotaTickSeconds reads the alert-loop interval from report_config,
 // clamped, defaulting when unset/invalid. Re-read each tick so the interval is
 // tunable without a restart.
@@ -1484,10 +1574,9 @@ func runSupplierQuotaCheck() {
 		return
 	}
 	var (
-		accts         []quotaAccount
-		ids           = make([]int64, 0)
-		aliasToRemote = make(map[string]int64)
-		minCreated    = time.Now().Unix()
+		accts      []quotaAccount
+		ids        = make([]int64, 0)
+		minCreated = time.Now().Unix()
 	)
 	for rows.Next() {
 		var a quotaAccount
@@ -1498,9 +1587,6 @@ func runSupplierQuotaCheck() {
 		}
 		accts = append(accts, a)
 		ids = append(ids, a.remoteID)
-		if a.alias != "" {
-			aliasToRemote[a.alias] = a.remoteID
-		}
 		if a.createdAt > 0 && a.createdAt < minCreated {
 			minCreated = a.createdAt
 		}
@@ -1510,7 +1596,7 @@ func runSupplierQuotaCheck() {
 		return
 	}
 
-	costRMB, err := supplierLifetimeCostRMB(ids, aliasToRemote, minCreated)
+	costRMB, err := supplierLifetimeCostRMB(ids, minCreated)
 	if err != nil {
 		log.Printf("[supplier-quota] usage query: %v", err)
 		return
@@ -1538,62 +1624,13 @@ func runSupplierQuotaCheck() {
 	}
 }
 
-// supplierLifetimeCostRMB sums each account's portal cost (RMB) from its
-// creation (bounded to a 180-day lookback) to now. The metrics endpoint caps a
-// single query at 7 days / 100 ids, so we window in <7-day chunks and batch
-// ids, keying results back onto remote_account_id via the shared alias.
-func supplierLifetimeCostRMB(ids []int64, aliasToRemote map[string]int64, minCreated int64) (map[int64]float64, error) {
-	const layout = "2006-01-02 15:04:05"
-	now := time.Now().In(supplierPortalLoc)
-	earliest := now.AddDate(0, 0, -supplierQuotaLookbackDays)
-	begin := time.Unix(minCreated, 0).In(supplierPortalLoc)
-	if begin.Before(earliest) {
-		begin = earliest
-	}
-	// Just under 7 days so the portal's ">7天" guard never trips.
-	step := 7*24*time.Hour - time.Minute
-
-	out := make(map[int64]float64, len(ids))
-	for chunkStart := begin; chunkStart.Before(now); chunkStart = chunkStart.Add(step) {
-		chunkEnd := chunkStart.Add(step)
-		if chunkEnd.After(now) {
-			chunkEnd = now
-		}
-		for start := 0; start < len(ids); start += 100 {
-			end := start + 100
-			if end > len(ids) {
-				end = len(ids)
-			}
-			reqBytes, _ := json.Marshal(map[string]any{
-				"account_ids": ids[start:end],
-				"begin_time":  chunkStart.Format(layout),
-				"end_time":    chunkEnd.Format(layout),
-				"aggregate":   false,
-			})
-			status, body, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/metrics/query", effectiveOpenAPIToken(), reqBytes)
-			if err != nil {
-				return nil, err
-			}
-			if status < 200 || status >= 300 {
-				return nil, errors.New(supplierErr(body))
-			}
-			var parsed struct {
-				Accounts []supplierMetric `json:"accounts"`
-			}
-			if err := json.Unmarshal(body, &parsed); err != nil {
-				return nil, err
-			}
-			for _, m := range parsed.Accounts {
-				if m.Cost == nil {
-					continue
-				}
-				rid, ok := aliasToRemote[m.AccountAlias]
-				if !ok {
-					rid = m.AID
-				}
-				out[rid] += *m.Cost
-			}
-		}
-	}
-	return out, nil
+// supplierLifetimeCostRMB sums each account's offline-billed cost (RMB) from its
+// creation to now, via /openapi/bill/query. The bill endpoint accepts a 90-day
+// date range in one call (keyed by account id), so no time-chunking is needed;
+// the start is clamped to the portal's 90-day lower bound. Cost is bounded to a
+// 90-day lookback rather than the prior 180 because that is the bill window cap.
+func supplierLifetimeCostRMB(ids []int64, minCreated int64) (map[int64]float64, error) {
+	startDs := supplierBillStartDate(minCreated)
+	endDs := supplierBillDate(time.Now().Unix())
+	return supplierBillCostRMB(ids, startDs, endDs)
 }
