@@ -452,6 +452,40 @@ func getSupplierWebToken() (string, error) {
 	return tok, nil
 }
 
+// invalidateSupplierWebToken drops the cached WEB token so the next
+// getSupplierWebToken performs a fresh login. Called when the portal rejects a
+// cached token: the portal enforces a single active session per user, so any
+// external login for the same account (a human logging into the portal UI, or
+// another instance) silently invalidates ours.
+func invalidateSupplierWebToken() {
+	supplierWebMu.Lock()
+	supplierWebToken = ""
+	supplierWebExpiry = time.Time{}
+	supplierWebMu.Unlock()
+}
+
+// supplierWebProxy issues a WEB-token portal request and, if the portal
+// rejects the cached token with 401, re-logs in once and retries. Without this
+// a token invalidated out-of-band stays broken until the next scheduled
+// refresh (up to the full TTL), surfacing as persistent 502s on the
+// providers / models / accounts / announcements endpoints.
+func supplierWebProxy(method, path string, jsonBody []byte) (int, []byte, error) {
+	tok, err := getSupplierWebToken()
+	if err != nil {
+		return 0, nil, err
+	}
+	status, body, err := supplierProxy(method, path, tok, jsonBody)
+	if err != nil || status != http.StatusUnauthorized {
+		return status, body, err
+	}
+	invalidateSupplierWebToken()
+	tok, err = getSupplierWebToken()
+	if err != nil {
+		return 0, nil, err
+	}
+	return supplierProxy(method, path, tok, jsonBody)
+}
+
 // startSupplierWebTokenRefresher logs in at startup and keeps the WEB token
 // fresh, re-logging in shortly before each expiry. No-op when not configured.
 func startSupplierWebTokenRefresher() {
@@ -483,12 +517,7 @@ func handleSupplierProviders(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier account portal not configured"})
 		return
 	}
-	tok, err := getSupplierWebToken()
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "supplier login failed: " + err.Error()})
-		return
-	}
-	status, body, err := supplierProxy(http.MethodGet, "/supplier-account/api/providers", tok, nil)
+	status, body, err := supplierWebProxy(http.MethodGet, "/supplier-account/api/providers", nil)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
@@ -529,12 +558,7 @@ func handleSupplierModels(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier account portal not configured"})
 		return
 	}
-	tok, err := getSupplierWebToken()
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "supplier login failed: " + err.Error()})
-		return
-	}
-	status, body, err := supplierProxy(http.MethodGet, "/supplier-account/api/models", tok, nil)
+	status, body, err := supplierWebProxy(http.MethodGet, "/supplier-account/api/models", nil)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
@@ -757,10 +781,6 @@ type portalAccount struct {
 // fetchSupplierPortalAccounts pages through the WEB `/supplier/accounts`
 // endpoint and returns the full roster the logged-in supplier can see.
 func fetchSupplierPortalAccounts() ([]portalAccount, error) {
-	tok, err := getSupplierWebToken()
-	if err != nil {
-		return nil, fmt.Errorf("supplier login failed: %w", err)
-	}
 	const pageSize = 100
 	out := make([]portalAccount, 0, pageSize)
 	// Cap pages as a runaway guard (100 pages = 10k accounts).
@@ -769,7 +789,7 @@ func fetchSupplierPortalAccounts() ([]portalAccount, error) {
 			"/supplier-account/api/supplier/accounts?status=all&keyword=&page=%d&page_size=%d&provider=&model=&account_type=",
 			page, pageSize,
 		)
-		status, body, err := supplierProxy(http.MethodGet, path, tok, nil)
+		status, body, err := supplierWebProxy(http.MethodGet, path, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -1494,12 +1514,7 @@ func runSupplierAnnouncementPush() {
 	if webhook == "" {
 		return
 	}
-	tok, err := getSupplierWebToken()
-	if err != nil {
-		log.Printf("[supplier-announce] web token: %v", err)
-		return
-	}
-	status, body, err := supplierProxy(http.MethodGet, "/supplier-account/api/supplier/announcements", tok, nil)
+	status, body, err := supplierWebProxy(http.MethodGet, "/supplier-account/api/supplier/announcements", nil)
 	if err != nil {
 		log.Printf("[supplier-announce] fetch: %v", err)
 		return
