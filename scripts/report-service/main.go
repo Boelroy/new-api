@@ -5121,6 +5121,10 @@ func main() {
 	// so a caller can't peek into other studios by passing arbitrary
 	// channel_ids. Admin+ callers see the full profile.
 	remoteOperatorAPI.POST("/remote-newapi/channels/usage-range", handleRemoteChannelUsageRange)
+	// Server-side channel test (like new-api's 测试): proxies the remote's
+	// GET /api/channel/test/:id via the profile token. Studio operators are
+	// scoped to their own channels inside the handler.
+	remoteOperatorAPI.POST("/remote-newapi/channels/test-remote", handleRemoteChannelTest)
 	// Auto-disable-on-quota: global on/off + tick interval. Admin+ can
 	// toggle because this only takes down channels operators have
 	// explicitly opted in (per-channel auto_disable=TRUE flag on

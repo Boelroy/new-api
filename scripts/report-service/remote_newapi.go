@@ -4706,6 +4706,78 @@ func handleRemoteTestKey(c *gin.Context) {
 	c.JSON(http.StatusOK, res)
 }
 
+// ---- Handler: server-side channel test (like new-api's 测试) ----
+
+// handleRemoteChannelTest tests an existing remote channel the same way new-api
+// does: it calls the remote's GET /api/channel/test/:id with the profile token,
+// so the remote runs the test with its own stored key — the operator never has
+// to paste a key. Studio operators are scoped to their own channels; admin+ can
+// test any channel on the profile. The remote returns {success, message, time}.
+func handleRemoteChannelTest(c *gin.Context) {
+	var body struct {
+		ProfileID int64  `json:"profile_id"`
+		ChannelID int64  `json:"channel_id"`
+		Model     string `json:"model,omitempty"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.ProfileID <= 0 || body.ChannelID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id and channel_id are required"})
+		return
+	}
+	// Reuse the usage-range scope: studio operators can only test channels they
+	// own; admin+ callers can test anything on the profile.
+	scoped, err := resolveUsageRangeChannelIDs(c, body.ProfileID, []int64{body.ChannelID})
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	inScope := false
+	for _, id := range scoped {
+		if id == body.ChannelID {
+			inScope = true
+			break
+		}
+	}
+	if !inScope {
+		c.JSON(http.StatusForbidden, gin.H{"error": "channel not in your scope"})
+		return
+	}
+
+	host, userID, token, err := loadRemoteProfileByID(body.ProfileID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	q := url.Values{}
+	if m := strings.TrimSpace(body.Model); m != "" {
+		q.Set("model", m)
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	defer cancel()
+	data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/channel/test/"+strconv.FormatInt(body.ChannelID, 10), token, userID, q, nil)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"ok": false, "message": err.Error(), "latency_ms": 0})
+		return
+	}
+	var res struct {
+		Success bool    `json:"success"`
+		Message string  `json:"message"`
+		Time    float64 `json:"time"`
+	}
+	if err := json.Unmarshal(data, &res); err != nil {
+		c.JSON(http.StatusOK, gin.H{"ok": false, "message": "bad response from remote: " + err.Error(), "latency_ms": 0})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"ok":         res.Success,
+		"message":    res.Message,
+		"latency_ms": int64(res.Time*1000 + 0.5),
+	})
+}
+
 // ---- Handler: last-hour cost per channel + realtime rpm/tpm ----
 
 // lastHourEntry caches everything /api/log/stat returns in one shot: the

@@ -604,6 +604,10 @@ export default function RemoteChannelsStudio() {
   // the button while it's running so back-to-back clicks don't stack
   // 429s at the backend guard.
   const [refreshingRemote, setRefreshingRemote] = useState(false)
+  // Per-channel connectivity test (server-side, like new-api). testingCh holds
+  // the channel id currently under test; testMsg maps channel id → result.
+  const [testingCh, setTestingCh] = useState<number | null>(null)
+  const [testMsg, setTestMsg] = useState<Record<number, { ok: boolean; text: string }>>({})
   // Studio bound to this JWT — used as the default "middle segment" of
   // new channel names. Fetched once on mount; empty string until it
   // arrives (openBatch guards against opening the modal before that).
@@ -788,6 +792,29 @@ export default function RemoteChannelsStudio() {
       setRefreshingRemote(false)
     }
   }, [selectedID, refreshingRemote, reloadChannels])
+
+  // Server-side connectivity test for one channel — the remote runs it with
+  // its own stored key (like new-api's 测试), so no key needs to be pasted.
+  const testChannel = useCallback(
+    async (channelID: number) => {
+      if (!selectedID) return
+      setTestingCh(channelID)
+      try {
+        const res = await api.remoteChannelTest({ profile_id: selectedID, channel_id: channelID })
+        setTestMsg(prev => ({
+          ...prev,
+          [channelID]: res.ok
+            ? { ok: true, text: `✓ ${res.latency_ms}ms` }
+            : { ok: false, text: `✗ ${res.message || '失败'}` },
+        }))
+      } catch (e: any) {
+        setTestMsg(prev => ({ ...prev, [channelID]: { ok: false, text: '✗ ' + (e?.message || e) } }))
+      } finally {
+        setTestingCh(null)
+      }
+    },
+    [selectedID],
+  )
 
   // Convert YYYY-MM-DD (local) → epoch seconds at 00:00 local. For the
   // end field we push to 24:00 (start of next day) so the window
@@ -1339,12 +1366,13 @@ export default function RemoteChannelsStudio() {
                   </th>
                   <th className="text-right px-4 py-2 font-medium" title="累计已用 / 额度">剩余</th>
                   <th className="text-left px-4 py-2 font-medium">创建时间</th>
+                  <th className="text-right px-4 py-2 font-medium">操作</th>
                 </tr>
               </thead>
               <tbody>
                 {channels.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="px-4 py-6 text-center text-xs text-muted-foreground">
+                    <td colSpan={9} className="px-4 py-6 text-center text-xs text-muted-foreground">
                       暂无渠道，点上方「批量添加」上传 Key
                     </td>
                   </tr>
@@ -1374,6 +1402,26 @@ export default function RemoteChannelsStudio() {
                             <UsagePct used={usedUSD} quota={quotaUSD} />
                           </td>
                           <td className="px-4 py-2 text-xs text-muted-foreground">{fmtTime(ch.created_time)}</td>
+                          <td className="px-4 py-2 text-right whitespace-nowrap">
+                            <div className="inline-flex items-center gap-2">
+                              {testMsg[ch.id] && (
+                                <span
+                                  className={`text-xs ${testMsg[ch.id].ok ? 'text-success' : 'text-destructive'}`}
+                                  title={testMsg[ch.id].text}
+                                >
+                                  {testMsg[ch.id].text.length > 24 ? testMsg[ch.id].text.slice(0, 24) + '…' : testMsg[ch.id].text}
+                                </span>
+                              )}
+                              <Button
+                                variant="outline"
+                                onClick={() => void testChannel(ch.id)}
+                                disabled={testingCh === ch.id}
+                                className="border px-2 disabled:opacity-50"
+                              >
+                                {testingCh === ch.id ? '测试中…' : '测试'}
+                              </Button>
+                            </div>
+                          </td>
                         </tr>
                       )
                     })}
@@ -1385,7 +1433,7 @@ export default function RemoteChannelsStudio() {
                         ${channels.reduce((s, c) => s + c.used_quota / 500000, 0).toFixed(4)}
                       </td>
                       <td className="px-4 py-2 text-right tabular-nums text-xs font-medium">${usageTotal.toFixed(4)}</td>
-                      <td className="px-4 py-2" colSpan={3}></td>
+                      <td className="px-4 py-2" colSpan={4}></td>
                     </tr>
                   </>
                 )}

@@ -1437,6 +1437,19 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  // Server-side channel test (like new-api's 测试): the remote runs the test
+  // with its own stored key, so no key needs to be pasted. Returns latency +
+  // message. Studio operators are scoped to their own channels server-side.
+  remoteChannelTest: (payload: { profile_id: number; channel_id: number; model?: string }) =>
+    request<{ ok: boolean; message: string; latency_ms: number }>(
+      '/api/remote-newapi/channels/test-remote',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+    ),
+
   // Categorised error breakdown for one channel over the past N seconds
   // (default 1h). Groups upstream error logs by (error_type, status_code).
   // Backend caches for 5min per (profile, channel, window).
