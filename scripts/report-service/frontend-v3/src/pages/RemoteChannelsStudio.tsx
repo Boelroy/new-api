@@ -806,8 +806,15 @@ export default function RemoteChannelsStudio() {
           ...prev,
           [channelID]: { ok: res.ok, latency: res.latency_ms, message: res.message || (res.ok ? '' : '失败') },
         }))
+        if (res.ok) {
+          toast.success(`测试通过 · ${res.latency_ms}ms`)
+        } else {
+          toast.error(`测试失败: ${res.message || '远端无返回信息'}`)
+        }
       } catch (e: any) {
-        setTestMsg(prev => ({ ...prev, [channelID]: { ok: false, latency: 0, message: e?.message || String(e) } }))
+        const msg = e?.message || String(e)
+        setTestMsg(prev => ({ ...prev, [channelID]: { ok: false, latency: 0, message: msg } }))
+        toast.error(`测试失败: ${msg}`)
       } finally {
         setTestingCh(null)
       }
