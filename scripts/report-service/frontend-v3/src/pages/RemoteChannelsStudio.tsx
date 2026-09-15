@@ -1251,16 +1251,9 @@ export default function RemoteChannelsStudio() {
           <button
             onClick={openImmediate}
             disabled={!selectedID}
-            className="border border-border text-foreground rounded-md px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+            className="bg-primary text-primary-foreground rounded-md px-3 py-1.5 text-sm hover:bg-primary/90 disabled:opacity-50"
           >
             上普通 Key
-          </button>
-          <button
-            onClick={openBatch}
-            disabled={!selectedID}
-            className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
-          >
-            批量上 5刀key (Pool)
           </button>
         </div>
       }

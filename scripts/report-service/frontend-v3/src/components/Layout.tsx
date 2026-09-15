@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import Header from './Header'
 import Sidebar from './Sidebar'
 
@@ -9,19 +9,48 @@ type Props = {
   children: ReactNode
 }
 
-// App shell: full-width header on top, then a row of floating sidebar + main
-// content. Keeps the same (title, subtitle, actions, children) contract as the
-// v1 Layout so ported pages need no changes. The page title lives inside the
-// content region (new-api style), not in the global top bar.
+const COLLAPSE_KEY = 'v3-sidebar-collapsed'
+
+// App shell mirroring new-api's default console: full-width transparent header
+// on top, then a row of a floating (collapsible-to-icon) sidebar + flush
+// content on a bg-background canvas. Keeps the v1 (title, subtitle, actions,
+// children) contract so ported pages need no changes.
 export default function Layout({ title, subtitle, actions, children }: Props) {
-  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [collapsed, setCollapsed] = useState<boolean>(() => localStorage.getItem(COLLAPSE_KEY) === '1')
+  const [mobileOpen, setMobileOpen] = useState(false)
+
+  useEffect(() => {
+    localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0')
+  }, [collapsed])
+
+  // One toggle button in the header: on desktop it collapses the rail, on
+  // mobile it opens the off-canvas drawer.
+  const toggle = useCallback(() => {
+    if (window.matchMedia('(min-width: 1024px)').matches) {
+      setCollapsed((c) => !c)
+    } else {
+      setMobileOpen((o) => !o)
+    }
+  }, [])
+
+  // ⌘/Ctrl+B toggles the sidebar, matching new-api's shortcut.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'b' || e.key === 'B')) {
+        e.preventDefault()
+        setCollapsed((c) => !c)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   return (
     <div className="flex h-svh flex-col bg-background text-foreground">
-      <Header onMenu={() => setSidebarOpen(true)} />
+      <Header onToggle={toggle} />
 
       <div className="flex min-h-0 w-full flex-1">
-        <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+        <Sidebar collapsed={collapsed} mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} />
 
         <main className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto max-w-[1400px] px-4 py-5 sm:px-6 sm:py-6 lg:px-8">
