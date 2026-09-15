@@ -1261,10 +1261,7 @@ export default function RemoteChannelsStudio() {
         <div className="bg-card border border-border rounded-xl">
           <div className="flex items-center justify-between px-4 py-3 border-b border-border">
             <div>
-              <div className="text-sm font-medium text-foreground">我的远程渠道</div>
-              <div className="text-xs text-muted-foreground mt-0.5">
-                每 30 秒从本地镜像刷新一次；远端用量每 15 分钟同步一次，需要立即拉取请按「获取用量」。
-              </div>
+              <div className="text-sm font-medium text-foreground">我的渠道</div>
             </div>
             <div className="flex items-center gap-2">
               <Button
