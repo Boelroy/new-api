@@ -26,6 +26,14 @@ function readBasePath(): string {
 
 export const BASE_PATH = readBasePath();
 
+// Where the v3 SPA is mounted for THIS request. It is served two ways:
+//   • under /v3 on hosts that still run the legacy UI at / (coexistence)
+//   • at root (/) on hosts that show v3 as the whole site (e.g. gw.nexroute.cc)
+// Detected from the current URL so router basename + hard-coded links resolve
+// correctly in both cases. "" = root mount, "/v3" = prefixed mount.
+export const APP_BASE =
+  typeof window !== 'undefined' && window.location.pathname.startsWith('/v3') ? '/v3' : '';
+
 export function withBase(path: string): string {
   if (!path.startsWith('/')) return path;
   return BASE_PATH + path;

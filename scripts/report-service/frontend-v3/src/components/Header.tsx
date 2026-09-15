@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { PanelLeft, Moon, Sun, LogOut, User } from 'lucide-react'
 import { api } from '../api'
+import { APP_BASE } from '../basePath'
 import { useTheme } from '../context/theme-provider'
 import { cx } from './ui'
 
@@ -24,7 +25,7 @@ export default function Header(props: Props) {
         <PanelLeft className="size-4" />
       </button>
 
-      <a href="/v3/" className="inline-flex h-7 min-w-0 items-center rounded-md px-1.5 text-sm font-bold tracking-[0.08em] text-foreground hover:bg-accent">
+      <a href={`${APP_BASE}/`} className="inline-flex h-7 min-w-0 items-center rounded-md px-1.5 text-sm font-bold tracking-[0.08em] text-foreground hover:bg-accent">
         <span className="max-w-[14rem] truncate">AI Gateway</span>
       </a>
 
@@ -67,7 +68,7 @@ function ProfileMenu() {
     try {
       await api.logout()
     } finally {
-      window.location.href = '/v3/login'
+      window.location.href = `${APP_BASE}/login`
     }
   }
 

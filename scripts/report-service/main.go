@@ -3952,6 +3952,15 @@ func spaHandler() gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
 		}
+		// Host-based split: on hosts listed in V3_ROOT_HOSTS (e.g. gw.nexroute.cc)
+		// the new v3 "AI Gateway" SPA IS the whole site — serve its shell at root
+		// for every non-/api, non-asset path. Its hashed assets live under /v3/*
+		// (served by registerV3Frontend, host-agnostic), so only the shell needs
+		// host routing here. Every other host still gets the legacy v1 UI below.
+		if isV3RootHost(c.Request.Host) {
+			serveV3Shell(c)
+			return
+		}
 		// The SPA shell is served from the rewritten in-memory copy (with the
 		// base path injected), never from FileServer — that also avoids
 		// FileServer's /index.html → ./ canonicalization redirect.
@@ -4795,6 +4804,13 @@ func main() {
 	reportBasePath = strings.TrimRight(os.Getenv("REPORT_BASE_PATH"), "/")
 	if reportBasePath != "" {
 		log.Printf("[base-path] serving under prefix %q", reportBasePath)
+	}
+
+	// Hosts that serve the v3 SPA at root (no /v3 prefix). Defaults to
+	// gw.nexroute.cc; override/extend with V3_ROOT_HOSTS (comma-separated).
+	initV3RootHosts(os.Getenv("V3_ROOT_HOSTS"))
+	if len(v3RootHosts) > 0 {
+		log.Printf("[v3-root] serving v3 at / for hosts: %v", v3RootHosts)
 	}
 
 	gin.SetMode(gin.ReleaseMode)

@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { ArrowUpRight } from 'lucide-react'
-import { withBase } from '../basePath'
+import { withBase, APP_BASE } from '../basePath'
 
 // Editorial "AI Gateway" login, matching the blueprint reference: warm paper
 // canvas, Songti serif hero on the left, a login card on the right, dark-green
@@ -19,7 +19,7 @@ export default function Login() {
   const [loading, setLoading] = useState(false)
 
   const params = new URLSearchParams(window.location.search)
-  const next = params.get('next') || '/v3/'
+  const next = params.get('next') || `${APP_BASE}/`
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()

@@ -4,6 +4,7 @@ import Login from './pages/Login'
 import RemoteChannels from './pages/RemoteChannels'
 import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR } from './api'
 import { getCachedRole, loadRole } from './auth'
+import { APP_BASE } from './basePath'
 import { Toaster, ConfirmHost, PromptHost } from './components/feedback'
 
 // RoleGate guards a page. While the role is being fetched it renders null so we
@@ -25,7 +26,7 @@ function NoAccess() {
     <div className="flex min-h-svh flex-col items-center justify-center gap-3 bg-background px-4 text-center text-foreground">
       <div className="display text-lg">无访问权限</div>
       <p className="text-sm text-muted-foreground">当前账号没有权限访问该页面。</p>
-      <a href="/v3/login" className="text-sm text-primary hover:underline">
+      <a href={`${APP_BASE}/login`} className="text-sm text-primary hover:underline">
         重新登录
       </a>
     </div>
