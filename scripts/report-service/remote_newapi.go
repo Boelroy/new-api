@@ -3653,10 +3653,13 @@ func handleRemoteCachedChannels(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id is required"})
 		return
 	}
-	// Studio operators only see channels tied to keys they themselves
-	// enqueued (via remote_pending_key.uploaded_by). Pre-migration rows
-	// with uploaded_by = 0 remain visible to everyone in the studio,
-	// same permissive fallback as handlePendingKeyList.
+	// Studio operators see every channel currently tagged with their studio
+	// in the mirror (the tag is set to the studio at upload). We match on the
+	// mirror's own `tag` column rather than joining remote_pending_key by
+	// remote_channel_id: the pending attribution id can drift from the live
+	// channel id (the created id is reverse-looked-up by sha8 and may land on
+	// a stale duplicate — see the 3664→41294 case), which silently hid
+	// channels. Tag-based matching is immune to that drift.
 	q := `SELECT remote_channel_id, name, type, status, "group", tag,
 	             priority, weight, models, used_quota, created_time, updated_at
 	        FROM remote_channel_current
@@ -3668,16 +3671,8 @@ func handleRemoteCachedChannels(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "your account has no studio binding; ask an admin to bind one before viewing channels"})
 			return
 		}
-		q += " AND remote_channel_id IN (SELECT remote_channel_id FROM remote_pending_key" +
-			" WHERE profile_id = $1 AND tag = $" + strconv.Itoa(len(args)+1) + " AND remote_channel_id > 0"
+		q += " AND tag = $" + strconv.Itoa(len(args)+1)
 		args = append(args, studio)
-		if v, ok := c.Get("user_id"); ok {
-			if uid, ok := v.(int64); ok && uid > 0 {
-				q += " AND (uploaded_by = 0 OR uploaded_by = $" + strconv.Itoa(len(args)+1) + ")"
-				args = append(args, uid)
-			}
-		}
-		q += ")"
 	}
 	q += " ORDER BY remote_channel_id DESC"
 	rows, err := db.Query(q, args...)
@@ -5186,22 +5181,14 @@ func resolveUsageRangeChannelIDs(c *gin.Context, profileID int64, requested []in
 	if studio == "" {
 		return nil, errors.New("your account has no studio binding; ask an admin to bind one before viewing usage")
 	}
-	q := `SELECT DISTINCT c.remote_channel_id
-	        FROM remote_channel_current c
-	        JOIN remote_pending_key p
-	          ON p.profile_id = c.profile_id
-	         AND p.remote_channel_id = c.remote_channel_id
-	       WHERE c.profile_id = $1
-	         AND p.tag = $2
-	         AND p.remote_channel_id > 0`
-	args := []any{profileID, studio}
-	if v, ok := c.Get("user_id"); ok {
-		if uid, ok := v.(int64); ok && uid > 0 {
-			q += " AND (p.uploaded_by = 0 OR p.uploaded_by = $3)"
-			args = append(args, uid)
-		}
-	}
-	rows, err := db.Query(q, args...)
+	// Match by the mirror's own tag (set to the studio at upload) instead of
+	// joining remote_pending_key by remote_channel_id — the pending attribution
+	// id can drift from the live channel id (see handleRemoteCachedChannels),
+	// which silently dropped channels from usage/test/delete scope.
+	rows, err := db.Query(
+		`SELECT remote_channel_id FROM remote_channel_current WHERE profile_id=$1 AND tag=$2`,
+		profileID, studio,
+	)
 	if err != nil {
 		return nil, err
 	}
