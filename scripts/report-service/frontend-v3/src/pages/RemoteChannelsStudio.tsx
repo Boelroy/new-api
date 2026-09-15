@@ -1259,88 +1259,11 @@ export default function RemoteChannelsStudio() {
         </div>
 
         <div className="bg-card border border-border rounded-xl">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-            <div>
-              <div className="text-sm font-medium text-foreground">我的渠道</div>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="primary"
-                onClick={() => void refreshRemoteUsage()}
-                disabled={refreshingRemote || !selectedID}
-                className="px-2 disabled:opacity-50"
-                title="向远端 new-api 发起一次拉取，更新用量数据"
-              >
-                {refreshingRemote ? '拉取中…' : '获取用量'}
-              </Button>
-              <Button variant="outline" onClick={() => void reloadChannels()} className="border px-2">
-                刷新
-              </Button>
-            </div>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm">
-              <thead className="bg-muted mono-label">
-                <tr>
-                  <th className="text-left px-4 py-2 font-medium">名称</th>
-                  <th className="text-left px-4 py-2 font-medium">状态</th>
-                  <th className="text-left px-4 py-2 font-medium">Group</th>
-                  <th className="text-right px-4 py-2 font-medium" title="从 remote_channel_current 同步的累计用量">
-                    已用
-                  </th>
-                  <th className="text-right px-4 py-2 font-medium" title="上传时填写的额度上限">
-                    额度
-                  </th>
-                  <th className="text-right px-4 py-2 font-medium">剩余</th>
-                  <th className="text-left px-4 py-2 font-medium">创建时间</th>
-                </tr>
-              </thead>
-              <tbody>
-                {channels.length === 0 ? (
-                  <tr>
-                    <td colSpan={7} className="px-4 py-6 text-center text-xs text-muted-foreground">
-                      暂无渠道，先在下方队列上传 Key
-                    </td>
-                  </tr>
-                ) : (
-                  channels.map(ch => {
-                    const usedUSD = ch.used_quota / 500000
-                    const quotaUSD = ch.quota_usd ?? 0
-                    return (
-                      <tr key={ch.id} className="border-t border-border">
-                        <td className="px-4 py-2 font-mono text-xs">{ch.name}</td>
-                        <td className="px-4 py-2">
-                          <span className={`inline-block px-1.5 py-0.5 rounded text-xs ${channelStatusCls(ch.status)}`}>
-                            {channelStatusLabel(ch.status)}
-                          </span>
-                        </td>
-                        <td className="px-4 py-2 text-xs text-muted-foreground">{ch.group || '—'}</td>
-                        <td className="px-4 py-2 text-right tabular-nums text-xs">${usedUSD.toFixed(4)}</td>
-                        <td className="px-4 py-2 text-right tabular-nums text-xs">
-                          {quotaUSD > 0 ? `$${quotaUSD.toFixed(2)}` : <span className="text-muted-foreground">—</span>}
-                        </td>
-                        <td className="px-4 py-2 text-right">
-                          <UsagePct used={usedUSD} quota={quotaUSD} />
-                        </td>
-                        <td className="px-4 py-2 text-xs text-muted-foreground">{fmtTime(ch.created_time)}</td>
-                      </tr>
-                    )
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* Key 用量统计（按时间窗口）。数据源是远端 /api/log/stat?type=2
-            的窗口 quota，不是快照差值，所以是精确的实际消耗。默认当天
-            00:00 → 现在，改日期即刻重新拉。 */}
-        <div className="bg-card border border-border rounded-xl">
           <div className="flex items-center justify-between px-4 py-3 border-b border-border gap-3 flex-wrap">
             <div>
-              <div className="text-sm font-medium text-foreground">Key 用量统计</div>
+              <div className="text-sm font-medium text-foreground">我的渠道</div>
               <div className="text-xs text-muted-foreground mt-0.5">
-                窗口内实际消耗（USD）。默认当天。
+                累计已用 + 窗口消耗（USD）。窗口默认当天。
                 {usageFetchedAt > 0 && <span> · 更新于 {new Date(usageFetchedAt).toLocaleTimeString()}</span>}
               </div>
             </div>
@@ -1376,93 +1299,96 @@ export default function RemoteChannelsStudio() {
               </Button>
               <Button
                 variant="primary"
-                onClick={() => void loadUsage()}
-                disabled={usageLoading}
+                onClick={() => void refreshRemoteUsage()}
+                disabled={refreshingRemote || !selectedID}
                 className="px-2 disabled:opacity-50"
+                title="向远端 new-api 发起一次拉取，更新用量数据"
               >
-                {usageLoading ? '拉取中…' : '刷新'}
+                {refreshingRemote ? '拉取中…' : '获取用量'}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  void reloadChannels()
+                  void loadUsage()
+                }}
+                className="border px-2"
+              >
+                刷新
               </Button>
             </div>
           </div>
           {usageErr && (
-            <div className="px-4 py-2 text-xs text-destructive border-b border-border bg-destructive/10">
-              {usageErr}
-            </div>
+            <div className="px-4 py-2 text-xs text-destructive border-b border-border bg-destructive/10">{usageErr}</div>
           )}
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead className="bg-muted mono-label">
                 <tr>
                   <th className="text-left px-4 py-2 font-medium">名称</th>
+                  <th className="text-left px-4 py-2 font-medium">状态</th>
                   <th className="text-left px-4 py-2 font-medium">Group</th>
-                  <th className="text-right px-4 py-2 font-medium">窗口内消耗 (USD)</th>
-                  <th className="text-right px-4 py-2 font-medium" title="上传时设置的额度上限">
+                  <th className="text-right px-4 py-2 font-medium" title="从 remote_channel_current 同步的累计用量">
+                    已用
+                  </th>
+                  <th className="text-right px-4 py-2 font-medium" title="所选时间窗口内的实际消耗">
+                    窗口消耗
+                  </th>
+                  <th className="text-right px-4 py-2 font-medium" title="上传时填写的额度上限">
                     额度
                   </th>
-                  <th className="text-right px-4 py-2 font-medium" title="窗口内消耗 / 额度">
-                    占比
-                  </th>
+                  <th className="text-right px-4 py-2 font-medium" title="累计已用 / 额度">剩余</th>
+                  <th className="text-left px-4 py-2 font-medium">创建时间</th>
                 </tr>
               </thead>
               <tbody>
-                {(() => {
-                  // Rows are driven by the channel list (so operators see
-                  // all their channels even if usage is 0), sorted by
-                  // window usage desc, with a total row at the bottom.
-                  const rows = channels.map(ch => {
-                    const raw = usageData[String(ch.id)] || 0
-                    const usedUSD = raw / 500000
-                    const quotaUSD = ch.quota_usd ?? 0
-                    const pct = quotaUSD > 0 ? Math.min(100, (usedUSD / quotaUSD) * 100) : null
-                    return { ch, usedUSD, quotaUSD, pct }
-                  })
-                  rows.sort((a, b) => b.usedUSD - a.usedUSD)
-                  if (rows.length === 0) {
-                    return (
-                      <tr>
-                        <td colSpan={5} className="px-4 py-6 text-center text-xs text-muted-foreground">
-                          {usageLoading ? '加载中…' : '暂无渠道'}
-                        </td>
-                      </tr>
-                    )
-                  }
-                  return (
-                    <>
-                      {rows.map(r => (
-                        <tr key={r.ch.id} className="border-t border-border">
-                          <td className="px-4 py-2 font-mono text-xs">{r.ch.name}</td>
-                          <td className="px-4 py-2 text-xs text-muted-foreground">{r.ch.group || '—'}</td>
+                {channels.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="px-4 py-6 text-center text-xs text-muted-foreground">
+                      暂无渠道，点上方「批量添加」上传 Key
+                    </td>
+                  </tr>
+                ) : (
+                  <>
+                    {channels.map(ch => {
+                      const usedUSD = ch.used_quota / 500000
+                      const quotaUSD = ch.quota_usd ?? 0
+                      const windowUSD = (usageData[String(ch.id)] || 0) / 500000
+                      return (
+                        <tr key={ch.id} className="border-t border-border">
+                          <td className="px-4 py-2 font-mono text-xs">{ch.name}</td>
+                          <td className="px-4 py-2">
+                            <span className={`inline-block px-1.5 py-0.5 rounded text-xs ${channelStatusCls(ch.status)}`}>
+                              {channelStatusLabel(ch.status)}
+                            </span>
+                          </td>
+                          <td className="px-4 py-2 text-xs text-muted-foreground">{ch.group || '—'}</td>
+                          <td className="px-4 py-2 text-right tabular-nums text-xs">${usedUSD.toFixed(4)}</td>
                           <td className="px-4 py-2 text-right tabular-nums text-xs">
-                            {r.usedUSD > 0 ? (
-                              `$${r.usedUSD.toFixed(4)}`
-                            ) : (
-                              <span className="text-muted-foreground">$0</span>
-                            )}
+                            {windowUSD > 0 ? `$${windowUSD.toFixed(4)}` : <span className="text-muted-foreground">$0</span>}
                           </td>
                           <td className="px-4 py-2 text-right tabular-nums text-xs">
-                            {r.quotaUSD > 0 ? (
-                              `$${r.quotaUSD.toFixed(2)}`
-                            ) : (
-                              <span className="text-muted-foreground">—</span>
-                            )}
+                            {quotaUSD > 0 ? `$${quotaUSD.toFixed(2)}` : <span className="text-muted-foreground">—</span>}
                           </td>
-                          <td className="px-4 py-2 text-right tabular-nums text-xs">
-                            {r.pct != null ? `${r.pct.toFixed(1)}%` : <span className="text-muted-foreground">—</span>}
+                          <td className="px-4 py-2 text-right">
+                            <UsagePct used={usedUSD} quota={quotaUSD} />
                           </td>
+                          <td className="px-4 py-2 text-xs text-muted-foreground">{fmtTime(ch.created_time)}</td>
                         </tr>
-                      ))}
-                      <tr className="border-t-2 border-border bg-muted">
-                        <td className="px-4 py-2 text-xs font-medium text-foreground" colSpan={2}>
-                          合计
-                        </td>
-                        <td className="px-4 py-2 text-right tabular-nums text-xs font-medium">
-                          ${usageTotal.toFixed(4)}
-                        </td>
-                        <td className="px-4 py-2" colSpan={2}></td>
-                      </tr>
-                    </>
-                  )
-                })()}
+                      )
+                    })}
+                    <tr className="border-t-2 border-border bg-muted">
+                      <td className="px-4 py-2 text-xs font-medium text-foreground" colSpan={3}>
+                        合计
+                      </td>
+                      <td className="px-4 py-2 text-right tabular-nums text-xs font-medium">
+                        ${channels.reduce((s, c) => s + c.used_quota / 500000, 0).toFixed(4)}
+                      </td>
+                      <td className="px-4 py-2 text-right tabular-nums text-xs font-medium">${usageTotal.toFixed(4)}</td>
+                      <td className="px-4 py-2" colSpan={3}></td>
+                    </tr>
+                  </>
+                )}
               </tbody>
             </table>
           </div>
