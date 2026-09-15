@@ -238,14 +238,16 @@ const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
   },
   {
     id: 'azure',
-    label: 'Azure',
+    label: 'Azure (OpenAI)',
     kind: 'azure',
     type: CHANNEL_TYPE_AZURE,
     fallbackModels: DEFAULT_OPENAI_MODELS,
     fallbackGroup: 'openai',
     testModel: 'gpt-4o-mini',
-    profileGroupField: 'default_group',
-    profileModelsField: 'default_models',
+    // Azure hosts the OpenAI model family — resolve default group/models from
+    // the profile's OpenAI config (falls back to DEFAULT_OPENAI_MODELS).
+    profileGroupField: 'default_openai_group',
+    profileModelsField: 'default_openai_models',
   },
   {
     id: 'aws',

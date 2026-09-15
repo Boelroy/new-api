@@ -215,13 +215,16 @@ const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
   },
   {
     id: 'azure',
-    label: 'Azure',
+    label: 'Azure (OpenAI)',
     kind: 'azure',
     type: CHANNEL_TYPE_AZURE,
     fallbackModels: DEFAULT_OPENAI_MODELS,
     fallbackGroup: 'openai',
-    profileGroupField: 'default_group',
-    profileModelsField: 'default_models',
+    // Azure hosts the OpenAI model family — resolve its default group/models
+    // from the profile's OpenAI config so admins can set the Azure default to
+    // OpenAI models (falls back to DEFAULT_OPENAI_MODELS / gpt-*).
+    profileGroupField: 'default_openai_group',
+    profileModelsField: 'default_openai_models',
   },
   {
     id: 'aws',
@@ -1230,9 +1233,6 @@ export default function RemoteChannelsStudio() {
           <Button variant="primary" onClick={openBatch} disabled={!selectedID}>
             {t('Batch Add (one key per line)')}
           </Button>
-          <Button variant="outline" onClick={openImmediate} disabled={!selectedID} className="px-3 disabled:opacity-50">
-            上普通 Key
-          </Button>
         </div>
       }
     >
@@ -1255,11 +1255,6 @@ export default function RemoteChannelsStudio() {
                 </option>
               ))}
             </Select>
-          )}
-          {selectedProfile && (
-            <div className="text-xs text-muted-foreground mt-2">
-              默认 Models: <span className="font-mono">{selectedProfile.default_models || '未设置'}</span>
-            </div>
           )}
         </div>
 
@@ -1471,108 +1466,6 @@ export default function RemoteChannelsStudio() {
                     </>
                   )
                 })()}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div className="bg-card border border-border rounded-xl">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-            <div>
-              <div className="text-sm font-medium text-foreground">上传队列</div>
-              <div className="text-xs text-muted-foreground mt-0.5">
-                pending → active → used。每 30 秒自动刷新一次。
-              </div>
-            </div>
-            <Button variant="outline" onClick={() => void reloadPending()} className="border px-2">
-              刷新
-            </Button>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm">
-              <thead className="bg-muted mono-label">
-                <tr>
-                  <th className="text-left px-4 py-2 font-medium">Key</th>
-                  <th className="text-left px-4 py-2 font-medium">状态</th>
-                  <th className="text-right px-4 py-2 font-medium" title="从 remote_channel_current 同步的累计用量">
-                    已用
-                  </th>
-                  <th className="text-right px-4 py-2 font-medium" title="上传时填写的额度上限">
-                    额度
-                  </th>
-                  <th className="text-left px-4 py-2 font-medium">尝试</th>
-                  <th className="text-left px-4 py-2 font-medium">创建时间</th>
-                  <th className="text-left px-4 py-2 font-medium">失败原因</th>
-                  <th className="text-right px-4 py-2 font-medium">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pending.length === 0 ? (
-                  <tr>
-                    <td colSpan={8} className="px-4 py-6 text-center text-xs text-muted-foreground">
-                      队列为空
-                    </td>
-                  </tr>
-                ) : (
-                  pending.map(row => {
-                    const pct = row.quota_usd > 0 ? Math.min(100, (row.used_usd / row.quota_usd) * 100) : null
-                    return (
-                      <tr key={row.id} className="border-t border-border">
-                        <td className="px-4 py-2 font-mono text-xs">{row.key_masked}</td>
-                        <td className="px-4 py-2">
-                          <span className={`inline-block px-1.5 py-0.5 rounded text-xs ${STATUS_CLS[row.status]}`}>
-                            {STATUS_LABEL[row.status]}
-                          </span>
-                        </td>
-                        <td className="px-4 py-2 text-right tabular-nums">
-                          {row.used_usd > 0 ? (
-                            <div className="flex flex-col items-end gap-0.5">
-                              <span className="text-xs">${row.used_usd.toFixed(4)}</span>
-                              {pct != null && (
-                                <div className="w-14 h-1 bg-muted rounded overflow-hidden">
-                                  <div
-                                    className={`h-full ${pct >= 100 ? 'bg-destructive' : pct >= 80 ? 'bg-warning' : 'bg-success'}`}
-                                    style={{ width: pct + '%' }}
-                                  />
-                                </div>
-                              )}
-                            </div>
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
-                          )}
-                        </td>
-                        <td className="px-4 py-2 text-right tabular-nums text-xs">
-                          {row.quota_usd > 0 ? (
-                            `$${row.quota_usd.toFixed(2)}`
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
-                          )}
-                        </td>
-                        <td className="px-4 py-2 text-xs tabular-nums">{row.attempts}</td>
-                        <td className="px-4 py-2 text-xs text-muted-foreground">{fmtTime(row.created_at)}</td>
-                        <td
-                          className="px-4 py-2 text-xs text-destructive max-w-xs truncate"
-                          title={row.failed_reason || ''}
-                        >
-                          {row.failed_reason || '—'}
-                        </td>
-                        <td className="px-4 py-2 text-right">
-                          {row.status === 'pending' || row.status === 'failed' ? (
-                            <Button
-                              variant="danger"
-                              onClick={() => void cancelPending(row)}
-                              className="text-destructive hover:underline"
-                            >
-                              撤销
-                            </Button>
-                          ) : (
-                            <span className="text-xs text-muted-foreground">—</span>
-                          )}
-                        </td>
-                      </tr>
-                    )
-                  })
-                )}
               </tbody>
             </table>
           </div>
