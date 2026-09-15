@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { forwardRef, useEffect, useState } from 'react'
 import type { ReactNode, ButtonHTMLAttributes, InputHTMLAttributes } from 'react'
 import { cn } from '../lib/utils'
 
@@ -14,15 +14,7 @@ export function MonoLabel({ children, className }: { children: ReactNode; classN
   return <span className={cx('mono-label', className)}>{children}</span>
 }
 
-export function Card({
-  children,
-  className,
-  as: As = 'div',
-}: {
-  children: ReactNode
-  className?: string
-  as?: any
-}) {
+export function Card({ children, className, as: As = 'div' }: { children: ReactNode; className?: string; as?: any }) {
   return <As className={cx('card', className)}>{children}</As>
 }
 
@@ -33,9 +25,14 @@ type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
 
 // Button matches the v1 API (primary/outline/danger/... + sm/md/lg) so ported
 // call sites need no changes, but is styled with new-api semantic tokens.
-export function Button({ variant = 'primary', size = 'md', className, ...props }: ButtonProps) {
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  { variant = 'primary', size = 'md', className, ...props },
+  ref,
+) {
   return (
     <button
+      ref={ref}
+      type="button"
       className={cx(
         'inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-transparent font-medium whitespace-nowrap transition-all outline-none select-none',
         'focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 active:translate-y-px',
@@ -55,11 +52,27 @@ export function Button({ variant = 'primary', size = 'md', className, ...props }
       {...props}
     />
   )
-}
+})
 
-export function Input({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
+export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(function Input(
+  { className, ...props },
+  ref,
+) {
+  if (props.type === 'checkbox' || props.type === 'radio') {
+    return (
+      <input
+        ref={ref}
+        className={cx(
+          'size-4 shrink-0 accent-primary focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-50',
+          className,
+        )}
+        {...props}
+      />
+    )
+  }
   return (
     <input
+      ref={ref}
       className={cx(
         'h-8 w-full min-w-0 rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm transition-colors outline-none',
         'placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/50',
@@ -69,11 +82,16 @@ export function Input({ className, ...props }: InputHTMLAttributes<HTMLInputElem
       {...props}
     />
   )
-}
+})
 
 export function Eyebrow({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <div className={cx('flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-primary', className)}>
+    <div
+      className={cx(
+        'flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-primary',
+        className,
+      )}
+    >
       {children}
     </div>
   )
@@ -134,13 +152,19 @@ export function RelativeTime({ at, className }: { at: number | null; className?:
   const [, force] = useState(0)
   useEffect(() => {
     if (!at) return
-    const id = setInterval(() => force((n) => n + 1), 5000)
+    const id = setInterval(() => force(n => n + 1), 5000)
     return () => clearInterval(id)
   }, [at])
   if (!at) return null
   const secs = Math.max(0, Math.floor((Date.now() - at) / 1000))
   const label =
-    secs < 5 ? '刚刚' : secs < 60 ? `${secs}s 前` : secs < 3600 ? `${Math.floor(secs / 60)}m 前` : `${Math.floor(secs / 3600)}h 前`
+    secs < 5
+      ? '刚刚'
+      : secs < 60
+        ? `${secs}s 前`
+        : secs < 3600
+          ? `${Math.floor(secs / 60)}m 前`
+          : `${Math.floor(secs / 3600)}h 前`
   return <span className={cx('tnum', className)}>{label}</span>
 }
 
@@ -175,7 +199,14 @@ export function Ring({ value, size = 132, label }: { value: number; size?: numbe
   return (
     <div className="relative inline-flex items-center justify-center" style={{ width: size, height: size }}>
       <svg width={size} height={size} className="-rotate-90">
-        <circle cx={size / 2} cy={size / 2} r={r} style={{ stroke: 'var(--border)' }} strokeWidth={stroke} fill="none" />
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          style={{ stroke: 'var(--border)' }}
+          strokeWidth={stroke}
+          fill="none"
+        />
         <circle
           cx={size / 2}
           cy={size / 2}
@@ -194,5 +225,31 @@ export function Ring({ value, size = 132, label }: { value: number; size?: numbe
         {label && <span className="mono-label mt-0.5">{label}</span>}
       </div>
     </div>
+  )
+}
+
+export function Textarea({ className, ...props }: import('react').TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  return (
+    <textarea
+      className={cx(
+        'min-h-20 w-full min-w-0 rounded-lg border border-input bg-transparent px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-input/30',
+        className,
+      )}
+      {...props}
+    />
+  )
+}
+
+// Keep native select semantics (including mobile pickers) for the existing
+// onChange API; centralize its focus, disabled, sizing and theme behavior.
+export function Select({ className, ...props }: import('react').SelectHTMLAttributes<HTMLSelectElement>) {
+  return (
+    <select
+      className={cx(
+        'h-9 min-w-0 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50',
+        className,
+      )}
+      {...props}
+    />
   )
 }

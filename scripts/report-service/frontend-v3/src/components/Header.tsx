@@ -24,9 +24,8 @@ export default function Header(props: Props) {
         <PanelLeft className="size-4" />
       </button>
 
-      <a href="/v3/" className="inline-flex h-7 min-w-0 items-center gap-1.5 rounded-md px-1.5 text-sm font-medium text-foreground hover:bg-accent">
-        <span className="flex size-5 items-center justify-center rounded-md bg-primary text-[11px] font-bold text-primary-foreground">N</span>
-        <span className="max-w-[12rem] truncate">New API</span>
+      <a href="/v3/" className="inline-flex h-7 min-w-0 items-center rounded-md px-1.5 text-sm font-bold tracking-[0.08em] text-foreground hover:bg-accent">
+        <span className="max-w-[14rem] truncate">AI Gateway</span>
       </a>
 
       <div className="ms-auto flex shrink-0 items-center gap-1 sm:gap-2">

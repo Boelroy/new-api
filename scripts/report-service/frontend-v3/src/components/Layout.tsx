@@ -27,9 +27,9 @@ export default function Layout({ title, subtitle, actions, children }: Props) {
   // mobile it opens the off-canvas drawer.
   const toggle = useCallback(() => {
     if (window.matchMedia('(min-width: 1024px)').matches) {
-      setCollapsed((c) => !c)
+      setCollapsed(c => !c)
     } else {
-      setMobileOpen((o) => !o)
+      setMobileOpen(o => !o)
     }
   }, [])
 
@@ -38,7 +38,7 @@ export default function Layout({ title, subtitle, actions, children }: Props) {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && (e.key === 'b' || e.key === 'B')) {
         e.preventDefault()
-        setCollapsed((c) => !c)
+        setCollapsed(c => !c)
       }
     }
     window.addEventListener('keydown', onKey)
@@ -52,8 +52,8 @@ export default function Layout({ title, subtitle, actions, children }: Props) {
       <div className="flex min-h-0 w-full flex-1">
         <Sidebar collapsed={collapsed} mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} />
 
-        <main className="min-h-0 flex-1 overflow-y-auto">
-          <div className="mx-auto max-w-[1400px] px-4 py-5 sm:px-6 sm:py-6 lg:px-8">
+        <main className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+          <div className="mx-auto w-full max-w-[1600px] px-4 py-5 sm:px-6 sm:py-6 lg:px-8">
             <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
               <div className="min-w-0">
                 <h1 className="display text-lg leading-tight sm:text-[22px]">{title}</h1>

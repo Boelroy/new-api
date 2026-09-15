@@ -1,5 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
-import { createPortal } from 'react-dom'
+import { Dialog } from '@base-ui/react/dialog'
+import { useTranslation } from 'react-i18next'
+import { X } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Button, Input, cx } from './ui'
 
@@ -18,7 +20,7 @@ const toastListeners = new Set<() => void>()
 
 function emitToasts() {
   toasts = toasts.slice()
-  toastListeners.forEach((l) => l())
+  toastListeners.forEach(l => l())
 }
 
 function pushToast(tone: ToastTone, message: string, ttlMs: number) {
@@ -30,7 +32,7 @@ function pushToast(tone: ToastTone, message: string, ttlMs: number) {
 }
 
 function dismissToast(id: number) {
-  const next = toasts.filter((t) => t.id !== id)
+  const next = toasts.filter(t => t.id !== id)
   if (next.length !== toasts.length) {
     toasts = next
     emitToasts()
@@ -66,11 +68,15 @@ function subscribeToasts(cb: () => void) {
 }
 
 export function Toaster() {
-  const items = useSyncExternalStore(subscribeToasts, () => toasts, () => toasts)
+  const items = useSyncExternalStore(
+    subscribeToasts,
+    () => toasts,
+    () => toasts,
+  )
   if (!items.length) return null
   return (
     <div className="fixed top-4 right-4 z-[100] flex w-[min(92vw,360px)] flex-col gap-2">
-      {items.map((t) => (
+      {items.map(t => (
         <div
           key={t.id}
           role="status"
@@ -100,7 +106,15 @@ export function Toaster() {
             aria-label="关闭"
             className="shrink-0 text-muted-foreground hover:text-foreground"
           >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+            >
               <line x1="18" y1="6" x2="6" y2="18" />
               <line x1="6" y1="6" x2="18" y2="18" />
             </svg>
@@ -117,52 +131,41 @@ export function Toaster() {
 // chrome; the modal only adds the dim backdrop, centering, and close button.
 // ─────────────────────────────────────────────────────────────────────────
 
-export function Modal({
-  open,
-  onClose,
-  children,
-  className,
-}: {
+export function Modal(props: {
   open: boolean
   onClose: () => void
   children: ReactNode
+  title?: ReactNode
   className?: string
 }) {
-  useEffect(() => {
-    if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose])
-
-  if (!open) return null
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[110] flex items-start justify-center overflow-y-auto bg-black/50 p-4 sm:items-center"
-      onClick={onClose}
+  const { t } = useTranslation()
+  return (
+    <Dialog.Root
+      open={props.open}
+      onOpenChange={open => {
+        if (!open) props.onClose()
+      }}
     >
-      <div
-        role="dialog"
-        aria-modal="true"
-        className={cx('animate-fadeUp relative my-6 w-full max-w-[520px]', className)}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <button
-          onClick={onClose}
-          aria-label="关闭"
-          className="absolute right-3 top-3 z-10 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+      <Dialog.Portal>
+        <Dialog.Backdrop className="fixed inset-0 z-[110] bg-black/40" />
+        <Dialog.Popup
+          className={cx(
+            'fixed left-1/2 top-1/2 z-[110] max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border border-border bg-popover p-6 text-popover-foreground shadow-xl outline-none',
+            props.className,
+          )}
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <line x1="18" y1="6" x2="6" y2="18" />
-            <line x1="6" y1="6" x2="18" y2="18" />
-          </svg>
-        </button>
-        {children}
-      </div>
-    </div>,
-    document.body,
+          <Dialog.Title className="mb-4 pr-8 text-base font-semibold">{props.title ?? t('Confirm')}</Dialog.Title>
+          <Dialog.Close
+            render={
+              <Button variant="ghost" className="absolute right-3 top-3 size-8 p-0" aria-label={t('Close dialog')} />
+            }
+          >
+            <X className="size-4" aria-hidden="true" />
+          </Dialog.Close>
+          {props.children}
+        </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
   )
 }
 
@@ -185,12 +188,12 @@ let pendingConfirm: PendingConfirm | null = null
 const confirmListeners = new Set<() => void>()
 
 function emitConfirm() {
-  confirmListeners.forEach((l) => l())
+  confirmListeners.forEach(l => l())
 }
 
 export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
   if (pendingConfirm) pendingConfirm.resolve(false)
-  return new Promise<boolean>((resolve) => {
+  return new Promise<boolean>(resolve => {
     pendingConfirm = { ...opts, resolve }
     emitConfirm()
   })
@@ -209,39 +212,27 @@ function subscribeConfirm(cb: () => void) {
 }
 
 export function ConfirmHost() {
-  const p = useSyncExternalStore(subscribeConfirm, () => pendingConfirm, () => pendingConfirm)
+  const { t } = useTranslation()
+  const p = useSyncExternalStore(
+    subscribeConfirm,
+    () => pendingConfirm,
+    () => pendingConfirm,
+  )
   if (!p) return null
   return (
-    <div
-      className="fixed inset-0 z-[110] flex items-center justify-center bg-black/50 px-4"
-      onClick={() => settleConfirm(false)}
-    >
-      <div
-        role="alertdialog"
-        aria-modal="true"
-        className="animate-fadeUp w-full max-w-[420px] rounded-xl bg-popover p-6 text-popover-foreground shadow-xl ring-1 ring-foreground/10"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className={cx('mb-3 text-[10px] font-semibold uppercase tracking-wider', p.danger ? 'text-destructive' : 'text-primary')}>
-          {p.danger ? 'Danger' : 'Confirm'}
-        </div>
-        {p.title && <h2 className="display mb-2 text-lg">{p.title}</h2>}
-        <p className="whitespace-pre-line text-sm leading-relaxed text-foreground">{p.message}</p>
-        <div className="mt-6 flex justify-end gap-2">
-          <Button variant="outline" size="sm" onClick={() => settleConfirm(false)}>
-            {p.cancelText ?? '取消'}
-          </Button>
-          <Button
-            variant={p.danger ? 'danger' : 'primary'}
-            size="sm"
-            autoFocus
-            onClick={() => settleConfirm(true)}
-          >
-            {p.confirmText ?? '确定'}
-          </Button>
-        </div>
+    <Modal open onClose={() => settleConfirm(false)} title={p.title ?? t('Confirm')}>
+      <Dialog.Description className="whitespace-pre-line text-sm leading-relaxed text-muted-foreground">
+        {p.message}
+      </Dialog.Description>
+      <div className="mt-6 flex justify-end gap-2">
+        <Button variant="outline" autoFocus onClick={() => settleConfirm(false)}>
+          {p.cancelText ?? t('Cancel')}
+        </Button>
+        <Button variant={p.danger ? 'danger' : 'primary'} onClick={() => settleConfirm(true)}>
+          {p.confirmText ?? t('Confirm')}
+        </Button>
       </div>
-    </div>
+    </Modal>
   )
 }
 
@@ -265,12 +256,12 @@ let pendingPrompt: PendingPrompt | null = null
 const promptListeners = new Set<() => void>()
 
 function emitPrompt() {
-  promptListeners.forEach((l) => l())
+  promptListeners.forEach(l => l())
 }
 
 export function promptDialog(opts: PromptOptions): Promise<string | null> {
   if (pendingPrompt) pendingPrompt.resolve(null)
-  return new Promise<string | null>((resolve) => {
+  return new Promise<string | null>(resolve => {
     pendingPrompt = { ...opts, resolve }
     emitPrompt()
   })
@@ -289,45 +280,42 @@ function subscribePrompt(cb: () => void) {
 }
 
 export function PromptHost() {
-  const p = useSyncExternalStore(subscribePrompt, () => pendingPrompt, () => pendingPrompt)
+  const { t } = useTranslation()
+  const p = useSyncExternalStore(
+    subscribePrompt,
+    () => pendingPrompt,
+    () => pendingPrompt,
+  )
   const [value, setValue] = useState('')
-  // Reseed the field whenever a new prompt opens.
   useEffect(() => {
     if (p) setValue(p.defaultValue ?? '')
   }, [p])
   if (!p) return null
   return (
-    <div
-      className="fixed inset-0 z-[110] flex items-center justify-center bg-black/50 px-4"
-      onClick={() => settlePrompt(null)}
-    >
+    <Modal open onClose={() => settlePrompt(null)} title={p.title ?? t('Confirm')}>
       <form
-        role="dialog"
-        aria-modal="true"
-        className="animate-fadeUp w-full max-w-[440px] rounded-xl bg-popover p-6 text-popover-foreground shadow-xl ring-1 ring-foreground/10"
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={(e) => {
-          e.preventDefault()
+        onSubmit={event => {
+          event.preventDefault()
           settlePrompt(value)
         }}
       >
-        {p.title && <h2 className="display mb-2 text-lg">{p.title}</h2>}
-        <p className="mb-3 whitespace-pre-line text-sm leading-relaxed text-foreground">{p.message}</p>
+        <Dialog.Description className="mb-4 whitespace-pre-line text-sm leading-relaxed text-muted-foreground">
+          {p.message}
+        </Dialog.Description>
         <Input
           autoFocus
+          aria-label={p.title ?? t('Text')}
           value={value}
           placeholder={p.placeholder}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={event => setValue(event.target.value)}
         />
         <div className="mt-6 flex justify-end gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={() => settlePrompt(null)}>
-            {p.cancelText ?? '取消'}
+          <Button type="button" variant="outline" onClick={() => settlePrompt(null)}>
+            {p.cancelText ?? t('Cancel')}
           </Button>
-          <Button type="submit" variant="primary" size="sm">
-            {p.confirmText ?? '确定'}
-          </Button>
+          <Button type="submit">{p.confirmText ?? t('Confirm')}</Button>
         </div>
       </form>
-    </div>
+    </Modal>
   )
 }

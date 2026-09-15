@@ -49,8 +49,7 @@ export default function Login() {
       <header className="border-b border-[#e1e2dc]">
         <div className="mx-auto flex w-full max-w-[1280px] items-center justify-between px-6 py-4 sm:px-10">
           <div className="flex items-baseline gap-2">
-            <span className="text-sm font-bold tracking-[0.18em]">BLUEPRINT</span>
-            <span className="text-sm text-[#8a8d84]">/ AI Gateway</span>
+            <span className="text-sm font-bold tracking-[0.12em]">AI Gateway</span>
           </div>
           <div className="flex items-center gap-2 text-xs text-[#8a8d84]">
             <span>语言</span>
@@ -160,7 +159,7 @@ export default function Login() {
       {/* Footer */}
       <footer className="border-t border-[#e1e2dc]">
         <div className="mx-auto flex w-full max-w-[1280px] items-center justify-between px-6 py-5 font-mono text-[11px] uppercase tracking-[0.14em] text-[#9a9d93] sm:px-10">
-          <span>Blueprint / AI Gateway</span>
+          <span>AI Gateway</span>
           <span className="normal-case tracking-normal">请求、回复与运行细节。</span>
         </div>
       </footer>

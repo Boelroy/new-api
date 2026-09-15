@@ -1,7 +1,13 @@
+import { useTranslation } from 'react-i18next'
+import { FormSection } from '../components/FormSection'
+import { ProviderSelect } from '../components/ProviderSelect'
+import { Button, Input, Select, Textarea } from '../components/ui'
+import { BatchKeyInput } from '../components/BatchKeyInput'
+import { keyRowsToItems, parseKeyRows } from '../lib/batch-keys'
+import { SidePanel } from '../components/SidePanel'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Layout from '../components/Layout'
 import { toast, confirmDialog, promptDialog } from '../components/feedback'
-import { ProviderOption } from '../components/ProviderMark'
 import { withBase } from '../basePath'
 import {
   api,
@@ -24,9 +30,9 @@ const STATUS_LABEL: Record<number, string> = {
   3: '自动禁用',
 }
 const STATUS_CLS: Record<number, string> = {
-  1: 'text-success bg-[#E6F4EE]',
+  1: 'text-success bg-success/10',
   2: 'bg-destructive/10 text-destructive',
-  3: 'text-warning bg-[#FBF0DC]',
+  3: 'text-warning bg-warning/10',
 }
 
 const DEFAULT_ANTHROPIC_MODELS = [
@@ -96,9 +102,17 @@ const CHANNEL_TYPE_AWS = 33
 // AWS Bedrock: common regions offered as quick-pick chips; the pre-selected
 // set is seeded from the deployment's aws_default_regions config.
 const AWS_COMMON_REGIONS = [
-  'us-east-1', 'us-east-2', 'us-west-2',
-  'ap-northeast-1', 'ap-northeast-2', 'ap-southeast-1', 'ap-southeast-2', 'ap-south-1',
-  'eu-central-1', 'eu-west-1', 'eu-west-3',
+  'us-east-1',
+  'us-east-2',
+  'us-west-2',
+  'ap-northeast-1',
+  'ap-northeast-2',
+  'ap-southeast-1',
+  'ap-southeast-2',
+  'ap-south-1',
+  'eu-central-1',
+  'eu-west-1',
+  'eu-west-3',
 ]
 const CHANNEL_TYPE_OPENROUTER = 20
 
@@ -169,14 +183,88 @@ type PresetSpec = {
   profileModelsField?: 'default_models' | 'default_gemini_models' | 'default_vertex_models' | 'default_openai_models'
 }
 const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
-  { id: 'anthropic',     label: 'Anthropic (Claude)',  kind: 'text',   type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS,     fallbackGroup: 'default',        testModel: 'claude-haiku-4-5-20251001',    profileGroupField: 'default_group',        profileModelsField: 'default_models' },
-  { id: 'openai',        label: 'OpenAI',              kind: 'text',   type: CHANNEL_TYPE_OPENAI,    fallbackModels: DEFAULT_OPENAI_MODELS,        fallbackGroup: 'openai',         testModel: 'gpt-4o-mini',                  profileGroupField: 'default_openai_group', profileModelsField: 'default_openai_models' },
-  { id: 'gemini',        label: 'Gemini',              kind: 'text',   type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,        fallbackGroup: 'gemini',         testModel: 'gemini-2.5-flash',             profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
-  { id: 'vertex',        label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,        fallbackGroup: 'gemini',         testModel: 'gemini-2.5-flash',             profileGroupField: 'default_gemini_group', profileModelsField: 'default_vertex_models' },
-  { id: 'vertex-claude', label: 'Vertex AI (Claude)',  kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_CLAUDE_MODELS, fallbackGroup: 'claude-vertex', testModel: 'claude-sonnet-4-5-20250929' },
-  { id: 'azure',         label: 'Azure',               kind: 'azure',  type: CHANNEL_TYPE_AZURE,     fallbackModels: DEFAULT_OPENAI_MODELS,        fallbackGroup: 'openai',         testModel: 'gpt-4o-mini',                  profileGroupField: 'default_group',        profileModelsField: 'default_models' },
-  { id: 'aws',           label: 'AWS (Bedrock)',       kind: 'aws',    type: CHANNEL_TYPE_AWS,       fallbackModels: DEFAULT_AWS_CLAUDE_MODELS,    fallbackGroup: 'claude-aws',     testModel: 'claude-haiku-4-5-20251001' },
-  { id: 'openrouter',    label: 'OpenRouter',          kind: 'text',   type: CHANNEL_TYPE_OPENROUTER, fallbackModels: DEFAULT_OPENROUTER_MODELS,    fallbackGroup: 'default',        testModel: 'claude-haiku-4-5-20251001' },
+  {
+    id: 'anthropic',
+    label: 'Anthropic (Claude)',
+    kind: 'text',
+    type: CHANNEL_TYPE_ANTHROPIC,
+    fallbackModels: DEFAULT_ANTHROPIC_MODELS,
+    fallbackGroup: 'default',
+    testModel: 'claude-haiku-4-5-20251001',
+    profileGroupField: 'default_group',
+    profileModelsField: 'default_models',
+  },
+  {
+    id: 'openai',
+    label: 'OpenAI',
+    kind: 'text',
+    type: CHANNEL_TYPE_OPENAI,
+    fallbackModels: DEFAULT_OPENAI_MODELS,
+    fallbackGroup: 'openai',
+    testModel: 'gpt-4o-mini',
+    profileGroupField: 'default_openai_group',
+    profileModelsField: 'default_openai_models',
+  },
+  {
+    id: 'gemini',
+    label: 'Gemini',
+    kind: 'text',
+    type: CHANNEL_TYPE_GEMINI,
+    fallbackModels: DEFAULT_GEMINI_MODELS,
+    fallbackGroup: 'gemini',
+    testModel: 'gemini-2.5-flash',
+    profileGroupField: 'default_gemini_group',
+    profileModelsField: 'default_gemini_models',
+  },
+  {
+    id: 'vertex',
+    label: 'Vertex AI',
+    kind: 'vertex',
+    type: CHANNEL_TYPE_VERTEX,
+    fallbackModels: DEFAULT_VERTEX_MODELS,
+    fallbackGroup: 'gemini',
+    testModel: 'gemini-2.5-flash',
+    profileGroupField: 'default_gemini_group',
+    profileModelsField: 'default_vertex_models',
+  },
+  {
+    id: 'vertex-claude',
+    label: 'Vertex AI (Claude)',
+    kind: 'vertex',
+    type: CHANNEL_TYPE_VERTEX,
+    fallbackModels: DEFAULT_VERTEX_CLAUDE_MODELS,
+    fallbackGroup: 'claude-vertex',
+    testModel: 'claude-sonnet-4-5-20250929',
+  },
+  {
+    id: 'azure',
+    label: 'Azure',
+    kind: 'azure',
+    type: CHANNEL_TYPE_AZURE,
+    fallbackModels: DEFAULT_OPENAI_MODELS,
+    fallbackGroup: 'openai',
+    testModel: 'gpt-4o-mini',
+    profileGroupField: 'default_group',
+    profileModelsField: 'default_models',
+  },
+  {
+    id: 'aws',
+    label: 'AWS (Bedrock)',
+    kind: 'aws',
+    type: CHANNEL_TYPE_AWS,
+    fallbackModels: DEFAULT_AWS_CLAUDE_MODELS,
+    fallbackGroup: 'claude-aws',
+    testModel: 'claude-haiku-4-5-20251001',
+  },
+  {
+    id: 'openrouter',
+    label: 'OpenRouter',
+    kind: 'text',
+    type: CHANNEL_TYPE_OPENROUTER,
+    fallbackModels: DEFAULT_OPENROUTER_MODELS,
+    fallbackGroup: 'default',
+    testModel: 'claude-haiku-4-5-20251001',
+  },
 ]
 
 // resolvePresetGroup / resolvePresetModels pick the batch upload group +
@@ -250,53 +338,55 @@ function VertexAdminInputSection({
   return (
     <>
       <div>
-        <label className="block text-[11px] text-muted-foreground mb-1">Auth Mode</label>
+        <label className="block text-xs text-muted-foreground mb-1">Auth Mode</label>
         <div className="inline-flex rounded-md border border-border overflow-hidden">
           {(
             [
-              { id: 'json',    label: 'Service Account JSON' },
+              { id: 'json', label: 'Service Account JSON' },
               { id: 'api_key', label: 'API Key' },
             ] as { id: VertexAdminKeyMode; label: string }[]
           ).map(m => {
             const active = keyMode === m.id
             return (
-              <button
+              <Button
+                variant="ghost"
                 key={m.id}
                 type="button"
                 onClick={() => onKeyModeChange(m.id)}
-                className={`px-3 py-1 text-[11px] border-r border-border last:border-r-0 transition-colors ${
+                className={`px-3 py-1 text-xs border-r border-border last:border-r-0 transition-colors ${
                   active ? 'bg-brand text-white' : 'bg-card text-foreground hover:bg-muted'
                 }`}
               >
                 {m.label}
-              </button>
+              </Button>
             )
           })}
         </div>
-        <p className="text-[10px] text-muted-foreground mt-1">
-          JSON 走 Bearer Token 鉴权；API Key 走 <code className="font-mono">?key=</code> URL 鉴权。写进 channel.settings 的 <code className="font-mono">vertex_key_type</code>。
+        <p className="text-xs text-muted-foreground mt-1">
+          JSON 走 Bearer Token 鉴权；API Key 走 <code className="font-mono">?key=</code> URL 鉴权。写进 channel.settings
+          的 <code className="font-mono">vertex_key_type</code>。
         </p>
       </div>
       <div>
-        <label className="block text-[11px] text-muted-foreground mb-1">
-          Deployment Region
-        </label>
-        <input
+        <label className="block text-xs text-muted-foreground mb-1">Deployment Region</label>
+        <Input
           value={region}
           onChange={e => onRegionChange(e.target.value)}
           placeholder="global"
           className="w-full border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
         />
-        <p className="text-[10px] text-muted-foreground mt-1">
-          输入部署区域或 JSON 映射：<code className="font-mono">{'{"default": "us-central1", "claude-3-5-sonnet-20240620": "europe-west1"}'}</code>。默认 <code className="font-mono">global</code>。写进 channel.other，本批次共用。
+        <p className="text-xs text-muted-foreground mt-1">
+          输入部署区域或 JSON 映射：
+          <code className="font-mono">
+            {'{"default": "us-central1", "claude-3-5-sonnet-20240620": "europe-west1"}'}
+          </code>
+          。默认 <code className="font-mono">global</code>。写进 channel.other，本批次共用。
         </p>
       </div>
       {keyMode === 'json' ? (
         <div>
-          <label className="block text-[11px] text-muted-foreground mb-1">
-            Service Account JSON 文件（可多选）
-          </label>
-          <input
+          <label className="block text-xs text-muted-foreground mb-1">Service Account JSON 文件（可多选）</label>
+          <Input
             type="file"
             accept=".json,application/json"
             multiple
@@ -304,14 +394,16 @@ function VertexAdminInputSection({
               onPickFiles(e.target.files)
               e.target.value = ''
             }}
-            className="block w-full text-[11px] text-foreground file:mr-3 file:py-1 file:px-2 file:rounded file:border file:border-border file:text-[11px] file:bg-muted file:hover:bg-muted"
+            className="block w-full text-xs text-foreground file:mr-3 file:py-1 file:px-2 file:rounded file:border file:border-border file:text-xs file:bg-muted file:hover:bg-muted"
           />
           {files.length > 0 && (
             <ul className="mt-2 divide-y divide-border border border-border rounded-md">
               {files.map((f, i) => (
-                <li key={i} className="px-3 py-2 flex items-center gap-2 text-[11px]">
-                  <span className="flex-1 truncate font-mono text-foreground" title={f.name}>{f.name}</span>
-                  <input
+                <li key={i} className="px-3 py-2 flex items-center gap-2 text-xs">
+                  <span className="flex-1 truncate font-mono text-foreground" title={f.name}>
+                    {f.name}
+                  </span>
+                  <Input
                     type="number"
                     placeholder="quota"
                     step="0.01"
@@ -322,9 +414,9 @@ function VertexAdminInputSection({
                       next[i] = { ...f, quotaUSD: v && v > 0 ? v : undefined }
                       onFilesChange(next)
                     }}
-                    className="w-20 border border-border rounded px-1.5 py-0.5 text-[11px] tabular-nums focus:outline-none focus:border-ring"
+                    className="w-20 border border-border rounded px-1.5 py-0.5 text-xs tabular-nums focus:outline-none focus:border-ring"
                   />
-                  <input
+                  <Input
                     type="text"
                     placeholder="备注"
                     value={f.note ?? ''}
@@ -333,15 +425,16 @@ function VertexAdminInputSection({
                       next[i] = { ...f, note: e.target.value }
                       onFilesChange(next)
                     }}
-                    className="w-36 border border-border rounded px-1.5 py-0.5 text-[11px] focus:outline-none focus:border-ring"
+                    className="w-36 border border-border rounded px-1.5 py-0.5 text-xs focus:outline-none focus:border-ring"
                   />
-                  <button
+                  <Button
+                    variant="danger"
                     type="button"
                     onClick={() => onFilesChange(files.filter((_, j) => j !== i))}
                     className="text-destructive hover:underline"
                   >
                     删除
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ul>
@@ -349,19 +442,8 @@ function VertexAdminInputSection({
         </div>
       ) : (
         <div>
-          <label className="block text-[11px] text-muted-foreground mb-1">
-            Vertex API Keys —— 每行 <code className="text-foreground bg-muted px-1">key [额度USD] [备注...]</code>
-          </label>
-          <textarea
-            value={apiKeysText}
-            onChange={e => onApiKeysTextChange(e.target.value)}
-            rows={6}
-            placeholder={'AIzaSy... 220\nAIzaSy... 500 备注\n# 井号开头的行会被忽略'}
-            className="w-full border border-border rounded-md p-2 text-[11px] font-mono resize-y focus:outline-none focus:border-ring"
-          />
-          <p className="text-[10px] text-muted-foreground mt-1">
-            额度和备注可省。key 明文只走一次 POST，不落本地。
-          </p>
+          <BatchKeyInput value={apiKeysText} onChange={onApiKeysTextChange} />
+          <p className="text-xs text-muted-foreground mt-1">额度和备注可省。key 明文只走一次 POST，不落本地。</p>
         </div>
       )}
     </>
@@ -380,18 +462,23 @@ function FragmentRow({ children }: { children: React.ReactNode }) {
 // show a flat readable line instead of collapsing to a single pixel.
 function Sparkline({ points }: { points: { t: number; q: number }[] }) {
   if (points.length < 2) return null
-  const w = 640, h = 60, padX = 4, padY = 6
+  const w = 640,
+    h = 60,
+    padX = 4,
+    padY = 6
   const tMin = points[0].t
   const tMax = points[points.length - 1].t
   const tRange = Math.max(1, tMax - tMin)
   const qMin = Math.min(...points.map(p => p.q))
   const qMax = Math.max(...points.map(p => p.q))
   const qRange = Math.max(1, qMax - qMin)
-  const path = points.map((p, i) => {
-    const x = padX + ((p.t - tMin) / tRange) * (w - padX * 2)
-    const y = h - padY - ((p.q - qMin) / qRange) * (h - padY * 2)
-    return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
-  }).join(' ')
+  const path = points
+    .map((p, i) => {
+      const x = padX + ((p.t - tMin) / tRange) * (w - padX * 2)
+      const y = h - padY - ((p.q - qMin) / qRange) * (h - padY * 2)
+      return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
+    })
+    .join(' ')
   const first = points[0]
   const last = points[points.length - 1]
   const totalDeltaUSD = usdFromQuota(last.q - first.q)
@@ -400,9 +487,11 @@ function Sparkline({ points }: { points: { t: number; q: number }[] }) {
       <svg width={w} height={h} className="bg-card border border-border rounded">
         <path d={path} stroke="#10b981" strokeWidth="1.5" fill="none" />
       </svg>
-      <div className="text-[11px] text-muted-foreground space-y-0.5 tabular-nums">
+      <div className="text-xs text-muted-foreground space-y-0.5 tabular-nums">
         <div>点数：{points.length}</div>
-        <div>窗口：{fmtTime(first.t)} → {fmtTime(last.t)}</div>
+        <div>
+          窗口：{fmtTime(first.t)} → {fmtTime(last.t)}
+        </div>
         <div className={totalDeltaUSD > 0 ? 'text-destructive font-medium' : 'text-muted-foreground'}>
           该窗口用量 Δ = ${totalDeltaUSD.toFixed(4)}
         </div>
@@ -454,6 +543,7 @@ export default function RemoteChannels() {
 }
 
 function RemoteChannelsAdmin({ role }: { role: number }) {
+  const { t } = useTranslation()
   // Super admin can create / edit / delete profiles + see host / user_id.
   // Everyone else on this page is admin (route gate min ROLE_ADMIN); they
   // drive channel-level ops but never see credentials or profile CRUD.
@@ -498,12 +588,18 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   // Profile-wide realtime stat (rpm / tpm / last-hour quota). One remote
   // call per refresh regardless of channel count, so this stays cheap
   // even for large deployments. Polled every 30s while the page is open.
-  const [statSummary, setStatSummary] = useState<{ rpm: number; tpm: number; quota_last_hour: number } | null>(null)
+  const [statSummary, setStatSummary] = useState<{
+    rpm: number
+    tpm: number
+    quota_last_hour: number
+  } | null>(null)
 
   // Baseline used_quota per channel from the previous background snapshot.
   // The Δ column subtracts this from live used_quota to show recent burn.
   // Empty until fetchChannels or a manual reload populates it.
-  const [snapshotBaseline, setSnapshotBaseline] = useState<Record<number, { captured_at: number; used_quota: number }>>({})
+  const [snapshotBaseline, setSnapshotBaseline] = useState<Record<number, { captured_at: number; used_quota: number }>>(
+    {},
+  )
 
   // Sparkline state: which channel row is expanded, and cached per-channel
   // 24h time series so re-expanding is instant.
@@ -647,14 +743,12 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
         if (Array.isArray(cfg?.aws_default_regions)) setAwsDefaultRegions(cfg.aws_default_regions)
         if (typeof cfg?.aws_default_group === 'string') setAwsDefaultGroup(cfg.aws_default_group.trim())
         if (typeof cfg?.aws_default_models === 'string') setAwsDefaultModels(cfg.aws_default_models.trim())
-      } catch { /* leave empty */ }
+      } catch {
+        /* leave empty */
+      }
     })()
   }, [])
-  // Custom preset dropdown open state (native <select> can't render logos).
-  const [batchTypeOpen, setBatchTypeOpen] = useState(false)
   // Key entry mode: 'paste' (CSV textarea) or 'table' (per-row editor).
-  const [batchInputMode, setBatchInputMode] = useState<'paste' | 'table'>('paste')
-  const [batchKeyRows, setBatchKeyRows] = useState<{ key: string; quota: string; note: string }[]>([{ key: '', quota: '', note: '' }])
 
   // Row edit modal.
   const [rowOpen, setRowOpen] = useState(false)
@@ -695,7 +789,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     }
   }, [])
 
-  useEffect(() => { void loadAutoDisableConfig() }, [loadAutoDisableConfig])
+  useEffect(() => {
+    void loadAutoDisableConfig()
+  }, [loadAutoDisableConfig])
 
   const saveAutoDisableConfig = async (patch: { enabled?: boolean; interval_sec?: number }) => {
     setAutoDisableSaving(true)
@@ -731,10 +827,14 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     }
   }, [])
 
-  useEffect(() => { void reloadProfiles() }, [reloadProfiles])
+  useEffect(() => {
+    void reloadProfiles()
+  }, [reloadProfiles])
 
   // Persist selection across refreshes.
-  useEffect(() => { writeRememberedProfileID(selectedID) }, [selectedID])
+  useEffect(() => {
+    writeRememberedProfileID(selectedID)
+  }, [selectedID])
 
   // Load cached channel list from local mirror as soon as a profile is
   // selected (including on page reload). Purely local — no remote hit.
@@ -803,7 +903,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
             const res = await api.remoteProfileVisibilityGet(anyProf.id)
             setVisOperators(res.operators || [])
           }
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       } finally {
         setVisLoading(false)
       }
@@ -842,7 +944,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
         const res = await api.remoteProfileVisibilityGet(p.id)
         setVisOperators(res.operators || [])
         setVisAllowlist(new Set(res.allowlist || []))
-      } catch { /* leave defaults, section shows retry */ } finally {
+      } catch {
+        /* leave defaults, section shows retry */
+      } finally {
         setVisLoading(false)
       }
     })()
@@ -916,7 +1020,14 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   }
 
   const deleteProfile = async (p: RemoteProfile) => {
-    if (!(await confirmDialog({ message: `Delete profile "${p.name}"? Cannot be undone.`, danger: true, confirmText: '删除' }))) return
+    if (
+      !(await confirmDialog({
+        message: `Delete profile "${p.name}"? Cannot be undone.`,
+        danger: true,
+        confirmText: '删除',
+      }))
+    )
+      return
     try {
       await api.remoteProfileDelete(p.id)
       if (selectedID === p.id) setSelectedID(null)
@@ -1048,7 +1159,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
       return
     }
     void loadStatSummary(selectedID)
-    const t = setInterval(() => { void loadStatSummary(selectedID) }, 30000)
+    const t = setInterval(() => {
+      void loadStatSummary(selectedID)
+    }, 30000)
     return () => clearInterval(t)
   }, [selectedID, loadStatSummary])
 
@@ -1136,12 +1249,16 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     }
     // Optimistic patch so the "Priority" column reflects the new value
     // without waiting for a Fetch.
-    setChannels(prev => prev.map(c => {
-      const p = priorities.get(c.id)
-      return p != null ? { ...c, priority: p } : c
-    }))
+    setChannels(prev =>
+      prev.map(c => {
+        const p = priorities.get(c.id)
+        return p != null ? { ...c, priority: p } : c
+      }),
+    )
     setBulkPrioBusy(false)
-    toast.success(`已更新 ${ok} 条${failed.length ? `，${failed.length} 条失败 (id: ${failed.slice(0, 8).join(', ')}${failed.length > 8 ? '…' : ''})` : ''}`)
+    toast.success(
+      `已更新 ${ok} 条${failed.length ? `，${failed.length} 条失败 (id: ${failed.slice(0, 8).join(', ')}${failed.length > 8 ? '…' : ''})` : ''}`,
+    )
     setBulkPrioOpen(false)
     setSelectedIDs(new Set())
   }
@@ -1165,7 +1282,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
         channel_ids: Array.from(selectedIDs),
         unit_price_cny: v,
       })
-      setChannels(prev => prev.map(c => selectedIDs.has(c.id) ? { ...c, unit_price_cny: v } : c))
+      setChannels(prev => prev.map(c => (selectedIDs.has(c.id) ? { ...c, unit_price_cny: v } : c)))
       toast.success(`已更新 ${res.updated} 条${res.failed.length ? `，${res.failed.length} 失败` : ''}`)
       setBulkCostOpen(false)
       setSelectedIDs(new Set())
@@ -1196,7 +1313,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     if (!selectedID) return
     void reloadPending()
     if (!pendingOpen) return
-    const t = setInterval(() => { void reloadPending() }, 30000)
+    const t = setInterval(() => {
+      void reloadPending()
+    }, 30000)
     return () => clearInterval(t)
   }, [selectedID, pendingOpen, reloadPending])
 
@@ -1273,7 +1392,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     }
   }, [selectedID])
 
-  useEffect(() => { void reloadStudioPolicies() }, [reloadStudioPolicies, pending])
+  useEffect(() => {
+    void reloadStudioPolicies()
+  }, [reloadStudioPolicies, pending])
 
   const toggleStudioPolicy = async (studio: string, next: boolean) => {
     if (!selectedID) return
@@ -1295,7 +1416,14 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
 
   const cancelPending = async (row: PendingKey) => {
     if (row.status !== 'pending' && row.status !== 'failed') return
-    if (!(await confirmDialog({ message: `删除队列条目 (${row.key_masked})？只能删 pending/failed 的。`, danger: true, confirmText: '删除' }))) return
+    if (
+      !(await confirmDialog({
+        message: `删除队列条目 (${row.key_masked})？只能删 pending/failed 的。`,
+        danger: true,
+        confirmText: '删除',
+      }))
+    )
+      return
     try {
       await api.remotePendingDelete(row.id)
       await reloadPending()
@@ -1309,7 +1437,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     // types the "middle" segment of the name — the final channel name
     // becomes  YYYYMMDD-<middle>-<key-tail>-<hash>.
     const p = profiles.find(x => x.id === selectedID)
-    setBatchPrefix('')  // "middle" segment only; date is a separate field
+    setBatchPrefix('') // "middle" segment only; date is a separate field
     // Seed the date segment with today so most uploads just accept the
     // default; the operator can still backdate an upload from the
     // adjacent input.
@@ -1335,9 +1463,6 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setBatchAwsRegions([])
     setBatchAwsProxy('')
     setBatchAwsRegionInput('')
-    setBatchInputMode('paste')
-    setBatchKeyRows([{ key: '', quota: '', note: '' }])
-    setBatchTypeOpen(false)
     setBatchOpen(true)
   }
 
@@ -1351,60 +1476,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     return `${y}${m}${dd}`
   }
 
-  // Toggle paste/table, carrying data across (key [quota] [note] per line).
-  const switchBatchInputMode = (mode: 'paste' | 'table') => {
-    if (mode === batchInputMode) return
-    if (mode === 'table') {
-      const rows: { key: string; quota: string; note: string }[] = []
-      for (const line of batchInput.split('\n')) {
-        const t = line.trim()
-        if (!t || t.startsWith('#')) continue
-        const parts = t.split(/[\s,]+/)
-        if (!parts[0]) continue
-        rows.push({ key: parts[0], quota: parts[1] ?? '', note: parts.slice(2).join(' ') })
-      }
-      setBatchKeyRows(rows.length ? rows : [{ key: '', quota: '', note: '' }])
-    } else {
-      const text = batchKeyRows
-        .filter(r => r.key.trim())
-        .map(r => [r.key.trim(), r.quota.trim(), r.note.trim()].filter(Boolean).join(' '))
-        .join('\n')
-      setBatchInput(text)
-    }
-    setBatchInputMode(mode)
-  }
-
-  // Collect {key, quota_usd?, note?} from whichever entry mode is active.
-  const collectBatchItems = (): { key: string; quota_usd?: number; note?: string }[] => {
-    const out: { key: string; quota_usd?: number; note?: string }[] = []
-    if (batchInputMode === 'table') {
-      for (const r of batchKeyRows) {
-        const key = r.key.trim()
-        if (!key) continue
-        const item: { key: string; quota_usd?: number; note?: string } = { key }
-        const q = parseFloat(r.quota.trim())
-        if (!isNaN(q) && q > 0) item.quota_usd = q
-        if (r.note.trim()) item.note = r.note.trim()
-        out.push(item)
-      }
-    } else {
-      for (const raw of batchInput.split('\n')) {
-        const t = raw.trim()
-        if (!t || t.startsWith('#')) continue
-        const parts = t.split(/[\s,]+/)
-        const key = parts[0]
-        if (!key) continue
-        const item: { key: string; quota_usd?: number; note?: string } = { key }
-        if (parts[1]) {
-          const q = parseFloat(parts[1])
-          if (!isNaN(q) && q > 0) item.quota_usd = q
-        }
-        if (parts.length > 2) item.note = parts.slice(2).join(' ')
-        out.push(item)
-      }
-    }
-    return out
-  }
+  const collectBatchItems = () => keyRowsToItems(parseKeyRows(batchInput))
 
   const submitBatch = async () => {
     if (!selectedID) return
@@ -1424,7 +1496,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     if (preset?.kind === 'vertex') {
       const vertexItems: (
         | { key_json: unknown; quota_usd?: number; note?: string }
-        | { key: string;       quota_usd?: number; note?: string }
+        | { key: string; quota_usd?: number; note?: string }
       )[] = []
       // For the results panel `key` column: filename when JSON, masked
       // key preview when API key. Precomputed so the res.results loop
@@ -1437,20 +1509,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           displayKeys.push(f.name)
         }
       } else {
-        for (const raw of batchVertexKeysText.split('\n')) {
-          const t = raw.trim()
-          if (!t || t.startsWith('#')) continue
-          const parts = t.split(/[\s,]+/)
-          const key = parts[0]
-          if (!key) continue
-          const item: { key: string; quota_usd?: number; note?: string } = { key }
-          if (parts[1]) {
-            const q = parseFloat(parts[1])
-            if (!isNaN(q) && q > 0) item.quota_usd = q
-          }
-          if (parts.length > 2) item.note = parts.slice(2).join(' ')
+        for (const item of keyRowsToItems(parseKeyRows(batchVertexKeysText))) {
           vertexItems.push(item)
-          displayKeys.push(key.length > 8 ? `${key.slice(0, 4)}…${key.slice(-4)}` : key)
+          displayKeys.push(item.key.length > 8 ? `${item.key.slice(0, 4)}…${item.key.slice(-4)}` : item.key)
         }
         if (vertexItems.length === 0) return setBatchErr('未解析到有效行')
       }
@@ -1471,7 +1532,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
             ok: r.ok,
             channel_id: r.channel_id,
             error: r.error,
-          }))
+          })),
         )
         // Refresh remote channel list so newly created rows appear.
         void fetchChannels()
@@ -1506,7 +1567,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
         // Backend fans out item×region (item outer, region inner), so map each
         // result index back to its source key for the masked display.
         setBatchResults(
-          res.results.map((r) => {
+          res.results.map(r => {
             const itemIdx = Math.floor((r.index ?? 0) / regions.length)
             const raw = awsItems[itemIdx]?.key ?? ''
             const region = regions[(r.index ?? 0) % regions.length] ?? ''
@@ -1517,7 +1578,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
               channel_id: r.channel_id,
               error: r.error,
             }
-          })
+          }),
         )
         void fetchChannels()
       } catch (e: any) {
@@ -1532,7 +1593,8 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     // needs per-batch base_url + api_version, so it bypasses both the
     // pending queue and remoteChannelCreate lane like Vertex does.
     if (preset?.kind === 'azure') {
-      if (!batchAzureBaseUrl.trim()) return setBatchErr('Azure 需要 Resource Endpoint (例: https://<resource>.openai.azure.com)')
+      if (!batchAzureBaseUrl.trim())
+        return setBatchErr('Azure 需要 Resource Endpoint (例: https://<resource>.openai.azure.com)')
       const azureItems = collectBatchItems()
       if (azureItems.length === 0) return setBatchErr('未解析到有效行')
       setBatchBusy(true)
@@ -1556,7 +1618,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
               channel_id: r.channel_id,
               error: r.error,
             }
-          })
+          }),
         )
         void fetchChannels()
       } catch (e: any) {
@@ -1580,7 +1642,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
         batchLevelPriority = basePriority
       } else {
         const step = batchPrioMode === 'desc' ? -1 : 1
-        items.forEach((it, i) => { it.priority = Math.max(1, basePriority + i * step) })
+        items.forEach((it, i) => {
+          it.priority = Math.max(1, basePriority + i * step)
+        })
       }
     }
     // fullNamePrefix already computed above (before the Vertex branch).
@@ -1609,7 +1673,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
         })
         setBatchResults([])
         setBatchErr(null)
-        toast.success(`已入队 ${res.inserted} 条${res.skipped ? `（${res.skipped} 条跳过 / 已存在）` : ''}${poolSize > 0 ? `，池大小 ${poolSize}` : '，立即上传'}`)
+        toast.success(
+          `已入队 ${res.inserted} 条${res.skipped ? `（${res.skipped} 条跳过 / 已存在）` : ''}${poolSize > 0 ? `，池大小 ${poolSize}` : '，立即上传'}`,
+        )
         void reloadPending()
         setBatchOpen(false)
         return
@@ -1645,9 +1711,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setRowNote(ch.note ?? '')
     setRowAutoDisable(!!ch.auto_disable)
     setRowAutoDisableReserveUSD(
-      ch.auto_disable_reserve_usd != null && ch.auto_disable_reserve_usd > 0
-        ? String(ch.auto_disable_reserve_usd)
-        : ''
+      ch.auto_disable_reserve_usd != null && ch.auto_disable_reserve_usd > 0 ? String(ch.auto_disable_reserve_usd) : '',
     )
     setRowErr(null)
     setRowOpen(true)
@@ -1679,9 +1743,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     if (rowAutoDisable !== !!rowChannel.auto_disable) {
       patch.auto_disable = rowAutoDisable
     }
-    const reserveNum = rowAutoDisableReserveUSD.trim()
-      ? parseFloat(rowAutoDisableReserveUSD.trim())
-      : 0
+    const reserveNum = rowAutoDisableReserveUSD.trim() ? parseFloat(rowAutoDisableReserveUSD.trim()) : 0
     const prevReserve = rowChannel.auto_disable_reserve_usd ?? 0
     if (!isNaN(reserveNum) && reserveNum >= 0 && reserveNum !== prevReserve) {
       patch.auto_disable_reserve_usd = reserveNum
@@ -1694,7 +1756,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
       try {
         const r = await api.remoteChannelGet(selectedID, rowChannel.id)
         setChannels(prev => prev.map(c => (c.id === rowChannel.id ? r.channel : c)))
-      } catch { /* fallthrough */ }
+      } catch {
+        /* fallthrough */
+      }
     } catch (e: any) {
       setRowErr(e?.message || String(e))
     } finally {
@@ -1704,7 +1768,14 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
 
   const deleteRow = async (ch: RemoteChannel) => {
     if (!selectedID) return
-    if (!(await confirmDialog({ message: `确认删除 "${ch.name}"？此操作会同时删除远端渠道，不可恢复。`, danger: true, confirmText: '删除' }))) return
+    if (
+      !(await confirmDialog({
+        message: `确认删除 "${ch.name}"？此操作会同时删除远端渠道，不可恢复。`,
+        danger: true,
+        confirmText: '删除',
+      }))
+    )
+      return
     try {
       await api.remoteChannelDelete(selectedID, ch.id)
       setChannels(prev => prev.filter(c => c.id !== ch.id))
@@ -1724,9 +1795,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setTestingID(ch.id)
     try {
       const res = await api.remoteTestKey(key.trim(), DEFAULT_TEST_MODEL)
-      const msg = res.ok
-        ? `✓ ${res.latency_ms}ms`
-        : `✗ ${res.status || ''} ${res.error || res.message || '失败'}`
+      const msg = res.ok ? `✓ ${res.latency_ms}ms` : `✗ ${res.status || ''} ${res.error || res.message || '失败'}`
       setTestMsg(prev => ({ ...prev, [ch.id]: msg }))
     } catch (e: any) {
       setTestMsg(prev => ({ ...prev, [ch.id]: '✗ ' + (e?.message || e) }))
@@ -1774,7 +1843,21 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
 
   const exportCSV = () => {
     if (filteredChannels.length === 0) return
-    const header = ['ID', 'Name', 'Type', 'Group', 'Tag', 'Priority', 'Used USD', 'Δ USD (since baseline)', '额度 USD', '单价 CNY', 'Status', 'Created', 'Note']
+    const header = [
+      'ID',
+      'Name',
+      'Type',
+      'Group',
+      'Tag',
+      'Priority',
+      'Used USD',
+      'Δ USD (since baseline)',
+      '额度 USD',
+      '单价 CNY',
+      'Status',
+      'Created',
+      'Note',
+    ]
     const escape = (v: unknown) => {
       const s = v == null ? '' : String(v)
       return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
@@ -1784,7 +1867,12 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
       const baseline = snapshotBaseline[c.id]
       const deltaUSD = baseline ? usdFromQuota(c.used_quota - baseline.used_quota) : null
       return [
-        c.id, c.name, c.type, c.group, c.tag, c.priority,
+        c.id,
+        c.name,
+        c.type,
+        c.group,
+        c.tag,
+        c.priority,
         usedUSD.toFixed(4),
         deltaUSD != null ? deltaUSD.toFixed(4) : '',
         c.quota_usd != null ? c.quota_usd.toFixed(2) : '',
@@ -1792,14 +1880,16 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
         STATUS_LABEL[c.status] ?? c.status,
         c.created_time ? new Date(c.created_time * 1000).toISOString() : '',
         c.note || '',
-      ].map(escape).join(',')
+      ]
+        .map(escape)
+        .join(',')
     })
     const csv = [header.join(','), ...rows].join('\n')
     // BOM so Excel opens it as UTF-8 without garbling.
     const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
-    const suffix = (filterStart || filterEnd) ? `_${filterStart || 'any'}_${filterEnd || 'any'}` : ''
+    const suffix = filterStart || filterEnd ? `_${filterStart || 'any'}_${filterEnd || 'any'}` : ''
     const profileName = profiles.find(p => p.id === selectedID)?.name || 'remote'
     a.href = url
     a.download = `remote-channels_${profileName}${suffix}.csv`
@@ -1813,12 +1903,9 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   // action row (channel operations still available inline).
   const actions = isSuperAdmin ? (
     <div className="flex items-center gap-2 flex-wrap">
-      <button
-        onClick={openCreate}
-        className="border border-border text-foreground rounded-md px-3 py-1.5 text-xs hover:bg-muted"
-      >
+      <Button variant="outline" onClick={openCreate} className="border px-3">
         + New profile
-      </button>
+      </Button>
     </div>
   ) : null
 
@@ -1827,7 +1914,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   const tableToolbar = (
     <div className="flex items-center gap-2 flex-wrap justify-end">
       <div className="flex items-center gap-1">
-        <input
+        <Input
           type="date"
           value={filterStart}
           onChange={e => setFilterStart(e.target.value)}
@@ -1835,7 +1922,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           title="创建时间 ≥"
         />
         <span className="text-muted-foreground text-xs">→</span>
-        <input
+        <Input
           type="date"
           value={filterEnd}
           onChange={e => setFilterEnd(e.target.value)}
@@ -1843,47 +1930,52 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           title="创建时间 ≤"
         />
         {(filterStart || filterEnd) && (
-          <button
-            onClick={() => { setFilterStart(''); setFilterEnd('') }}
-            className="text-[10px] text-muted-foreground hover:text-foreground px-1"
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setFilterStart('')
+              setFilterEnd('')
+            }}
+            className="px-1"
             title="清除日期筛选"
-          >×</button>
+          >
+            ×
+          </Button>
         )}
       </div>
-      <button
+      <Button
+        variant="outline"
         onClick={exportCSV}
         disabled={filteredChannels.length === 0}
-        className="border border-border text-foreground rounded-md px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-40"
+        className="border px-3 disabled:opacity-40"
       >
         导出 CSV
-      </button>
-      <button
+      </Button>
+      <Button
+        variant="outline"
         onClick={openBulkCost}
         disabled={selectedIDs.size === 0}
-        className="border border-warning/40 text-warning rounded-md px-3 py-1.5 text-xs hover:bg-warning/10 disabled:opacity-40"
+        className="border px-3 disabled:opacity-40"
         title="将勾选行的单价 (CNY) 批量写到本地"
       >
         批量设成本
         {selectedIDs.size > 0 && <span className="ml-1 text-warning font-medium">({selectedIDs.size})</span>}
-      </button>
-      <button
+      </Button>
+      <Button
+        variant="outline"
         onClick={openBulkPrio}
         disabled={selectedIDs.size === 0}
-        className="border border-indigo-500 text-indigo-700 rounded-md px-3 py-1.5 text-xs hover:bg-indigo-50 disabled:opacity-40"
+        className="border px-3 disabled:opacity-40"
         title="将勾选行的优先级批量改到远端"
       >
         批量改优先级
         {selectedIDs.size > 0 && <span className="ml-1 text-indigo-600 font-medium">({selectedIDs.size})</span>}
-      </button>
-      <button
-        onClick={openBatch}
-        disabled={!selectedID}
-        className="border border-success/40 text-success rounded-md px-3 py-1.5 text-xs hover:bg-success/10 disabled:opacity-40"
-      >
+      </Button>
+      <Button variant="primary" onClick={openBatch} disabled={!selectedID} className="border px-3 disabled:opacity-40">
         + 批量上 key
-      </button>
+      </Button>
       <div className="inline-flex items-center gap-1 border border-destructive/40 rounded-md">
-        <select
+        <Select
           value={errWindowSec}
           onChange={e => setErrWindowSec(parseInt(e.target.value, 10))}
           className="text-xs px-2 py-1.5 bg-card text-destructive border-r border-destructive/40 focus:outline-none rounded-l-md"
@@ -1894,23 +1986,25 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           <option value={60 * 60}>过去 1 小时</option>
           <option value={6 * 60 * 60}>过去 6 小时</option>
           <option value={24 * 60 * 60}>过去 24 小时</option>
-        </select>
-        <button
+        </Select>
+        <Button
+          variant="danger"
           onClick={loadErrorRates}
           disabled={!selectedID || errRateLoading || channels.length === 0}
-          className="text-destructive px-2.5 py-1.5 text-xs hover:bg-destructive/10 disabled:opacity-40 rounded-r-md"
+          className="text-destructive px-2.5 disabled:opacity-40"
           title="用选中的时间窗口拉每个渠道的成功/错误数，计算错误率。5 分钟缓存。"
         >
           {errRateLoading ? '加载中…' : '加载错误率'}
-        </button>
+        </Button>
       </div>
-      <button
+      <Button
+        variant="primary"
         onClick={fetchChannels}
         disabled={!selectedID || fetching}
-        className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-50"
+        className="px-3 disabled:opacity-50"
       >
         {fetching ? 'Fetching…' : 'Fetch channels'}
-      </button>
+      </Button>
     </div>
   )
 
@@ -1925,13 +2019,17 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
         <section className="bg-card border border-border rounded-xl p-4">
           <div className="flex items-center justify-between mb-3">
             <h2 className="mono-label">Profile</h2>
-            {loadingProfiles && <span className="text-[11px] text-muted-foreground">loading…</span>}
+            {loadingProfiles && <span className="text-xs text-muted-foreground">loading…</span>}
           </div>
           {profiles.length === 0 && !loadingProfiles && (
             <p className="text-xs text-muted-foreground">
-              {isSuperAdmin
-                ? <>还没有 profile，点右上角 <span className="font-medium">"+ New profile"</span> 添加。</>
-                : <>还没有 profile。联系 super admin 创建后再回来。</>}
+              {isSuperAdmin ? (
+                <>
+                  还没有 profile，点右上角 <span className="font-medium">"+ New profile"</span> 添加。
+                </>
+              ) : (
+                <>还没有 profile。联系 super admin 创建后再回来。</>
+              )}
             </p>
           )}
           {profiles.length > 0 && (
@@ -1954,21 +2052,33 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                             through the edit modal. Keeps the display
                             surface clean of credential-adjacent info. */}
                         {isSuperAdmin && (
-                          <div className="text-[10px] text-muted-foreground mt-1">
+                          <div className="text-xs text-muted-foreground mt-1">
                             user_id={p.user_id} · token {p.has_token ? '已保存' : '未设'}
                           </div>
                         )}
                       </div>
                       {isSuperAdmin && (
                         <div className="flex flex-col gap-1 shrink-0">
-                          <button
-                            onClick={e => { e.stopPropagation(); openEdit(p) }}
-                            className="text-[10px] text-muted-foreground hover:text-foreground"
-                          >编辑</button>
-                          <button
-                            onClick={e => { e.stopPropagation(); void deleteProfile(p) }}
-                            className="text-[10px] text-destructive hover:text-destructive"
-                          >删除</button>
+                          <Button
+                            variant="ghost"
+                            onClick={e => {
+                              e.stopPropagation()
+                              openEdit(p)
+                            }}
+                            className=""
+                          >
+                            编辑
+                          </Button>
+                          <Button
+                            variant="danger"
+                            onClick={e => {
+                              e.stopPropagation()
+                              void deleteProfile(p)
+                            }}
+                            className="text-destructive hover:text-destructive"
+                          >
+                            删除
+                          </Button>
                         </div>
                       )}
                     </div>
@@ -1985,18 +2095,16 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
             额度是否设置。 */}
         <section className="bg-card border border-border rounded-xl p-4">
           <div className="flex items-center justify-between mb-2">
-            <h2 className="mono-label">
-              到额自动禁用（全局）
-            </h2>
+            <h2 className="mono-label">到额自动禁用（全局）</h2>
             {autoDisableMsg && (
-              <span className={`text-[11px] ${autoDisableMsg.ok ? 'text-success' : 'text-destructive'}`}>
+              <span className={`text-xs ${autoDisableMsg.ok ? 'text-success' : 'text-destructive'}`}>
                 {autoDisableMsg.text}
               </span>
             )}
           </div>
           <div className="flex items-center flex-wrap gap-4 text-sm">
             <label className="flex items-center gap-2 cursor-pointer">
-              <input
+              <Input
                 type="checkbox"
                 checked={autoDisableEnabled}
                 disabled={autoDisableSaving}
@@ -2006,8 +2114,8 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
               <span className="text-foreground">启用循环</span>
             </label>
             <div className="flex items-center gap-2">
-              <span className="text-[11px] text-muted-foreground">检查间隔</span>
-              <input
+              <span className="text-xs text-muted-foreground">检查间隔</span>
+              <Input
                 type="number"
                 min={5}
                 max={3600}
@@ -2023,13 +2131,13 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                 disabled={autoDisableSaving}
                 className="w-24 border border-border rounded-md px-2 py-1 text-sm tabular-nums focus:outline-none focus:border-ring"
               />
-              <span className="text-[11px] text-muted-foreground">秒（5–3600）</span>
+              <span className="text-xs text-muted-foreground">秒（5–3600）</span>
             </div>
           </div>
-          <p className="text-[10px] text-muted-foreground mt-2 leading-relaxed">
-            仅对勾选了「到额自动禁用」<em>且</em>已设置额度的渠道生效。
-            触发条件：<code className="font-mono">已用 ≥ 额度 − 保留额</code>，命中后把远端 status 置为 2（手动禁用）。
-            循环独立于 15 分钟快照，可随时开关。
+          <p className="text-xs text-muted-foreground mt-2 leading-relaxed">
+            仅对勾选了「到额自动禁用」<em>且</em>已设置额度的渠道生效。 触发条件：
+            <code className="font-mono">已用 ≥ 额度 − 保留额</code>，命中后把远端 status 置为 2（手动禁用）。 循环独立于
+            15 分钟快照，可随时开关。
           </p>
         </section>
         {fetchErr && (
@@ -2044,10 +2152,11 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
             the queue they control. */}
         {selectedID && (
           <section className="bg-card border border-border rounded-xl overflow-hidden">
-            <button
+            <Button
+              variant="outline"
               type="button"
               onClick={() => setPendingOpen(v => !v)}
-              className="w-full flex items-center justify-between px-4 py-2.5 border-b border-border hover:bg-muted"
+              className="w-full flex items-center justify-between px-4 border-b"
             >
               <div className="text-sm font-semibold text-foreground flex items-center gap-2">
                 上 Key 队列
@@ -2061,7 +2170,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                 </span>
               </div>
               <span className="text-muted-foreground">{pendingOpen ? '▾' : '▸'}</span>
-            </button>
+            </Button>
             {/* Pool 节流 — 前一批 key 死光后，下一 tick 从 pending 里
                 按 FIFO 取 N 个上传，priority 自动累加。仅对 pool 模式
                 (pool_size > 0) 的行生效；pool_size=0 的立即上传不受影响。
@@ -2071,34 +2180,41 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
               className="flex flex-wrap items-center gap-3 px-4 py-2.5 border-b border-border bg-muted/50"
               onClick={e => e.stopPropagation()}
             >
-              <div className="mono-label">
-                Pool 节流
-              </div>
+              <div className="mono-label">Pool 节流</div>
               <label className="flex items-center gap-1.5 text-xs text-foreground">
                 检查间隔
-                <input
+                <Input
                   value={poolIntervalSec}
-                  onChange={e => { setPoolIntervalSec(e.target.value); setPoolDirty(true) }}
+                  onChange={e => {
+                    setPoolIntervalSec(e.target.value)
+                    setPoolDirty(true)
+                  }}
                   inputMode="numeric"
                   className="w-16 border border-border rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none focus:border-ring"
                 />
-                <span className="text-[10px] text-muted-foreground">秒</span>
+                <span className="text-xs text-muted-foreground">秒</span>
               </label>
               <label className="flex items-center gap-1.5 text-xs text-foreground">
                 {poolAutoMode ? '上限' : '每次上'}
-                <input
+                <Input
                   value={poolBatchSize}
-                  onChange={e => { setPoolBatchSize(e.target.value); setPoolDirty(true) }}
+                  onChange={e => {
+                    setPoolBatchSize(e.target.value)
+                    setPoolDirty(true)
+                  }}
                   inputMode="numeric"
                   className="w-14 border border-border rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none focus:border-ring"
                 />
-                <span className="text-[10px] text-muted-foreground">个 key</span>
+                <span className="text-xs text-muted-foreground">个 key</span>
               </label>
               <label className="flex items-center gap-1.5 text-xs text-foreground border-l border-border pl-3 ml-1">
-                <input
+                <Input
                   type="checkbox"
                   checked={poolAutoMode}
-                  onChange={e => { setPoolAutoMode(e.target.checked); setPoolDirty(true) }}
+                  onChange={e => {
+                    setPoolAutoMode(e.target.checked)
+                    setPoolDirty(true)
+                  }}
                 />
                 自动模式
               </label>
@@ -2106,41 +2222,44 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                 <>
                   <label className="flex items-center gap-1.5 text-xs text-foreground">
                     RPM/key
-                    <input
+                    <Input
                       value={poolRPMBase}
-                      onChange={e => { setPoolRPMBase(e.target.value); setPoolDirty(true) }}
+                      onChange={e => {
+                        setPoolRPMBase(e.target.value)
+                        setPoolDirty(true)
+                      }}
                       inputMode="numeric"
                       className="w-16 border border-border rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none focus:border-ring"
                     />
                   </label>
                   <label className="flex items-center gap-1.5 text-xs text-foreground">
                     低于
-                    <input
+                    <Input
                       value={poolRPMMin}
-                      onChange={e => { setPoolRPMMin(e.target.value); setPoolDirty(true) }}
+                      onChange={e => {
+                        setPoolRPMMin(e.target.value)
+                        setPoolDirty(true)
+                      }}
                       inputMode="numeric"
                       className="w-14 border border-border rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none focus:border-ring"
                     />
-                    <span className="text-[10px] text-muted-foreground">RPM 停</span>
+                    <span className="text-xs text-muted-foreground">RPM 停</span>
                   </label>
                 </>
               )}
-              <button
+              <Button
+                variant="primary"
                 type="button"
                 onClick={savePoolTuning}
                 disabled={poolSaving || !poolDirty}
-                className="bg-brand text-white rounded px-2 py-0.5 text-xs hover:bg-brand-700 disabled:opacity-40"
+                className="px-2 disabled:opacity-40"
               >
                 {poolSaving ? '保存中…' : '保存'}
-              </button>
+              </Button>
               {poolMsg && (
-                <span className={`text-[11px] ${poolMsg.ok ? 'text-success' : 'text-destructive'}`}>
-                  {poolMsg.text}
-                </span>
+                <span className={`text-xs ${poolMsg.ok ? 'text-success' : 'text-destructive'}`}>{poolMsg.text}</span>
               )}
-              <span className="text-[10px] text-muted-foreground ml-auto">
-                Priority = 存活最高 + 1，逐条累加
-              </span>
+              <span className="text-xs text-muted-foreground ml-auto">Priority = 存活最高 + 1，逐条累加</span>
             </div>
             {pendingOpen && pending.length === 0 && (
               <div className="px-4 py-4 text-xs text-muted-foreground">队列为空</div>
@@ -2166,14 +2285,21 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                     {pending.map(row => (
                       <tr key={row.id} className="border-b border-border hover:bg-muted">
                         <td className="px-3 py-2 tabular-nums">{row.id}</td>
-                        <td className="px-3 py-2 font-mono text-[11px]">{row.key_masked}</td>
+                        <td className="px-3 py-2 font-mono text-xs">{row.key_masked}</td>
                         <td className="px-3 py-2">
-                          <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] ${
-                            row.status === 'active' ? 'text-success bg-[#E6F4EE]'
-                              : row.status === 'used' ? 'bg-muted text-muted-foreground'
-                              : row.status === 'failed' ? 'bg-destructive/10 text-destructive'
-                              : 'bg-primary/10 text-primary'
-                          }`}>{row.status}</span>
+                          <span
+                            className={`inline-block px-2 py-0.5 rounded-full text-xs ${
+                              row.status === 'active'
+                                ? 'text-success bg-success/10'
+                                : row.status === 'used'
+                                  ? 'bg-muted text-muted-foreground'
+                                  : row.status === 'failed'
+                                    ? 'bg-destructive/10 text-destructive'
+                                    : 'bg-primary/10 text-primary'
+                            }`}
+                          >
+                            {row.status}
+                          </span>
                         </td>
                         <td className="px-3 py-2 tabular-nums text-right">
                           {row.pool_size === 0 ? <span className="text-muted-foreground">立即</span> : row.pool_size}
@@ -2186,19 +2312,25 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                           {row.remote_channel_id > 0 ? row.remote_channel_id : '—'}
                         </td>
                         <td className="px-3 py-2 tabular-nums text-right">{row.attempts}</td>
-                        <td className="px-3 py-2 text-[10px] text-muted-foreground max-w-[240px] truncate" title={row.failed_reason || fmtTime(row.updated_at)}>
-                          {row.failed_reason
-                            ? <span className="text-destructive">{row.failed_reason}</span>
-                            : fmtTime(row.updated_at)}
+                        <td
+                          className="px-3 py-2 text-xs text-muted-foreground max-w-[240px] truncate"
+                          title={row.failed_reason || fmtTime(row.updated_at)}
+                        >
+                          {row.failed_reason ? (
+                            <span className="text-destructive">{row.failed_reason}</span>
+                          ) : (
+                            fmtTime(row.updated_at)
+                          )}
                         </td>
                         <td className="px-3 py-2">
                           {(row.status === 'pending' || row.status === 'failed') && (
-                            <button
+                            <Button
+                              variant="danger"
                               onClick={() => void cancelPending(row)}
-                              className="text-[10px] text-destructive hover:text-destructive"
+                              className="text-destructive hover:text-destructive"
                             >
                               删除
-                            </button>
+                            </Button>
                           )}
                         </td>
                       </tr>
@@ -2218,11 +2350,11 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
             <div className="px-4 py-2.5 border-b border-border flex items-center justify-between">
               <div>
                 <div className="text-sm font-semibold text-foreground">工作室上 Key 策略</div>
-                <div className="text-[11px] text-muted-foreground mt-0.5">
+                <div className="text-xs text-muted-foreground mt-0.5">
                   关掉后，对应工作室提交批量 Key 时会被拒绝。默认接收。
                 </div>
               </div>
-              {policyErr && <span className="text-[11px] text-destructive">{policyErr}</span>}
+              {policyErr && <span className="text-xs text-destructive">{policyErr}</span>}
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
@@ -2240,31 +2372,32 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                       <td className="px-3 py-2 font-mono">{p.studio}</td>
                       <td className="px-3 py-2">
                         {p.accepting_keys ? (
-                          <span className="inline-block px-2 py-0.5 rounded-full text-[10px] text-success bg-[#E6F4EE]">
+                          <span className="inline-block px-2 py-0.5 rounded-full text-xs text-success bg-success/10">
                             接收{p.has_row ? '' : '（默认）'}
                           </span>
                         ) : (
-                          <span className="inline-block px-2 py-0.5 rounded-full text-[10px] bg-destructive/10 text-destructive">
+                          <span className="inline-block px-2 py-0.5 rounded-full text-xs bg-destructive/10 text-destructive">
                             拒绝
                           </span>
                         )}
                       </td>
-                      <td className="px-3 py-2 text-[10px] text-muted-foreground">
+                      <td className="px-3 py-2 text-xs text-muted-foreground">
                         {p.has_row ? fmtTime(p.updated_at) : '—'}
                       </td>
                       <td className="px-3 py-2 text-right">
-                        <button
+                        <Button
+                          variant="ghost"
                           type="button"
                           onClick={() => void toggleStudioPolicy(p.studio, !p.accepting_keys)}
                           disabled={policyBusy === p.studio}
-                          className={`text-[11px] px-2 py-0.5 rounded border disabled:opacity-40 ${
+                          className={`text-xs px-2 py-0.5 rounded border disabled:opacity-40 ${
                             p.accepting_keys
                               ? 'border-destructive/40 text-destructive hover:bg-destructive/10'
                               : 'border-success/40 text-success hover:bg-success/10'
                           }`}
                         >
                           {policyBusy === p.studio ? '…' : p.accepting_keys ? '关闭上 Key' : '开放上 Key'}
-                        </button>
+                        </Button>
                       </td>
                     </tr>
                   ))}
@@ -2276,7 +2409,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
         {selectedID != null && tableToolbar}
         {channels.length > 0 && meta && (
           <>
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
               <MetricCard label="渠道总数" value={String(summary.count)} />
               <MetricCard label="启用" value={String(summary.enabled)} color="text-success" />
               <MetricCard label="禁用" value={String(summary.disabled)} color="text-destructive" />
@@ -2298,11 +2431,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
               </div>
             )}
             {selectedID && (
-              <ProfileErrorSummary
-                profileID={selectedID}
-                windowSec={errWindowSec}
-                onWindowChange={setErrWindowSec}
-              />
+              <ProfileErrorSummary profileID={selectedID} windowSec={errWindowSec} onWindowChange={setErrWindowSec} />
             )}
             <div className="bg-card border border-border rounded-xl overflow-hidden">
               <div className="overflow-x-auto">
@@ -2310,10 +2439,12 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                   <thead className="bg-muted border-b border-border text-muted-foreground">
                     <tr>
                       <th className="px-2 py-2 text-center font-medium">
-                        <input
+                        <Input
                           type="checkbox"
                           checked={allVisibleSelected}
-                          ref={el => { if (el) el.indeterminate = someVisibleSelected && !allVisibleSelected }}
+                          ref={el => {
+                            if (el) el.indeterminate = someVisibleSelected && !allVisibleSelected
+                          }}
                           onChange={e => toggleAllSelected(filteredChannels, e.target.checked)}
                           title="全选当前视图"
                         />
@@ -2326,11 +2457,20 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                       <th className="px-3 py-2 text-left font-medium">Tag</th>
                       <th className="px-3 py-2 text-right font-medium">Priority</th>
                       <th className="px-3 py-2 text-right font-medium">已用 (USD)</th>
-                      <th className="px-3 py-2 text-right font-medium" title="距上一次后台快照的用量增量">Δ</th>
+                      <th className="px-3 py-2 text-right font-medium" title="距上一次后台快照的用量增量">
+                        Δ
+                      </th>
                       <th className="px-3 py-2 text-right font-medium">额度 (USD)</th>
-                      <th className="px-3 py-2 text-right font-medium" title="本地维护的上游成本, CNY / USD 额度">单价 CNY</th>
+                      <th className="px-3 py-2 text-right font-medium" title="本地维护的上游成本, CNY / USD 额度">
+                        单价 CNY
+                      </th>
                       <th className="px-3 py-2 text-left font-medium">状态</th>
-                      <th className="px-3 py-2 text-right font-medium" title="过去 60 秒的错误率 = err_rpm / (rpm + err_rpm)。点击单元格查看错误类型分桶。">错误率</th>
+                      <th
+                        className="px-3 py-2 text-right font-medium"
+                        title="过去 60 秒的错误率 = err_rpm / (rpm + err_rpm)。点击单元格查看错误类型分桶。"
+                      >
+                        错误率
+                      </th>
                       <th className="px-3 py-2 text-left font-medium">Note</th>
                       <th className="px-3 py-2 text-left font-medium">操作</th>
                     </tr>
@@ -2348,25 +2488,30 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                       const series = seriesCache[c.id]
                       return (
                         <FragmentRow key={c.id}>
-                          <tr className={`border-b border-border hover:bg-muted ${selectedIDs.has(c.id) ? 'bg-primary/10' : ''}`}>
+                          <tr
+                            className={`border-b border-border hover:bg-muted ${selectedIDs.has(c.id) ? 'bg-primary/10' : ''}`}
+                          >
                             <td className="px-2 py-2 text-center">
-                              <input
+                              <Input
                                 type="checkbox"
                                 checked={selectedIDs.has(c.id)}
                                 onChange={e => toggleRowSelected(c.id, e.target.checked)}
                               />
                             </td>
                             <td className="px-2 py-2 text-center">
-                              <button
+                              <Button
+                                variant="ghost"
                                 onClick={() => void toggleSparkline(c.id)}
-                                className={`text-[10px] ${isOpen ? 'text-success' : 'text-muted-foreground hover:text-foreground'}`}
+                                className={`text-xs ${isOpen ? 'text-success' : 'text-muted-foreground hover:text-foreground'}`}
                                 title={isOpen ? '收起' : '查看 24h 曲线'}
                               >
                                 {isOpen ? '▾' : '▸'}
-                              </button>
+                              </Button>
                             </td>
                             <td className="px-3 py-2 tabular-nums">{c.id}</td>
-                            <td className="px-3 py-2 font-mono text-[11px] max-w-[280px] truncate" title={c.name}>{c.name}</td>
+                            <td className="px-3 py-2 font-mono text-xs max-w-[280px] truncate" title={c.name}>
+                              {c.name}
+                            </td>
                             <td className="px-3 py-2 tabular-nums">{c.type}</td>
                             <td className="px-3 py-2">{c.group || '—'}</td>
                             <td className="px-3 py-2 text-muted-foreground">{c.tag || '—'}</td>
@@ -2376,7 +2521,11 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                               {deltaUSD != null ? (
                                 <span
                                   className={deltaUSD > 0 ? 'text-destructive' : 'text-muted-foreground'}
-                                  title={baseline ? `since ${new Date(baseline.captured_at * 1000).toLocaleTimeString('zh-CN')}` : ''}
+                                  title={
+                                    baseline
+                                      ? `since ${new Date(baseline.captured_at * 1000).toLocaleTimeString('zh-CN')}`
+                                      : ''
+                                  }
                                 >
                                   {deltaUSD > 0 ? '+' : ''}${deltaUSD.toFixed(4)}
                                 </span>
@@ -2404,10 +2553,14 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                             <td className="px-3 py-2 tabular-nums text-right">
                               {c.unit_price_cny != null ? (
                                 <span className="text-foreground">¥{c.unit_price_cny.toFixed(4)}</span>
-                              ) : <span className="text-muted-foreground">—</span>}
+                              ) : (
+                                <span className="text-muted-foreground">—</span>
+                              )}
                             </td>
                             <td className="px-3 py-2">
-                              <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] ${STATUS_CLS[c.status] ?? 'bg-muted text-muted-foreground'}`}>
+                              <span
+                                className={`inline-block px-2 py-0.5 rounded-full text-xs ${STATUS_CLS[c.status] ?? 'bg-muted text-muted-foreground'}`}
+                              >
                                 {STATUS_LABEL[c.status] ?? c.status}
                               </span>
                             </td>
@@ -2422,22 +2575,27 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                             </td>
                             <td className="px-3 py-2">
                               <div className="flex items-center gap-1.5 flex-wrap">
-                                <button
-                                  onClick={() => openRowEdit(c)}
-                                  className="text-[10px] text-muted-foreground hover:text-foreground"
-                                >编辑</button>
-                                <button
+                                <Button variant="ghost" onClick={() => openRowEdit(c)} className="">
+                                  编辑
+                                </Button>
+                                <Button
+                                  variant="ghost"
                                   onClick={() => void testRow(c)}
                                   disabled={testingID === c.id}
-                                  className="text-[10px] text-primary hover:text-primary disabled:opacity-40"
-                                >{testingID === c.id ? '测试中…' : '测试'}</button>
-                                <button
+                                  className="disabled:opacity-40"
+                                >
+                                  {testingID === c.id ? '测试中…' : '测试'}
+                                </Button>
+                                <Button
+                                  variant="danger"
                                   onClick={() => void deleteRow(c)}
-                                  className="text-[10px] text-destructive hover:text-destructive"
-                                >删除</button>
+                                  className="text-destructive hover:text-destructive"
+                                >
+                                  删除
+                                </Button>
                                 {testMsg[c.id] && (
                                   <span
-                                    className={`text-[10px] ${testMsg[c.id].startsWith('✓') ? 'text-success' : 'text-destructive'}`}
+                                    className={`text-xs ${testMsg[c.id].startsWith('✓') ? 'text-success' : 'text-destructive'}`}
                                     title={testMsg[c.id]}
                                   >
                                     {testMsg[c.id].length > 24 ? testMsg[c.id].slice(0, 24) + '…' : testMsg[c.id]}
@@ -2450,11 +2608,11 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                             <tr className="bg-muted/60 border-b border-border">
                               <td colSpan={16} className="px-4 py-3">
                                 {seriesLoading === c.id ? (
-                                  <div className="text-[11px] text-muted-foreground">加载 24h 数据…</div>
+                                  <div className="text-xs text-muted-foreground">加载 24h 数据…</div>
                                 ) : series && series.length >= 2 ? (
                                   <Sparkline points={series} />
                                 ) : (
-                                  <div className="text-[11px] text-muted-foreground">
+                                  <div className="text-xs text-muted-foreground">
                                     暂无历史点（后台每 15 min 采一次；等下一轮就有数据了）
                                   </div>
                                 )}
@@ -2467,7 +2625,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                   </tbody>
                 </table>
               </div>
-              <div className="px-3 py-2 text-[10px] text-muted-foreground border-t border-border">
+              <div className="px-3 py-2 text-xs text-muted-foreground border-t border-border">
                 创建时间列已从表格移除以节省空间；如需查看，将鼠标悬停到名称。
               </div>
             </div>
@@ -2478,51 +2636,55 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
       {/* Modal: bulk set unit_price_cny across the selected rows.
           Purely local — never touches the remote. */}
       {bulkCostOpen && (
-        <div
-          className="fixed inset-0 z-50 flex justify-end bg-black/50"
-          onClick={() => !bulkCostBusy && setBulkCostOpen(false)}
-        >
-          <div
-            className="drawer-panel max-w-md p-5"
-            onClick={e => e.stopPropagation()}
-          >
-            <h3 className="text-sm font-semibold text-foreground mb-1">批量设成本</h3>
-            <p className="text-xs text-muted-foreground mb-4">
-              将 <span className="font-medium text-foreground">{selectedIDs.size}</span> 个选中渠道的单价改为下面填写的值 (CNY / 每 USD 上游额度)。仅本地存储，不写远端。
-              <br />
-              <span className="text-muted-foreground">下游折扣按 profile 每日单独在 Profit 页面配置。</span>
-            </p>
-            <Field label="单价 (CNY)">
-              <input
-                type="number"
-                step="0.001"
-                min="0"
-                value={bulkCostValue}
-                onChange={e => setBulkCostValue(e.target.value)}
-                placeholder="例如 4.3"
-                autoFocus
-                className="w-full border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
-              />
-            </Field>
-            {bulkCostErr && <p className="mt-2 text-xs text-destructive">{bulkCostErr}</p>}
+        <SidePanel
+          title={<>批量设成本</>}
+          busy={bulkCostBusy}
+          onClose={() => !bulkCostBusy && setBulkCostOpen(false)}
+          footer={
             <div className="mt-5 flex justify-end gap-2">
-              <button
+              <Button
+                variant="outline"
                 onClick={() => setBulkCostOpen(false)}
                 disabled={bulkCostBusy}
-                className="border border-border rounded-md px-3 py-1.5 text-sm text-foreground hover:bg-muted"
+                className="border px-3"
               >
                 取消
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="primary"
                 onClick={submitBulkCost}
                 disabled={bulkCostBusy}
-                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
+                className="px-3 disabled:opacity-50"
               >
                 {bulkCostBusy ? '保存中…' : `保存 (${selectedIDs.size})`}
-              </button>
+              </Button>
             </div>
-          </div>
-        </div>
+          }
+        >
+          <p className="text-xs text-muted-foreground mb-4">
+            将 <span className="font-medium text-foreground">{selectedIDs.size}</span> 个选中渠道的单价改为下面填写的值
+            (CNY / 每 USD 上游额度)。仅本地存储，不写远端。
+            <br />
+            <span className="text-muted-foreground">下游折扣按 profile 每日单独在 Profit 页面配置。</span>
+          </p>
+          <Field label="单价 (CNY)">
+            <Input
+              type="number"
+              step="0.001"
+              min="0"
+              value={bulkCostValue}
+              onChange={e => setBulkCostValue(e.target.value)}
+              placeholder="例如 4.3"
+              autoFocus
+              className="w-full border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
+            />
+          </Field>
+          {bulkCostErr && (
+            <p role="alert" className="mt-2 text-xs text-destructive">
+              {bulkCostErr}
+            </p>
+          )}
+        </SidePanel>
       )}
 
       {/* Modal: bulk update priority. Same three modes as the
@@ -2530,109 +2692,375 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           selected channels by ±1 from the base, ordered by channel_id
           ascending so the result is stable across sessions. */}
       {bulkPrioOpen && (
-        <div
-          className="fixed inset-0 z-50 flex justify-end bg-black/50"
-          onClick={() => !bulkPrioBusy && setBulkPrioOpen(false)}
-        >
-          <div
-            className="drawer-panel max-w-md p-5"
-            onClick={e => e.stopPropagation()}
-          >
-            <h3 className="text-sm font-semibold text-foreground mb-1">批量改优先级</h3>
-            <p className="text-xs text-muted-foreground mb-4">
-              选中 <span className="font-medium text-foreground">{selectedIDs.size}</span> 个渠道，改到远端。
-              <br />
-              <span className="text-muted-foreground">顺序模式下按 channel_id 升序依次分配，priority 最小 1（负值会被夹到 1）。</span>
-            </p>
-            <div className="space-y-3">
-              <Field label={`起始优先级${bulkPrioMode === 'desc' ? '（base − i）' : bulkPrioMode === 'asc' ? '（base + i）' : ''}`}>
-                <div className="flex gap-1">
-                  <input
-                    type="number"
-                    step="1"
-                    min="1"
-                    value={bulkPrioValue}
-                    onChange={e => setBulkPrioValue(e.target.value)}
-                    placeholder={bulkPrioMode === 'same' ? '例如 1001' : '起始 base'}
-                    autoFocus
-                    className="flex-1 border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
-                  />
-                  <select
-                    value={bulkPrioMode}
-                    onChange={e => setBulkPrioMode(e.target.value as 'same' | 'desc' | 'asc')}
-                    className="border border-border rounded-md px-2 py-1.5 text-sm bg-card focus:outline-none focus:border-ring"
-                    title="统一 = 所有 key 同一值；顺序 = 每个 key 依次递减/递增"
-                  >
-                    <option value="same">统一</option>
-                    <option value="desc">顺序 ↓</option>
-                    <option value="asc">顺序 ↑</option>
-                  </select>
-                </div>
-              </Field>
-              {bulkPrioProgress && (
-                <div className="text-xs text-muted-foreground">
-                  进度: {bulkPrioProgress.done} / {bulkPrioProgress.total}
-                  <div className="mt-1 h-1 bg-muted rounded overflow-hidden">
-                    <div
-                      className="h-full bg-indigo-500"
-                      style={{ width: `${(bulkPrioProgress.done / Math.max(1, bulkPrioProgress.total)) * 100}%` }}
-                    />
-                  </div>
-                </div>
-              )}
-              {bulkPrioErr && <p className="text-xs text-destructive">{bulkPrioErr}</p>}
-            </div>
+        <SidePanel
+          title={<>批量改优先级</>}
+          busy={bulkPrioBusy}
+          onClose={() => !bulkPrioBusy && setBulkPrioOpen(false)}
+          footer={
             <div className="mt-5 flex justify-end gap-2">
-              <button
+              <Button
+                variant="outline"
                 onClick={() => setBulkPrioOpen(false)}
                 disabled={bulkPrioBusy}
-                className="border border-border rounded-md px-3 py-1.5 text-sm text-foreground hover:bg-muted"
+                className="border px-3"
               >
                 取消
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="primary"
                 onClick={submitBulkPrio}
                 disabled={bulkPrioBusy}
-                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
+                className="px-3 disabled:opacity-50"
               >
-                {bulkPrioBusy ? `保存中… ${bulkPrioProgress?.done ?? 0}/${bulkPrioProgress?.total ?? 0}` : `保存 (${selectedIDs.size})`}
-              </button>
+                {bulkPrioBusy
+                  ? `保存中… ${bulkPrioProgress?.done ?? 0}/${bulkPrioProgress?.total ?? 0}`
+                  : `保存 (${selectedIDs.size})`}
+              </Button>
             </div>
+          }
+        >
+          <p className="text-xs text-muted-foreground mb-4">
+            选中 <span className="font-medium text-foreground">{selectedIDs.size}</span> 个渠道，改到远端。
+            <br />
+            <span className="text-muted-foreground">
+              顺序模式下按 channel_id 升序依次分配，priority 最小 1（负值会被夹到 1）。
+            </span>
+          </p>
+          <div className="space-y-3">
+            <Field
+              label={`起始优先级${bulkPrioMode === 'desc' ? '（base − i）' : bulkPrioMode === 'asc' ? '（base + i）' : ''}`}
+            >
+              <div className="flex gap-1">
+                <Input
+                  type="number"
+                  step="1"
+                  min="1"
+                  value={bulkPrioValue}
+                  onChange={e => setBulkPrioValue(e.target.value)}
+                  placeholder={bulkPrioMode === 'same' ? '例如 1001' : '起始 base'}
+                  autoFocus
+                  className="flex-1 border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
+                />
+                <Select
+                  value={bulkPrioMode}
+                  onChange={e => setBulkPrioMode(e.target.value as 'same' | 'desc' | 'asc')}
+                  className="border border-border rounded-md px-2 py-1.5 text-sm bg-card focus:outline-none focus:border-ring"
+                  title="统一 = 所有 key 同一值；顺序 = 每个 key 依次递减/递增"
+                >
+                  <option value="same">统一</option>
+                  <option value="desc">顺序 ↓</option>
+                  <option value="asc">顺序 ↑</option>
+                </Select>
+              </div>
+            </Field>
+            {bulkPrioProgress && (
+              <div className="text-xs text-muted-foreground">
+                进度: {bulkPrioProgress.done} / {bulkPrioProgress.total}
+                <div className="mt-1 h-1 bg-muted rounded overflow-hidden">
+                  <div
+                    className="h-full bg-indigo-500"
+                    style={{
+                      width: `${(bulkPrioProgress.done / Math.max(1, bulkPrioProgress.total)) * 100}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+            {bulkPrioErr && (
+              <p role="alert" className="text-xs text-destructive">
+                {bulkPrioErr}
+              </p>
+            )}
           </div>
-        </div>
+        </SidePanel>
       )}
 
       {/* Modal: batch upload keys */}
       {batchOpen && (
-        <div
-          className="fixed inset-0 z-50 flex justify-end bg-black/50"
-          onClick={() => !batchBusy && setBatchOpen(false)}
+        <SidePanel
+          title={<>批量上 key 到远端 new-api</>}
+          busy={batchBusy}
+          onClose={() => !batchBusy && setBatchOpen(false)}
+          footer={
+            <div className="mt-5 flex justify-end gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setBatchOpen(false)}
+                disabled={batchBusy}
+                className="border px-3"
+              >
+                关闭
+              </Button>
+              <Button
+                variant="primary"
+                onClick={submitBatch}
+                disabled={batchBusy}
+                className="px-3 hover:opacity-85 disabled:opacity-50"
+              >
+                {batchBusy ? '上传中…' : '上传'}
+              </Button>
+            </div>
+          }
         >
-          <div
-            className="drawer-panel max-w-2xl p-5"
-            onClick={e => e.stopPropagation()}
-          >
-            <h3 className="text-sm font-semibold text-foreground mb-3">批量上 key 到远端 new-api</h3>
-            <div className="grid grid-cols-2 gap-3 mb-3">
-              <Field label="名字中间段（最终 = <日期>-<你填>-<key末8>-<hash8>）">
-                <div className="flex items-center gap-1.5">
-                  <input
-                    value={batchDatePrefix}
-                    onChange={e => setBatchDatePrefix(e.target.value)}
-                    placeholder={todayYYYYMMDD()}
-                    className="w-24 border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring tabular-nums"
-                  />
-                  <span className="text-[11px] text-muted-foreground font-mono">-</span>
-                  <input
-                    value={batchPrefix}
-                    onChange={e => setBatchPrefix(e.target.value)}
-                    placeholder="例如 pipi-a"
-                    className="flex-1 border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+          <FormSection>
+            <Field label="渠道类型">
+              <ProviderSelect
+                label="渠道类型"
+                value={batchPresetID}
+                options={CHANNEL_TYPE_PRESETS}
+                onChange={p => {
+                  setBatchPresetID(p.id)
+                  const prof = profiles.find(x => x.id === selectedID)
+                  setBatchModels(resolvePresetModels(p, prof))
+                  setBatchGroup(resolvePresetGroup(p, prof))
+                  if (p.kind === 'aws') {
+                    setBatchRegion('us-east-1')
+                    setBatchAwsRegions(prev => (prev.length ? prev : awsDefaultRegions))
+                    if (awsDefaultGroup) setBatchGroup(awsDefaultGroup)
+                    if (awsDefaultModels) setBatchModels(awsDefaultModels)
+                  } else if (p.kind === 'vertex') setBatchRegion('{"default": "global"}')
+                }}
+              />
+            </Field>
+            <Field label={t('Name')}>
+              <div className="flex items-center gap-1.5">
+                <Input
+                  aria-label={t('Date')}
+                  value={batchDatePrefix}
+                  onChange={e => setBatchDatePrefix(e.target.value)}
+                  placeholder={todayYYYYMMDD()}
+                  className="w-24 border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring tabular-nums"
+                />
+                <span className="text-xs text-muted-foreground font-mono">-</span>
+                <Input
+                  aria-label={t('Name')}
+                  value={batchPrefix}
+                  onChange={e => setBatchPrefix(e.target.value)}
+                  placeholder="例如 pipi-a"
+                  className="flex-1 border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+                />
+              </div>
+            </Field>
+          </FormSection>
+          {!(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude') && (
+            <BatchKeyInput value={batchInput} onChange={setBatchInput} />
+          )}
+          {(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude') && (
+            <div className="mt-3 space-y-3 border border-dashed border-border rounded-md p-3 bg-muted/50">
+              <p className="text-xs text-muted-foreground">
+                Vertex 走独立通道，绕过 Pending 队列 —— 不会出现在下方"上传队列"，直接创建远端渠道。
+              </p>
+              <VertexAdminInputSection
+                region={batchRegion}
+                onRegionChange={setBatchRegion}
+                keyMode={batchVertexKeyMode}
+                onKeyModeChange={setBatchVertexKeyMode}
+                files={batchVertexFiles}
+                onFilesChange={setBatchVertexFiles}
+                onPickFiles={async list => {
+                  const { parsed, errors } = await readVertexAdminFiles(list)
+                  setBatchVertexFiles(prev => [...prev, ...parsed])
+                  if (errors.length) setBatchErr(errors.join('; '))
+                }}
+                apiKeysText={batchVertexKeysText}
+                onApiKeysTextChange={setBatchVertexKeysText}
+              />
+            </div>
+          )}
+          {batchPresetID === 'azure' && (
+            <div className="mt-3 space-y-2 border border-dashed border-border rounded-md p-3 bg-muted/50">
+              <p className="text-xs text-muted-foreground">
+                Azure 走独立通道，绕过 Pending 队列 —— 直接创建远端渠道。同批 Key 共享同一 base_url + api version。
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs text-muted-foreground mb-1">
+                    Resource Endpoint <span className="text-destructive">*</span>
+                  </label>
+                  <Input
+                    value={batchAzureBaseUrl}
+                    onChange={e => setBatchAzureBaseUrl(e.target.value)}
+                    placeholder="https://<resource>.openai.azure.com"
+                    className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
                   />
                 </div>
-              </Field>
+                <div>
+                  <label className="block text-xs text-muted-foreground mb-1">API Version</label>
+                  <Input
+                    value={batchAzureApiVersion}
+                    onChange={e => setBatchAzureApiVersion(e.target.value)}
+                    placeholder={AZURE_DEFAULT_API_VERSION}
+                    className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+          {batchPresetID === 'aws' && (
+            <div className="mt-3 space-y-2 border border-dashed border-border rounded-md p-3 bg-muted/50">
+              <p className="text-xs text-muted-foreground">
+                AWS Bedrock 走独立通道，绕过 Pending 队列。每个 key 会在每个所选 Region 各建一个渠道；Region 拼进
+                channel.key，模型映射前缀由后台 <span className="font-mono">Settings → AWS</span>{' '}
+                的区域→前缀映射自动决定。
+              </p>
+              <div>
+                <label className="block text-xs text-muted-foreground mb-1">
+                  Regions <span className="text-destructive">*</span>
+                </label>
+                <div className="flex flex-wrap gap-1.5 mb-2 min-h-[1.5rem]">
+                  {batchAwsRegions.length === 0 && <span className="text-xs text-muted-foreground">未选择区域</span>}
+                  {batchAwsRegions.map(r => (
+                    <span
+                      key={r}
+                      className="inline-flex items-center gap-1 rounded-full bg-brand-50 text-brand px-2 py-0.5 text-xs font-mono"
+                    >
+                      {r}
+                      <Button
+                        variant="ghost"
+                        type="button"
+                        onClick={() => setBatchAwsRegions(prev => prev.filter(x => x !== r))}
+                        className=""
+                        title="移除"
+                      >
+                        <svg
+                          width="11"
+                          height="11"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2.5"
+                          strokeLinecap="round"
+                        >
+                          <line x1="18" y1="6" x2="6" y2="18" />
+                          <line x1="6" y1="6" x2="18" y2="18" />
+                        </svg>
+                      </Button>
+                    </span>
+                  ))}
+                </div>
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {AWS_COMMON_REGIONS.filter(r => !batchAwsRegions.includes(r)).map(r => (
+                    <Button
+                      variant="outline"
+                      key={r}
+                      type="button"
+                      onClick={() => setBatchAwsRegions(prev => (prev.includes(r) ? prev : [...prev, r]))}
+                      className="border px-2 font-mono hover:border-brand"
+                    >
+                      + {r}
+                    </Button>
+                  ))}
+                </div>
+                <div className="flex gap-1">
+                  <Input
+                    value={batchAwsRegionInput}
+                    onChange={e => setBatchAwsRegionInput(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        const v = batchAwsRegionInput.trim()
+                        if (v && !batchAwsRegions.includes(v)) setBatchAwsRegions(prev => [...prev, v])
+                        setBatchAwsRegionInput('')
+                      }
+                    }}
+                    placeholder="自定义区域，回车添加（例 me-central-1）"
+                    className="flex-1 border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
+                  />
+                  <Button
+                    variant="outline"
+                    type="button"
+                    onClick={() => {
+                      const v = batchAwsRegionInput.trim()
+                      if (v && !batchAwsRegions.includes(v)) setBatchAwsRegions(prev => [...prev, v])
+                      setBatchAwsRegionInput('')
+                    }}
+                    className="border px-3"
+                  >
+                    添加
+                  </Button>
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs text-muted-foreground mb-1">认证方式</label>
+                <div className="inline-flex rounded-md border border-border overflow-hidden">
+                  <Button
+                    variant="ghost"
+                    type="button"
+                    onClick={() => setBatchAwsKeyMode('ak_sk')}
+                    className={`px-3 py-1.5 text-xs border-r border-border transition-colors ${batchAwsKeyMode === 'ak_sk' ? 'bg-brand text-white' : 'bg-card text-foreground hover:bg-muted'}`}
+                  >
+                    AK/SK
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    type="button"
+                    onClick={() => setBatchAwsKeyMode('api_key')}
+                    className={`px-3 py-1.5 text-xs transition-colors ${batchAwsKeyMode === 'api_key' ? 'bg-brand text-white' : 'bg-card text-foreground hover:bg-muted'}`}
+                  >
+                    API Key
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {batchAwsKeyMode === 'ak_sk'
+                    ? '每行填 ak|sk（Region 自动追加）。'
+                    : '每行填 apikey（Region 自动追加）。'}
+                </p>
+              </div>
+              <div>
+                <label className="block text-xs text-muted-foreground mb-1">Proxy（可选）</label>
+                <Input
+                  value={batchAwsProxy}
+                  onChange={e => setBatchAwsProxy(e.target.value)}
+                  placeholder="http://user:pass@host:port（留空则不走代理）"
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  写入 channel.settings.proxy，作用于本批全部渠道；默认为空。
+                </p>
+              </div>
+            </div>
+          )}
+          {batchErr && (
+            <p role="alert" className="text-xs text-destructive mt-2">
+              {batchErr}
+            </p>
+          )}
+          {batchResults && (
+            <div className="mt-3 border border-border rounded-md max-h-56 overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-muted text-muted-foreground sticky top-0">
+                  <tr>
+                    <th className="px-2 py-1 text-left">Key</th>
+                    <th className="px-2 py-1 text-left">结果</th>
+                    <th className="px-2 py-1 text-left">Channel</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {batchResults.map((r, i) => (
+                    <tr key={i} className="border-t border-border">
+                      <td className="px-2 py-1 font-mono">{r.key}</td>
+                      <td className="px-2 py-1">
+                        {r.ok ? (
+                          <span className="text-success">✓ 成功</span>
+                        ) : (
+                          <span className="text-destructive" title={r.error}>
+                            ✗ {(r.error ?? '失败').slice(0, 40)}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-2 py-1 text-muted-foreground">
+                        {r.channel_id ? `#${r.channel_id} ${r.name ?? ''}` : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <FormSection advanced>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Field label="Group">
-                <input
+                <Input
                   value={batchGroup}
                   onChange={e => setBatchGroup(e.target.value)}
                   placeholder="default"
@@ -2640,15 +3068,17 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                 />
               </Field>
               <Field label="Tag（可选）">
-                <input
+                <Input
                   value={batchTag}
                   onChange={e => setBatchTag(e.target.value)}
                   className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
                 />
               </Field>
-              <Field label={`Priority${batchPrioMode === 'desc' ? '（base − i）' : batchPrioMode === 'asc' ? '（base + i）' : '（可选）'}`}>
+              <Field
+                label={`Priority${batchPrioMode === 'desc' ? '（base − i）' : batchPrioMode === 'asc' ? '（base + i）' : '（可选）'}`}
+              >
                 <div className="flex gap-1">
-                  <input
+                  <Input
                     type="number"
                     min="0"
                     value={batchPriority}
@@ -2656,7 +3086,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                     placeholder={batchPrioMode === 'same' ? '例如 1001' : '起始 base'}
                     className="flex-1 border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
                   />
-                  <select
+                  <Select
                     value={batchPrioMode}
                     onChange={e => setBatchPrioMode(e.target.value as 'same' | 'desc' | 'asc')}
                     className="border border-border rounded-md px-2 py-1.5 text-sm bg-card focus:outline-none focus:border-ring"
@@ -2665,30 +3095,35 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                     <option value="same">统一</option>
                     <option value="desc">顺序 ↓</option>
                     <option value="asc">顺序 ↑</option>
-                  </select>
+                  </Select>
                 </div>
               </Field>
             </div>
-
-            {/* Queue mode toggle. When on, keys stage into
-                remote_pending_key and the scheduler goroutine uploads
-                them. Immediate mode (default) is the original
-                synchronous path. */}
+            <Field label="Models（逗号分隔）">
+              <Textarea
+                value={batchModels}
+                onChange={e => setBatchModels(e.target.value)}
+                rows={2}
+                className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
+              />
+            </Field>
+          </FormSection>
+          {CHANNEL_TYPE_PRESETS.find(p => p.id === batchPresetID)?.kind === 'text' && (
             <div className="mb-3 rounded-md border border-border bg-muted p-3 space-y-2">
               <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={batchQueue}
-                  onChange={e => setBatchQueue(e.target.checked)}
-                />
+                <Input type="checkbox" checked={batchQueue} onChange={e => setBatchQueue(e.target.checked)} />
                 使用队列（定时上传 / drip 池）
               </label>
               {batchQueue && (
                 <div className="pl-6 space-y-1.5">
-                  <label className="block text-[11px] text-muted-foreground">
-                    Pool size（<span className="text-muted-foreground">0 = 全部立即上；N = 一批 N 个，全部用完了再上下一批 N 个</span>）
+                  <label className="block text-xs text-muted-foreground">
+                    Pool size（
+                    <span className="text-muted-foreground">
+                      0 = 全部立即上；N = 一批 N 个，全部用完了再上下一批 N 个
+                    </span>
+                    ）
                   </label>
-                  <input
+                  <Input
                     type="number"
                     min="0"
                     max="100"
@@ -2696,627 +3131,327 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                     onChange={e => setBatchPoolSize(e.target.value)}
                     className="w-24 border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
                   />
-                  <p className="text-[10px] text-muted-foreground">
-                    队列由后台 goroutine 每 20s 扫描一次；只有当整批 key 都被 remote 自动禁用（status ≠ 1），才会一起上下一批。上传失败会重试 3 次。
+                  <p className="text-xs text-muted-foreground">
+                    队列由后台 goroutine 每 20s 扫描一次；只有当整批 key 都被 remote 自动禁用（status ≠
+                    1），才会一起上下一批。上传失败会重试 3 次。
                   </p>
                 </div>
               )}
             </div>
-            <Field label="渠道类型">
-              {/* Custom dropdown so each provider shows its coloured logo. */}
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={() => setBatchTypeOpen(v => !v)}
-                  className="w-full flex items-center justify-between gap-2 border border-border rounded-md px-2 py-1.5 text-sm bg-card focus:outline-none focus:border-ring"
-                >
-                  {(() => {
-                    const cur = CHANNEL_TYPE_PRESETS.find(x => x.id === batchPresetID) ?? CHANNEL_TYPE_PRESETS[0]
-                    return <ProviderOption type={cur.type} label={cur.label} size={20} />
-                  })()}
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`text-muted-foreground transition-transform ${batchTypeOpen ? 'rotate-180' : ''}`}>
-                    <polyline points="6 9 12 15 18 9" />
-                  </svg>
-                </button>
-                {batchTypeOpen && (
-                  <>
-                    <div className="fixed inset-0 z-10" onClick={() => setBatchTypeOpen(false)} />
-                    <ul className="absolute z-20 mt-1 w-full max-h-72 overflow-auto rounded-md border border-border bg-card py-1 shadow-lg">
-                      {CHANNEL_TYPE_PRESETS.map(p => {
-                        const active = p.id === batchPresetID
-                        return (
-                          <li key={p.id}>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setBatchPresetID(p.id)
-                                const prof = profiles.find(x => x.id === selectedID)
-                                setBatchModels(resolvePresetModels(p, prof))
-                                setBatchGroup(resolvePresetGroup(p, prof))
-                                if (p.kind === 'aws') {
-                                  setBatchRegion('us-east-1')
-                                  setBatchAwsRegions(prev => (prev.length ? prev : awsDefaultRegions))
-                                  if (awsDefaultGroup) setBatchGroup(awsDefaultGroup)
-                                  if (awsDefaultModels) setBatchModels(awsDefaultModels)
-                                } else if (p.kind === 'vertex') {
-                                  setBatchRegion('{"default": "global"}')
-                                }
-                                setBatchTypeOpen(false)
-                              }}
-                              className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-sm text-left hover:bg-muted ${active ? 'bg-brand-50/60 text-brand' : 'text-foreground'}`}
-                            >
-                              <ProviderOption type={p.type} label={p.label} size={20} />
-                              {active && (
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" className="ml-auto">
-                                  <polyline points="20 6 9 17 4 12" />
-                                </svg>
-                              )}
-                            </button>
-                          </li>
-                        )
-                      })}
-                    </ul>
-                  </>
-                )}
-              </div>
-              <p className="text-[10px] text-muted-foreground mt-1">
-                切换预设会同步重写下方的 <span className="font-mono">Models</span> 和 <span className="font-mono">Group</span>。Gemini 用站点上配置的 <span className="font-mono">default_gemini_group</span> / <span className="font-mono">default_gemini_models</span>；未设置则回退到内置默认。
-              </p>
-            </Field>
-            <Field label="Models（逗号分隔）">
-              <textarea
-                value={batchModels}
-                onChange={e => setBatchModels(e.target.value)}
-                rows={2}
-                className="w-full border border-border rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-ring"
-              />
-            </Field>
-            {!(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude') && (() => {
-              const keyLabel = batchPresetID === 'aws' ? (batchAwsKeyMode === 'ak_sk' ? 'ak|sk' : 'apikey') : 'key'
-              return (
-                <div className="mt-3">
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-[11px] text-muted-foreground">
-                      Keys —— <code className="text-foreground bg-muted px-1">{keyLabel} [额度USD] [备注...]</code>
-                    </label>
-                    <div className="inline-flex rounded-md border border-border overflow-hidden">
-                      {([{ id: 'paste', label: '粘贴' }, { id: 'table', label: '表格' }] as { id: 'paste' | 'table'; label: string }[]).map(m => (
-                        <button
-                          key={m.id}
-                          type="button"
-                          onClick={() => switchBatchInputMode(m.id)}
-                          className={`px-3 py-1 text-[11px] border-r border-border last:border-r-0 transition-colors ${batchInputMode === m.id ? 'bg-brand text-white' : 'bg-card text-foreground hover:bg-muted'}`}
-                        >
-                          {m.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  {batchInputMode === 'paste' ? (
-                    <textarea
-                      value={batchInput}
-                      onChange={e => setBatchInput(e.target.value)}
-                      rows={8}
-                      placeholder={'sk-ant-api03-xxxx 220\nsk-ant-api03-yyyy 500 备注文字\n# 井号开头的行会被忽略'}
-                      className="w-full border border-border rounded-md p-2 text-[11px] font-mono resize-y focus:outline-none focus:border-ring"
-                    />
-                  ) : (
-                    <div className="border border-border rounded-md overflow-hidden">
-                      <div className="grid grid-cols-[1fr_5rem_1fr_2rem] gap-2 px-2 py-1.5 bg-muted border-b border-border text-[10px] text-muted-foreground uppercase tracking-wide">
-                        <span>{keyLabel}</span><span>额度 USD</span><span>备注</span><span />
-                      </div>
-                      <div className="max-h-64 overflow-y-auto divide-y divide-border">
-                        {batchKeyRows.map((r, i) => (
-                          <div key={i} className="grid grid-cols-[1fr_5rem_1fr_2rem] gap-2 px-2 py-1 items-center">
-                            <input value={r.key} onChange={e => setBatchKeyRows(prev => prev.map((x, j) => j === i ? { ...x, key: e.target.value } : x))} placeholder={keyLabel} className="w-full border border-border rounded px-2 py-1 text-[11px] font-mono bg-card focus:outline-none focus:border-ring" />
-                            <input type="number" step="0.01" min="0" value={r.quota} onChange={e => setBatchKeyRows(prev => prev.map((x, j) => j === i ? { ...x, quota: e.target.value } : x))} placeholder="可选" className="w-full border border-border rounded px-2 py-1 text-[11px] tabular-nums bg-card focus:outline-none focus:border-ring" />
-                            <input value={r.note} onChange={e => setBatchKeyRows(prev => prev.map((x, j) => j === i ? { ...x, note: e.target.value } : x))} placeholder="可选" className="w-full border border-border rounded px-2 py-1 text-[11px] bg-card focus:outline-none focus:border-ring" />
-                            <button type="button" onClick={() => setBatchKeyRows(prev => prev.length > 1 ? prev.filter((_, j) => j !== i) : [{ key: '', quota: '', note: '' }])} title="删除该行" className="text-muted-foreground hover:text-destructive flex items-center justify-center">
-                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                      <div className="flex items-center justify-between px-2 py-1.5 border-t border-border bg-muted/60">
-                        <button type="button" onClick={() => setBatchKeyRows(prev => [...prev, { key: '', quota: '', note: '' }])} className="inline-flex items-center gap-1 text-[11px] text-brand hover:text-brand-700">
-                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
-                          添加一行
-                        </button>
-                        <span className="text-[10px] text-muted-foreground tabular-nums">{batchKeyRows.filter(r => r.key.trim()).length} 条</span>
-                      </div>
-                    </div>
-                  )}
-                  <p className="text-[10px] text-muted-foreground mt-1">
-                    额度和备注可省。额度写在本地 remote_channel_meta；key 明文只走一次 POST，不落本地。
-                  </p>
-                </div>
-              )
-            })()}
-            {(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude') && (
-              <div className="mt-3 space-y-3 border border-dashed border-border rounded-md p-3 bg-muted/50">
-                <p className="text-[11px] text-muted-foreground">
-                  Vertex 走独立通道，绕过 Pending 队列 —— 不会出现在下方"上传队列"，直接创建远端渠道。
-                </p>
-                <VertexAdminInputSection
-                  region={batchRegion}
-                  onRegionChange={setBatchRegion}
-                  keyMode={batchVertexKeyMode}
-                  onKeyModeChange={setBatchVertexKeyMode}
-                  files={batchVertexFiles}
-                  onFilesChange={setBatchVertexFiles}
-                  onPickFiles={async list => {
-                    const { parsed, errors } = await readVertexAdminFiles(list)
-                    setBatchVertexFiles(prev => [...prev, ...parsed])
-                    if (errors.length) setBatchErr(errors.join('; '))
-                  }}
-                  apiKeysText={batchVertexKeysText}
-                  onApiKeysTextChange={setBatchVertexKeysText}
-                />
-              </div>
-            )}
-            {batchPresetID === 'azure' && (
-              <div className="mt-3 space-y-2 border border-dashed border-border rounded-md p-3 bg-muted/50">
-                <p className="text-[11px] text-muted-foreground">
-                  Azure 走独立通道，绕过 Pending 队列 —— 直接创建远端渠道。同批 Key 共享同一 base_url + api version。
-                </p>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-[11px] text-muted-foreground mb-1">
-                      Resource Endpoint <span className="text-destructive">*</span>
-                    </label>
-                    <input
-                      value={batchAzureBaseUrl}
-                      onChange={e => setBatchAzureBaseUrl(e.target.value)}
-                      placeholder="https://<resource>.openai.azure.com"
-                      className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
-                    />
-                    <p className="text-[10px] text-muted-foreground mt-1">写进 channel.base_url。</p>
-                  </div>
-                  <div>
-                    <label className="block text-[11px] text-muted-foreground mb-1">API Version</label>
-                    <input
-                      value={batchAzureApiVersion}
-                      onChange={e => setBatchAzureApiVersion(e.target.value)}
-                      placeholder={AZURE_DEFAULT_API_VERSION}
-                      className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
-                    />
-                    <p className="text-[10px] text-muted-foreground mt-1">写进 channel.other，缺省 {AZURE_DEFAULT_API_VERSION}。</p>
-                  </div>
-                </div>
-              </div>
-            )}
-            {batchPresetID === 'aws' && (
-              <div className="mt-3 space-y-2 border border-dashed border-border rounded-md p-3 bg-muted/50">
-                <p className="text-[11px] text-muted-foreground">
-                  AWS Bedrock 走独立通道，绕过 Pending 队列。每个 key 会在每个所选 Region 各建一个渠道；Region 拼进 channel.key，模型映射前缀由后台 <span className="font-mono">Settings → AWS</span> 的区域→前缀映射自动决定。
-                </p>
-                <div>
-                  <label className="block text-[11px] text-muted-foreground mb-1">
-                    Regions <span className="text-destructive">*</span>
-                  </label>
-                  <div className="flex flex-wrap gap-1.5 mb-2 min-h-[1.5rem]">
-                    {batchAwsRegions.length === 0 && <span className="text-[10px] text-muted-foreground">未选择区域</span>}
-                    {batchAwsRegions.map(r => (
-                      <span key={r} className="inline-flex items-center gap-1 rounded-full bg-brand-50 text-brand px-2 py-0.5 text-[11px] font-mono">
-                        {r}
-                        <button type="button" onClick={() => setBatchAwsRegions(prev => prev.filter(x => x !== r))} className="hover:text-brand-700" title="移除">
-                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                  <div className="flex flex-wrap gap-1.5 mb-2">
-                    {AWS_COMMON_REGIONS.filter(r => !batchAwsRegions.includes(r)).map(r => (
-                      <button key={r} type="button" onClick={() => setBatchAwsRegions(prev => prev.includes(r) ? prev : [...prev, r])} className="rounded-full border border-border bg-card px-2 py-0.5 text-[11px] font-mono text-muted-foreground hover:border-brand hover:text-brand">
-                        + {r}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="flex gap-1">
-                    <input
-                      value={batchAwsRegionInput}
-                      onChange={e => setBatchAwsRegionInput(e.target.value)}
-                      onKeyDown={e => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault()
-                          const v = batchAwsRegionInput.trim()
-                          if (v && !batchAwsRegions.includes(v)) setBatchAwsRegions(prev => [...prev, v])
-                          setBatchAwsRegionInput('')
-                        }
-                      }}
-                      placeholder="自定义区域，回车添加（例 me-central-1）"
-                      className="flex-1 border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
-                    />
-                    <button type="button" onClick={() => { const v = batchAwsRegionInput.trim(); if (v && !batchAwsRegions.includes(v)) setBatchAwsRegions(prev => [...prev, v]); setBatchAwsRegionInput('') }} className="border border-border rounded-md px-3 text-xs text-muted-foreground hover:bg-muted">添加</button>
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-[11px] text-muted-foreground mb-1">认证方式</label>
-                  <div className="inline-flex rounded-md border border-border overflow-hidden">
-                    <button type="button" onClick={() => setBatchAwsKeyMode('ak_sk')} className={`px-3 py-1.5 text-xs border-r border-border transition-colors ${batchAwsKeyMode === 'ak_sk' ? 'bg-brand text-white' : 'bg-card text-foreground hover:bg-muted'}`}>AK/SK</button>
-                    <button type="button" onClick={() => setBatchAwsKeyMode('api_key')} className={`px-3 py-1.5 text-xs transition-colors ${batchAwsKeyMode === 'api_key' ? 'bg-brand text-white' : 'bg-card text-foreground hover:bg-muted'}`}>API Key</button>
-                  </div>
-                  <p className="text-[10px] text-muted-foreground mt-1">
-                    {batchAwsKeyMode === 'ak_sk' ? '每行填 ak|sk（Region 自动追加）。' : '每行填 apikey（Region 自动追加）。'}
-                  </p>
-                </div>
-                <div>
-                  <label className="block text-[11px] text-muted-foreground mb-1">Proxy（可选）</label>
-                  <input
-                    value={batchAwsProxy}
-                    onChange={e => setBatchAwsProxy(e.target.value)}
-                    placeholder="http://user:pass@host:port（留空则不走代理）"
-                    className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
-                  />
-                  <p className="text-[10px] text-muted-foreground mt-1">写入 channel.settings.proxy，作用于本批全部渠道；默认为空。</p>
-                </div>
-              </div>
-            )}
-            {batchErr && <p className="text-xs text-destructive mt-2">{batchErr}</p>}
-            {batchResults && (
-              <div className="mt-3 border border-border rounded-md max-h-56 overflow-y-auto">
-                <table className="w-full text-[11px]">
-                  <thead className="bg-muted text-muted-foreground sticky top-0">
-                    <tr>
-                      <th className="px-2 py-1 text-left">Key</th>
-                      <th className="px-2 py-1 text-left">结果</th>
-                      <th className="px-2 py-1 text-left">Channel</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {batchResults.map((r, i) => (
-                      <tr key={i} className="border-t border-border">
-                        <td className="px-2 py-1 font-mono">{r.key}</td>
-                        <td className="px-2 py-1">
-                          {r.ok ? <span className="text-success">✓ 成功</span>
-                                : <span className="text-destructive" title={r.error}>✗ {(r.error ?? '失败').slice(0, 40)}</span>}
-                        </td>
-                        <td className="px-2 py-1 text-muted-foreground">
-                          {r.channel_id ? `#${r.channel_id} ${r.name ?? ''}` : '—'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                onClick={() => setBatchOpen(false)}
-                disabled={batchBusy}
-                className="border border-border rounded-md px-3 py-1.5 text-sm text-foreground hover:bg-muted"
-              >
-                关闭
-              </button>
-              <button
-                onClick={submitBatch}
-                disabled={batchBusy}
-                className="bg-success text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85 disabled:opacity-50"
-              >
-                {batchBusy ? '上传中…' : '上传'}
-              </button>
-            </div>
-          </div>
-        </div>
+          )}
+        </SidePanel>
       )}
 
       {/* Modal: row edit */}
       {rowOpen && rowChannel && (
-        <div
-          className="fixed inset-0 z-50 flex justify-end bg-black/50"
-          onClick={() => !rowBusy && setRowOpen(false)}
+        <SidePanel
+          title={<>编辑渠道 #{rowChannel.id}</>}
+          busy={rowBusy}
+          onClose={() => !rowBusy && setRowOpen(false)}
+          footer={
+            <div className="mt-5 flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setRowOpen(false)} disabled={rowBusy} className="border px-3">
+                取消
+              </Button>
+              <Button variant="primary" onClick={submitRowEdit} disabled={rowBusy} className="px-3 disabled:opacity-50">
+                {rowBusy ? '保存中…' : '保存'}
+              </Button>
+            </div>
+          }
         >
-          <div
-            className="drawer-panel max-w-md p-5"
-            onClick={e => e.stopPropagation()}
-          >
-            <h3 className="text-sm font-semibold text-foreground mb-3">
-              编辑渠道 #{rowChannel.id}
-            </h3>
-            <div className="space-y-3">
-              <Field label="Name">
-                <input
-                  value={rowName}
-                  onChange={e => setRowName(e.target.value)}
-                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
-                />
-              </Field>
-              <div className="grid grid-cols-2 gap-2">
-                <Field label="Group">
-                  <input
-                    value={rowGroup}
-                    onChange={e => setRowGroup(e.target.value)}
-                    className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
-                  />
-                </Field>
-                <Field label="Tag">
-                  <input
-                    value={rowTag}
-                    onChange={e => setRowTag(e.target.value)}
-                    className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
-                  />
-                </Field>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <Field label="Status">
-                  <select
-                    value={rowStatus}
-                    onChange={e => setRowStatus(parseInt(e.target.value, 10))}
-                    className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
-                  >
-                    <option value={1}>1 · 启用</option>
-                    <option value={2}>2 · 手动禁用</option>
-                    <option value={3}>3 · 自动禁用</option>
-                  </select>
-                </Field>
-                <Field label="Priority">
-                  <input
-                    type="number"
-                    value={rowPriority}
-                    onChange={e => setRowPriority(e.target.value)}
-                    className="w-full border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
-                  />
-                </Field>
-              </div>
-              <Field label="额度上限 (USD) · 本地存储">
-                <input
-                  type="number"
-                  step="0.01"
-                  value={rowQuotaUSD}
-                  onChange={e => setRowQuotaUSD(e.target.value)}
-                  placeholder="留空清除"
-                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
-                />
-              </Field>
-              <Field label="Note · 本地存储">
-                <textarea
-                  value={rowNote}
-                  onChange={e => setRowNote(e.target.value)}
-                  rows={2}
+          <div className="space-y-3">
+            <Field label="Name">
+              <Input
+                value={rowName}
+                onChange={e => setRowName(e.target.value)}
+                className="w-full border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
+              />
+            </Field>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <Field label="Group">
+                <Input
+                  value={rowGroup}
+                  onChange={e => setRowGroup(e.target.value)}
                   className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
                 />
               </Field>
-              <div className="border-t border-border pt-3">
-                <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={rowAutoDisable}
-                    onChange={e => setRowAutoDisable(e.target.checked)}
-                    className="rounded border-border"
-                  />
-                  <span>到额自动禁用（本地存储）</span>
-                </label>
-                <p className="text-[10px] text-muted-foreground mt-1 leading-relaxed">
-                  勾选后，后台自动循环会在 <code className="font-mono">used_usd ≥ 额度 − 保留额</code> 时把远端 status 改为 2。
-                  额度未设置时本行不生效。
-                </p>
-                <Field label="保留额 USD（缓冲；到 额度 − 保留额 就下）">
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    value={rowAutoDisableReserveUSD}
-                    onChange={e => setRowAutoDisableReserveUSD(e.target.value)}
-                    placeholder="0"
-                    disabled={!rowAutoDisable}
-                    className="w-full border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring disabled:bg-muted disabled:text-muted-foreground"
-                  />
-                </Field>
-              </div>
-              {rowErr && <p className="text-xs text-destructive">{rowErr}</p>}
+              <Field label="Tag">
+                <Input
+                  value={rowTag}
+                  onChange={e => setRowTag(e.target.value)}
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+                />
+              </Field>
             </div>
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                onClick={() => setRowOpen(false)}
-                disabled={rowBusy}
-                className="border border-border rounded-md px-3 py-1.5 text-sm text-foreground hover:bg-muted"
-              >
-                取消
-              </button>
-              <button
-                onClick={submitRowEdit}
-                disabled={rowBusy}
-                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
-              >
-                {rowBusy ? '保存中…' : '保存'}
-              </button>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <Field label="Status">
+                <Select
+                  value={rowStatus}
+                  onChange={e => setRowStatus(parseInt(e.target.value, 10))}
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+                >
+                  <option value={1}>1 · 启用</option>
+                  <option value={2}>2 · 手动禁用</option>
+                  <option value={3}>3 · 自动禁用</option>
+                </Select>
+              </Field>
+              <Field label="Priority">
+                <Input
+                  type="number"
+                  value={rowPriority}
+                  onChange={e => setRowPriority(e.target.value)}
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
+                />
+              </Field>
             </div>
+            <Field label="额度上限 (USD) · 本地存储">
+              <Input
+                type="number"
+                step="0.01"
+                value={rowQuotaUSD}
+                onChange={e => setRowQuotaUSD(e.target.value)}
+                placeholder="留空清除"
+                className="w-full border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
+              />
+            </Field>
+            <Field label="Note · 本地存储">
+              <Textarea
+                value={rowNote}
+                onChange={e => setRowNote(e.target.value)}
+                rows={2}
+                className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+              />
+            </Field>
+            <div className="border-t border-border pt-3">
+              <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
+                <Input
+                  type="checkbox"
+                  checked={rowAutoDisable}
+                  onChange={e => setRowAutoDisable(e.target.checked)}
+                  className="rounded border-border"
+                />
+                <span>到额自动禁用（本地存储）</span>
+              </label>
+              <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+                勾选后，后台自动循环会在 <code className="font-mono">used_usd ≥ 额度 − 保留额</code> 时把远端 status
+                改为 2。 额度未设置时本行不生效。
+              </p>
+              <Field label="保留额 USD（缓冲；到 额度 − 保留额 就下）">
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={rowAutoDisableReserveUSD}
+                  onChange={e => setRowAutoDisableReserveUSD(e.target.value)}
+                  placeholder="0"
+                  disabled={!rowAutoDisable}
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring disabled:bg-muted disabled:text-muted-foreground"
+                />
+              </Field>
+            </div>
+            {rowErr && (
+              <p role="alert" className="text-xs text-destructive">
+                {rowErr}
+              </p>
+            )}
           </div>
-        </div>
+        </SidePanel>
       )}
 
       {/* Modal: create / edit */}
       {formOpen && (
-        <div
-          className="fixed inset-0 z-50 flex justify-end bg-black/50"
-          onClick={() => !formBusy && setFormOpen(false)}
+        <SidePanel
+          title={<>{editingID === 0 ? 'New remote profile' : 'Edit profile'}</>}
+          busy={formBusy}
+          onClose={() => !formBusy && setFormOpen(false)}
+          footer={
+            <div className="mt-5 flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setFormOpen(false)} disabled={formBusy} className="border px-3">
+                取消
+              </Button>
+              <Button variant="primary" onClick={submitForm} disabled={formBusy} className="px-3 disabled:opacity-50">
+                {formBusy ? '保存中…' : '保存'}
+              </Button>
+            </div>
+          }
         >
-          <div
-            className="drawer-panel max-w-md p-5"
-            onClick={e => e.stopPropagation()}
-          >
-            <h3 className="text-sm font-semibold text-foreground mb-3">
-              {editingID === 0 ? 'New remote profile' : 'Edit profile'}
-            </h3>
-            <div className="space-y-3">
-              <Field label="Name">
-                <input
-                  value={formName}
-                  onChange={e => setFormName(e.target.value)}
-                  placeholder="例如 newapi-remote"
+          <div className="space-y-3">
+            <Field label="Name">
+              <Input
+                value={formName}
+                onChange={e => setFormName(e.target.value)}
+                placeholder="例如 newapi-remote"
+                className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+              />
+            </Field>
+            <Field label="Host">
+              <Input
+                value={formHost}
+                onChange={e => setFormHost(e.target.value)}
+                placeholder={editingID === 0 ? 'http://example.com' : '留空 = 保持原 host 不变'}
+                className="w-full border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
+              />
+            </Field>
+            <Field label="Proxy (可选)">
+              <Input
+                value={formProxy}
+                onChange={e => setFormProxy(e.target.value)}
+                placeholder="http://user:pass@host:port（留空 = 直连，不走代理）"
+                className="w-full border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
+              />
+            </Field>
+            <Field label="User ID (New-Api-User header)">
+              <Input
+                type="number"
+                min="1"
+                value={formUserID}
+                onChange={e => setFormUserID(e.target.value)}
+                placeholder="例如 1"
+                className="w-full border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
+              />
+            </Field>
+            <Field label={editingID === 0 ? 'Access token' : 'Access token (留空保留原值)'}>
+              <Input
+                type="password"
+                value={formToken}
+                onChange={e => setFormToken(e.target.value)}
+                placeholder={editingID === 0 ? 'new-api access_token' : '••••••••'}
+                className="w-full border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
+              />
+            </Field>
+
+            {/* Defaults preloaded into the batch-upload modal so the
+                  operator only has to type the "middle" segment of the
+                  channel name and pick keys. */}
+            <div className="pt-2 border-t border-border">
+              <div className="mono-label mb-2">批量上传默认值</div>
+              <Field label="默认 Group (Anthropic)">
+                <Input
+                  value={formDefaultGroup}
+                  onChange={e => setFormDefaultGroup(e.target.value)}
+                  placeholder="例如 default"
                   className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
                 />
               </Field>
-              <Field label="Host">
-                <input
-                  value={formHost}
-                  onChange={e => setFormHost(e.target.value)}
-                  placeholder={editingID === 0 ? 'http://example.com' : '留空 = 保持原 host 不变'}
-                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
+              <Field label="默认 Group (Gemini)">
+                <Input
+                  value={formDefaultGeminiGroup}
+                  onChange={e => setFormDefaultGeminiGroup(e.target.value)}
+                  placeholder="例如 gemini（留空则用 'gemini'）"
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
                 />
               </Field>
-              <Field label="Proxy (可选)">
-                <input
-                  value={formProxy}
-                  onChange={e => setFormProxy(e.target.value)}
-                  placeholder="http://user:pass@host:port（留空 = 直连，不走代理）"
-                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
+              <Field label="默认 Group (OpenAI)">
+                <Input
+                  value={formDefaultOpenAIGroup}
+                  onChange={e => setFormDefaultOpenAIGroup(e.target.value)}
+                  placeholder="例如 openai（留空则用 'openai'）"
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
                 />
               </Field>
-              <Field label="User ID (New-Api-User header)">
-                <input
-                  type="number"
-                  min="1"
-                  value={formUserID}
-                  onChange={e => setFormUserID(e.target.value)}
-                  placeholder="例如 1"
-                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
+              <Field label="默认 Models (Anthropic, 逗号分隔)">
+                <Textarea
+                  value={formDefaultModels}
+                  onChange={e => setFormDefaultModels(e.target.value)}
+                  rows={3}
+                  placeholder="claude-opus-4-7,claude-sonnet-4-6,..."
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
                 />
               </Field>
-              <Field label={editingID === 0 ? 'Access token' : 'Access token (留空保留原值)'}>
-                <input
-                  type="password"
-                  value={formToken}
-                  onChange={e => setFormToken(e.target.value)}
-                  placeholder={editingID === 0 ? 'new-api access_token' : '••••••••'}
-                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
+              <Field label="默认 Models (Gemini, 逗号分隔)">
+                <Textarea
+                  value={formDefaultGeminiModels}
+                  onChange={e => setFormDefaultGeminiModels(e.target.value)}
+                  rows={3}
+                  placeholder="gemini-2.5-flash,gemini-2.5-pro,...（留空则用内置默认）"
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
                 />
               </Field>
+              <Field label="默认 Models (OpenAI, 逗号分隔)">
+                <Textarea
+                  value={formDefaultOpenAIModels}
+                  onChange={e => setFormDefaultOpenAIModels(e.target.value)}
+                  rows={3}
+                  placeholder="gpt-4o,gpt-4o-mini,gpt-5,...（留空则用内置默认）"
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
+                />
+              </Field>
+            </div>
 
-              {/* Defaults preloaded into the batch-upload modal so the
-                  operator only has to type the "middle" segment of the
-                  channel name and pick keys. */}
-              <div className="pt-2 border-t border-border">
-                <div className="mono-label mb-2">
-                  批量上传默认值
-                </div>
-                <Field label="默认 Group (Anthropic)">
-                  <input
-                    value={formDefaultGroup}
-                    onChange={e => setFormDefaultGroup(e.target.value)}
-                    placeholder="例如 default"
-                    className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
-                  />
-                </Field>
-                <Field label="默认 Group (Gemini)">
-                  <input
-                    value={formDefaultGeminiGroup}
-                    onChange={e => setFormDefaultGeminiGroup(e.target.value)}
-                    placeholder="例如 gemini（留空则用 'gemini'）"
-                    className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
-                  />
-                </Field>
-                <Field label="默认 Group (OpenAI)">
-                  <input
-                    value={formDefaultOpenAIGroup}
-                    onChange={e => setFormDefaultOpenAIGroup(e.target.value)}
-                    placeholder="例如 openai（留空则用 'openai'）"
-                    className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
-                  />
-                </Field>
-                <Field label="默认 Models (Anthropic, 逗号分隔)">
-                  <textarea
-                    value={formDefaultModels}
-                    onChange={e => setFormDefaultModels(e.target.value)}
-                    rows={3}
-                    placeholder="claude-opus-4-7,claude-sonnet-4-6,..."
-                    className="w-full border border-border rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-ring"
-                  />
-                </Field>
-                <Field label="默认 Models (Gemini, 逗号分隔)">
-                  <textarea
-                    value={formDefaultGeminiModels}
-                    onChange={e => setFormDefaultGeminiModels(e.target.value)}
-                    rows={3}
-                    placeholder="gemini-2.5-flash,gemini-2.5-pro,...（留空则用内置默认）"
-                    className="w-full border border-border rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-ring"
-                  />
-                </Field>
-                <Field label="默认 Models (OpenAI, 逗号分隔)">
-                  <textarea
-                    value={formDefaultOpenAIModels}
-                    onChange={e => setFormDefaultOpenAIModels(e.target.value)}
-                    rows={3}
-                    placeholder="gpt-4o,gpt-4o-mini,gpt-5,...（留空则用内置默认）"
-                    className="w-full border border-border rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-ring"
-                  />
-                </Field>
-              </div>
-
-              {/* Per-profile visibility. Empty allowlist = visible to all
+            {/* Per-profile visibility. Empty allowlist = visible to all
                   remote_studio_operator users (backward-compatible default).
                   One or more selected = only those users may see the profile
                   in the operator picker AND pass the upload preflight. */}
-              <div className="pt-2 border-t border-border">
-                <div className="mono-label mb-2 flex items-center gap-2">
-                  <span>Remote Studio Operator 可见性</span>
-                  {visLoading && <span className="text-muted-foreground">加载中…</span>}
-                </div>
-                {visOperators.length === 0 && !visLoading && (
-                  <p className="text-[11px] text-muted-foreground">未找到 role=3 用户，或未来才创建。可稍后回来配置。</p>
-                )}
-                {visOperators.length > 0 && (
-                  <>
-                    <p className="text-[11px] text-muted-foreground mb-2">
-                      {visAllowlist.size === 0
-                        ? '未勾选任何人 → 所有 remote studio operator 均可见（默认）'
-                        : `已勾选 ${visAllowlist.size} 位用户 → 仅这些用户可见`}
-                    </p>
-                    <div className="grid grid-cols-2 gap-1 max-h-40 overflow-y-auto border border-border rounded-md p-2 bg-muted/40">
-                      {visOperators.map(u => (
-                        <label key={u.id} className="flex items-center gap-2 text-[11px] cursor-pointer hover:bg-card rounded px-1 py-0.5">
-                          <input
-                            type="checkbox"
-                            checked={visAllowlist.has(u.id)}
-                            onChange={e => {
-                              setVisAllowlist(prev => {
-                                const next = new Set(prev)
-                                if (e.target.checked) next.add(u.id)
-                                else next.delete(u.id)
-                                return next
-                              })
-                            }}
-                          />
-                          <span className="font-mono flex-1 truncate">{u.username}</span>
-                          {u.studio && <span className="text-muted-foreground text-[10px] truncate" title={u.studio}>{u.studio}</span>}
-                        </label>
-                      ))}
-                    </div>
-                    <div className="mt-1 flex gap-2 text-[10px]">
-                      <button
-                        type="button"
-                        onClick={() => setVisAllowlist(new Set(visOperators.map(u => u.id)))}
-                        className="text-muted-foreground hover:text-foreground underline underline-offset-2"
-                      >全选</button>
-                      <button
-                        type="button"
-                        onClick={() => setVisAllowlist(new Set())}
-                        className="text-muted-foreground hover:text-foreground underline underline-offset-2"
-                      >清空（改为全可见）</button>
-                    </div>
-                  </>
-                )}
+            <div className="pt-2 border-t border-border">
+              <div className="mono-label mb-2 flex items-center gap-2">
+                <span>Remote Studio Operator 可见性</span>
+                {visLoading && <span className="text-muted-foreground">加载中…</span>}
               </div>
-              {formErr && <p className="text-xs text-destructive">{formErr}</p>}
+              {visOperators.length === 0 && !visLoading && (
+                <p className="text-xs text-muted-foreground">未找到 role=3 用户，或未来才创建。可稍后回来配置。</p>
+              )}
+              {visOperators.length > 0 && (
+                <>
+                  <p className="text-xs text-muted-foreground mb-2">
+                    {visAllowlist.size === 0
+                      ? '未勾选任何人 → 所有 remote studio operator 均可见（默认）'
+                      : `已勾选 ${visAllowlist.size} 位用户 → 仅这些用户可见`}
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 max-h-40 overflow-y-auto border border-border rounded-md p-2 bg-muted/40">
+                    {visOperators.map(u => (
+                      <label
+                        key={u.id}
+                        className="flex items-center gap-2 text-xs cursor-pointer hover:bg-card rounded px-1 py-0.5"
+                      >
+                        <Input
+                          type="checkbox"
+                          checked={visAllowlist.has(u.id)}
+                          onChange={e => {
+                            setVisAllowlist(prev => {
+                              const next = new Set(prev)
+                              if (e.target.checked) next.add(u.id)
+                              else next.delete(u.id)
+                              return next
+                            })
+                          }}
+                        />
+                        <span className="font-mono flex-1 truncate">{u.username}</span>
+                        {u.studio && (
+                          <span className="text-muted-foreground text-xs truncate" title={u.studio}>
+                            {u.studio}
+                          </span>
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                  <div className="mt-1 flex gap-2 text-xs">
+                    <Button
+                      variant="ghost"
+                      type="button"
+                      onClick={() => setVisAllowlist(new Set(visOperators.map(u => u.id)))}
+                      className="underline underline-offset-2"
+                    >
+                      全选
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      type="button"
+                      onClick={() => setVisAllowlist(new Set())}
+                      className="underline underline-offset-2"
+                    >
+                      清空（改为全可见）
+                    </Button>
+                  </div>
+                </>
+              )}
             </div>
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                onClick={() => setFormOpen(false)}
-                disabled={formBusy}
-                className="border border-border rounded-md px-3 py-1.5 text-sm text-foreground hover:bg-muted"
-              >
-                取消
-              </button>
-              <button
-                onClick={submitForm}
-                disabled={formBusy}
-                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
-              >
-                {formBusy ? '保存中…' : '保存'}
-              </button>
-            </div>
+            {formErr && (
+              <p role="alert" className="text-xs text-destructive">
+                {formErr}
+              </p>
+            )}
           </div>
-        </div>
+        </SidePanel>
       )}
       {breakdownFor && selectedID && (
         <BreakdownModal
@@ -3342,22 +3477,31 @@ function ErrorRateCell({
 }) {
   if (!stat) return <span className="text-muted-foreground">—</span>
   const total = stat.success + stat.errors
-  if (total === 0) return <span className="text-muted-foreground" title="窗口内无请求">0</span>
+  if (total === 0)
+    return (
+      <span className="text-muted-foreground" title="窗口内无请求">
+        0
+      </span>
+    )
   const rate = stat.errors / total
   const pct = rate * 100
   const cls =
-    pct >= 20 ? 'bg-destructive/10 text-destructive border-destructive/40'
-    : pct >= 5 ? 'bg-warning/10 text-warning border-warning/40'
-    : pct > 0  ? 'bg-success/10 text-success border-success/40'
-    : 'bg-muted text-muted-foreground border-border'
+    pct >= 20
+      ? 'bg-destructive/10 text-destructive border-destructive/40'
+      : pct >= 5
+        ? 'bg-warning/10 text-warning border-warning/40'
+        : pct > 0
+          ? 'bg-success/10 text-success border-success/40'
+          : 'bg-muted text-muted-foreground border-border'
   return (
-    <button
+    <Button
+      variant="ghost"
       onClick={onOpen}
-      className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[11px] tabular-nums hover:opacity-80 ${cls}`}
+      className={`inline-flex items-center px-2 py-0.5 rounded-md border text-xs tabular-nums hover:opacity-80 ${cls}`}
       title={`${stat.errors} 错误 / ${total} 总请求 · 点击查看类型分桶`}
     >
       {pct.toFixed(pct < 1 ? 2 : 1)}%
-    </button>
+    </Button>
   )
 }
 
@@ -3399,72 +3543,70 @@ function BreakdownModal({
         if (!cancelled) setLoading(false)
       }
     })()
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+    }
   }, [profileID, channel.id, windowSec])
 
-  const humanWindow = windowSec < 3600
-    ? `${Math.round(windowSec / 60)} 分钟`
-    : `${(windowSec / 3600).toFixed(windowSec % 3600 === 0 ? 0 : 1)} 小时`
+  const humanWindow =
+    windowSec < 3600
+      ? `${Math.round(windowSec / 60)} 分钟`
+      : `${(windowSec / 3600).toFixed(windowSec % 3600 === 0 ? 0 : 1)} 小时`
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/50" onClick={onClose}>
-      <div className="drawer-panel max-w-lg" onClick={e => e.stopPropagation()}>
-        <div className="px-4 py-3 border-b border-border flex items-start justify-between">
-          <div>
-            <div className="text-sm font-medium text-foreground">
-              渠道 <span className="font-mono text-xs">{channel.name}</span> · 错误类型分桶
-            </div>
-            <div className="text-[11px] text-muted-foreground mt-0.5">过去 {humanWindow}</div>
-          </div>
-          <button onClick={onClose} className="text-muted-foreground hover:text-foreground text-lg leading-none">×</button>
-        </div>
-        <div className="p-4 max-h-[60vh] overflow-y-auto">
-          {loading && <div className="text-sm text-muted-foreground">加载中…</div>}
-          {err && <div className="text-sm text-destructive">{err}</div>}
-          {data && (
-            <>
-              <div className="mb-3 text-sm text-foreground">
-                共 <span className="font-semibold text-destructive">{data.total}</span> 条错误日志
-                {data.sample_size !== undefined && data.sample_size < data.total && (
-                  <span className="text-[11px] text-muted-foreground ml-2">
-                    （分桶基于最新 {data.sample_size} 条采样）
-                  </span>
-                )}
-              </div>
-              {data.buckets.length === 0 ? (
-                <div className="text-sm text-muted-foreground">窗口内没有错误</div>
-              ) : (
-                <table className="w-full text-xs">
-                  <thead className="bg-muted text-muted-foreground">
-                    <tr>
-                      <th className="text-left px-3 py-2 font-medium">错误类型</th>
-                      <th className="text-left px-3 py-2 font-medium">状态码</th>
-                      <th className="text-right px-3 py-2 font-medium">数量</th>
-                      <th className="text-right px-3 py-2 font-medium">占比</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.buckets.map((b, i) => {
-                      const share = data.sample_size ? (b.count / data.sample_size) * 100 : 0
-                      return (
-                        <tr key={i} className="border-t border-border">
-                          <td className="px-3 py-2 font-mono text-[11px]">{b.error_type || '—'}</td>
-                          <td className="px-3 py-2 tabular-nums">{b.status_code || '—'}</td>
-                          <td className="px-3 py-2 tabular-nums text-right">{b.count}</td>
-                          <td className="px-3 py-2 tabular-nums text-right text-muted-foreground">
-                            {share > 0 ? share.toFixed(1) + '%' : '—'}
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
+    <SidePanel
+      title={
+        <>
+          渠道 <span className="font-mono text-xs">{channel.name}</span> · 错误类型分桶
+        </>
+      }
+      onClose={onClose}
+    >
+      <div className="text-xs text-muted-foreground mt-0.5">过去 {humanWindow}</div>
+      <div className="p-4 max-h-[60vh] overflow-y-auto">
+        {loading && <div className="text-sm text-muted-foreground">加载中…</div>}
+        {err && <div className="text-sm text-destructive">{err}</div>}
+        {data && (
+          <>
+            <div className="mb-3 text-sm text-foreground">
+              共 <span className="font-semibold text-destructive">{data.total}</span> 条错误日志
+              {data.sample_size !== undefined && data.sample_size < data.total && (
+                <span className="text-xs text-muted-foreground ml-2">（分桶基于最新 {data.sample_size} 条采样）</span>
               )}
-            </>
-          )}
-        </div>
+            </div>
+            {data.buckets.length === 0 ? (
+              <div className="text-sm text-muted-foreground">窗口内没有错误</div>
+            ) : (
+              <table className="w-full text-xs">
+                <thead className="bg-muted text-muted-foreground">
+                  <tr>
+                    <th className="text-left px-3 py-2 font-medium">错误类型</th>
+                    <th className="text-left px-3 py-2 font-medium">状态码</th>
+                    <th className="text-right px-3 py-2 font-medium">数量</th>
+                    <th className="text-right px-3 py-2 font-medium">占比</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.buckets.map((b, i) => {
+                    const share = data.sample_size ? (b.count / data.sample_size) * 100 : 0
+                    return (
+                      <tr key={i} className="border-t border-border">
+                        <td className="px-3 py-2 font-mono text-xs">{b.error_type || '—'}</td>
+                        <td className="px-3 py-2 tabular-nums">{b.status_code || '—'}</td>
+                        <td className="px-3 py-2 tabular-nums text-right">{b.count}</td>
+                        <td className="px-3 py-2 tabular-nums text-right text-muted-foreground">
+                          {share > 0 ? share.toFixed(1) + '%' : '—'}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            )}
+          </>
+        )}
       </div>
-    </div>
+    </SidePanel>
   )
 }
 
@@ -3531,25 +3673,25 @@ function ProfileErrorSummary({
     : []
   const filteredErrors = filteredBuckets.reduce((s, b) => s + b.count, 0)
   const total = data ? data.total_success + data.total_errors : 0
-  const shownRate = (selectedCode != null || selectedType != null)
-    ? (total > 0 ? filteredErrors / total : 0)
-    : (data?.error_rate ?? 0)
+  const shownRate =
+    selectedCode != null || selectedType != null ? (total > 0 ? filteredErrors / total : 0) : (data?.error_rate ?? 0)
 
-  const humanWindow = windowSec < 3600
-    ? `过去 ${Math.round(windowSec / 60)} 分钟`
-    : `过去 ${(windowSec / 3600).toFixed(windowSec % 3600 === 0 ? 0 : 1)} 小时`
+  const humanWindow =
+    windowSec < 3600
+      ? `过去 ${Math.round(windowSec / 60)} 分钟`
+      : `过去 ${(windowSec / 3600).toFixed(windowSec % 3600 === 0 ? 0 : 1)} 小时`
 
   return (
     <section className="bg-card border border-border rounded-xl overflow-hidden">
       <div className="px-4 py-2.5 border-b border-border flex items-center justify-between gap-3 flex-wrap">
         <div>
           <div className="text-sm font-semibold text-foreground">错误率汇总 · {humanWindow}</div>
-          <div className="text-[11px] text-muted-foreground mt-0.5">
+          <div className="text-xs text-muted-foreground mt-0.5">
             profile 层面聚合，本地按分钟同步的错误日志分析。点击下方状态码 / 类型行只看该类错误。
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <select
+          <Select
             value={windowSec}
             onChange={e => onWindowChange(parseInt(e.target.value, 10))}
             className="text-xs px-2 py-1 border border-border rounded-md bg-card"
@@ -3559,24 +3701,17 @@ function ProfileErrorSummary({
             <option value={60 * 60}>过去 1 小时</option>
             <option value={6 * 60 * 60}>过去 6 小时</option>
             <option value={24 * 60 * 60}>过去 24 小时</option>
-          </select>
-          <button
-            onClick={load}
-            disabled={loading}
-            className="text-xs px-2 py-1 border border-border rounded-md hover:bg-muted disabled:opacity-40"
-          >
+          </Select>
+          <Button variant="outline" onClick={load} disabled={loading} className="px-2 border disabled:opacity-40">
             {loading ? '加载中…' : '刷新'}
-          </button>
+          </Button>
         </div>
       </div>
 
       <div className="p-4 space-y-3">
         {err && <div className="text-xs text-destructive">{err}</div>}
         <div className="grid grid-cols-4 gap-3">
-          <MetricCard
-            label="总请求"
-            value={data ? total.toLocaleString() : '—'}
-          />
+          <MetricCard label="总请求" value={data ? total.toLocaleString() : '—'} />
           <MetricCard
             label={selectedCode != null || selectedType != null ? '过滤后错误数' : '错误数'}
             value={data ? filteredErrors.toLocaleString() : '—'}
@@ -3586,27 +3721,26 @@ function ProfileErrorSummary({
             label={selectedCode != null || selectedType != null ? '过滤后错误率' : '错误率'}
             value={data && total > 0 ? (shownRate * 100).toFixed(shownRate < 0.01 ? 3 : 2) + '%' : '—'}
             color={
-              shownRate >= 0.2 ? 'text-destructive'
-              : shownRate >= 0.05 ? 'text-warning'
-              : shownRate > 0 ? 'text-success'
-              : 'text-muted-foreground'
+              shownRate >= 0.2
+                ? 'text-destructive'
+                : shownRate >= 0.05
+                  ? 'text-warning'
+                  : shownRate > 0
+                    ? 'text-success'
+                    : 'text-muted-foreground'
             }
           />
-          <MetricCard
-            label="成功数"
-            value={data ? data.total_success.toLocaleString() : '—'}
-            color="text-success"
-          />
+          <MetricCard label="成功数" value={data ? data.total_success.toLocaleString() : '—'} color="text-success" />
         </div>
 
         {data && data.sync_lag_sec !== undefined && data.sync_lag_sec > 180 && (
-          <div className="text-[11px] text-warning bg-warning/10 border border-warning/40 rounded px-2 py-1">
+          <div className="text-xs text-warning bg-warning/10 border border-warning/40 rounded px-2 py-1">
             本地错误日志同步落后 {Math.round(data.sync_lag_sec / 60)} 分钟 —— 最新的错误可能还没进本地分析。
           </div>
         )}
 
         {(selectedCode != null || selectedType != null) && (
-          <div className="text-[11px] flex items-center gap-2">
+          <div className="text-xs flex items-center gap-2">
             <span className="text-muted-foreground">当前过滤：</span>
             {selectedCode != null && (
               <span className="px-1.5 py-0.5 rounded-md bg-destructive/10 text-destructive border border-destructive/40 font-mono">
@@ -3618,12 +3752,16 @@ function ProfileErrorSummary({
                 {selectedType}
               </span>
             )}
-            <button
-              onClick={() => { setSelectedCode(null); setSelectedType(null) }}
-              className="text-muted-foreground hover:text-foreground underline"
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setSelectedCode(null)
+                setSelectedType(null)
+              }}
+              className="underline"
             >
               清除
-            </button>
+            </Button>
           </div>
         )}
 
@@ -3653,7 +3791,8 @@ function ProfileErrorSummary({
                         // Toggle-friendly: clicking the currently focused
                         // row clears the filter.
                         if (selectedCode === b.status_code && selectedType === b.error_type) {
-                          setSelectedCode(null); setSelectedType(null)
+                          setSelectedCode(null)
+                          setSelectedType(null)
                         } else {
                           setSelectedCode(b.status_code || null)
                           setSelectedType(b.error_type || null)
@@ -3661,16 +3800,21 @@ function ProfileErrorSummary({
                       }}
                     >
                       <td className="px-3 py-1.5 tabular-nums">
-                        <span className={`inline-block px-1.5 py-0.5 rounded font-mono text-[11px] ${
-                          b.status_code === 429 ? 'bg-warning/10 text-warning' :
-                          b.status_code >= 500 ? 'bg-destructive/10 text-destructive' :
-                          b.status_code >= 400 ? 'bg-orange-100 text-orange-800' :
-                          'bg-muted text-foreground'
-                        }`}>
+                        <span
+                          className={`inline-block px-1.5 py-0.5 rounded font-mono text-xs ${
+                            b.status_code === 429
+                              ? 'bg-warning/10 text-warning'
+                              : b.status_code >= 500
+                                ? 'bg-destructive/10 text-destructive'
+                                : b.status_code >= 400
+                                  ? 'bg-orange-100 text-orange-800'
+                                  : 'bg-muted text-foreground'
+                          }`}
+                        >
                           {b.status_code || '—'}
                         </span>
                       </td>
-                      <td className="px-3 py-1.5 font-mono text-[11px]">{b.error_type || 'unknown'}</td>
+                      <td className="px-3 py-1.5 font-mono text-xs">{b.error_type || 'unknown'}</td>
                       <td className="px-3 py-1.5 tabular-nums text-right">{b.count.toLocaleString()}</td>
                       <td className="px-3 py-1.5 tabular-nums text-right text-muted-foreground">
                         {(b.share * 100).toFixed(1)}%
@@ -3686,9 +3830,7 @@ function ProfileErrorSummary({
           </div>
         )}
 
-        {data && data.total_errors === 0 && (
-          <div className="text-xs text-muted-foreground">窗口内没有错误 ✨</div>
-        )}
+        {data && data.total_errors === 0 && <div className="text-xs text-muted-foreground">窗口内没有错误 ✨</div>}
       </div>
     </section>
   )
@@ -3697,7 +3839,7 @@ function ProfileErrorSummary({
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <label className="block text-[11px] text-muted-foreground mb-1">{label}</label>
+      <label className="block text-xs text-muted-foreground mb-1">{label}</label>
       {children}
     </div>
   )

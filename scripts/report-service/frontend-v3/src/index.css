@@ -34,9 +34,9 @@ body,
   .mono-label {
     @apply text-[10.5px] font-medium uppercase tracking-wider leading-none text-muted-foreground;
   }
-  /* Section heading (replaces the v1 editorial display face). */
+  /* Section heading — Songti serif, matching the login page's editorial hero. */
   .display {
-    @apply font-semibold tracking-tight;
+    @apply font-serif font-medium tracking-tight;
   }
   .hairline {
     @apply border-border;
@@ -88,4 +88,15 @@ body,
 *::-webkit-scrollbar-thumb {
   background: color-mix(in oklch, var(--foreground) 22%, var(--background));
   border-radius: 8px;
+}
+
+/* Keep dense management forms legible and controls consistent with new-api. */
+.v3-form > div:empty { display: none; }
+.v3-form label { font-size: 0.8125rem; line-height: 1.5; }
+.v3-form input:not([type=checkbox]):not([type=radio]):not([type=file]),
+.v3-form select { min-height: 2.25rem; }
+.v3-form textarea { line-height: 1.7; }
+.v3-form [role=alert] { border-radius: 0.5rem; padding: 0.75rem; background: color-mix(in oklch, var(--destructive) 8%, var(--background)); }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }

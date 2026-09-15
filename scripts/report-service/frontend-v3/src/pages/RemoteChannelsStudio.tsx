@@ -1,3 +1,10 @@
+import { useTranslation } from 'react-i18next'
+import { FormSection } from '../components/FormSection'
+import { ProviderSelect } from '../components/ProviderSelect'
+import { Button, Input, Select, Textarea } from '../components/ui'
+import { BatchKeyInput } from '../components/BatchKeyInput'
+import { keyRowsToItems, parseKeyRows } from '../lib/batch-keys'
+import { SidePanel } from '../components/SidePanel'
 import { useCallback, useEffect, useState } from 'react'
 import Layout from '../components/Layout'
 import { api, type PendingKey, type RemoteChannel, type RemoteProfile } from '../api'
@@ -158,14 +165,80 @@ type PresetSpec = {
   profileModelsField?: 'default_models' | 'default_gemini_models' | 'default_vertex_models' | 'default_openai_models'
 }
 const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
-  { id: 'anthropic',     label: 'Anthropic (Claude)',  kind: 'text',   type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS,     fallbackGroup: 'default',        profileGroupField: 'default_group',        profileModelsField: 'default_models' },
-  { id: 'openai',        label: 'OpenAI',              kind: 'text',   type: CHANNEL_TYPE_OPENAI,    fallbackModels: DEFAULT_OPENAI_MODELS,        fallbackGroup: 'openai',         profileGroupField: 'default_openai_group', profileModelsField: 'default_openai_models' },
-  { id: 'gemini',        label: 'Gemini',              kind: 'text',   type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,        fallbackGroup: 'gemini',         profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
-  { id: 'vertex',        label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,        fallbackGroup: 'gemini',         profileGroupField: 'default_gemini_group', profileModelsField: 'default_vertex_models' },
-  { id: 'vertex-claude', label: 'Vertex AI (Claude)',  kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_CLAUDE_MODELS, fallbackGroup: 'claude-vertex' },
-  { id: 'azure',         label: 'Azure',               kind: 'azure',  type: CHANNEL_TYPE_AZURE,     fallbackModels: DEFAULT_OPENAI_MODELS,        fallbackGroup: 'openai',         profileGroupField: 'default_group',        profileModelsField: 'default_models' },
-  { id: 'aws',           label: 'AWS (Bedrock)',       kind: 'aws',    type: CHANNEL_TYPE_AWS,       fallbackModels: DEFAULT_AWS_CLAUDE_MODELS,    fallbackGroup: 'claude-aws' },
-  { id: 'openrouter',    label: 'OpenRouter',          kind: 'text',   type: CHANNEL_TYPE_OPENROUTER, fallbackModels: DEFAULT_OPENROUTER_MODELS,    fallbackGroup: 'default' },
+  {
+    id: 'anthropic',
+    label: 'Anthropic (Claude)',
+    kind: 'text',
+    type: CHANNEL_TYPE_ANTHROPIC,
+    fallbackModels: DEFAULT_ANTHROPIC_MODELS,
+    fallbackGroup: 'default',
+    profileGroupField: 'default_group',
+    profileModelsField: 'default_models',
+  },
+  {
+    id: 'openai',
+    label: 'OpenAI',
+    kind: 'text',
+    type: CHANNEL_TYPE_OPENAI,
+    fallbackModels: DEFAULT_OPENAI_MODELS,
+    fallbackGroup: 'openai',
+    profileGroupField: 'default_openai_group',
+    profileModelsField: 'default_openai_models',
+  },
+  {
+    id: 'gemini',
+    label: 'Gemini',
+    kind: 'text',
+    type: CHANNEL_TYPE_GEMINI,
+    fallbackModels: DEFAULT_GEMINI_MODELS,
+    fallbackGroup: 'gemini',
+    profileGroupField: 'default_gemini_group',
+    profileModelsField: 'default_gemini_models',
+  },
+  {
+    id: 'vertex',
+    label: 'Vertex AI',
+    kind: 'vertex',
+    type: CHANNEL_TYPE_VERTEX,
+    fallbackModels: DEFAULT_VERTEX_MODELS,
+    fallbackGroup: 'gemini',
+    profileGroupField: 'default_gemini_group',
+    profileModelsField: 'default_vertex_models',
+  },
+  {
+    id: 'vertex-claude',
+    label: 'Vertex AI (Claude)',
+    kind: 'vertex',
+    type: CHANNEL_TYPE_VERTEX,
+    fallbackModels: DEFAULT_VERTEX_CLAUDE_MODELS,
+    fallbackGroup: 'claude-vertex',
+  },
+  {
+    id: 'azure',
+    label: 'Azure',
+    kind: 'azure',
+    type: CHANNEL_TYPE_AZURE,
+    fallbackModels: DEFAULT_OPENAI_MODELS,
+    fallbackGroup: 'openai',
+    profileGroupField: 'default_group',
+    profileModelsField: 'default_models',
+  },
+  {
+    id: 'aws',
+    label: 'AWS (Bedrock)',
+    kind: 'aws',
+    type: CHANNEL_TYPE_AWS,
+    fallbackModels: DEFAULT_AWS_CLAUDE_MODELS,
+    fallbackGroup: 'claude-aws',
+  },
+  {
+    id: 'openrouter',
+    label: 'OpenRouter',
+    kind: 'text',
+    type: CHANNEL_TYPE_OPENROUTER,
+    fallbackModels: DEFAULT_OPENROUTER_MODELS,
+    fallbackGroup: 'default',
+  },
 ]
 
 function resolvePresetGroup(preset: PresetSpec, profile: RemoteProfile | undefined): string {
@@ -194,15 +267,15 @@ function fmtTime(epoch: number) {
 
 const STATUS_LABEL: Record<PendingKey['status'], string> = {
   pending: '待上传',
-  active:  '已上传',
-  used:    '已消耗',
-  failed:  '失败',
+  active: '已上传',
+  used: '已消耗',
+  failed: '失败',
 }
 const STATUS_CLS: Record<PendingKey['status'], string> = {
-  pending: 'text-warning bg-[#FBF0DC]',
-  active:  'text-success bg-[#E6F4EE]',
-  used:    'bg-muted text-muted-foreground',
-  failed:  'bg-destructive/10 text-destructive',
+  pending: 'text-warning bg-warning/10',
+  active: 'text-success bg-success/10',
+  used: 'bg-muted text-muted-foreground',
+  failed: 'bg-destructive/10 text-destructive',
 }
 
 // Remote-channel status codes come from newapi's channel model:
@@ -216,13 +289,13 @@ function channelStatusLabel(status: number): string {
   return `状态 ${status}`
 }
 function channelStatusCls(status: number): string {
-  if (status === 1) return 'text-success bg-[#E6F4EE]'
+  if (status === 1) return 'text-success bg-success/10'
   if (status === 3) return 'bg-destructive/10 text-destructive'
   return 'bg-muted text-muted-foreground'
 }
 
 function UsagePct({ used, quota }: { used: number; quota: number }) {
-  if (!quota || quota <= 0) return <span className="text-muted-foreground text-[11px]">—</span>
+  if (!quota || quota <= 0) return <span className="text-muted-foreground text-xs">—</span>
   const pct = Math.min(100, (used / quota) * 100)
   return (
     <div className="flex items-center gap-2 justify-end">
@@ -232,7 +305,7 @@ function UsagePct({ used, quota }: { used: number; quota: number }) {
           style={{ width: pct + '%' }}
         />
       </div>
-      <span className="text-[10px] tabular-nums text-muted-foreground w-8 text-right">{pct.toFixed(0)}%</span>
+      <span className="text-xs tabular-nums text-muted-foreground w-8 text-right">{pct.toFixed(0)}%</span>
     </div>
   )
 }
@@ -275,53 +348,55 @@ function VertexInputSection({
   return (
     <>
       <div>
-        <label className="block text-[11px] text-muted-foreground mb-1">Auth Mode</label>
+        <label className="block text-xs text-muted-foreground mb-1">Auth Mode</label>
         <div className="inline-flex rounded-md border border-border overflow-hidden">
           {(
             [
-              { id: 'json',    label: 'Service Account JSON' },
+              { id: 'json', label: 'Service Account JSON' },
               { id: 'api_key', label: 'API Key' },
             ] as { id: VertexKeyMode; label: string }[]
           ).map(m => {
             const active = keyMode === m.id
             return (
-              <button
+              <Button
+                variant="ghost"
                 key={m.id}
                 type="button"
                 onClick={() => onKeyModeChange(m.id)}
-                className={`px-3 py-1 text-[11px] border-r border-border last:border-r-0 transition-colors ${
+                className={`px-3 py-1 text-xs border-r border-border last:border-r-0 transition-colors ${
                   active ? 'bg-brand text-white' : 'bg-card text-foreground hover:bg-muted'
                 }`}
               >
                 {m.label}
-              </button>
+              </Button>
             )
           })}
         </div>
-        <p className="text-[10px] text-muted-foreground mt-1">
-          JSON 走 Bearer Token 鉴权；API Key 走 <code className="font-mono">?key=</code> URL 鉴权。写进 channel.settings 的 <code className="font-mono">vertex_key_type</code>。
+        <p className="text-xs text-muted-foreground mt-1">
+          JSON 走 Bearer Token 鉴权；API Key 走 <code className="font-mono">?key=</code> URL 鉴权。写进 channel.settings
+          的 <code className="font-mono">vertex_key_type</code>。
         </p>
       </div>
       <div>
-        <label className="block text-[11px] text-muted-foreground mb-1">
-          Deployment Region
-        </label>
-        <input
+        <label className="block text-xs text-muted-foreground mb-1">Deployment Region</label>
+        <Input
           value={region}
           onChange={e => onRegionChange(e.target.value)}
           placeholder="global"
           className="w-full border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
         />
-        <p className="text-[10px] text-muted-foreground mt-1">
-          输入部署区域或 JSON 映射：<code className="font-mono">{'{"default": "us-central1", "claude-3-5-sonnet-20240620": "europe-west1"}'}</code>。默认 <code className="font-mono">global</code>。写进 channel.other，本批次共用。
+        <p className="text-xs text-muted-foreground mt-1">
+          输入部署区域或 JSON 映射：
+          <code className="font-mono">
+            {'{"default": "us-central1", "claude-3-5-sonnet-20240620": "europe-west1"}'}
+          </code>
+          。默认 <code className="font-mono">global</code>。写进 channel.other，本批次共用。
         </p>
       </div>
       {keyMode === 'json' ? (
         <div>
-          <label className="block text-[11px] text-muted-foreground mb-1">
-            Service Account JSON 文件（可多选）
-          </label>
-          <input
+          <label className="block text-xs text-muted-foreground mb-1">Service Account JSON 文件（可多选）</label>
+          <Input
             type="file"
             accept=".json,application/json"
             multiple
@@ -330,14 +405,16 @@ function VertexInputSection({
               // allow re-picking the same file
               e.target.value = ''
             }}
-            className="block w-full text-[11px] text-foreground file:mr-3 file:py-1 file:px-2 file:rounded file:border file:border-border file:text-[11px] file:bg-muted file:hover:bg-muted"
+            className="block w-full text-xs text-foreground file:mr-3 file:py-1 file:px-2 file:rounded file:border file:border-border file:text-xs file:bg-muted file:hover:bg-muted"
           />
           {files.length > 0 && (
             <ul className="mt-2 divide-y divide-border border border-border rounded-md">
               {files.map((f, i) => (
-                <li key={i} className="px-3 py-2 flex items-center gap-2 text-[11px]">
-                  <span className="flex-1 truncate font-mono text-foreground" title={f.name}>{f.name}</span>
-                  <input
+                <li key={i} className="px-3 py-2 flex items-center gap-2 text-xs">
+                  <span className="flex-1 truncate font-mono text-foreground" title={f.name}>
+                    {f.name}
+                  </span>
+                  <Input
                     type="number"
                     placeholder="quota"
                     step="0.01"
@@ -348,9 +425,9 @@ function VertexInputSection({
                       next[i] = { ...f, quotaUSD: v && v > 0 ? v : undefined }
                       onFilesChange(next)
                     }}
-                    className="w-20 border border-border rounded px-1.5 py-0.5 text-[11px] tabular-nums focus:outline-none focus:border-ring"
+                    className="w-20 border border-border rounded px-1.5 py-0.5 text-xs tabular-nums focus:outline-none focus:border-ring"
                   />
-                  <input
+                  <Input
                     type="text"
                     placeholder="备注"
                     value={f.note ?? ''}
@@ -359,15 +436,16 @@ function VertexInputSection({
                       next[i] = { ...f, note: e.target.value }
                       onFilesChange(next)
                     }}
-                    className="w-36 border border-border rounded px-1.5 py-0.5 text-[11px] focus:outline-none focus:border-ring"
+                    className="w-36 border border-border rounded px-1.5 py-0.5 text-xs focus:outline-none focus:border-ring"
                   />
-                  <button
+                  <Button
+                    variant="danger"
                     type="button"
                     onClick={() => onFilesChange(files.filter((_, j) => j !== i))}
                     className="text-destructive hover:underline"
                   >
                     删除
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ul>
@@ -375,19 +453,8 @@ function VertexInputSection({
         </div>
       ) : (
         <div>
-          <label className="block text-[11px] text-muted-foreground mb-1">
-            Vertex API Keys —— 每行 <code className="text-foreground bg-muted px-1">key [额度USD] [备注...]</code>
-          </label>
-          <textarea
-            value={apiKeysText}
-            onChange={e => onApiKeysTextChange(e.target.value)}
-            rows={6}
-            placeholder={'AIzaSy... 220\nAIzaSy... 500 备注\n# 井号开头的行会被忽略'}
-            className="w-full border border-border rounded-md p-2 text-[11px] font-mono resize-y focus:outline-none focus:border-ring"
-          />
-          <p className="text-[10px] text-muted-foreground mt-1">
-            额度和备注可省。key 明文只走一次 POST，不落本地。
-          </p>
+          <BatchKeyInput value={apiKeysText} onChange={onApiKeysTextChange} />
+          <p className="text-xs text-muted-foreground mt-1">额度和备注可省。key 明文只走一次 POST，不落本地。</p>
         </div>
       )}
     </>
@@ -410,28 +477,26 @@ function AzureInputSection({
   onApiVersionChange: (v: string) => void
 }) {
   return (
-    <div className="grid grid-cols-2 gap-2 border border-dashed border-border rounded-md p-3 bg-muted/50">
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 border border-dashed border-border rounded-md p-3 bg-muted/50">
       <div>
-        <label className="block text-[11px] text-muted-foreground mb-1">
+        <label className="block text-xs text-muted-foreground mb-1">
           Resource Endpoint <span className="text-destructive">*</span>
         </label>
-        <input
+        <Input
           value={baseUrl}
           onChange={e => onBaseUrlChange(e.target.value)}
           placeholder="https://<resource>.openai.azure.com"
           className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
         />
-        <p className="text-[10px] text-muted-foreground mt-1">写进 channel.base_url，本批次共用。</p>
       </div>
       <div>
-        <label className="block text-[11px] text-muted-foreground mb-1">API Version</label>
-        <input
+        <label className="block text-xs text-muted-foreground mb-1">API Version</label>
+        <Input
           value={apiVersion}
           onChange={e => onApiVersionChange(e.target.value)}
           placeholder={AZURE_DEFAULT_API_VERSION}
           className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
         />
-        <p className="text-[10px] text-muted-foreground mt-1">写进 channel.other，缺省 {AZURE_DEFAULT_API_VERSION}。</p>
       </div>
     </div>
   )
@@ -459,26 +524,28 @@ function AwsInputSection({
 }) {
   return (
     <div className="space-y-2 border border-dashed border-border rounded-md p-3 bg-muted/50">
-      <p className="text-[11px] text-muted-foreground">
-        本批次共用一个 Region；Region 会拼进 channel.key 并按区域生成 Claude 模型映射（例: us-east-1 → <span className="font-mono">us.anthropic.*</span>）。
+      <p className="text-xs text-muted-foreground">
+        本批次共用一个 Region；Region 会拼进 channel.key 并按区域生成 Claude 模型映射（例: us-east-1 →{' '}
+        <span className="font-mono">us.anthropic.*</span>）。
       </p>
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         <div>
-          <label className="block text-[11px] text-muted-foreground mb-1">
+          <label className="block text-xs text-muted-foreground mb-1">
             Region <span className="text-destructive">*</span>
           </label>
-          <input
+          <Input
             value={region}
             onChange={e => onRegionChange(e.target.value)}
             placeholder="us-east-1"
             className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
           />
-          <p className="text-[10px] text-muted-foreground mt-1">前缀自动推导：us→us、eu→eu、ap→apac。</p>
+          <p className="text-xs text-muted-foreground mt-1">前缀自动推导：us→us、eu→eu、ap→apac。</p>
         </div>
         <div>
-          <label className="block text-[11px] text-muted-foreground mb-1">认证方式</label>
+          <label className="block text-xs text-muted-foreground mb-1">认证方式</label>
           <div className="inline-flex rounded-md border border-border overflow-hidden">
-            <button
+            <Button
+              variant="ghost"
               type="button"
               onClick={() => onKeyModeChange('ak_sk')}
               className={`px-3 py-1.5 text-xs border-r border-border transition-colors ${
@@ -486,8 +553,9 @@ function AwsInputSection({
               }`}
             >
               AK/SK
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
               type="button"
               onClick={() => onKeyModeChange('api_key')}
               className={`px-3 py-1.5 text-xs transition-colors ${
@@ -495,28 +563,31 @@ function AwsInputSection({
               }`}
             >
               API Key
-            </button>
+            </Button>
           </div>
-          <p className="text-[10px] text-muted-foreground mt-1">
+          <p className="text-xs text-muted-foreground mt-1">
             {keyMode === 'ak_sk' ? '每行填 ak|sk（Region 自动追加）。' : '每行填 apikey（Region 自动追加）。'}
           </p>
         </div>
       </div>
       <div>
-        <label className="block text-[11px] text-muted-foreground mb-1">Proxy（可选）</label>
-        <input
+        <label className="block text-xs text-muted-foreground mb-1">Proxy（可选）</label>
+        <Input
           value={proxy}
           onChange={e => onProxyChange(e.target.value)}
           placeholder="http://user:pass@host:port（留空则不走代理）"
           className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
         />
-        <p className="text-[10px] text-muted-foreground mt-1">写入 channel.settings.proxy，作用于本批全部渠道；默认为空。</p>
+        <p className="text-xs text-muted-foreground mt-1">
+          写入 channel.settings.proxy，作用于本批全部渠道；默认为空。
+        </p>
       </div>
     </div>
   )
 }
 
 export default function RemoteChannelsStudio() {
+  const { t } = useTranslation()
   const [profiles, setProfiles] = useState<RemoteProfile[]>([])
   // Initialise from localStorage so a page refresh doesn't force operators
   // back to the first profile. Validated against the loaded list below.
@@ -618,21 +689,24 @@ export default function RemoteChannelsStudio() {
   // Read a FileList → VertexFile[]. On parse failure we skip the bad
   // file and surface a message; partial success is fine and matches how
   // the backend treats the batch (per-item error results).
-  const readVertexFiles = useCallback(async (files: FileList | null): Promise<{ parsed: VertexFile[]; errors: string[] }> => {
-    if (!files || files.length === 0) return { parsed: [], errors: [] }
-    const parsed: VertexFile[] = []
-    const errors: string[] = []
-    for (const f of Array.from(files)) {
-      try {
-        const txt = await f.text()
-        const json = JSON.parse(txt)
-        parsed.push({ name: f.name, json })
-      } catch (e: any) {
-        errors.push(`${f.name}: ${e?.message || 'JSON 解析失败'}`)
+  const readVertexFiles = useCallback(
+    async (files: FileList | null): Promise<{ parsed: VertexFile[]; errors: string[] }> => {
+      if (!files || files.length === 0) return { parsed: [], errors: [] }
+      const parsed: VertexFile[] = []
+      const errors: string[] = []
+      for (const f of Array.from(files)) {
+        try {
+          const txt = await f.text()
+          const json = JSON.parse(txt)
+          parsed.push({ name: f.name, json })
+        } catch (e: any) {
+          errors.push(`${f.name}: ${e?.message || 'JSON 解析失败'}`)
+        }
       }
-    }
-    return { parsed, errors }
-  }, [])
+      return { parsed, errors }
+    },
+    [],
+  )
 
   useEffect(() => {
     void (async () => {
@@ -664,9 +738,13 @@ export default function RemoteChannelsStudio() {
   }, [])
 
   // Persist selection so a refresh preserves the operator's context.
-  useEffect(() => { writeRememberedProfileID(selectedID) }, [selectedID])
+  useEffect(() => {
+    writeRememberedProfileID(selectedID)
+  }, [selectedID])
 
-  useEffect(() => { void reloadProfiles() }, [reloadProfiles])
+  useEffect(() => {
+    void reloadProfiles()
+  }, [reloadProfiles])
 
   const reloadPending = useCallback(async () => {
     if (!selectedID) {
@@ -826,7 +904,7 @@ export default function RemoteChannelsStudio() {
     if (preset?.kind === 'vertex') {
       const vertexItems: (
         | { key_json: unknown; quota_usd?: number; note?: string }
-        | { key: string;       quota_usd?: number; note?: string }
+        | { key: string; quota_usd?: number; note?: string }
       )[] = []
       if (batchVertexKeyMode === 'json') {
         if (batchVertexFiles.length === 0) return setBatchErr('请至少选择一个 Service Account JSON 文件')
@@ -834,18 +912,7 @@ export default function RemoteChannelsStudio() {
           vertexItems.push({ key_json: f.json, quota_usd: f.quotaUSD, note: f.note })
         }
       } else {
-        for (const raw of batchVertexKeysText.split('\n')) {
-          const t = raw.trim()
-          if (!t || t.startsWith('#')) continue
-          const parts = t.split(/[\s,]+/)
-          const key = parts[0]
-          if (!key) continue
-          const item: { key: string; quota_usd?: number; note?: string } = { key }
-          if (parts[1]) {
-            const q = parseFloat(parts[1])
-            if (!isNaN(q) && q > 0) item.quota_usd = q
-          }
-          if (parts.length > 2) item.note = parts.slice(2).join(' ')
+        for (const item of keyRowsToItems(parseKeyRows(batchVertexKeysText))) {
           vertexItems.push(item)
         }
         if (vertexItems.length === 0) return setBatchErr('未解析到有效行')
@@ -879,22 +946,9 @@ export default function RemoteChannelsStudio() {
     }
 
     if (preset?.kind === 'azure') {
-      if (!batchAzureBaseUrl.trim()) return setBatchErr('Azure 需要 Resource Endpoint (例: https://<resource>.openai.azure.com)')
-      const azureItems: { key: string; quota_usd?: number; note?: string }[] = []
-      for (const raw of batchInput.split('\n')) {
-        const t = raw.trim()
-        if (!t || t.startsWith('#')) continue
-        const parts = t.split(/[\s,]+/)
-        const key = parts[0]
-        if (!key) continue
-        const item: { key: string; quota_usd?: number; note?: string } = { key }
-        if (parts[1]) {
-          const q = parseFloat(parts[1])
-          if (!isNaN(q) && q > 0) item.quota_usd = q
-        }
-        if (parts.length > 2) item.note = parts.slice(2).join(' ')
-        azureItems.push(item)
-      }
+      if (!batchAzureBaseUrl.trim())
+        return setBatchErr('Azure 需要 Resource Endpoint (例: https://<resource>.openai.azure.com)')
+      const azureItems = keyRowsToItems(parseKeyRows(batchInput))
       if (azureItems.length === 0) return setBatchErr('未解析到有效行')
       setBatchBusy(true)
       try {
@@ -925,21 +979,7 @@ export default function RemoteChannelsStudio() {
 
     if (preset?.kind === 'aws') {
       if (!batchRegion.trim()) return setBatchErr('AWS 需要填写 Region (例: us-east-1)')
-      const awsItems: { key: string; quota_usd?: number; note?: string }[] = []
-      for (const raw of batchInput.split('\n')) {
-        const t = raw.trim()
-        if (!t || t.startsWith('#')) continue
-        const parts = t.split(/[\s,]+/)
-        const key = parts[0]
-        if (!key) continue
-        const item: { key: string; quota_usd?: number; note?: string } = { key }
-        if (parts[1]) {
-          const q = parseFloat(parts[1])
-          if (!isNaN(q) && q > 0) item.quota_usd = q
-        }
-        if (parts.length > 2) item.note = parts.slice(2).join(' ')
-        awsItems.push(item)
-      }
+      const awsItems = keyRowsToItems(parseKeyRows(batchInput))
       if (awsItems.length === 0) return setBatchErr('未解析到有效行')
       setBatchBusy(true)
       try {
@@ -969,23 +1009,7 @@ export default function RemoteChannelsStudio() {
       return
     }
 
-    const items: { key: string; quota_usd?: number; note?: string }[] = []
-    for (const raw of batchInput.split('\n')) {
-      const t = raw.trim()
-      if (!t || t.startsWith('#')) continue
-      const parts = t.split(/[\s,]+/)
-      const key = parts[0]
-      if (!key) continue
-      const item: { key: string; quota_usd?: number; note?: string } = { key }
-      if (parts[1]) {
-        const q = parseFloat(parts[1])
-        if (!isNaN(q) && q > 0) item.quota_usd = q
-      }
-      if (parts.length > 2) {
-        item.note = parts.slice(2).join(' ')
-      }
-      items.push(item)
-    }
+    const items = keyRowsToItems(parseKeyRows(batchInput))
     if (items.length === 0) return setBatchErr('未解析到有效行')
     setBatchBusy(true)
     try {
@@ -1046,7 +1070,7 @@ export default function RemoteChannelsStudio() {
     if (preset?.kind === 'vertex') {
       const vertexItems: (
         | { key_json: unknown; quota_usd?: number; note?: string }
-        | { key: string;       quota_usd?: number; note?: string }
+        | { key: string; quota_usd?: number; note?: string }
       )[] = []
       if (immVertexKeyMode === 'json') {
         if (immVertexFiles.length === 0) return setImmErr('请至少选择一个 Service Account JSON 文件')
@@ -1054,18 +1078,7 @@ export default function RemoteChannelsStudio() {
           vertexItems.push({ key_json: f.json, quota_usd: f.quotaUSD, note: f.note })
         }
       } else {
-        for (const raw of immVertexKeysText.split('\n')) {
-          const t = raw.trim()
-          if (!t || t.startsWith('#')) continue
-          const parts = t.split(/[\s,]+/)
-          const key = parts[0]
-          if (!key) continue
-          const item: { key: string; quota_usd?: number; note?: string } = { key }
-          if (parts[1]) {
-            const q = parseFloat(parts[1])
-            if (!isNaN(q) && q > 0) item.quota_usd = q
-          }
-          if (parts.length > 2) item.note = parts.slice(2).join(' ')
+        for (const item of keyRowsToItems(parseKeyRows(immVertexKeysText))) {
           vertexItems.push(item)
         }
         if (vertexItems.length === 0) return setImmErr('未解析到有效行')
@@ -1098,22 +1111,9 @@ export default function RemoteChannelsStudio() {
     }
 
     if (preset?.kind === 'azure') {
-      if (!immAzureBaseUrl.trim()) return setImmErr('Azure 需要 Resource Endpoint (例: https://<resource>.openai.azure.com)')
-      const azureItems: { key: string; quota_usd?: number; note?: string }[] = []
-      for (const raw of immInput.split('\n')) {
-        const t = raw.trim()
-        if (!t || t.startsWith('#')) continue
-        const parts = t.split(/[\s,]+/)
-        const key = parts[0]
-        if (!key) continue
-        const item: { key: string; quota_usd?: number; note?: string } = { key }
-        if (parts[1]) {
-          const q = parseFloat(parts[1])
-          if (!isNaN(q) && q > 0) item.quota_usd = q
-        }
-        if (parts.length > 2) item.note = parts.slice(2).join(' ')
-        azureItems.push(item)
-      }
+      if (!immAzureBaseUrl.trim())
+        return setImmErr('Azure 需要 Resource Endpoint (例: https://<resource>.openai.azure.com)')
+      const azureItems = keyRowsToItems(parseKeyRows(immInput))
       if (azureItems.length === 0) return setImmErr('未解析到有效行')
       setImmBusy(true)
       try {
@@ -1144,21 +1144,7 @@ export default function RemoteChannelsStudio() {
 
     if (preset?.kind === 'aws') {
       if (!immRegion.trim()) return setImmErr('AWS 需要填写 Region (例: us-east-1)')
-      const awsItems: { key: string; quota_usd?: number; note?: string }[] = []
-      for (const raw of immInput.split('\n')) {
-        const t = raw.trim()
-        if (!t || t.startsWith('#')) continue
-        const parts = t.split(/[\s,]+/)
-        const key = parts[0]
-        if (!key) continue
-        const item: { key: string; quota_usd?: number; note?: string } = { key }
-        if (parts[1]) {
-          const q = parseFloat(parts[1])
-          if (!isNaN(q) && q > 0) item.quota_usd = q
-        }
-        if (parts.length > 2) item.note = parts.slice(2).join(' ')
-        awsItems.push(item)
-      }
+      const awsItems = keyRowsToItems(parseKeyRows(immInput))
       if (awsItems.length === 0) return setImmErr('未解析到有效行')
       setImmBusy(true)
       try {
@@ -1188,21 +1174,7 @@ export default function RemoteChannelsStudio() {
       return
     }
 
-    const items: { key: string; quota_usd?: number; note?: string }[] = []
-    for (const raw of immInput.split('\n')) {
-      const t = raw.trim()
-      if (!t || t.startsWith('#')) continue
-      const parts = t.split(/[\s,]+/)
-      const key = parts[0]
-      if (!key) continue
-      const item: { key: string; quota_usd?: number; note?: string } = { key }
-      if (parts[1]) {
-        const q = parseFloat(parts[1])
-        if (!isNaN(q) && q > 0) item.quota_usd = q
-      }
-      if (parts.length > 2) item.note = parts.slice(2).join(' ')
-      items.push(item)
-    }
+    const items = keyRowsToItems(parseKeyRows(immInput))
     if (items.length === 0) return setImmErr('未解析到有效行')
     setImmBusy(true)
     try {
@@ -1231,7 +1203,14 @@ export default function RemoteChannelsStudio() {
 
   const cancelPending = async (row: PendingKey) => {
     if (row.status !== 'pending' && row.status !== 'failed') return
-    if (!(await confirmDialog({ message: `删除队列条目 (${row.key_masked})？只能删 pending/failed 的。`, danger: true, confirmText: '删除' }))) return
+    if (
+      !(await confirmDialog({
+        message: `删除队列条目 (${row.key_masked})？只能删 pending/failed 的。`,
+        danger: true,
+        confirmText: '删除',
+      }))
+    )
+      return
     try {
       await api.remotePendingDelete(row.id)
       await reloadPending()
@@ -1248,36 +1227,37 @@ export default function RemoteChannelsStudio() {
       subtitle="批量上传 Key 到远端 New-Api"
       actions={
         <div className="flex items-center gap-2">
-          <button
-            onClick={openImmediate}
-            disabled={!selectedID}
-            className="bg-primary text-primary-foreground rounded-md px-3 py-1.5 text-sm hover:bg-primary/90 disabled:opacity-50"
-          >
+          <Button variant="primary" onClick={openBatch} disabled={!selectedID}>
+            {t('Batch Add (one key per line)')}
+          </Button>
+          <Button variant="outline" onClick={openImmediate} disabled={!selectedID} className="px-3 disabled:opacity-50">
             上普通 Key
-          </button>
+          </Button>
         </div>
       }
     >
       <div className="space-y-4">
         <div className="bg-card border border-border rounded-xl p-4">
-          <label className="block text-[11px] text-muted-foreground mb-1">Profile</label>
+          <label className="block text-xs text-muted-foreground mb-1">Profile</label>
           {loadingProfiles ? (
             <div className="text-xs text-muted-foreground">加载中…</div>
           ) : profiles.length === 0 ? (
             <div className="text-xs text-muted-foreground">还没有配置 Profile，请联系管理员。</div>
           ) : (
-            <select
+            <Select
               value={selectedID ?? ''}
               onChange={e => setSelectedID(parseInt(e.target.value, 10) || null)}
               className="border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
             >
               {profiles.map(p => (
-                <option key={p.id} value={p.id}>{p.name}</option>
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
               ))}
-            </select>
+            </Select>
           )}
           {selectedProfile && (
-            <div className="text-[11px] text-muted-foreground mt-2">
+            <div className="text-xs text-muted-foreground mt-2">
               默认 Models: <span className="font-mono">{selectedProfile.default_models || '未设置'}</span>
             </div>
           )}
@@ -1287,25 +1267,23 @@ export default function RemoteChannelsStudio() {
           <div className="flex items-center justify-between px-4 py-3 border-b border-border">
             <div>
               <div className="text-sm font-medium text-foreground">我的远程渠道</div>
-              <div className="text-[11px] text-muted-foreground mt-0.5">
+              <div className="text-xs text-muted-foreground mt-0.5">
                 每 30 秒从本地镜像刷新一次；远端用量每 15 分钟同步一次，需要立即拉取请按「获取用量」。
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <button
+              <Button
+                variant="primary"
                 onClick={() => void refreshRemoteUsage()}
                 disabled={refreshingRemote || !selectedID}
-                className="text-xs text-white bg-brand rounded-md px-2 py-1 hover:bg-brand-700 disabled:opacity-50"
+                className="px-2 disabled:opacity-50"
                 title="向远端 new-api 发起一次拉取，更新用量数据"
               >
                 {refreshingRemote ? '拉取中…' : '获取用量'}
-              </button>
-              <button
-                onClick={() => void reloadChannels()}
-                className="text-xs text-muted-foreground border border-border rounded-md px-2 py-1 hover:bg-muted"
-              >
+              </Button>
+              <Button variant="outline" onClick={() => void reloadChannels()} className="border px-2">
                 刷新
-              </button>
+              </Button>
             </div>
           </div>
           <div className="overflow-x-auto">
@@ -1315,8 +1293,12 @@ export default function RemoteChannelsStudio() {
                   <th className="text-left px-4 py-2 font-medium">名称</th>
                   <th className="text-left px-4 py-2 font-medium">状态</th>
                   <th className="text-left px-4 py-2 font-medium">Group</th>
-                  <th className="text-right px-4 py-2 font-medium" title="从 remote_channel_current 同步的累计用量">已用</th>
-                  <th className="text-right px-4 py-2 font-medium" title="上传时填写的额度上限">额度</th>
+                  <th className="text-right px-4 py-2 font-medium" title="从 remote_channel_current 同步的累计用量">
+                    已用
+                  </th>
+                  <th className="text-right px-4 py-2 font-medium" title="上传时填写的额度上限">
+                    额度
+                  </th>
                   <th className="text-right px-4 py-2 font-medium">剩余</th>
                   <th className="text-left px-4 py-2 font-medium">创建时间</th>
                 </tr>
@@ -1334,21 +1316,21 @@ export default function RemoteChannelsStudio() {
                     const quotaUSD = ch.quota_usd ?? 0
                     return (
                       <tr key={ch.id} className="border-t border-border">
-                        <td className="px-4 py-2 font-mono text-[11px]">{ch.name}</td>
+                        <td className="px-4 py-2 font-mono text-xs">{ch.name}</td>
                         <td className="px-4 py-2">
-                          <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] ${channelStatusCls(ch.status)}`}>
+                          <span className={`inline-block px-1.5 py-0.5 rounded text-xs ${channelStatusCls(ch.status)}`}>
                             {channelStatusLabel(ch.status)}
                           </span>
                         </td>
-                        <td className="px-4 py-2 text-[11px] text-muted-foreground">{ch.group || '—'}</td>
-                        <td className="px-4 py-2 text-right tabular-nums text-[11px]">${usedUSD.toFixed(4)}</td>
-                        <td className="px-4 py-2 text-right tabular-nums text-[11px]">
+                        <td className="px-4 py-2 text-xs text-muted-foreground">{ch.group || '—'}</td>
+                        <td className="px-4 py-2 text-right tabular-nums text-xs">${usedUSD.toFixed(4)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums text-xs">
                           {quotaUSD > 0 ? `$${quotaUSD.toFixed(2)}` : <span className="text-muted-foreground">—</span>}
                         </td>
                         <td className="px-4 py-2 text-right">
                           <UsagePct used={usedUSD} quota={quotaUSD} />
                         </td>
-                        <td className="px-4 py-2 text-[11px] text-muted-foreground">{fmtTime(ch.created_time)}</td>
+                        <td className="px-4 py-2 text-xs text-muted-foreground">{fmtTime(ch.created_time)}</td>
                       </tr>
                     )
                   })
@@ -1365,53 +1347,53 @@ export default function RemoteChannelsStudio() {
           <div className="flex items-center justify-between px-4 py-3 border-b border-border gap-3 flex-wrap">
             <div>
               <div className="text-sm font-medium text-foreground">Key 用量统计</div>
-              <div className="text-[11px] text-muted-foreground mt-0.5">
+              <div className="text-xs text-muted-foreground mt-0.5">
                 窗口内实际消耗（USD）。默认当天。
-                {usageFetchedAt > 0 && (
-                  <span> · 更新于 {new Date(usageFetchedAt).toLocaleTimeString()}</span>
-                )}
+                {usageFetchedAt > 0 && <span> · 更新于 {new Date(usageFetchedAt).toLocaleTimeString()}</span>}
               </div>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              <label className="flex items-center gap-1 text-[11px] text-muted-foreground">
+              <label className="flex items-center gap-1 text-xs text-muted-foreground">
                 起
-                <input
+                <Input
                   type="date"
                   value={usageStart}
                   onChange={e => setUsageStart(e.target.value)}
                   className="border border-border rounded-md px-2 py-1 text-xs focus:outline-none focus:border-ring"
                 />
               </label>
-              <label className="flex items-center gap-1 text-[11px] text-muted-foreground">
+              <label className="flex items-center gap-1 text-xs text-muted-foreground">
                 止
-                <input
+                <Input
                   type="date"
                   value={usageEnd}
                   onChange={e => setUsageEnd(e.target.value)}
                   className="border border-border rounded-md px-2 py-1 text-xs focus:outline-none focus:border-ring"
                 />
               </label>
-              <button
+              <Button
+                variant="outline"
                 onClick={() => {
                   const t = todayLocalYMD()
                   setUsageStart(t)
                   setUsageEnd(t)
                 }}
-                className="text-[11px] text-muted-foreground border border-border rounded-md px-2 py-1 hover:bg-muted"
+                className="border px-2"
               >
                 今天
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="primary"
                 onClick={() => void loadUsage()}
                 disabled={usageLoading}
-                className="text-xs text-white bg-brand rounded-md px-2 py-1 hover:bg-brand-700 disabled:opacity-50"
+                className="px-2 disabled:opacity-50"
               >
                 {usageLoading ? '拉取中…' : '刷新'}
-              </button>
+              </Button>
             </div>
           </div>
           {usageErr && (
-            <div className="px-4 py-2 text-[11px] text-destructive border-b border-border bg-destructive/10">
+            <div className="px-4 py-2 text-xs text-destructive border-b border-border bg-destructive/10">
               {usageErr}
             </div>
           )}
@@ -1422,8 +1404,12 @@ export default function RemoteChannelsStudio() {
                   <th className="text-left px-4 py-2 font-medium">名称</th>
                   <th className="text-left px-4 py-2 font-medium">Group</th>
                   <th className="text-right px-4 py-2 font-medium">窗口内消耗 (USD)</th>
-                  <th className="text-right px-4 py-2 font-medium" title="上传时设置的额度上限">额度</th>
-                  <th className="text-right px-4 py-2 font-medium" title="窗口内消耗 / 额度">占比</th>
+                  <th className="text-right px-4 py-2 font-medium" title="上传时设置的额度上限">
+                    额度
+                  </th>
+                  <th className="text-right px-4 py-2 font-medium" title="窗口内消耗 / 额度">
+                    占比
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -1452,21 +1438,31 @@ export default function RemoteChannelsStudio() {
                     <>
                       {rows.map(r => (
                         <tr key={r.ch.id} className="border-t border-border">
-                          <td className="px-4 py-2 font-mono text-[11px]">{r.ch.name}</td>
-                          <td className="px-4 py-2 text-[11px] text-muted-foreground">{r.ch.group || '—'}</td>
-                          <td className="px-4 py-2 text-right tabular-nums text-[11px]">
-                            {r.usedUSD > 0 ? `$${r.usedUSD.toFixed(4)}` : <span className="text-muted-foreground">$0</span>}
+                          <td className="px-4 py-2 font-mono text-xs">{r.ch.name}</td>
+                          <td className="px-4 py-2 text-xs text-muted-foreground">{r.ch.group || '—'}</td>
+                          <td className="px-4 py-2 text-right tabular-nums text-xs">
+                            {r.usedUSD > 0 ? (
+                              `$${r.usedUSD.toFixed(4)}`
+                            ) : (
+                              <span className="text-muted-foreground">$0</span>
+                            )}
                           </td>
-                          <td className="px-4 py-2 text-right tabular-nums text-[11px]">
-                            {r.quotaUSD > 0 ? `$${r.quotaUSD.toFixed(2)}` : <span className="text-muted-foreground">—</span>}
+                          <td className="px-4 py-2 text-right tabular-nums text-xs">
+                            {r.quotaUSD > 0 ? (
+                              `$${r.quotaUSD.toFixed(2)}`
+                            ) : (
+                              <span className="text-muted-foreground">—</span>
+                            )}
                           </td>
-                          <td className="px-4 py-2 text-right tabular-nums text-[11px]">
+                          <td className="px-4 py-2 text-right tabular-nums text-xs">
                             {r.pct != null ? `${r.pct.toFixed(1)}%` : <span className="text-muted-foreground">—</span>}
                           </td>
                         </tr>
                       ))}
                       <tr className="border-t-2 border-border bg-muted">
-                        <td className="px-4 py-2 text-xs font-medium text-foreground" colSpan={2}>合计</td>
+                        <td className="px-4 py-2 text-xs font-medium text-foreground" colSpan={2}>
+                          合计
+                        </td>
                         <td className="px-4 py-2 text-right tabular-nums text-xs font-medium">
                           ${usageTotal.toFixed(4)}
                         </td>
@@ -1484,16 +1480,13 @@ export default function RemoteChannelsStudio() {
           <div className="flex items-center justify-between px-4 py-3 border-b border-border">
             <div>
               <div className="text-sm font-medium text-foreground">上传队列</div>
-              <div className="text-[11px] text-muted-foreground mt-0.5">
+              <div className="text-xs text-muted-foreground mt-0.5">
                 pending → active → used。每 30 秒自动刷新一次。
               </div>
             </div>
-            <button
-              onClick={() => void reloadPending()}
-              className="text-xs text-muted-foreground border border-border rounded-md px-2 py-1 hover:bg-muted"
-            >
+            <Button variant="outline" onClick={() => void reloadPending()} className="border px-2">
               刷新
-            </button>
+            </Button>
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
@@ -1501,8 +1494,12 @@ export default function RemoteChannelsStudio() {
                 <tr>
                   <th className="text-left px-4 py-2 font-medium">Key</th>
                   <th className="text-left px-4 py-2 font-medium">状态</th>
-                  <th className="text-right px-4 py-2 font-medium" title="从 remote_channel_current 同步的累计用量">已用</th>
-                  <th className="text-right px-4 py-2 font-medium" title="上传时填写的额度上限">额度</th>
+                  <th className="text-right px-4 py-2 font-medium" title="从 remote_channel_current 同步的累计用量">
+                    已用
+                  </th>
+                  <th className="text-right px-4 py-2 font-medium" title="上传时填写的额度上限">
+                    额度
+                  </th>
                   <th className="text-left px-4 py-2 font-medium">尝试</th>
                   <th className="text-left px-4 py-2 font-medium">创建时间</th>
                   <th className="text-left px-4 py-2 font-medium">失败原因</th>
@@ -1520,51 +1517,59 @@ export default function RemoteChannelsStudio() {
                   pending.map(row => {
                     const pct = row.quota_usd > 0 ? Math.min(100, (row.used_usd / row.quota_usd) * 100) : null
                     return (
-                    <tr key={row.id} className="border-t border-border">
-                      <td className="px-4 py-2 font-mono text-[11px]">{row.key_masked}</td>
-                      <td className="px-4 py-2">
-                        <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] ${STATUS_CLS[row.status]}`}>
-                          {STATUS_LABEL[row.status]}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2 text-right tabular-nums">
-                        {row.used_usd > 0 ? (
-                          <div className="flex flex-col items-end gap-0.5">
-                            <span className="text-[11px]">${row.used_usd.toFixed(4)}</span>
-                            {pct != null && (
-                              <div className="w-14 h-1 bg-muted rounded overflow-hidden">
-                                <div
-                                  className={`h-full ${pct >= 100 ? 'bg-destructive' : pct >= 80 ? 'bg-warning' : 'bg-success'}`}
-                                  style={{ width: pct + '%' }}
-                                />
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-2 text-right tabular-nums text-[11px]">
-                        {row.quota_usd > 0 ? `$${row.quota_usd.toFixed(2)}` : <span className="text-muted-foreground">—</span>}
-                      </td>
-                      <td className="px-4 py-2 text-xs tabular-nums">{row.attempts}</td>
-                      <td className="px-4 py-2 text-[11px] text-muted-foreground">{fmtTime(row.created_at)}</td>
-                      <td className="px-4 py-2 text-[11px] text-destructive max-w-xs truncate" title={row.failed_reason || ''}>
-                        {row.failed_reason || '—'}
-                      </td>
-                      <td className="px-4 py-2 text-right">
-                        {(row.status === 'pending' || row.status === 'failed') ? (
-                          <button
-                            onClick={() => void cancelPending(row)}
-                            className="text-[11px] text-destructive hover:underline"
-                          >
-                            撤销
-                          </button>
-                        ) : (
-                          <span className="text-[11px] text-muted-foreground">—</span>
-                        )}
-                      </td>
-                    </tr>
+                      <tr key={row.id} className="border-t border-border">
+                        <td className="px-4 py-2 font-mono text-xs">{row.key_masked}</td>
+                        <td className="px-4 py-2">
+                          <span className={`inline-block px-1.5 py-0.5 rounded text-xs ${STATUS_CLS[row.status]}`}>
+                            {STATUS_LABEL[row.status]}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2 text-right tabular-nums">
+                          {row.used_usd > 0 ? (
+                            <div className="flex flex-col items-end gap-0.5">
+                              <span className="text-xs">${row.used_usd.toFixed(4)}</span>
+                              {pct != null && (
+                                <div className="w-14 h-1 bg-muted rounded overflow-hidden">
+                                  <div
+                                    className={`h-full ${pct >= 100 ? 'bg-destructive' : pct >= 80 ? 'bg-warning' : 'bg-success'}`}
+                                    style={{ width: pct + '%' }}
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-2 text-right tabular-nums text-xs">
+                          {row.quota_usd > 0 ? (
+                            `$${row.quota_usd.toFixed(2)}`
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-2 text-xs tabular-nums">{row.attempts}</td>
+                        <td className="px-4 py-2 text-xs text-muted-foreground">{fmtTime(row.created_at)}</td>
+                        <td
+                          className="px-4 py-2 text-xs text-destructive max-w-xs truncate"
+                          title={row.failed_reason || ''}
+                        >
+                          {row.failed_reason || '—'}
+                        </td>
+                        <td className="px-4 py-2 text-right">
+                          {row.status === 'pending' || row.status === 'failed' ? (
+                            <Button
+                              variant="danger"
+                              onClick={() => void cancelPending(row)}
+                              className="text-destructive hover:underline"
+                            >
+                              撤销
+                            </Button>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          )}
+                        </td>
+                      </tr>
                     )
                   })
                 )}
@@ -1575,287 +1580,269 @@ export default function RemoteChannelsStudio() {
       </div>
 
       {batchOpen && (
-        <div className="fixed inset-0 z-50 flex justify-end bg-black/50">
-          <div className="drawer-panel max-w-lg p-5">
-            <div className="text-base font-semibold mb-3">批量上 Key</div>
-            <div className="space-y-3">
-              <div>
-                <label className="block text-[11px] text-muted-foreground mb-1">
-                  名字中间段（最终 = &lt;日期&gt;-&lt;你填&gt;-&lt;key末8&gt;-&lt;hash8&gt;）
-                </label>
-                <div className="flex items-center gap-1">
-                  <input
-                    value={batchDatePrefix}
-                    onChange={e => setBatchDatePrefix(e.target.value)}
-                    placeholder={todayYYYYMMDD()}
-                    className="w-24 border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring tabular-nums"
-                  />
-                  <span className="text-[11px] text-muted-foreground font-mono">-</span>
-                  <input
-                    value={batchPrefix}
-                    onChange={e => setBatchPrefix(e.target.value)}
-                    placeholder="例如 anthropic-A"
-                    className="flex-1 border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] text-muted-foreground mb-1">渠道类型</label>
-                <select
-                  value={batchPresetID}
-                  onChange={e => {
-                    const p = CHANNEL_TYPE_PRESETS.find(x => x.id === (e.target.value as PresetID))
-                    if (!p) return
-                    setBatchPresetID(p.id)
-                    const prof = profiles.find(x => x.id === selectedID)
-                    setBatchGroup(resolvePresetGroup(p, prof))
-                    setBatchModels(resolvePresetModels(p, prof))
-                    // AWS needs a real region (baked into the key + model
-                    // mapping); Vertex uses the "global" sentinel.
-                    if (p.kind === 'aws') setBatchRegion('us-east-1')
-                    else if (p.kind === 'vertex') setBatchRegion('global')
-                  }}
-                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm bg-card focus:outline-none focus:border-ring"
-                >
-                  {CHANNEL_TYPE_PRESETS.map(p => (
-                    <option key={p.id} value={p.id}>{p.label}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-[11px] text-muted-foreground mb-1">Group</label>
-                <input
-                  value={batchGroup}
-                  onChange={e => setBatchGroup(e.target.value)}
-                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] text-muted-foreground mb-1">Models（逗号分隔）</label>
-                <textarea
-                  value={batchModels}
-                  onChange={e => setBatchModels(e.target.value)}
-                  rows={2}
-                  className="w-full border border-border rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-ring"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] text-muted-foreground mb-1">
-                  Keys（每行一个，可选 <code>quota_usd</code> / 备注：<code>key 10 备注</code>）
-                </label>
-                <textarea
-                  value={batchInput}
-                  onChange={e => setBatchInput(e.target.value)}
-                  rows={8}
-                  placeholder="sk-... 10&#10;sk-... 20 备注"
-                  className="w-full border border-border rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-ring"
-                  disabled={batchPresetID === 'vertex' || batchPresetID === 'vertex-claude'}
-                />
-              </div>
-              {(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude') && (
-                <VertexInputSection
-                  region={batchRegion}
-                  onRegionChange={setBatchRegion}
-                  keyMode={batchVertexKeyMode}
-                  onKeyModeChange={setBatchVertexKeyMode}
-                  files={batchVertexFiles}
-                  onFilesChange={setBatchVertexFiles}
-                  onPickFiles={async list => {
-                    const { parsed, errors } = await readVertexFiles(list)
-                    setBatchVertexFiles(prev => [...prev, ...parsed])
-                    if (errors.length) setBatchErr(errors.join('; '))
-                  }}
-                  apiKeysText={batchVertexKeysText}
-                  onApiKeysTextChange={setBatchVertexKeysText}
-                />
-              )}
-              {batchPresetID === 'azure' && (
-                <AzureInputSection
-                  baseUrl={batchAzureBaseUrl}
-                  onBaseUrlChange={setBatchAzureBaseUrl}
-                  apiVersion={batchAzureApiVersion}
-                  onApiVersionChange={setBatchAzureApiVersion}
-                />
-              )}
-              {batchPresetID === 'aws' && (
-                <AwsInputSection
-                  region={batchRegion}
-                  onRegionChange={setBatchRegion}
-                  keyMode={batchAwsKeyMode}
-                  onKeyModeChange={setBatchAwsKeyMode}
-                  proxy={batchAwsProxy}
-                  onProxyChange={setBatchAwsProxy}
-                />
-              )}
-              <p className="text-[11px] text-muted-foreground">
-                {(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude')
-                  ? 'Vertex 走独立通道 —— 上传后不进 Pool 队列，直接创建远端渠道。'
-                  : batchPresetID === 'azure'
-                  ? 'Azure 走独立通道 —— 上传后不进 Pool 队列，直接创建远端渠道。同批 Key 共享同一 base_url + api version。'
-                  : batchPresetID === 'aws'
-                  ? 'AWS 走独立通道 —— 上传后不进 Pool 队列，直接创建远端渠道。同批凭证共享同一 Region；每行填 ' + (batchAwsKeyMode === 'ak_sk' ? 'ak|sk' : 'apikey') + '。'
-                  : '上 Key 后进入 Pool 队列。管理员配置了每次上几个 + 检查间隔。同批 Key 会按 FIFO 依次进池，前一批全部消耗完之前不会开始新一批。'}
-              </p>
-              {batchErr && <p className="text-xs text-destructive">{batchErr}</p>}
-            </div>
+        <SidePanel
+          title={<>批量上 Key</>}
+          busy={batchBusy}
+          onClose={() => setBatchOpen(false)}
+          footer={
             <div className="mt-5 flex justify-end gap-2">
-              <button
+              <Button
+                variant="outline"
                 onClick={() => setBatchOpen(false)}
                 disabled={batchBusy}
-                className="border border-border rounded-md px-3 py-1.5 text-sm text-foreground hover:bg-muted"
+                className="border px-3"
               >
                 取消
-              </button>
-              <button
-                onClick={submitBatch}
-                disabled={batchBusy}
-                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
-              >
-                {batchBusy ? '入队中…' : '入队上传'}
-              </button>
+              </Button>
+              <Button variant="primary" onClick={submitBatch} disabled={batchBusy} className="px-3 disabled:opacity-50">
+                {batchBusy ? '上传中…' : '上传'}
+              </Button>
             </div>
+          }
+        >
+          <FormSection>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-1">渠道类型</label>
+              <ProviderSelect
+                label="渠道类型"
+                value={batchPresetID}
+                options={CHANNEL_TYPE_PRESETS}
+                onChange={p => {
+                  setBatchPresetID(p.id)
+                  const prof = profiles.find(x => x.id === selectedID)
+                  setBatchGroup(resolvePresetGroup(p, prof))
+                  setBatchModels(resolvePresetModels(p, prof))
+                  // AWS needs a real region (baked into the key + model
+                  // mapping); Vertex uses the "global" sentinel.
+                  if (p.kind === 'aws') setBatchRegion('us-east-1')
+                  else if (p.kind === 'vertex') setBatchRegion('global')
+                }}
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-1">{t('Name')}</label>
+              <div className="flex items-center gap-1">
+                <Input
+                  aria-label={t('Date')}
+                  value={batchDatePrefix}
+                  onChange={e => setBatchDatePrefix(e.target.value)}
+                  placeholder={todayYYYYMMDD()}
+                  className="w-24 border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring tabular-nums"
+                />
+                <span className="text-xs text-muted-foreground font-mono">-</span>
+                <Input
+                  aria-label={t('Name')}
+                  value={batchPrefix}
+                  onChange={e => setBatchPrefix(e.target.value)}
+                  placeholder="例如 anthropic-A"
+                  className="flex-1 border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
+                />
+              </div>
+            </div>
+          </FormSection>
+          <div>
+            {!(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude') && (
+              <BatchKeyInput value={batchInput} onChange={setBatchInput} />
+            )}
           </div>
-        </div>
+          {(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude') && (
+            <VertexInputSection
+              region={batchRegion}
+              onRegionChange={setBatchRegion}
+              keyMode={batchVertexKeyMode}
+              onKeyModeChange={setBatchVertexKeyMode}
+              files={batchVertexFiles}
+              onFilesChange={setBatchVertexFiles}
+              onPickFiles={async list => {
+                const { parsed, errors } = await readVertexFiles(list)
+                setBatchVertexFiles(prev => [...prev, ...parsed])
+                if (errors.length) setBatchErr(errors.join('; '))
+              }}
+              apiKeysText={batchVertexKeysText}
+              onApiKeysTextChange={setBatchVertexKeysText}
+            />
+          )}
+          {batchPresetID === 'azure' && (
+            <AzureInputSection
+              baseUrl={batchAzureBaseUrl}
+              onBaseUrlChange={setBatchAzureBaseUrl}
+              apiVersion={batchAzureApiVersion}
+              onApiVersionChange={setBatchAzureApiVersion}
+            />
+          )}
+          {batchPresetID === 'aws' && (
+            <AwsInputSection
+              region={batchRegion}
+              onRegionChange={setBatchRegion}
+              keyMode={batchAwsKeyMode}
+              onKeyModeChange={setBatchAwsKeyMode}
+              proxy={batchAwsProxy}
+              onProxyChange={setBatchAwsProxy}
+            />
+          )}
+          <p className="text-xs text-muted-foreground">
+            {batchPresetID === 'vertex' || batchPresetID === 'vertex-claude'
+              ? 'Vertex 走独立通道 —— 上传后不进 Pool 队列，直接创建远端渠道。'
+              : batchPresetID === 'azure'
+                ? 'Azure 走独立通道 —— 上传后不进 Pool 队列，直接创建远端渠道。同批 Key 共享同一 base_url + api version。'
+                : batchPresetID === 'aws'
+                  ? 'AWS 走独立通道 —— 上传后不进 Pool 队列，直接创建远端渠道。同批凭证共享同一 Region；每行填 ' +
+                    (batchAwsKeyMode === 'ak_sk' ? 'ak|sk' : 'apikey') +
+                    '。'
+                  : '上 Key 后进入 Pool 队列。管理员配置了每次上几个 + 检查间隔。同批 Key 会按 FIFO 依次进池，前一批全部消耗完之前不会开始新一批。'}
+          </p>
+          {batchErr && (
+            <p role="alert" className="text-xs text-destructive">
+              {batchErr}
+            </p>
+          )}
+          <FormSection advanced>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-1">Group</label>
+              <Input
+                value={batchGroup}
+                onChange={e => setBatchGroup(e.target.value)}
+                className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-1">Models（逗号分隔）</label>
+              <Textarea
+                value={batchModels}
+                onChange={e => setBatchModels(e.target.value)}
+                rows={2}
+                className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
+              />
+            </div>
+          </FormSection>
+        </SidePanel>
       )}
 
       {immOpen && (
-        <div className="fixed inset-0 z-50 flex justify-end bg-black/50">
-          <div className="drawer-panel max-w-lg p-5">
-            <div className="text-base font-semibold mb-1">上普通 Key</div>
-            <div className="text-[11px] text-muted-foreground mb-3">
-              立即上传（不进 Pool 队列），默认 priority = 0。
-            </div>
-            <div className="space-y-3">
-              <div>
-                <label className="block text-[11px] text-muted-foreground mb-1">
-                  名字中间段（最终 = &lt;日期&gt;-&lt;你填&gt;-&lt;key末8&gt;-&lt;hash8&gt;）
-                </label>
-                <div className="flex items-center gap-1">
-                  <input
-                    value={immDatePrefix}
-                    onChange={e => setImmDatePrefix(e.target.value)}
-                    placeholder={todayYYYYMMDD()}
-                    className="w-24 border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring tabular-nums"
-                  />
-                  <span className="text-[11px] text-muted-foreground font-mono">-</span>
-                  <input
-                    value={immPrefix}
-                    onChange={e => setImmPrefix(e.target.value)}
-                    placeholder="例如 studio-A"
-                    className="flex-1 border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block text-[11px] text-muted-foreground mb-1">渠道类型</label>
-                <select
-                  value={immPresetID}
-                  onChange={e => {
-                    const p = CHANNEL_TYPE_PRESETS.find(x => x.id === (e.target.value as PresetID))
-                    if (!p) return
-                    setImmPresetID(p.id)
-                    const prof = profiles.find(x => x.id === selectedID)
-                    setImmGroup(resolvePresetGroup(p, prof))
-                    setImmModels(resolvePresetModels(p, prof))
-                    if (p.kind === 'aws') setImmRegion('us-east-1')
-                    else if (p.kind === 'vertex') setImmRegion('global')
-                  }}
-                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm bg-card focus:outline-none focus:border-ring"
-                >
-                  {CHANNEL_TYPE_PRESETS.map(p => (
-                    <option key={p.id} value={p.id}>{p.label}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-[11px] text-muted-foreground mb-1">Group</label>
-                <input
-                  value={immGroup}
-                  onChange={e => setImmGroup(e.target.value)}
-                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
-                />
-              </div>
-              <div>
-                <label className="block text-[11px] text-muted-foreground mb-1">Models（逗号分隔）</label>
-                <textarea
-                  value={immModels}
-                  onChange={e => setImmModels(e.target.value)}
-                  rows={2}
-                  className="w-full border border-border rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-ring"
-                />
-              </div>
-              <div>
-                <label className="block text-[11px] text-muted-foreground mb-1">
-                  Keys（每行一个，可选 <code>quota_usd</code> / 备注：<code>key 10 备注</code>）
-                </label>
-                <textarea
-                  value={immInput}
-                  onChange={e => setImmInput(e.target.value)}
-                  rows={8}
-                  placeholder="sk-... 10&#10;sk-... 20 备注"
-                  className="w-full border border-border rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-ring"
-                  disabled={immPresetID === 'vertex' || immPresetID === 'vertex-claude'}
-                />
-              </div>
-              {(immPresetID === 'vertex' || immPresetID === 'vertex-claude') && (
-                <VertexInputSection
-                  region={immRegion}
-                  onRegionChange={setImmRegion}
-                  keyMode={immVertexKeyMode}
-                  onKeyModeChange={setImmVertexKeyMode}
-                  files={immVertexFiles}
-                  onFilesChange={setImmVertexFiles}
-                  onPickFiles={async list => {
-                    const { parsed, errors } = await readVertexFiles(list)
-                    setImmVertexFiles(prev => [...prev, ...parsed])
-                    if (errors.length) setImmErr(errors.join('; '))
-                  }}
-                  apiKeysText={immVertexKeysText}
-                  onApiKeysTextChange={setImmVertexKeysText}
-                />
-              )}
-              {immPresetID === 'azure' && (
-                <AzureInputSection
-                  baseUrl={immAzureBaseUrl}
-                  onBaseUrlChange={setImmAzureBaseUrl}
-                  apiVersion={immAzureApiVersion}
-                  onApiVersionChange={setImmAzureApiVersion}
-                />
-              )}
-              {immPresetID === 'aws' && (
-                <AwsInputSection
-                  region={immRegion}
-                  onRegionChange={setImmRegion}
-                  keyMode={immAwsKeyMode}
-                  onKeyModeChange={setImmAwsKeyMode}
-                  proxy={immAwsProxy}
-                  onProxyChange={setImmAwsProxy}
-                />
-              )}
-              {immErr && <p className="text-xs text-destructive">{immErr}</p>}
-            </div>
+        <SidePanel
+          title={<>上普通 Key</>}
+          busy={immBusy}
+          onClose={() => setImmOpen(false)}
+          footer={
             <div className="mt-5 flex justify-end gap-2">
-              <button
-                onClick={() => setImmOpen(false)}
-                disabled={immBusy}
-                className="border border-border rounded-md px-3 py-1.5 text-sm text-foreground hover:bg-muted"
-              >
+              <Button variant="outline" onClick={() => setImmOpen(false)} disabled={immBusy} className="border px-3">
                 取消
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="primary"
                 onClick={submitImmediate}
                 disabled={immBusy}
-                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
+                className="px-3 disabled:opacity-50"
               >
                 {immBusy ? '上传中…' : '立即上传'}
-              </button>
+              </Button>
             </div>
+          }
+        >
+          <div className="text-xs text-muted-foreground mb-3">立即上传（不进 Pool 队列），默认 priority = 0。</div>
+          <FormSection>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-1">渠道类型</label>
+              <ProviderSelect
+                label="渠道类型"
+                value={immPresetID}
+                options={CHANNEL_TYPE_PRESETS}
+                onChange={p => {
+                  setImmPresetID(p.id)
+                  const prof = profiles.find(x => x.id === selectedID)
+                  setImmGroup(resolvePresetGroup(p, prof))
+                  setImmModels(resolvePresetModels(p, prof))
+                  if (p.kind === 'aws') setImmRegion('us-east-1')
+                  else if (p.kind === 'vertex') setImmRegion('global')
+                }}
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-1">{t('Name')}</label>
+              <div className="flex items-center gap-1">
+                <Input
+                  aria-label={t('Date')}
+                  value={immDatePrefix}
+                  onChange={e => setImmDatePrefix(e.target.value)}
+                  placeholder={todayYYYYMMDD()}
+                  className="w-24 border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring tabular-nums"
+                />
+                <span className="text-xs text-muted-foreground font-mono">-</span>
+                <Input
+                  aria-label={t('Name')}
+                  value={immPrefix}
+                  onChange={e => setImmPrefix(e.target.value)}
+                  placeholder="例如 studio-A"
+                  className="flex-1 border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
+                />
+              </div>
+            </div>
+          </FormSection>
+          <div>
+            {!(immPresetID === 'vertex' || immPresetID === 'vertex-claude') && (
+              <BatchKeyInput value={immInput} onChange={setImmInput} />
+            )}
           </div>
-        </div>
+          {(immPresetID === 'vertex' || immPresetID === 'vertex-claude') && (
+            <VertexInputSection
+              region={immRegion}
+              onRegionChange={setImmRegion}
+              keyMode={immVertexKeyMode}
+              onKeyModeChange={setImmVertexKeyMode}
+              files={immVertexFiles}
+              onFilesChange={setImmVertexFiles}
+              onPickFiles={async list => {
+                const { parsed, errors } = await readVertexFiles(list)
+                setImmVertexFiles(prev => [...prev, ...parsed])
+                if (errors.length) setImmErr(errors.join('; '))
+              }}
+              apiKeysText={immVertexKeysText}
+              onApiKeysTextChange={setImmVertexKeysText}
+            />
+          )}
+          {immPresetID === 'azure' && (
+            <AzureInputSection
+              baseUrl={immAzureBaseUrl}
+              onBaseUrlChange={setImmAzureBaseUrl}
+              apiVersion={immAzureApiVersion}
+              onApiVersionChange={setImmAzureApiVersion}
+            />
+          )}
+          {immPresetID === 'aws' && (
+            <AwsInputSection
+              region={immRegion}
+              onRegionChange={setImmRegion}
+              keyMode={immAwsKeyMode}
+              onKeyModeChange={setImmAwsKeyMode}
+              proxy={immAwsProxy}
+              onProxyChange={setImmAwsProxy}
+            />
+          )}
+          {immErr && (
+            <p role="alert" className="text-xs text-destructive">
+              {immErr}
+            </p>
+          )}
+          <FormSection advanced>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-1">Group</label>
+              <Input
+                value={immGroup}
+                onChange={e => setImmGroup(e.target.value)}
+                className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-1">Models（逗号分隔）</label>
+              <Textarea
+                value={immModels}
+                onChange={e => setImmModels(e.target.value)}
+                rows={2}
+                className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
+              />
+            </div>
+          </FormSection>
+        </SidePanel>
       )}
     </Layout>
   )
