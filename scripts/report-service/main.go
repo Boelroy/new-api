@@ -2455,6 +2455,116 @@ func handleReport(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+// SupplierBillRow is one (studio, hour) aggregate for the 供应商账单 tab.
+// Studio identity is the channel tag (the same identity /api/studios exposes),
+// falling back to the channel-name MMDD-<studio>- prefix for legacy/untagged
+// or deleted channels. Returned per-hour so the frontend can re-bucket to a
+// local day under the selected timezone, exactly like 用户账单.
+type SupplierBillRow struct {
+	Studio       string  `json:"studio"`
+	Hour         string  `json:"hour"`
+	RequestCount int     `json:"request_count"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	TotalTokens  int64   `json:"total_tokens"`
+	TotalCost    float64 `json:"total_cost"`
+}
+
+func handleSupplierBill(c *gin.Context) {
+	startDate := c.DefaultQuery("start", time.Now().UTC().AddDate(0, 0, -6).Format("2006-01-02"))
+	endDate := c.DefaultQuery("end", time.Now().UTC().Format("2006-01-02"))
+
+	rows, err := db.Query(`
+		SELECT COALESCE(NULLIF(TRIM(c.tag),''), split_part(a.channel_name,'-',2)) AS studio,
+		       a.hour,
+		       SUM(a.request_count), SUM(a.input_tokens), SUM(a.output_tokens),
+		       SUM(a.total_tokens), SUM(a.total_cost)
+		FROM report_daily_agg a
+		LEFT JOIN channels c ON c.id = a.channel_id
+		WHERE a.date >= $1 AND a.date <= $2
+		GROUP BY 1, a.hour
+		ORDER BY a.hour, studio`, startDate, endDate)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	result := make([]SupplierBillRow, 0)
+	for rows.Next() {
+		var r SupplierBillRow
+		if err := rows.Scan(&r.Studio, &r.Hour, &r.RequestCount,
+			&r.InputTokens, &r.OutputTokens, &r.TotalTokens, &r.TotalCost); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		result = append(result, r)
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// cfgSupplierBillGroups is the report_config key holding the 供应商账单 group
+// definitions — a JSON array of {name, studios[]} shared across all admins.
+const cfgSupplierBillGroups = "supplier_bill_groups"
+
+type supplierBillGroup struct {
+	Name    string   `json:"name"`
+	Studios []string `json:"studios"`
+}
+
+func handleSupplierBillGroupsGet(c *gin.Context) {
+	groups := []supplierBillGroup{}
+	if raw := supplierConfigGet(cfgSupplierBillGroups); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &groups); err != nil {
+			groups = []supplierBillGroup{}
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"groups": groups})
+}
+
+func handleSupplierBillGroupsSet(c *gin.Context) {
+	var body struct {
+		Groups []supplierBillGroup `json:"groups"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	// Normalise: trim names/studios, drop empties, de-dup studios within a
+	// group, and skip groups that end up nameless or memberless.
+	clean := make([]supplierBillGroup, 0, len(body.Groups))
+	for _, g := range body.Groups {
+		name := strings.TrimSpace(g.Name)
+		if name == "" {
+			continue
+		}
+		seen := map[string]bool{}
+		studios := make([]string, 0, len(g.Studios))
+		for _, s := range g.Studios {
+			s = strings.TrimSpace(s)
+			if s == "" || seen[s] {
+				continue
+			}
+			seen[s] = true
+			studios = append(studios, s)
+		}
+		if len(studios) == 0 {
+			continue
+		}
+		clean = append(clean, supplierBillGroup{Name: name, Studios: studios})
+	}
+	blob, err := json.Marshal(clean)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err := supplierConfigSet(cfgSupplierBillGroups, string(blob)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "groups": clean})
+}
+
 func handleExportCSV(c *gin.Context) {
 	startDate := c.DefaultQuery("start", time.Now().UTC().AddDate(0, 0, -6).Format("2006-01-02"))
 	endDate := c.DefaultQuery("end", time.Now().UTC().Format("2006-01-02"))
@@ -4759,6 +4869,12 @@ func main() {
 	// page and by studio_operator's locked-studio UI — safe to open
 	// broadly.
 	api.GET("/studios", requireRoleOrProjectAdmin(minAdminRole), handleStudiosList)
+
+	// 供应商账单 (Supplier Bill) tab — per-studio daily usage plus shared,
+	// admin-managed studio groups (e.g. group "alice" = {alice, alice3}).
+	api.GET("/supplier-bill", requireRole(minAdminRole), handleSupplierBill)
+	api.GET("/supplier-bill/groups", requireRole(minAdminRole), handleSupplierBillGroupsGet)
+	api.PUT("/supplier-bill/groups", requireRole(minAdminRole), handleSupplierBillGroupsSet)
 
 	// Supplier Account portal. Admin+ see and manage every studio's
 	// accounts; supplier_01 (role=4) sees and uploads only its own. The

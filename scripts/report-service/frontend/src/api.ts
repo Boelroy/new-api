@@ -23,6 +23,26 @@ export type LogRow = {
   total_cost: number
 }
 
+// One (studio, UTC hour) usage aggregate for the 供应商账单 tab. Studio is the
+// channel tag (fallback: channel-name prefix). Re-bucketed to local day in the
+// browser, same as LogRow.
+export type SupplierBillRow = {
+  studio: string
+  hour: string
+  request_count: number
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  total_cost: number
+}
+
+// A named supplier group mapping to a set of studios, e.g. { name: 'alice',
+// studios: ['alice', 'alice3'] }. Shared across admins (report_config).
+export type SupplierBillGroup = {
+  name: string
+  studios: string[]
+}
+
 export type ChannelRow = {
   id: number
   name: string
@@ -895,6 +915,19 @@ export const api = {
 
   getReport: (start: string, end: string) =>
     request<LogRow[]>(`/api/report?start=${start}&end=${end}`),
+
+  getSupplierBill: (start: string, end: string) =>
+    request<SupplierBillRow[]>(`/api/supplier-bill?start=${start}&end=${end}`),
+
+  getSupplierBillGroups: () =>
+    request<{ groups: SupplierBillGroup[] }>('/api/supplier-bill/groups'),
+
+  saveSupplierBillGroups: (groups: SupplierBillGroup[]) =>
+    request<{ ok: boolean; groups: SupplierBillGroup[] }>('/api/supplier-bill/groups', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groups }),
+    }),
 
   getKeysData: () => request<KeySummary>('/api/keys/data'),
 
