@@ -1435,10 +1435,10 @@ export default function RemoteChannelsStudio() {
                                   </span>
                                 ) : (
                                   <span
-                                    className="text-xs text-destructive cursor-help underline decoration-dotted underline-offset-2"
-                                    title={testMsg[ch.id].message}
+                                    className="max-w-[240px] truncate text-xs text-destructive cursor-help"
+                                    title={testMsg[ch.id].message || '失败（远端无返回信息）'}
                                   >
-                                    ✗ 失败
+                                    ✗ {testMsg[ch.id].message || '失败'}
                                   </span>
                                 ))}
                               <Button
