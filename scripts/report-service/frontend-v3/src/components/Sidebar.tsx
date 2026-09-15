@@ -22,7 +22,7 @@ const GROUPS: NavGroup[] = [
     items: [
       {
         to: '/remote-channels',
-        label: 'Remote NewAPI',
+        label: 'NewAPI',
         icon: Radio,
         allow: (r) => r >= ROLE_ADMIN || r === ROLE_REMOTE_STUDIO_OPERATOR,
       },
