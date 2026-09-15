@@ -1450,6 +1450,15 @@ export const api = {
       },
     ),
 
+  // Studio-scoped delete: an operator deletes a channel they uploaded (removed
+  // on the remote new-api too). Server-side scoped to the caller's channels.
+  remoteChannelDeleteOperator: (payload: { profile_id: number; channel_id: number }) =>
+    request<{ ok: boolean }>('/api/remote-newapi/channels/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
   // Categorised error breakdown for one channel over the past N seconds
   // (default 1h). Groups upstream error logs by (error_type, status_code).
   // Backend caches for 5min per (profile, channel, window).

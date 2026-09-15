@@ -607,7 +607,8 @@ export default function RemoteChannelsStudio() {
   // Per-channel connectivity test (server-side, like new-api). testingCh holds
   // the channel id currently under test; testMsg maps channel id → result.
   const [testingCh, setTestingCh] = useState<number | null>(null)
-  const [testMsg, setTestMsg] = useState<Record<number, { ok: boolean; text: string }>>({})
+  const [testMsg, setTestMsg] = useState<Record<number, { ok: boolean; latency: number; message: string }>>({})
+  const [deletingCh, setDeletingCh] = useState<number | null>(null)
   // Studio bound to this JWT — used as the default "middle segment" of
   // new channel names. Fetched once on mount; empty string until it
   // arrives (openBatch guards against opening the modal before that).
@@ -803,14 +804,37 @@ export default function RemoteChannelsStudio() {
         const res = await api.remoteChannelTest({ profile_id: selectedID, channel_id: channelID })
         setTestMsg(prev => ({
           ...prev,
-          [channelID]: res.ok
-            ? { ok: true, text: `✓ ${res.latency_ms}ms` }
-            : { ok: false, text: `✗ ${res.message || '失败'}` },
+          [channelID]: { ok: res.ok, latency: res.latency_ms, message: res.message || (res.ok ? '' : '失败') },
         }))
       } catch (e: any) {
-        setTestMsg(prev => ({ ...prev, [channelID]: { ok: false, text: '✗ ' + (e?.message || e) } }))
+        setTestMsg(prev => ({ ...prev, [channelID]: { ok: false, latency: 0, message: e?.message || String(e) } }))
       } finally {
         setTestingCh(null)
+      }
+    },
+    [selectedID],
+  )
+
+  // Delete a channel the operator uploaded (removed on the remote too).
+  const deleteChannel = useCallback(
+    async (ch: RemoteChannel) => {
+      if (!selectedID) return
+      const ok = await confirmDialog({
+        title: '删除渠道',
+        message: `确认删除渠道「${ch.name}」？\n会同时在远端 new-api 删除该渠道，不可恢复。`,
+        danger: true,
+        confirmText: '删除',
+      })
+      if (!ok) return
+      setDeletingCh(ch.id)
+      try {
+        await api.remoteChannelDeleteOperator({ profile_id: selectedID, channel_id: ch.id })
+        setChannels(prev => prev.filter(c => c.id !== ch.id))
+        toast.success(`已删除渠道「${ch.name}」`)
+      } catch (e: any) {
+        toast.error('删除失败: ' + (e?.message || e))
+      } finally {
+        setDeletingCh(null)
       }
     },
     [selectedID],
@@ -1404,14 +1428,19 @@ export default function RemoteChannelsStudio() {
                           <td className="px-4 py-2 text-xs text-muted-foreground">{fmtTime(ch.created_time)}</td>
                           <td className="px-4 py-2 text-right whitespace-nowrap">
                             <div className="inline-flex items-center gap-2">
-                              {testMsg[ch.id] && (
-                                <span
-                                  className={`text-xs ${testMsg[ch.id].ok ? 'text-success' : 'text-destructive'}`}
-                                  title={testMsg[ch.id].text}
-                                >
-                                  {testMsg[ch.id].text.length > 24 ? testMsg[ch.id].text.slice(0, 24) + '…' : testMsg[ch.id].text}
-                                </span>
-                              )}
+                              {testMsg[ch.id] &&
+                                (testMsg[ch.id].ok ? (
+                                  <span className="text-xs text-success" title="测试通过">
+                                    ✓ {testMsg[ch.id].latency}ms
+                                  </span>
+                                ) : (
+                                  <span
+                                    className="text-xs text-destructive cursor-help underline decoration-dotted underline-offset-2"
+                                    title={testMsg[ch.id].message}
+                                  >
+                                    ✗ 失败
+                                  </span>
+                                ))}
                               <Button
                                 variant="outline"
                                 onClick={() => void testChannel(ch.id)}
@@ -1419,6 +1448,14 @@ export default function RemoteChannelsStudio() {
                                 className="border px-2 disabled:opacity-50"
                               >
                                 {testingCh === ch.id ? '测试中…' : '测试'}
+                              </Button>
+                              <Button
+                                variant="danger"
+                                onClick={() => void deleteChannel(ch)}
+                                disabled={deletingCh === ch.id}
+                                className="px-2 disabled:opacity-50"
+                              >
+                                {deletingCh === ch.id ? '删除中…' : '删除'}
                               </Button>
                             </div>
                           </td>

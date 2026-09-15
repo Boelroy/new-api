@@ -4778,6 +4778,61 @@ func handleRemoteChannelTest(c *gin.Context) {
 	})
 }
 
+// ---- Handler: studio-scoped channel delete ----
+
+// handleRemoteChannelDeleteOperator lets a studio operator delete a channel
+// they uploaded (deletes it on the remote new-api via the profile token). Same
+// effect as the admin delete but scoped: operators can only delete their own
+// channels (resolveUsageRangeChannelIDs enforces tag + uploaded_by); admin+ can
+// delete anything on the profile.
+func handleRemoteChannelDeleteOperator(c *gin.Context) {
+	var body struct {
+		ProfileID int64 `json:"profile_id"`
+		ChannelID int64 `json:"channel_id"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.ProfileID <= 0 || body.ChannelID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id and channel_id are required"})
+		return
+	}
+	scoped, err := resolveUsageRangeChannelIDs(c, body.ProfileID, []int64{body.ChannelID})
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	inScope := false
+	for _, id := range scoped {
+		if id == body.ChannelID {
+			inScope = true
+			break
+		}
+	}
+	if !inScope {
+		c.JSON(http.StatusForbidden, gin.H{"error": "channel not in your scope"})
+		return
+	}
+
+	host, userID, token, err := loadRemoteProfileByID(body.ProfileID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
+	defer cancel()
+	if _, err := remoteDoJSON(ctx, http.MethodDelete, host, "/api/channel/"+strconv.FormatInt(body.ChannelID, 10), token, userID, nil, nil); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	// Best-effort local cleanup so the row disappears from the operator's
+	// mirror on the next read; meta rows are harmless if left behind.
+	_ = deleteMeta(body.ProfileID, body.ChannelID)
+	_, _ = db.Exec(`DELETE FROM remote_channel_current WHERE profile_id=$1 AND remote_channel_id=$2`, body.ProfileID, body.ChannelID)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 // ---- Handler: last-hour cost per channel + realtime rpm/tpm ----
 
 // lastHourEntry caches everything /api/log/stat returns in one shot: the
