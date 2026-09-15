@@ -5155,6 +5155,10 @@ func main() {
 	registerV2Routes(r)
 	registerV2Frontend(r)
 
+	// V3 ("NewApi Dash"): a new front-end skin served at /v3/*. Reuses the
+	// existing V1 /api/* endpoints, so no new routes — only the static SPA.
+	registerV3Frontend(r)
+
 	// Keep the supplier-portal WEB token warm (providers / models). No-op
 	// unless SUPPLIER_ACCOUNT_USERNAME / _PASSWORD are configured.
 	startSupplierWebTokenRefresher()

@@ -14,6 +14,15 @@ RUN bun install --frozen-lockfile
 COPY frontend-v2/ .
 RUN bun run build
 
+# V3 frontend ("NewApi Dash") also uses bun. Separate stage so V1/V2 builds
+# stay untouched.
+FROM oven/bun:1 AS frontend-v3-builder
+WORKDIR /app/frontend-v3
+COPY frontend-v3/package.json frontend-v3/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY frontend-v3/ .
+RUN bun run build
+
 FROM golang:1.24-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -21,6 +30,7 @@ RUN go mod download
 COPY . .
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 COPY --from=frontend-v2-builder /app/frontend-v2/dist ./frontend-v2/dist
+COPY --from=frontend-v3-builder /app/frontend-v3/dist ./frontend-v3/dist
 RUN CGO_ENABLED=0 go build -o report-service .
 
 FROM alpine:3.19

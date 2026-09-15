@@ -1,0 +1,91 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/public-sans';
+@import './styles/theme.css';
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+@layer base {
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  /* Tabular figures everywhere numbers matter. */
+  table,
+  .tnum,
+  .font-mono {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  /* new-api-style surface: soft card with a hairline ring instead of a border. */
+  .card {
+    @apply bg-card text-card-foreground rounded-xl ring-1 ring-foreground/10;
+  }
+  .card-hover {
+    @apply transition-shadow hover:shadow-md;
+  }
+  /* Small quiet label (replaces the v1 blueprint mono-label). */
+  .mono-label {
+    @apply text-[10.5px] font-medium uppercase tracking-wider leading-none text-muted-foreground;
+  }
+  /* Section heading (replaces the v1 editorial display face). */
+  .display {
+    @apply font-semibold tracking-tight;
+  }
+  .hairline {
+    @apply border-border;
+  }
+  /* Right-anchored slide-over panel (new-api Sheet style). The overlay wrapper
+     uses `flex justify-end`; this panel fills the height and slides in from the
+     right. Width is capped per-use with a max-w-* utility. */
+  .drawer-panel {
+    @apply relative flex h-full w-full flex-col overflow-y-auto bg-popover text-popover-foreground shadow-2xl ring-1 ring-foreground/10;
+    animation: slideInRight 0.24s cubic-bezier(0.32, 0.72, 0, 1);
+  }
+}
+
+@keyframes slideInRight {
+  0% {
+    opacity: 0.4;
+    transform: translateX(24px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* Entrance animation reused by the toast/modal/confirm host. */
+@keyframes fadeUp {
+  0% {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-fadeUp {
+  animation: fadeUp 0.22s ease-out;
+}
+
+/* Thin scrollbars for the workspace. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--foreground) 22%, var(--background)) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--foreground) 22%, var(--background));
+  border-radius: 8px;
+}

@@ -1,0 +1,3713 @@
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import Layout from '../components/Layout'
+import { toast, confirmDialog, promptDialog } from '../components/feedback'
+import { ProviderOption } from '../components/ProviderMark'
+import { withBase } from '../basePath'
+import {
+  api,
+  ROLE_STUDIO_OPERATOR,
+  ROLE_REMOTE_STUDIO_OPERATOR,
+  ROLE_SUPER_ADMIN,
+  type PendingKey,
+  type RemoteChannel,
+  type RemoteChannelCreateResult,
+  type RemoteProfile,
+  type StudioPolicy,
+} from '../api'
+import { getCachedRole, loadRole } from '../auth'
+import RemoteChannelsStudio from './RemoteChannelsStudio'
+import { readRememberedProfileID, writeRememberedProfileID } from '../lib/rememberProfile'
+
+const STATUS_LABEL: Record<number, string> = {
+  1: '启用',
+  2: '手动禁用',
+  3: '自动禁用',
+}
+const STATUS_CLS: Record<number, string> = {
+  1: 'text-success bg-[#E6F4EE]',
+  2: 'bg-destructive/10 text-destructive',
+  3: 'text-warning bg-[#FBF0DC]',
+}
+
+const DEFAULT_ANTHROPIC_MODELS = [
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-sonnet-4-6',
+  'claude-opus-4-6',
+  'claude-haiku-4-5-20251001',
+  'claude-sonnet-4-5-20250929',
+  'claude-opus-4-5-20251101',
+  'claude-fable-5',
+  'claude-sonnet-5',
+  'claude-opus-5',
+].join(',')
+
+const DEFAULT_GEMINI_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-image',
+  'gemini-2.5-flash-preview-tts',
+  'gemini-2.5-pro',
+  'gemini-3-flash-preview',
+  'gemini-3-pro-image',
+  'gemini-3-pro-image-preview',
+  'gemini-3.1-flash-image',
+  'gemini-3.1-flash-image-preview',
+  'gemini-3.1-flash-lite',
+  'gemini-3.1-flash-lite-preview',
+  'gemini-3.1-pro-preview',
+  'gemini-3.1-pro-preview-customtools',
+  'gemini-3.5-flash',
+].join(',')
+
+// Vertex hosts Google's Gemini family (Anthropic-on-Vertex isn't wired
+// through this page's batch flow), so the default deployment list
+// mirrors DEFAULT_GEMINI_MODELS. Profiles can still override via
+// default_vertex_models when needed.
+const DEFAULT_VERTEX_MODELS = DEFAULT_GEMINI_MODELS
+
+// OpenAI native channel (channel_type=1) + Azure (which hosts the same
+// model family) share the same fallback model list. Profiles may still
+// override per-preset via default_openai_models / default_models.
+const DEFAULT_OPENAI_MODELS = [
+  'gpt-5',
+  'gpt-5-mini',
+  'gpt-5-nano',
+  'gpt-4.1',
+  'gpt-4o',
+  'gpt-4o-mini',
+  'o4-mini',
+  'o3',
+].join(',')
+
+const AZURE_DEFAULT_API_VERSION = '2025-04-01-preview'
+
+// Channel type integers from newapi constant/channel.go — 1 = OpenAI,
+// 3 = Azure, 14 = Anthropic, 24 = Gemini, 41 = Vertex AI. OpenAI /
+// Anthropic / Gemini flow through handleRemoteChannelCreate (text
+// presets); Vertex hits handleVertexChannelCreate; Azure hits
+// handleAzureChannelCreate.
+const CHANNEL_TYPE_OPENAI = 1
+const CHANNEL_TYPE_ANTHROPIC = 14
+const CHANNEL_TYPE_GEMINI = 24
+const CHANNEL_TYPE_VERTEX = 41
+const CHANNEL_TYPE_AZURE = 3
+const CHANNEL_TYPE_AWS = 33
+
+// AWS Bedrock: common regions offered as quick-pick chips; the pre-selected
+// set is seeded from the deployment's aws_default_regions config.
+const AWS_COMMON_REGIONS = [
+  'us-east-1', 'us-east-2', 'us-west-2',
+  'ap-northeast-1', 'ap-northeast-2', 'ap-southeast-1', 'ap-southeast-2', 'ap-south-1',
+  'eu-central-1', 'eu-west-1', 'eu-west-3',
+]
+const CHANNEL_TYPE_OPENROUTER = 20
+
+// Claude-on-Bedrock model list advertised by the AWS preset. The backend
+// pairs each name with a region-prefixed Bedrock model id in
+// channel.model_mapping (e.g. region us-east-1 → "us.anthropic.…"), so the
+// operator never edits the mapping directly — they just pick the region.
+const DEFAULT_AWS_CLAUDE_MODELS = [
+  'claude-opus-4-6',
+  'claude-opus-4-5-20251101',
+  'claude-sonnet-4-6',
+  'claude-sonnet-4-5-20250929',
+  'claude-haiku-4-5-20251001',
+].join(',')
+
+// OpenRouter (channel_type=20) is OpenAI-compatible; the backend maps these
+// friendly names onto anthropic/* slugs in channel.model_mapping, so the
+// operator never edits the mapping — they just pick the preset.
+const DEFAULT_OPENROUTER_MODELS = [
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-sonnet-4-6',
+  'claude-opus-4-6',
+  'claude-haiku-4-5-20251001',
+  'claude-sonnet-4-5-20250929',
+  'claude-opus-4-5-20251101',
+  'claude-fable-5',
+  'claude-sonnet-5',
+  'claude-opus-5',
+].join(',')
+
+// Anthropic-on-Vertex reuses channel_type=41 + the Vertex file/api_key
+// upload flow, but writes to a distinct upstream group so routing keys
+// can point at the Claude family separately from Gemini. Skips
+// profileGroupField/profileModelsField so its Claude group + Claude
+// model list are always what land upstream regardless of what the
+// profile stashed under default_vertex_models.
+const DEFAULT_VERTEX_CLAUDE_MODELS = [
+  'claude-opus-4-7',
+  'claude-sonnet-4-6',
+  'claude-opus-4-6',
+  'claude-haiku-4-5-20251001',
+  'claude-sonnet-4-5-20250929',
+  'claude-opus-4-5-20251101',
+  'claude-opus-4-8',
+  'claude-fable-5',
+  'claude-sonnet-5',
+].join(',')
+
+// Preset menu items for the batch upload channel-type + models + group
+// combo. Each preset resolves its group from a specific profile field
+// (default_group for anthropic, default_gemini_group for gemini) with a
+// hardcoded fallback so the field still works when a profile hasn't set
+// its own preference.
+type PresetID = 'anthropic' | 'openai' | 'gemini' | 'vertex' | 'vertex-claude' | 'azure' | 'aws' | 'openrouter'
+type PresetSpec = {
+  id: PresetID
+  label: string
+  kind: 'text' | 'vertex' | 'azure' | 'aws'
+  type: number
+  fallbackModels: string
+  fallbackGroup: string
+  testModel: string
+  // Optional: omit to skip profile-level lookup and always use
+  // fallbackGroup / fallbackModels (vertex-claude uses this so the
+  // Claude group isn't shadowed by an unrelated default_vertex_models).
+  profileGroupField?: 'default_group' | 'default_gemini_group' | 'default_openai_group'
+  profileModelsField?: 'default_models' | 'default_gemini_models' | 'default_vertex_models' | 'default_openai_models'
+}
+const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
+  { id: 'anthropic',     label: 'Anthropic (Claude)',  kind: 'text',   type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS,     fallbackGroup: 'default',        testModel: 'claude-haiku-4-5-20251001',    profileGroupField: 'default_group',        profileModelsField: 'default_models' },
+  { id: 'openai',        label: 'OpenAI',              kind: 'text',   type: CHANNEL_TYPE_OPENAI,    fallbackModels: DEFAULT_OPENAI_MODELS,        fallbackGroup: 'openai',         testModel: 'gpt-4o-mini',                  profileGroupField: 'default_openai_group', profileModelsField: 'default_openai_models' },
+  { id: 'gemini',        label: 'Gemini',              kind: 'text',   type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,        fallbackGroup: 'gemini',         testModel: 'gemini-2.5-flash',             profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
+  { id: 'vertex',        label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,        fallbackGroup: 'gemini',         testModel: 'gemini-2.5-flash',             profileGroupField: 'default_gemini_group', profileModelsField: 'default_vertex_models' },
+  { id: 'vertex-claude', label: 'Vertex AI (Claude)',  kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_CLAUDE_MODELS, fallbackGroup: 'claude-vertex', testModel: 'claude-sonnet-4-5-20250929' },
+  { id: 'azure',         label: 'Azure',               kind: 'azure',  type: CHANNEL_TYPE_AZURE,     fallbackModels: DEFAULT_OPENAI_MODELS,        fallbackGroup: 'openai',         testModel: 'gpt-4o-mini',                  profileGroupField: 'default_group',        profileModelsField: 'default_models' },
+  { id: 'aws',           label: 'AWS (Bedrock)',       kind: 'aws',    type: CHANNEL_TYPE_AWS,       fallbackModels: DEFAULT_AWS_CLAUDE_MODELS,    fallbackGroup: 'claude-aws',     testModel: 'claude-haiku-4-5-20251001' },
+  { id: 'openrouter',    label: 'OpenRouter',          kind: 'text',   type: CHANNEL_TYPE_OPENROUTER, fallbackModels: DEFAULT_OPENROUTER_MODELS,    fallbackGroup: 'default',        testModel: 'claude-haiku-4-5-20251001' },
+]
+
+// resolvePresetGroup / resolvePresetModels pick the batch upload group +
+// models for a preset. Priority: profile-saved value → preset fallback
+// baked into the frontend so the field is never empty.
+function resolvePresetGroup(preset: PresetSpec, profile: RemoteProfile | undefined): string {
+  if (!preset.profileGroupField) return preset.fallbackGroup
+  const fromProfile = (profile?.[preset.profileGroupField] || '').trim()
+  return fromProfile || preset.fallbackGroup
+}
+function resolvePresetModels(preset: PresetSpec, profile: RemoteProfile | undefined): string {
+  if (!preset.profileModelsField) return preset.fallbackModels
+  const fromProfile = (profile?.[preset.profileModelsField] || '').trim()
+  return fromProfile || preset.fallbackModels
+}
+
+const DEFAULT_TEST_MODEL = 'claude-haiku-4-5-20251001'
+
+// One parsed Service Account JSON in the Vertex admin upload UI. Files
+// are pre-parsed so the JSON blob is ready for remoteVertexCreate and
+// invalid uploads are rejected before submit. Kept module-scope so the
+// component-level state array can carry it.
+type VertexAdminFile = { name: string; json: unknown; quotaUSD?: number; note?: string }
+
+// readVertexAdminFiles is the module-level equivalent of the studio
+// page's readVertexFiles — same shape, returns parsed + errors so the
+// caller can surface partial success. Kept out of the component so the
+// two admin modals (batch / new one for immediate later) can share.
+async function readVertexAdminFiles(list: FileList | null): Promise<{ parsed: VertexAdminFile[]; errors: string[] }> {
+  if (!list || list.length === 0) return { parsed: [], errors: [] }
+  const parsed: VertexAdminFile[] = []
+  const errors: string[] = []
+  for (const f of Array.from(list)) {
+    try {
+      const txt = await f.text()
+      const json = JSON.parse(txt)
+      parsed.push({ name: f.name, json })
+    } catch (e: any) {
+      errors.push(`${f.name}: ${e?.message || 'JSON 解析失败'}`)
+    }
+  }
+  return { parsed, errors }
+}
+
+// VertexAdminInputSection renders the Vertex preset's per-batch inputs
+// in the admin modal. Same visual language as the studio page's
+// VertexInputSection; keyMode toggles the SA-JSON file picker against
+// a per-line API-key textarea (matches newapi's vertex_key_type).
+type VertexAdminKeyMode = 'json' | 'api_key'
+function VertexAdminInputSection({
+  region,
+  onRegionChange,
+  keyMode,
+  onKeyModeChange,
+  files,
+  onFilesChange,
+  onPickFiles,
+  apiKeysText,
+  onApiKeysTextChange,
+}: {
+  region: string
+  onRegionChange: (v: string) => void
+  keyMode: VertexAdminKeyMode
+  onKeyModeChange: (v: VertexAdminKeyMode) => void
+  files: VertexAdminFile[]
+  onFilesChange: (next: VertexAdminFile[]) => void
+  onPickFiles: (list: FileList | null) => void
+  apiKeysText: string
+  onApiKeysTextChange: (v: string) => void
+}) {
+  return (
+    <>
+      <div>
+        <label className="block text-[11px] text-muted-foreground mb-1">Auth Mode</label>
+        <div className="inline-flex rounded-md border border-border overflow-hidden">
+          {(
+            [
+              { id: 'json',    label: 'Service Account JSON' },
+              { id: 'api_key', label: 'API Key' },
+            ] as { id: VertexAdminKeyMode; label: string }[]
+          ).map(m => {
+            const active = keyMode === m.id
+            return (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => onKeyModeChange(m.id)}
+                className={`px-3 py-1 text-[11px] border-r border-border last:border-r-0 transition-colors ${
+                  active ? 'bg-brand text-white' : 'bg-card text-foreground hover:bg-muted'
+                }`}
+              >
+                {m.label}
+              </button>
+            )
+          })}
+        </div>
+        <p className="text-[10px] text-muted-foreground mt-1">
+          JSON 走 Bearer Token 鉴权；API Key 走 <code className="font-mono">?key=</code> URL 鉴权。写进 channel.settings 的 <code className="font-mono">vertex_key_type</code>。
+        </p>
+      </div>
+      <div>
+        <label className="block text-[11px] text-muted-foreground mb-1">
+          Deployment Region
+        </label>
+        <input
+          value={region}
+          onChange={e => onRegionChange(e.target.value)}
+          placeholder="global"
+          className="w-full border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
+        />
+        <p className="text-[10px] text-muted-foreground mt-1">
+          输入部署区域或 JSON 映射：<code className="font-mono">{'{"default": "us-central1", "claude-3-5-sonnet-20240620": "europe-west1"}'}</code>。默认 <code className="font-mono">global</code>。写进 channel.other，本批次共用。
+        </p>
+      </div>
+      {keyMode === 'json' ? (
+        <div>
+          <label className="block text-[11px] text-muted-foreground mb-1">
+            Service Account JSON 文件（可多选）
+          </label>
+          <input
+            type="file"
+            accept=".json,application/json"
+            multiple
+            onChange={e => {
+              onPickFiles(e.target.files)
+              e.target.value = ''
+            }}
+            className="block w-full text-[11px] text-foreground file:mr-3 file:py-1 file:px-2 file:rounded file:border file:border-border file:text-[11px] file:bg-muted file:hover:bg-muted"
+          />
+          {files.length > 0 && (
+            <ul className="mt-2 divide-y divide-border border border-border rounded-md">
+              {files.map((f, i) => (
+                <li key={i} className="px-3 py-2 flex items-center gap-2 text-[11px]">
+                  <span className="flex-1 truncate font-mono text-foreground" title={f.name}>{f.name}</span>
+                  <input
+                    type="number"
+                    placeholder="quota"
+                    step="0.01"
+                    value={f.quotaUSD ?? ''}
+                    onChange={e => {
+                      const v = e.target.value === '' ? undefined : parseFloat(e.target.value)
+                      const next = files.slice()
+                      next[i] = { ...f, quotaUSD: v && v > 0 ? v : undefined }
+                      onFilesChange(next)
+                    }}
+                    className="w-20 border border-border rounded px-1.5 py-0.5 text-[11px] tabular-nums focus:outline-none focus:border-ring"
+                  />
+                  <input
+                    type="text"
+                    placeholder="备注"
+                    value={f.note ?? ''}
+                    onChange={e => {
+                      const next = files.slice()
+                      next[i] = { ...f, note: e.target.value }
+                      onFilesChange(next)
+                    }}
+                    className="w-36 border border-border rounded px-1.5 py-0.5 text-[11px] focus:outline-none focus:border-ring"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => onFilesChange(files.filter((_, j) => j !== i))}
+                    className="text-destructive hover:underline"
+                  >
+                    删除
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : (
+        <div>
+          <label className="block text-[11px] text-muted-foreground mb-1">
+            Vertex API Keys —— 每行 <code className="text-foreground bg-muted px-1">key [额度USD] [备注...]</code>
+          </label>
+          <textarea
+            value={apiKeysText}
+            onChange={e => onApiKeysTextChange(e.target.value)}
+            rows={6}
+            placeholder={'AIzaSy... 220\nAIzaSy... 500 备注\n# 井号开头的行会被忽略'}
+            className="w-full border border-border rounded-md p-2 text-[11px] font-mono resize-y focus:outline-none focus:border-ring"
+          />
+          <p className="text-[10px] text-muted-foreground mt-1">
+            额度和备注可省。key 明文只走一次 POST，不落本地。
+          </p>
+        </div>
+      )}
+    </>
+  )
+}
+
+// FragmentRow is just <>{children}</> — used so `{channels.map(...)}` can
+// emit two adjacent <tr> elements (main row + expandable sparkline) and
+// still key on the channel id at the outermost node.
+function FragmentRow({ children }: { children: React.ReactNode }) {
+  return <>{children}</>
+}
+
+// Sparkline: minimal SVG line chart for cumulative used_quota. We normalise
+// the domain to [min, max] of the visible window so idle channels still
+// show a flat readable line instead of collapsing to a single pixel.
+function Sparkline({ points }: { points: { t: number; q: number }[] }) {
+  if (points.length < 2) return null
+  const w = 640, h = 60, padX = 4, padY = 6
+  const tMin = points[0].t
+  const tMax = points[points.length - 1].t
+  const tRange = Math.max(1, tMax - tMin)
+  const qMin = Math.min(...points.map(p => p.q))
+  const qMax = Math.max(...points.map(p => p.q))
+  const qRange = Math.max(1, qMax - qMin)
+  const path = points.map((p, i) => {
+    const x = padX + ((p.t - tMin) / tRange) * (w - padX * 2)
+    const y = h - padY - ((p.q - qMin) / qRange) * (h - padY * 2)
+    return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+  const first = points[0]
+  const last = points[points.length - 1]
+  const totalDeltaUSD = usdFromQuota(last.q - first.q)
+  return (
+    <div className="flex items-center gap-4">
+      <svg width={w} height={h} className="bg-card border border-border rounded">
+        <path d={path} stroke="#10b981" strokeWidth="1.5" fill="none" />
+      </svg>
+      <div className="text-[11px] text-muted-foreground space-y-0.5 tabular-nums">
+        <div>点数：{points.length}</div>
+        <div>窗口：{fmtTime(first.t)} → {fmtTime(last.t)}</div>
+        <div className={totalDeltaUSD > 0 ? 'text-destructive font-medium' : 'text-muted-foreground'}>
+          该窗口用量 Δ = ${totalDeltaUSD.toFixed(4)}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// todayUTC returns today's date as YYYY-MM-DD in UTC. Used as the default
+// bound for the date filter — the operator sees "just today" regardless of
+// browser timezone, matching how the backend stores created_time.
+const todayUTC = (() => {
+  const n = new Date()
+  const y = n.getUTCFullYear()
+  const m = String(n.getUTCMonth() + 1).padStart(2, '0')
+  const d = String(n.getUTCDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+})()
+
+function fmtTime(epoch: number) {
+  if (!epoch) return '—'
+  return new Date(epoch * 1000).toLocaleString()
+}
+
+function usdFromQuota(q: number) {
+  return q / 500000
+}
+
+export default function RemoteChannels() {
+  // Studio-operator gets the slim page — profile picker, batch-upload
+  // modal, own-studio pending queue. Admin+ gets the full inspector,
+  // but with profile create/edit/delete + host display gated to super
+  // admin. The RemoteChannelsAdmin sub-component reads role again to
+  // toggle those pieces.
+  const [role, setRole] = useState<number | null>(getCachedRole())
+  useEffect(() => {
+    if (role !== null) return
+    void loadRole().then(setRole)
+  }, [role])
+  if (role === null) return null
+  // Both studio-operator roles get the slim page. remote_studio_operator
+  // was carved off as its own role so a deployment can enable remote
+  // batch upload without touching local batch-create; both share the
+  // same UX because the studio-lock guarantees are the same either way.
+  if (role === ROLE_STUDIO_OPERATOR || role === ROLE_REMOTE_STUDIO_OPERATOR) {
+    return <RemoteChannelsStudio />
+  }
+  return <RemoteChannelsAdmin role={role} />
+}
+
+function RemoteChannelsAdmin({ role }: { role: number }) {
+  // Super admin can create / edit / delete profiles + see host / user_id.
+  // Everyone else on this page is admin (route gate min ROLE_ADMIN); they
+  // drive channel-level ops but never see credentials or profile CRUD.
+  const isSuperAdmin = role >= ROLE_SUPER_ADMIN
+  const [profiles, setProfiles] = useState<RemoteProfile[]>([])
+  // Restore last-selected profile so a refresh doesn't jump back to the
+  // top of the sidebar list. Validated against loaded profiles below.
+  const [selectedID, setSelectedID] = useState<number | null>(readRememberedProfileID)
+  const [loadingProfiles, setLoadingProfiles] = useState(true)
+
+  const [channels, setChannels] = useState<RemoteChannel[]>([])
+  const [meta, setMeta] = useState<{ total: number; truncated: boolean; host: string } | null>(null)
+  const [fetching, setFetching] = useState(false)
+  const [fetchErr, setFetchErr] = useState<string | null>(null)
+  const [refreshedAt, setRefreshedAt] = useState('')
+
+  // Last-hour cost per channel (channel_id -> USD). Loaded on demand.
+  // Last-hour column + per-channel /api/log/stat fan-out were removed —
+  // realtime numbers live in the profile-wide summary card only.
+
+  // Row selection for the bulk-cost editor. Cleared whenever the visible
+  // channel list changes so a stale ID from a previous profile can't leak
+  // into an update batch.
+  const [selectedIDs, setSelectedIDs] = useState<Set<number>>(new Set())
+  const [bulkCostOpen, setBulkCostOpen] = useState(false)
+  // Only upstream unit_price_cny is bulk-editable here now; downstream
+  // pricing moved to the per-profile per-day discount editor on Profit.
+  const [bulkCostValue, setBulkCostValue] = useState('')
+
+  // Bulk priority editor. `same` = one value across everyone; `desc`/`asc`
+  // walks per-channel by ±1 from the base, mirroring the batch-upload
+  // priority modes. Order = channel_id ascending so the result is stable.
+  const [bulkPrioOpen, setBulkPrioOpen] = useState(false)
+  const [bulkPrioValue, setBulkPrioValue] = useState('')
+  const [bulkPrioMode, setBulkPrioMode] = useState<'same' | 'desc' | 'asc'>('same')
+  const [bulkPrioBusy, setBulkPrioBusy] = useState(false)
+  const [bulkPrioErr, setBulkPrioErr] = useState<string | null>(null)
+  const [bulkPrioProgress, setBulkPrioProgress] = useState<{ done: number; total: number } | null>(null)
+  const [bulkCostBusy, setBulkCostBusy] = useState(false)
+  const [bulkCostErr, setBulkCostErr] = useState<string | null>(null)
+
+  // Profile-wide realtime stat (rpm / tpm / last-hour quota). One remote
+  // call per refresh regardless of channel count, so this stays cheap
+  // even for large deployments. Polled every 30s while the page is open.
+  const [statSummary, setStatSummary] = useState<{ rpm: number; tpm: number; quota_last_hour: number } | null>(null)
+
+  // Baseline used_quota per channel from the previous background snapshot.
+  // The Δ column subtracts this from live used_quota to show recent burn.
+  // Empty until fetchChannels or a manual reload populates it.
+  const [snapshotBaseline, setSnapshotBaseline] = useState<Record<number, { captured_at: number; used_quota: number }>>({})
+
+  // Sparkline state: which channel row is expanded, and cached per-channel
+  // 24h time series so re-expanding is instant.
+  const [expandedRow, setExpandedRow] = useState<number | null>(null)
+  const [seriesCache, setSeriesCache] = useState<Record<number, { t: number; q: number }[]>>({})
+  const [seriesLoading, setSeriesLoading] = useState<number | null>(null)
+
+  // Error-rate stats. Opt-in via toolbar button since it costs 2 remote
+  // API calls per channel; backend caches for 5 minutes so subsequent
+  // clicks reuse. rpm/errRpm are both 60s-window request counts (see
+  // /api/log/stat on newapi). Rate = errRpm / (rpm + errRpm) when either
+  // is nonzero; blank when both are 0 (no traffic to measure against).
+  // Error-rate uses precise counts from the remote paginated log endpoint
+  // over `errWindowSec`, not the hardcoded-60s RPM. Preset window keeps
+  // the UI simple; adding a full date-range picker is trivial later.
+  const [errStats, setErrStats] = useState<Record<number, { success: number; errors: number }>>({})
+  const [errRateLoading, setErrRateLoading] = useState(false)
+  const [errWindowSec, setErrWindowSec] = useState(3600) // 1h default
+  // Modal state for the categorised error breakdown popup. null = closed.
+  const [breakdownFor, setBreakdownFor] = useState<{ id: number; name: string } | null>(null)
+
+  // Date filter: client-side by channel.created_time, dates interpreted in
+  // UTC so [today, today] means "since UTC 00:00 today" and doesn't shift
+  // with the operator's browser timezone. Default = today (UTC) on both
+  // ends so the page opens to just-today's channels.
+  const [filterStart, setFilterStart] = useState(todayUTC)
+  const [filterEnd, setFilterEnd] = useState(todayUTC)
+
+  // Create / edit form. `editingID = 0` means we're creating a new profile.
+  const [formOpen, setFormOpen] = useState(false)
+  const [editingID, setEditingID] = useState<number | null>(null)
+  const [formName, setFormName] = useState('')
+  const [formHost, setFormHost] = useState('')
+  const [formProxy, setFormProxy] = useState('')
+  const [formUserID, setFormUserID] = useState('')
+  const [formToken, setFormToken] = useState('')
+  // Batch-upload defaults preloaded into the create modal from the
+  // selected profile. Editable per-batch but sticky at the profile
+  // level so operators don't retype 8 model names every day.
+  const [formDefaultModels, setFormDefaultModels] = useState('')
+  const [formDefaultGroup, setFormDefaultGroup] = useState('')
+  const [formDefaultGeminiGroup, setFormDefaultGeminiGroup] = useState('')
+  const [formDefaultGeminiModels, setFormDefaultGeminiModels] = useState('')
+  const [formDefaultOpenAIGroup, setFormDefaultOpenAIGroup] = useState('')
+  const [formDefaultOpenAIModels, setFormDefaultOpenAIModels] = useState('')
+  // Pool throttle lives on the profile but is edited from the upload
+  // queue panel (right where the operator watches keys stream through).
+  // `pool_dirty` guards against clobbering an unsaved edit if the
+  // profile list refetches mid-typing.
+  const [poolIntervalSec, setPoolIntervalSec] = useState('60')
+  const [poolBatchSize, setPoolBatchSize] = useState('2')
+  // Auto mode: when on, the scheduler sizes each tick's batch against
+  // live remote RPM. pool_batch_size becomes the ceiling; a fresh RPM
+  // read below rpm_min pauses uploads entirely.
+  const [poolAutoMode, setPoolAutoMode] = useState(false)
+  const [poolRPMBase, setPoolRPMBase] = useState('150')
+  const [poolRPMMin, setPoolRPMMin] = useState('50')
+  const [poolDirty, setPoolDirty] = useState(false)
+  const [poolSaving, setPoolSaving] = useState(false)
+  const [poolMsg, setPoolMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  // Per-(profile, studio) accept/reject policy. Loaded when the queue
+  // panel opens and after every enqueue so a new studio shows up.
+  const [studioPolicies, setStudioPolicies] = useState<StudioPolicy[]>([])
+  const [policyBusy, setPolicyBusy] = useState<string | null>(null)
+  const [policyErr, setPolicyErr] = useState<string | null>(null)
+  const [formBusy, setFormBusy] = useState(false)
+  const [formErr, setFormErr] = useState<string | null>(null)
+  // Per-profile visibility allowlist. Only meaningful on edit (a new
+  // profile has no id yet — the picker becomes usable once the profile
+  // is saved and the operator list is fetched in openEdit). Empty =
+  // visible to all remote_studio_operator users.
+  const [visOperators, setVisOperators] = useState<{ id: number; username: string; studio: string }[]>([])
+  const [visAllowlist, setVisAllowlist] = useState<Set<number>>(new Set())
+  const [visLoading, setVisLoading] = useState(false)
+
+  // Batch upload keys modal.
+  const [batchOpen, setBatchOpen] = useState(false)
+  const [batchPrefix, setBatchPrefix] = useState('')
+  // Editable date segment prepended to the channel name. Seeded to
+  // today in openBatch; operators can backdate an upload without
+  // reaching for the DB.
+  const [batchDatePrefix, setBatchDatePrefix] = useState('')
+  const [batchGroup, setBatchGroup] = useState('default')
+  const [batchTag, setBatchTag] = useState('')
+  const [batchPriority, setBatchPriority] = useState('')
+  // Sequential-priority mode: same UX as BatchCreatePanel.
+  //   same → all keys share `batchPriority`
+  //   desc → key[i] = batchPriority − i (higher priority up front)
+  //   asc  → key[i] = batchPriority + i
+  const [batchPrioMode, setBatchPrioMode] = useState<'same' | 'desc' | 'asc'>('same')
+
+  // Queue mode: when true, keys go into remote_pending_key instead of
+  // being uploaded synchronously. pool_size>0 turns on drip: at most N
+  // active at once, next one promotes when an active row's remote
+  // channel gets disabled (quota exhausted).
+  const [batchQueue, setBatchQueue] = useState(false)
+  const [batchPoolSize, setBatchPoolSize] = useState('0')
+
+  // Upload queue: rows from remote_pending_key for the selected profile.
+  // Auto-refreshed after enqueue and every 30s so status transitions
+  // (pending → active → used / failed) show up without a manual refresh.
+  const [pending, setPending] = useState<PendingKey[]>([])
+  const [pendingOpen, setPendingOpen] = useState(false)
+  const [batchModels, setBatchModels] = useState(DEFAULT_ANTHROPIC_MODELS)
+  // Preset (anthropic / gemini / ...) drives both the channel type sent
+  // to /handleRemoteChannelCreate AND the default model list. Changing
+  // this rewrites `batchModels` unless the user has hand-edited them.
+  const [batchPresetID, setBatchPresetID] = useState<PresetID>('anthropic')
+  const [batchInput, setBatchInput] = useState('')
+  const [batchBusy, setBatchBusy] = useState(false)
+  const [batchErr, setBatchErr] = useState<string | null>(null)
+  const [batchResults, setBatchResults] = useState<RemoteChannelCreateResult[] | null>(null)
+  // Vertex preset state (Vertex bypasses the pending queue and the
+  // remoteChannelCreate lane — it needs region + settings JSON that the
+  // other channel types don't carry). See handleVertexChannelCreate on
+  // the backend for the tradeoff.
+  const [batchRegion, setBatchRegion] = useState('global')
+  const [batchVertexFiles, setBatchVertexFiles] = useState<VertexAdminFile[]>([])
+  const [batchVertexKeyMode, setBatchVertexKeyMode] = useState<VertexAdminKeyMode>('json')
+  const [batchVertexKeysText, setBatchVertexKeysText] = useState('')
+  // Azure preset state. Also bypasses the pending queue (per-batch
+  // base_url + api_version don't fit the pending schema). See
+  // handleAzureChannelCreate on the backend.
+  const [batchAzureBaseUrl, setBatchAzureBaseUrl] = useState('')
+  const [batchAzureApiVersion, setBatchAzureApiVersion] = useState(AZURE_DEFAULT_API_VERSION)
+  // AWS Bedrock preset state. Bypasses the pending queue too. One key fans out
+  // to one channel per selected region (region→prefix from the admin config).
+  const [batchAwsKeyMode, setBatchAwsKeyMode] = useState<'ak_sk' | 'api_key'>('ak_sk')
+  const [batchAwsRegions, setBatchAwsRegions] = useState<string[]>([])
+  // Optional outbound proxy for every AWS channel (channel.settings.proxy). Empty → none.
+  const [batchAwsProxy, setBatchAwsProxy] = useState('')
+  const [batchAwsRegionInput, setBatchAwsRegionInput] = useState('')
+  // Deployment default region list (aws_default_regions), fetched once.
+  const [awsDefaultRegions, setAwsDefaultRegions] = useState<string[]>([])
+  const [awsDefaultGroup, setAwsDefaultGroup] = useState('')
+  const [awsDefaultModels, setAwsDefaultModels] = useState('')
+  useEffect(() => {
+    void (async () => {
+      try {
+        const cfg = await fetch(withBase('/api/auth/config')).then(r => r.json())
+        if (Array.isArray(cfg?.aws_default_regions)) setAwsDefaultRegions(cfg.aws_default_regions)
+        if (typeof cfg?.aws_default_group === 'string') setAwsDefaultGroup(cfg.aws_default_group.trim())
+        if (typeof cfg?.aws_default_models === 'string') setAwsDefaultModels(cfg.aws_default_models.trim())
+      } catch { /* leave empty */ }
+    })()
+  }, [])
+  // Custom preset dropdown open state (native <select> can't render logos).
+  const [batchTypeOpen, setBatchTypeOpen] = useState(false)
+  // Key entry mode: 'paste' (CSV textarea) or 'table' (per-row editor).
+  const [batchInputMode, setBatchInputMode] = useState<'paste' | 'table'>('paste')
+  const [batchKeyRows, setBatchKeyRows] = useState<{ key: string; quota: string; note: string }[]>([{ key: '', quota: '', note: '' }])
+
+  // Row edit modal.
+  const [rowOpen, setRowOpen] = useState(false)
+  const [rowChannel, setRowChannel] = useState<RemoteChannel | null>(null)
+  const [rowName, setRowName] = useState('')
+  const [rowTag, setRowTag] = useState('')
+  const [rowGroup, setRowGroup] = useState('')
+  const [rowStatus, setRowStatus] = useState(1)
+  const [rowPriority, setRowPriority] = useState('')
+  const [rowQuotaUSD, setRowQuotaUSD] = useState('')
+  const [rowNote, setRowNote] = useState('')
+  // Per-channel auto-disable toggle + buffer. Only meaningful when
+  // quota_usd is set; the loop skips rows with quota_usd IS NULL.
+  const [rowAutoDisable, setRowAutoDisable] = useState(false)
+  const [rowAutoDisableReserveUSD, setRowAutoDisableReserveUSD] = useState('')
+  const [rowBusy, setRowBusy] = useState(false)
+  const [rowErr, setRowErr] = useState<string | null>(null)
+
+  // Per-row test result (channel_id -> pretty message).
+  const [testMsg, setTestMsg] = useState<Record<number, string>>({})
+  const [testingID, setTestingID] = useState<number | null>(null)
+
+  // Global on/off for the auto-disable-on-quota loop (scoped to admin+
+  // by the backend). Per-channel opt-in still lives on the row edit
+  // modal — this just gates whether the loop runs at all.
+  const [autoDisableEnabled, setAutoDisableEnabled] = useState(false)
+  const [autoDisableIntervalSec, setAutoDisableIntervalSec] = useState('30')
+  const [autoDisableSaving, setAutoDisableSaving] = useState(false)
+  const [autoDisableMsg, setAutoDisableMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  const loadAutoDisableConfig = useCallback(async () => {
+    try {
+      const res = await api.remoteAutoDisableConfigGet()
+      setAutoDisableEnabled(!!res.enabled)
+      setAutoDisableIntervalSec(String(res.interval_sec))
+    } catch (e) {
+      console.warn('auto-disable config load failed', e)
+    }
+  }, [])
+
+  useEffect(() => { void loadAutoDisableConfig() }, [loadAutoDisableConfig])
+
+  const saveAutoDisableConfig = async (patch: { enabled?: boolean; interval_sec?: number }) => {
+    setAutoDisableSaving(true)
+    setAutoDisableMsg(null)
+    try {
+      const res = await api.remoteAutoDisableConfigSet(patch)
+      setAutoDisableEnabled(!!res.enabled)
+      setAutoDisableIntervalSec(String(res.interval_sec))
+      setAutoDisableMsg({ ok: true, text: '已保存' })
+    } catch (e: any) {
+      setAutoDisableMsg({ ok: false, text: e?.message || String(e) })
+    } finally {
+      setAutoDisableSaving(false)
+    }
+  }
+
+  const reloadProfiles = useCallback(async () => {
+    setLoadingProfiles(true)
+    try {
+      const res = await api.remoteProfiles()
+      setProfiles(res.profiles)
+      // Keep the remembered profile if it survived; otherwise pick the
+      // first available. Handles deletion + first-time visits both.
+      setSelectedID(prev => {
+        if (prev != null && res.profiles.some(p => p.id === prev)) return prev
+        return res.profiles[0]?.id ?? null
+      })
+    } catch (e) {
+      console.error(e)
+      toast.error(e)
+    } finally {
+      setLoadingProfiles(false)
+    }
+  }, [])
+
+  useEffect(() => { void reloadProfiles() }, [reloadProfiles])
+
+  // Persist selection across refreshes.
+  useEffect(() => { writeRememberedProfileID(selectedID) }, [selectedID])
+
+  // Load cached channel list from local mirror as soon as a profile is
+  // selected (including on page reload). Purely local — no remote hit.
+  // The user can still click "Fetch channels" to force a live pull.
+  useEffect(() => {
+    if (!selectedID) {
+      setChannels([])
+      setMeta(null)
+      setRefreshedAt('')
+      return
+    }
+    void (async () => {
+      try {
+        const res = await api.remoteCachedChannels(selectedID)
+        setChannels(res.channels)
+        setMeta({ total: res.total, truncated: false, host: '' })
+        if (res.cached_at > 0) {
+          setRefreshedAt(new Date(res.cached_at * 1000).toLocaleTimeString('zh-CN') + ' · cached')
+        } else {
+          setRefreshedAt('')
+        }
+        // Sparkline / test state belongs to a specific live fetch —
+        // reset when we're just showing the cached mirror.
+        setTestMsg({})
+        setSelectedIDs(new Set())
+        setExpandedRow(null)
+        // Pull the previous-snapshot baseline so the Δ column renders.
+        void loadSnapshotBaseline(selectedID)
+      } catch (e) {
+        console.warn('cached load failed', e)
+      }
+    })()
+  }, [selectedID])
+
+  const openCreate = () => {
+    setEditingID(0)
+    setFormName('')
+    setFormHost('')
+    setFormProxy('')
+    setFormUserID('')
+    setFormToken('')
+    setFormDefaultModels(DEFAULT_ANTHROPIC_MODELS)
+    setFormDefaultGroup('default')
+    setFormDefaultGeminiGroup('')
+    setFormDefaultGeminiModels('')
+    setFormDefaultOpenAIGroup('openai')
+    setFormDefaultOpenAIModels('')
+    setVisAllowlist(new Set())
+    setVisOperators([])
+    setFormErr(null)
+    setFormOpen(true)
+    // Prefetch the operator picker so the create modal can already
+    // display checkbox candidates; the actual allowlist gets saved via
+    // a follow-up PUT once the profile row exists.
+    void (async () => {
+      setVisLoading(true)
+      try {
+        const res = await api.remoteProfileVisibilityGet(0)
+        setVisOperators(res.operators || [])
+      } catch {
+        // 400 (invalid profile id) is expected here — fall back to a
+        // best-effort load via any existing profile.
+        try {
+          const anyProf = profiles[0]
+          if (anyProf) {
+            const res = await api.remoteProfileVisibilityGet(anyProf.id)
+            setVisOperators(res.operators || [])
+          }
+        } catch { /* ignore */ }
+      } finally {
+        setVisLoading(false)
+      }
+    })()
+  }
+
+  const openEdit = (p: RemoteProfile) => {
+    setEditingID(p.id)
+    setFormName(p.name)
+    // Blank host on edit — same pattern as access_token. The current
+    // value isn't shown; leave blank to keep, or type to replace. That
+    // way the upstream URL isn't visible to anyone glancing at the
+    // modal, and screenshots of the edit form don't leak it either.
+    setFormHost('')
+    // Proxy isn't a secret like host/token; prefill so the admin sees the
+    // current value and can clear it by blanking the field.
+    setFormProxy(p.proxy || '')
+    setFormUserID(p.user_id != null ? String(p.user_id) : '')
+    setFormToken('')
+    setFormDefaultModels(p.default_models || '')
+    setFormDefaultGroup(p.default_group || '')
+    setFormDefaultGeminiGroup(p.default_gemini_group || '')
+    setFormDefaultGeminiModels(p.default_gemini_models || '')
+    setFormDefaultOpenAIGroup(p.default_openai_group || '')
+    setFormDefaultOpenAIModels(p.default_openai_models || '')
+    setVisAllowlist(new Set())
+    setVisOperators([])
+    setFormErr(null)
+    setFormOpen(true)
+    // Fetch the current visibility allowlist + the operator picker in
+    // one round-trip. Failure is non-fatal — the modal still opens and
+    // the visibility section renders a "load failed" hint.
+    void (async () => {
+      setVisLoading(true)
+      try {
+        const res = await api.remoteProfileVisibilityGet(p.id)
+        setVisOperators(res.operators || [])
+        setVisAllowlist(new Set(res.allowlist || []))
+      } catch { /* leave defaults, section shows retry */ } finally {
+        setVisLoading(false)
+      }
+    })()
+  }
+
+  const submitForm = async () => {
+    setFormErr(null)
+    const uid = parseInt(formUserID, 10)
+    if (!formName.trim()) return setFormErr('name is required')
+    if (editingID === 0 && !formHost.trim()) return setFormErr('host is required')
+    if (isNaN(uid) || uid <= 0) return setFormErr('user_id must be positive integer')
+    if (editingID === 0 && !formToken.trim()) return setFormErr('access_token is required for new profile')
+    setFormBusy(true)
+    try {
+      let targetID = editingID
+      if (editingID === 0) {
+        // New profile — pool tuning takes the schema defaults (60s / 2)
+        // and is edited later from the upload queue panel.
+        const created = await api.remoteProfileCreate({
+          name: formName.trim(),
+          host: formHost.trim(),
+          user_id: uid,
+          access_token: formToken.trim(),
+          proxy: formProxy.trim(),
+          default_models: formDefaultModels.trim(),
+          default_group: formDefaultGroup.trim(),
+          default_gemini_group: formDefaultGeminiGroup.trim(),
+          default_gemini_models: formDefaultGeminiModels.trim(),
+          default_openai_group: formDefaultOpenAIGroup.trim(),
+          default_openai_models: formDefaultOpenAIModels.trim(),
+        })
+        targetID = created.id
+        await reloadProfiles()
+        setSelectedID(created.id)
+      } else if (editingID) {
+        const patch: Parameters<typeof api.remoteProfileUpdate>[1] = {
+          name: formName.trim(),
+          user_id: uid,
+          // Always sent (empty clears the proxy → direct connection).
+          proxy: formProxy.trim(),
+          default_models: formDefaultModels.trim(),
+          default_group: formDefaultGroup.trim(),
+          default_gemini_group: formDefaultGeminiGroup.trim(),
+          default_gemini_models: formDefaultGeminiModels.trim(),
+          default_openai_group: formDefaultOpenAIGroup.trim(),
+          default_openai_models: formDefaultOpenAIModels.trim(),
+        }
+        if (formHost.trim()) patch.host = formHost.trim()
+        if (formToken.trim()) patch.access_token = formToken.trim()
+        await api.remoteProfileUpdate(editingID, patch)
+        await reloadProfiles()
+      }
+      if (targetID && targetID > 0) {
+        // Persist visibility allowlist alongside the profile save so the
+        // admin doesn't have to remember a second "Save visibility"
+        // button. Best-effort — a failure here surfaces via formErr but
+        // doesn't roll back the profile write.
+        try {
+          await api.remoteProfileVisibilitySet(targetID, Array.from(visAllowlist))
+        } catch (e: any) {
+          setFormErr('渠道已保存，但可见性写入失败: ' + (e?.message || String(e)))
+          return
+        }
+      }
+      setFormOpen(false)
+    } catch (e: any) {
+      setFormErr(e?.message || String(e))
+    } finally {
+      setFormBusy(false)
+    }
+  }
+
+  const deleteProfile = async (p: RemoteProfile) => {
+    if (!(await confirmDialog({ message: `Delete profile "${p.name}"? Cannot be undone.`, danger: true, confirmText: '删除' }))) return
+    try {
+      await api.remoteProfileDelete(p.id)
+      if (selectedID === p.id) setSelectedID(null)
+      await reloadProfiles()
+    } catch (e: any) {
+      toast.error('delete failed: ' + (e?.message || e))
+    }
+  }
+
+  const fetchChannels = async () => {
+    if (!selectedID) return
+    setFetching(true)
+    setFetchErr(null)
+    try {
+      const res = await api.remoteFetchChannels({ profile_id: selectedID })
+      setChannels(res.channels)
+      setMeta({ total: res.total, truncated: res.truncated, host: res.host })
+      setRefreshedAt(new Date().toLocaleTimeString('zh-CN'))
+      // Any prior test state is stale against the refreshed list.
+      setTestMsg({})
+      setSelectedIDs(new Set())
+      // Cached sparkline data is per-channel time series; keep it, since
+      // adding new points doesn't invalidate older ones. Just close any
+      // currently-open sparkline so the layout resets cleanly.
+      setExpandedRow(null)
+      // Pull the latest background-captured snapshot so the Δ column can
+      // compare live used_quota against the previous known value. Fire and
+      // forget — a slow query shouldn't block the table from rendering.
+      void loadSnapshotBaseline(selectedID)
+    } catch (e: any) {
+      setFetchErr(e?.message || String(e))
+      setChannels([])
+      setMeta(null)
+    } finally {
+      setFetching(false)
+    }
+  }
+
+  // Fetch success + error counts for every channel over errWindowSec.
+  // Backend caps at 200 channels per request and caches 5 min per
+  // (profile, channel, window) so re-clicks are instant. Populates the
+  // "错误率" column; the per-channel breakdown popover fetches its own
+  // type-bucketed data lazily on click.
+  const loadErrorRates = async () => {
+    if (!selectedID || channels.length === 0) return
+    setErrRateLoading(true)
+    try {
+      const ids = channels.map(c => c.id)
+      const next: Record<number, { success: number; errors: number }> = {}
+      // Chunk to stay under the backend's max_channel_ids cap. Serial so
+      // we don't fan out too much when a profile has hundreds of
+      // channels — the backend itself parallelises within each chunk.
+      const chunkSize = 200
+      for (let i = 0; i < ids.length; i += chunkSize) {
+        const chunk = ids.slice(i, i + chunkSize)
+        const res = await api.remoteChannelCounts(selectedID, chunk, errWindowSec)
+        for (const idStr of Object.keys(res.data)) {
+          const idNum = parseInt(idStr, 10)
+          const cnt = res.data[idStr]
+          next[idNum] = { success: cnt?.success ?? 0, errors: cnt?.errors ?? 0 }
+        }
+      }
+      // Ensure channels missing from the response show 0/0 rather than
+      // staying undefined (which would render as "—").
+      for (const c of channels) {
+        if (next[c.id] == null) next[c.id] = { success: 0, errors: 0 }
+      }
+      setErrStats(next)
+    } catch (e: any) {
+      console.warn('error rate load failed', e)
+      toast.error('加载错误率失败：' + (e?.message || e))
+    } finally {
+      setErrRateLoading(false)
+    }
+  }
+
+  const loadSnapshotBaseline = async (profileID: number) => {
+    try {
+      // 24h window is enough for the "recent burn" delta while keeping the
+      // response small (~5000 rows worst case).
+      const since = Math.floor(Date.now() / 1000) - 24 * 3600
+      const res = await api.remoteSnapshotLatest(profileID, since)
+      const next: Record<number, { captured_at: number; used_quota: number }> = {}
+      for (const [k, v] of Object.entries(res.latest)) {
+        next[parseInt(k, 10)] = v
+      }
+      setSnapshotBaseline(next)
+    } catch (e) {
+      // Non-fatal — the Δ column just shows "—" if we couldn't load.
+      console.warn('snapshot baseline load failed', e)
+    }
+  }
+
+  const toggleSparkline = async (channelID: number) => {
+    if (expandedRow === channelID) {
+      setExpandedRow(null)
+      return
+    }
+    setExpandedRow(channelID)
+    if (seriesCache[channelID] || !selectedID) return
+    setSeriesLoading(channelID)
+    try {
+      const since = Math.floor(Date.now() / 1000) - 24 * 3600
+      const res = await api.remoteSnapshotSeries(selectedID, channelID, since)
+      const points = res.points.map(p => ({ t: p.captured_at, q: p.used_quota }))
+      setSeriesCache(prev => ({ ...prev, [channelID]: points }))
+    } catch (e) {
+      console.warn('sparkline load failed', e)
+    } finally {
+      setSeriesLoading(null)
+    }
+  }
+
+  // Profile-wide realtime stat for the summary cards. One remote call
+  // per tick regardless of channel count, so this stays cheap. Kept
+  // silent — a network blip just leaves the last value on screen.
+  const loadStatSummary = useCallback(async (pid: number) => {
+    try {
+      const res = await api.remoteStatSummary(pid)
+      setStatSummary({ rpm: res.rpm, tpm: res.tpm, quota_last_hour: res.quota_last_hour })
+    } catch (e) {
+      console.warn('stat summary failed', e)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!selectedID) {
+      setStatSummary(null)
+      return
+    }
+    void loadStatSummary(selectedID)
+    const t = setInterval(() => { void loadStatSummary(selectedID) }, 30000)
+    return () => clearInterval(t)
+  }, [selectedID, loadStatSummary])
+
+  const toggleRowSelected = (id: number, checked: boolean) => {
+    setSelectedIDs(prev => {
+      const next = new Set(prev)
+      if (checked) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+
+  const toggleAllSelected = (visible: RemoteChannel[], checked: boolean) => {
+    setSelectedIDs(prev => {
+      const next = new Set(prev)
+      for (const c of visible) {
+        if (checked) next.add(c.id)
+        else next.delete(c.id)
+      }
+      return next
+    })
+  }
+
+  const openBulkCost = () => {
+    setBulkCostValue('')
+    setBulkCostErr(null)
+    setBulkCostOpen(true)
+  }
+
+  const openBulkPrio = () => {
+    setBulkPrioValue('')
+    setBulkPrioMode('same')
+    setBulkPrioErr(null)
+    setBulkPrioProgress(null)
+    setBulkPrioOpen(true)
+  }
+
+  const submitBulkPrio = async () => {
+    if (!selectedID) return
+    setBulkPrioErr(null)
+    if (selectedIDs.size === 0) {
+      setBulkPrioErr('先勾选至少一行')
+      return
+    }
+    const base = parseInt(bulkPrioValue.trim(), 10)
+    if (isNaN(base) || base < 1) {
+      setBulkPrioErr('优先级必须是 ≥1 的整数')
+      return
+    }
+    // Stable ordering: iterate by channel_id ascending so 'desc' assigns
+    // the highest priority to the smallest ID (which is usually the
+    // oldest / most-trusted channel in new-api).
+    const ordered = channels
+      .filter(c => selectedIDs.has(c.id))
+      .map(c => c.id)
+      .sort((a, b) => a - b)
+    const step = bulkPrioMode === 'desc' ? -1 : bulkPrioMode === 'asc' ? 1 : 0
+    const priorities = new Map<number, number>()
+    for (let i = 0; i < ordered.length; i++) {
+      const p = bulkPrioMode === 'same' ? base : Math.max(1, base + i * step)
+      priorities.set(ordered[i], p)
+    }
+
+    setBulkPrioBusy(true)
+    setBulkPrioProgress({ done: 0, total: ordered.length })
+    let ok = 0
+    const failed: number[] = []
+    // Sequential to keep the remote's rate limit happy; ~50ms/channel is
+    // fine for a couple hundred rows.
+    for (let i = 0; i < ordered.length; i++) {
+      const chID = ordered[i]
+      const prio = priorities.get(chID)!
+      try {
+        await api.remoteChannelUpdate({
+          profile_id: selectedID,
+          channel_id: chID,
+          priority: prio,
+        })
+        ok++
+      } catch (e) {
+        console.warn('bulk priority', chID, e)
+        failed.push(chID)
+      }
+      setBulkPrioProgress({ done: i + 1, total: ordered.length })
+    }
+    // Optimistic patch so the "Priority" column reflects the new value
+    // without waiting for a Fetch.
+    setChannels(prev => prev.map(c => {
+      const p = priorities.get(c.id)
+      return p != null ? { ...c, priority: p } : c
+    }))
+    setBulkPrioBusy(false)
+    toast.success(`已更新 ${ok} 条${failed.length ? `，${failed.length} 条失败 (id: ${failed.slice(0, 8).join(', ')}${failed.length > 8 ? '…' : ''})` : ''}`)
+    setBulkPrioOpen(false)
+    setSelectedIDs(new Set())
+  }
+
+  const submitBulkCost = async () => {
+    if (!selectedID) return
+    setBulkCostErr(null)
+    if (selectedIDs.size === 0) {
+      setBulkCostErr('先勾选至少一行')
+      return
+    }
+    const v = parseFloat(bulkCostValue.trim())
+    if (isNaN(v) || v < 0) {
+      setBulkCostErr('单价必须是非负数字（CNY）')
+      return
+    }
+    setBulkCostBusy(true)
+    try {
+      const res = await api.remoteChannelMetaBulk({
+        profile_id: selectedID,
+        channel_ids: Array.from(selectedIDs),
+        unit_price_cny: v,
+      })
+      setChannels(prev => prev.map(c => selectedIDs.has(c.id) ? { ...c, unit_price_cny: v } : c))
+      toast.success(`已更新 ${res.updated} 条${res.failed.length ? `，${res.failed.length} 失败` : ''}`)
+      setBulkCostOpen(false)
+      setSelectedIDs(new Set())
+    } catch (e: any) {
+      setBulkCostErr(e?.message || String(e))
+    } finally {
+      setBulkCostBusy(false)
+    }
+  }
+
+  const reloadPending = useCallback(async () => {
+    if (!selectedID) {
+      setPending([])
+      return
+    }
+    try {
+      const res = await api.remotePendingList(selectedID)
+      setPending(res.items)
+    } catch (e) {
+      console.warn('pending list failed', e)
+    }
+  }, [selectedID])
+
+  // Auto-poll the queue every 30s while the panel is open — status
+  // transitions inside the scheduler tick (60s + retries) become visible
+  // without a manual refresh.
+  useEffect(() => {
+    if (!selectedID) return
+    void reloadPending()
+    if (!pendingOpen) return
+    const t = setInterval(() => { void reloadPending() }, 30000)
+    return () => clearInterval(t)
+  }, [selectedID, pendingOpen, reloadPending])
+
+  // Sync pool-throttle inputs from the selected profile whenever the
+  // pick changes (or profiles reload). Skip if the operator has an
+  // in-flight edit — poolDirty is our "don't clobber" flag, cleared on
+  // save or profile switch.
+  useEffect(() => {
+    const p = profiles.find(x => x.id === selectedID)
+    if (!p) return
+    if (poolDirty) return
+    setPoolIntervalSec(String(p.pool_interval_sec ?? 60))
+    setPoolBatchSize(String(p.pool_batch_size ?? 2))
+    setPoolAutoMode(!!p.auto_mode)
+    setPoolRPMBase(String(p.rpm_base ?? 150))
+    setPoolRPMMin(String(p.rpm_min ?? 50))
+    setPoolMsg(null)
+  }, [selectedID, profiles, poolDirty])
+
+  // Reset dirty flag when switching profiles — otherwise a stale edit
+  // from profile A would prevent profile B's values from loading.
+  useEffect(() => {
+    setPoolDirty(false)
+    setPoolMsg(null)
+  }, [selectedID])
+
+  const savePoolTuning = async () => {
+    if (!selectedID) return
+    const parsePool = (raw: string): number | undefined => {
+      const t = raw.trim()
+      if (t === '') return undefined
+      const n = parseInt(t, 10)
+      return isNaN(n) ? undefined : n
+    }
+    const interval = parsePool(poolIntervalSec)
+    const batch = parsePool(poolBatchSize)
+    const rpmBase = parsePool(poolRPMBase)
+    const rpmMin = parsePool(poolRPMMin)
+    setPoolSaving(true)
+    setPoolMsg(null)
+    try {
+      const patch: Parameters<typeof api.remoteProfileUpdate>[1] = {
+        auto_mode: poolAutoMode,
+      }
+      if (interval != null) patch.pool_interval_sec = interval
+      if (batch != null) patch.pool_batch_size = batch
+      if (rpmBase != null) patch.rpm_base = rpmBase
+      if (rpmMin != null) patch.rpm_min = rpmMin
+      await api.remoteProfileUpdate(selectedID, patch)
+      setPoolDirty(false)
+      await reloadProfiles()
+      setPoolMsg({ ok: true, text: '已保存' })
+    } catch (e: any) {
+      setPoolMsg({ ok: false, text: e?.message || String(e) })
+    } finally {
+      setPoolSaving(false)
+    }
+  }
+
+  // Studio policy: load + toggle. Loaded whenever a profile is picked
+  // and after each enqueue so a newly-seen studio appears without a
+  // manual refresh.
+  const reloadStudioPolicies = useCallback(async () => {
+    if (!selectedID) {
+      setStudioPolicies([])
+      return
+    }
+    try {
+      const res = await api.remoteStudioPolicyList(selectedID)
+      setStudioPolicies(res.items)
+      setPolicyErr(null)
+    } catch (e: any) {
+      setPolicyErr(e?.message || String(e))
+    }
+  }, [selectedID])
+
+  useEffect(() => { void reloadStudioPolicies() }, [reloadStudioPolicies, pending])
+
+  const toggleStudioPolicy = async (studio: string, next: boolean) => {
+    if (!selectedID) return
+    setPolicyBusy(studio)
+    setPolicyErr(null)
+    try {
+      await api.remoteStudioPolicyUpsert({
+        profile_id: selectedID,
+        studio,
+        accepting_keys: next,
+      })
+      await reloadStudioPolicies()
+    } catch (e: any) {
+      setPolicyErr(e?.message || String(e))
+    } finally {
+      setPolicyBusy(null)
+    }
+  }
+
+  const cancelPending = async (row: PendingKey) => {
+    if (row.status !== 'pending' && row.status !== 'failed') return
+    if (!(await confirmDialog({ message: `删除队列条目 (${row.key_masked})？只能删 pending/failed 的。`, danger: true, confirmText: '删除' }))) return
+    try {
+      await api.remotePendingDelete(row.id)
+      await reloadPending()
+    } catch (e: any) {
+      toast.error('delete failed: ' + (e?.message || e))
+    }
+  }
+
+  const openBatch = () => {
+    // Preload from the selected profile's saved defaults. The user just
+    // types the "middle" segment of the name — the final channel name
+    // becomes  YYYYMMDD-<middle>-<key-tail>-<hash>.
+    const p = profiles.find(x => x.id === selectedID)
+    setBatchPrefix('')  // "middle" segment only; date is a separate field
+    // Seed the date segment with today so most uploads just accept the
+    // default; the operator can still backdate an upload from the
+    // adjacent input.
+    setBatchDatePrefix(todayYYYYMMDD())
+    // Reset preset selector to Anthropic; the user picks Gemini
+    // manually after opening if they want it.
+    const initialPreset = CHANNEL_TYPE_PRESETS[0]
+    setBatchPresetID(initialPreset.id)
+    setBatchGroup(resolvePresetGroup(initialPreset, p))
+    setBatchModels(resolvePresetModels(initialPreset, p))
+    setBatchTag('')
+    setBatchPriority('')
+    setBatchInput('')
+    setBatchErr(null)
+    setBatchResults(null)
+    setBatchVertexFiles([])
+    setBatchVertexKeyMode('json')
+    setBatchVertexKeysText('')
+    setBatchRegion('global')
+    setBatchAzureBaseUrl('')
+    setBatchAzureApiVersion(AZURE_DEFAULT_API_VERSION)
+    setBatchAwsKeyMode('ak_sk')
+    setBatchAwsRegions([])
+    setBatchAwsProxy('')
+    setBatchAwsRegionInput('')
+    setBatchInputMode('paste')
+    setBatchKeyRows([{ key: '', quota: '', note: '' }])
+    setBatchTypeOpen(false)
+    setBatchOpen(true)
+  }
+
+  // todayYYYYMMDD returns the local-time date as a compact string, used
+  // as the auto-prepended prefix of new channel names.
+  const todayYYYYMMDD = () => {
+    const d = new Date()
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const dd = String(d.getDate()).padStart(2, '0')
+    return `${y}${m}${dd}`
+  }
+
+  // Toggle paste/table, carrying data across (key [quota] [note] per line).
+  const switchBatchInputMode = (mode: 'paste' | 'table') => {
+    if (mode === batchInputMode) return
+    if (mode === 'table') {
+      const rows: { key: string; quota: string; note: string }[] = []
+      for (const line of batchInput.split('\n')) {
+        const t = line.trim()
+        if (!t || t.startsWith('#')) continue
+        const parts = t.split(/[\s,]+/)
+        if (!parts[0]) continue
+        rows.push({ key: parts[0], quota: parts[1] ?? '', note: parts.slice(2).join(' ') })
+      }
+      setBatchKeyRows(rows.length ? rows : [{ key: '', quota: '', note: '' }])
+    } else {
+      const text = batchKeyRows
+        .filter(r => r.key.trim())
+        .map(r => [r.key.trim(), r.quota.trim(), r.note.trim()].filter(Boolean).join(' '))
+        .join('\n')
+      setBatchInput(text)
+    }
+    setBatchInputMode(mode)
+  }
+
+  // Collect {key, quota_usd?, note?} from whichever entry mode is active.
+  const collectBatchItems = (): { key: string; quota_usd?: number; note?: string }[] => {
+    const out: { key: string; quota_usd?: number; note?: string }[] = []
+    if (batchInputMode === 'table') {
+      for (const r of batchKeyRows) {
+        const key = r.key.trim()
+        if (!key) continue
+        const item: { key: string; quota_usd?: number; note?: string } = { key }
+        const q = parseFloat(r.quota.trim())
+        if (!isNaN(q) && q > 0) item.quota_usd = q
+        if (r.note.trim()) item.note = r.note.trim()
+        out.push(item)
+      }
+    } else {
+      for (const raw of batchInput.split('\n')) {
+        const t = raw.trim()
+        if (!t || t.startsWith('#')) continue
+        const parts = t.split(/[\s,]+/)
+        const key = parts[0]
+        if (!key) continue
+        const item: { key: string; quota_usd?: number; note?: string } = { key }
+        if (parts[1]) {
+          const q = parseFloat(parts[1])
+          if (!isNaN(q) && q > 0) item.quota_usd = q
+        }
+        if (parts.length > 2) item.note = parts.slice(2).join(' ')
+        out.push(item)
+      }
+    }
+    return out
+  }
+
+  const submitBatch = async () => {
+    if (!selectedID) return
+    setBatchErr(null)
+    if (!batchPrefix.trim()) return setBatchErr('name_prefix is required')
+    if (!batchModels.trim()) return setBatchErr('models is required')
+    const preset = CHANNEL_TYPE_PRESETS.find(p => p.id === batchPresetID)
+    // Empty date falls back to today. Anything the operator types is
+    // passed through as-is — no shape validation on the string.
+    const datePrefix = batchDatePrefix.trim() || todayYYYYMMDD()
+    const fullNamePrefix = datePrefix + '-' + batchPrefix.trim()
+
+    // Vertex takes a fundamentally different input (JSON files or API
+    // keys + region). It bypasses both the pending queue and the sync
+    // remoteChannelCreate lane, so we branch here before the text-mode
+    // line parsing.
+    if (preset?.kind === 'vertex') {
+      const vertexItems: (
+        | { key_json: unknown; quota_usd?: number; note?: string }
+        | { key: string;       quota_usd?: number; note?: string }
+      )[] = []
+      // For the results panel `key` column: filename when JSON, masked
+      // key preview when API key. Precomputed so the res.results loop
+      // below stays a simple index lookup.
+      const displayKeys: string[] = []
+      if (batchVertexKeyMode === 'json') {
+        if (batchVertexFiles.length === 0) return setBatchErr('请至少选择一个 Service Account JSON 文件')
+        for (const f of batchVertexFiles) {
+          vertexItems.push({ key_json: f.json, quota_usd: f.quotaUSD, note: f.note })
+          displayKeys.push(f.name)
+        }
+      } else {
+        for (const raw of batchVertexKeysText.split('\n')) {
+          const t = raw.trim()
+          if (!t || t.startsWith('#')) continue
+          const parts = t.split(/[\s,]+/)
+          const key = parts[0]
+          if (!key) continue
+          const item: { key: string; quota_usd?: number; note?: string } = { key }
+          if (parts[1]) {
+            const q = parseFloat(parts[1])
+            if (!isNaN(q) && q > 0) item.quota_usd = q
+          }
+          if (parts.length > 2) item.note = parts.slice(2).join(' ')
+          vertexItems.push(item)
+          displayKeys.push(key.length > 8 ? `${key.slice(0, 4)}…${key.slice(-4)}` : key)
+        }
+        if (vertexItems.length === 0) return setBatchErr('未解析到有效行')
+      }
+      setBatchBusy(true)
+      try {
+        const res = await api.remoteVertexCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: batchModels.trim(),
+          group: batchGroup.trim() || 'default',
+          region: batchRegion.trim() || 'global',
+          key_type: batchVertexKeyMode,
+          items: vertexItems,
+        })
+        setBatchResults(
+          res.results.map((r, idx) => ({
+            key: displayKeys[idx] ?? `item ${r.index}`,
+            ok: r.ok,
+            channel_id: r.channel_id,
+            error: r.error,
+          }))
+        )
+        // Refresh remote channel list so newly created rows appear.
+        void fetchChannels()
+      } catch (e: any) {
+        setBatchErr(e?.message || String(e))
+      } finally {
+        setBatchBusy(false)
+      }
+      return
+    }
+
+    // AWS Bedrock keeps the per-line credential textarea but needs a
+    // per-batch region (baked into the key + model_mapping) and an
+    // aws_key_type setting, so it bypasses the pending queue like Vertex.
+    if (preset?.kind === 'aws') {
+      const regions = batchAwsRegions.map(r => r.trim()).filter(Boolean)
+      if (regions.length === 0) return setBatchErr('AWS 需要至少选择一个 Region (例: us-east-1)')
+      const awsItems = collectBatchItems()
+      if (awsItems.length === 0) return setBatchErr('未解析到有效行')
+      setBatchBusy(true)
+      try {
+        const res = await api.remoteAwsCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: batchModels.trim(),
+          group: batchGroup.trim() || 'claude-aws',
+          regions,
+          key_type: batchAwsKeyMode,
+          ...(batchAwsProxy.trim() ? { proxy: batchAwsProxy.trim() } : {}),
+          items: awsItems,
+        })
+        // Backend fans out item×region (item outer, region inner), so map each
+        // result index back to its source key for the masked display.
+        setBatchResults(
+          res.results.map((r) => {
+            const itemIdx = Math.floor((r.index ?? 0) / regions.length)
+            const raw = awsItems[itemIdx]?.key ?? ''
+            const region = regions[(r.index ?? 0) % regions.length] ?? ''
+            const masked = raw.length > 8 ? `${raw.slice(0, 4)}…${raw.slice(-4)}` : raw
+            return {
+              key: region ? `${masked} @ ${region}` : masked,
+              ok: r.ok,
+              channel_id: r.channel_id,
+              error: r.error,
+            }
+          })
+        )
+        void fetchChannels()
+      } catch (e: any) {
+        setBatchErr(e?.message || String(e))
+      } finally {
+        setBatchBusy(false)
+      }
+      return
+    }
+
+    // Azure keeps the per-line key textarea (same as text presets) but
+    // needs per-batch base_url + api_version, so it bypasses both the
+    // pending queue and remoteChannelCreate lane like Vertex does.
+    if (preset?.kind === 'azure') {
+      if (!batchAzureBaseUrl.trim()) return setBatchErr('Azure 需要 Resource Endpoint (例: https://<resource>.openai.azure.com)')
+      const azureItems = collectBatchItems()
+      if (azureItems.length === 0) return setBatchErr('未解析到有效行')
+      setBatchBusy(true)
+      try {
+        const res = await api.remoteAzureCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: batchModels.trim(),
+          group: batchGroup.trim() || 'openai',
+          base_url: batchAzureBaseUrl.trim(),
+          api_version: batchAzureApiVersion.trim() || AZURE_DEFAULT_API_VERSION,
+          items: azureItems,
+        })
+        setBatchResults(
+          res.results.map((r, idx) => {
+            const raw = azureItems[idx]?.key ?? ''
+            const masked = raw.length > 8 ? `${raw.slice(0, 4)}…${raw.slice(-4)}` : raw
+            return {
+              key: masked,
+              ok: r.ok,
+              channel_id: r.channel_id,
+              error: r.error,
+            }
+          })
+        )
+        void fetchChannels()
+      } catch (e: any) {
+        setBatchErr(e?.message || String(e))
+      } finally {
+        setBatchBusy(false)
+      }
+      return
+    }
+
+    const items: { key: string; quota_usd?: number; note?: string; priority?: number }[] = collectBatchItems()
+    if (items.length === 0) return setBatchErr('未解析到有效行')
+
+    const basePriority = batchPriority.trim() ? parseInt(batchPriority.trim(), 10) : NaN
+    // In 'same' mode we pass the priority at batch level and every item
+    // inherits it. In sequential modes we compute per-item priority so the
+    // backend applies each independently.
+    let batchLevelPriority: number | undefined
+    if (!isNaN(basePriority) && basePriority > 0) {
+      if (batchPrioMode === 'same') {
+        batchLevelPriority = basePriority
+      } else {
+        const step = batchPrioMode === 'desc' ? -1 : 1
+        items.forEach((it, i) => { it.priority = Math.max(1, basePriority + i * step) })
+      }
+    }
+    // fullNamePrefix already computed above (before the Vertex branch).
+
+    setBatchBusy(true)
+    try {
+      if (batchQueue) {
+        // Queue path: stage the batch into remote_pending_key. The scheduler
+        // goroutine picks it up within 60s (or immediately via nudge) and
+        // uploads either all at once (pool_size=0) or drip-style (pool_size>0).
+        const poolSize = parseInt(batchPoolSize, 10)
+        if (isNaN(poolSize) || poolSize < 0) {
+          setBatchErr('pool size must be a non-negative integer')
+          return
+        }
+        const res = await api.remotePendingEnqueue({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          type: CHANNEL_TYPE_PRESETS.find(p => p.id === batchPresetID)?.type,
+          group: batchGroup.trim() || 'default',
+          tag: batchTag.trim() || undefined,
+          priority: batchLevelPriority,
+          models: batchModels.trim(),
+          pool_size: poolSize,
+          items,
+        })
+        setBatchResults([])
+        setBatchErr(null)
+        toast.success(`已入队 ${res.inserted} 条${res.skipped ? `（${res.skipped} 条跳过 / 已存在）` : ''}${poolSize > 0 ? `，池大小 ${poolSize}` : '，立即上传'}`)
+        void reloadPending()
+        setBatchOpen(false)
+        return
+      }
+      const res = await api.remoteChannelCreate({
+        profile_id: selectedID,
+        name_prefix: fullNamePrefix,
+        type: CHANNEL_TYPE_PRESETS.find(p => p.id === batchPresetID)?.type,
+        group: batchGroup.trim() || 'default',
+        tag: batchTag.trim() || undefined,
+        priority: batchLevelPriority,
+        models: batchModels.trim(),
+        items,
+      })
+      setBatchResults(res.results)
+      // Refresh the list so newly created rows show up.
+      void fetchChannels()
+    } catch (e: any) {
+      setBatchErr(e?.message || String(e))
+    } finally {
+      setBatchBusy(false)
+    }
+  }
+
+  const openRowEdit = (ch: RemoteChannel) => {
+    setRowChannel(ch)
+    setRowName(ch.name)
+    setRowTag(ch.tag)
+    setRowGroup(ch.group)
+    setRowStatus(ch.status)
+    setRowPriority(String(ch.priority ?? ''))
+    setRowQuotaUSD(ch.quota_usd != null ? String(ch.quota_usd) : '')
+    setRowNote(ch.note ?? '')
+    setRowAutoDisable(!!ch.auto_disable)
+    setRowAutoDisableReserveUSD(
+      ch.auto_disable_reserve_usd != null && ch.auto_disable_reserve_usd > 0
+        ? String(ch.auto_disable_reserve_usd)
+        : ''
+    )
+    setRowErr(null)
+    setRowOpen(true)
+  }
+
+  const submitRowEdit = async () => {
+    if (!selectedID || !rowChannel) return
+    setRowErr(null)
+    const patch: Parameters<typeof api.remoteChannelUpdate>[0] = {
+      profile_id: selectedID,
+      channel_id: rowChannel.id,
+    }
+    if (rowName !== rowChannel.name) patch.name = rowName
+    if (rowTag !== rowChannel.tag) patch.tag = rowTag
+    if (rowGroup !== rowChannel.group) patch.group = rowGroup
+    if (rowStatus !== rowChannel.status) patch.status = rowStatus
+    const priorityNum = rowPriority.trim() ? parseInt(rowPriority.trim(), 10) : undefined
+    if (priorityNum != null && !isNaN(priorityNum) && priorityNum !== rowChannel.priority) {
+      patch.priority = priorityNum
+    }
+    const quotaNum = rowQuotaUSD.trim() ? parseFloat(rowQuotaUSD.trim()) : null
+    const prevQuota = rowChannel.quota_usd ?? null
+    if (quotaNum !== prevQuota) {
+      patch.quota_usd = quotaNum // may be null to clear
+    }
+    if ((rowNote ?? '') !== (rowChannel.note ?? '')) {
+      patch.note = rowNote
+    }
+    if (rowAutoDisable !== !!rowChannel.auto_disable) {
+      patch.auto_disable = rowAutoDisable
+    }
+    const reserveNum = rowAutoDisableReserveUSD.trim()
+      ? parseFloat(rowAutoDisableReserveUSD.trim())
+      : 0
+    const prevReserve = rowChannel.auto_disable_reserve_usd ?? 0
+    if (!isNaN(reserveNum) && reserveNum >= 0 && reserveNum !== prevReserve) {
+      patch.auto_disable_reserve_usd = reserveNum
+    }
+    setRowBusy(true)
+    try {
+      await api.remoteChannelUpdate(patch)
+      setRowOpen(false)
+      // Refresh just this row.
+      try {
+        const r = await api.remoteChannelGet(selectedID, rowChannel.id)
+        setChannels(prev => prev.map(c => (c.id === rowChannel.id ? r.channel : c)))
+      } catch { /* fallthrough */ }
+    } catch (e: any) {
+      setRowErr(e?.message || String(e))
+    } finally {
+      setRowBusy(false)
+    }
+  }
+
+  const deleteRow = async (ch: RemoteChannel) => {
+    if (!selectedID) return
+    if (!(await confirmDialog({ message: `确认删除 "${ch.name}"？此操作会同时删除远端渠道，不可恢复。`, danger: true, confirmText: '删除' }))) return
+    try {
+      await api.remoteChannelDelete(selectedID, ch.id)
+      setChannels(prev => prev.filter(c => c.id !== ch.id))
+    } catch (e: any) {
+      toast.error('delete failed: ' + (e?.message || e))
+    }
+  }
+
+  const testRow = async (ch: RemoteChannel) => {
+    // We don't have the raw key on the frontend — the operator must paste it.
+    const key = await promptDialog({
+      title: '连通性测试',
+      message: `粘贴 ${ch.name} 的原始 key（不会被存储，仅用于本次连通性测试）:`,
+      placeholder: 'sk-... / AIza... / ...',
+    })
+    if (!key) return
+    setTestingID(ch.id)
+    try {
+      const res = await api.remoteTestKey(key.trim(), DEFAULT_TEST_MODEL)
+      const msg = res.ok
+        ? `✓ ${res.latency_ms}ms`
+        : `✗ ${res.status || ''} ${res.error || res.message || '失败'}`
+      setTestMsg(prev => ({ ...prev, [ch.id]: msg }))
+    } catch (e: any) {
+      setTestMsg(prev => ({ ...prev, [ch.id]: '✗ ' + (e?.message || e) }))
+    } finally {
+      setTestingID(null)
+    }
+  }
+
+  // Client-side date filter on channel.created_time. Dates are interpreted
+  // in UTC (Z suffix) so [today, today] = "since UTC 00:00 today, up to but
+  // not including UTC 00:00 tomorrow", independent of browser timezone.
+  const filteredChannels = useMemo(() => {
+    const startTS = filterStart ? Math.floor(new Date(filterStart + 'T00:00:00Z').getTime() / 1000) : 0
+    const endTS = filterEnd ? Math.floor(new Date(filterEnd + 'T00:00:00Z').getTime() / 1000) + 86400 : 0
+    if (!startTS && !endTS) return channels
+    return channels.filter(c => {
+      const t = c.created_time || 0
+      if (startTS && t < startTS) return false
+      if (endTS && t >= endTS) return false
+      return true
+    })
+  }, [channels, filterStart, filterEnd])
+
+  // Derived selection state — computed after filteredChannels so the
+  // header checkbox reflects the currently visible slice.
+  const someVisibleSelected = filteredChannels.some(c => selectedIDs.has(c.id))
+  const allVisibleSelected = filteredChannels.length > 0 && filteredChannels.every(c => selectedIDs.has(c.id))
+
+  const summary = useMemo(() => {
+    const totalUsedUSD = filteredChannels.reduce((s, c) => s + usdFromQuota(c.used_quota), 0)
+    const enabled = filteredChannels.filter(c => c.status === 1).length
+    const disabled = filteredChannels.length - enabled
+    // Realtime RPM / TPM come from the profile-wide /stat/summary endpoint
+    // (one remote call regardless of channel count), NOT from a per-row
+    // fan-out. Falls back to 0 when the summary hasn't loaded yet.
+    return {
+      count: filteredChannels.length,
+      totalUsedUSD,
+      enabled,
+      disabled,
+      totalRpm: statSummary?.rpm ?? 0,
+      totalTpm: statSummary?.tpm ?? 0,
+    }
+  }, [filteredChannels, statSummary])
+
+  const exportCSV = () => {
+    if (filteredChannels.length === 0) return
+    const header = ['ID', 'Name', 'Type', 'Group', 'Tag', 'Priority', 'Used USD', 'Δ USD (since baseline)', '额度 USD', '单价 CNY', 'Status', 'Created', 'Note']
+    const escape = (v: unknown) => {
+      const s = v == null ? '' : String(v)
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
+    }
+    const rows = filteredChannels.map(c => {
+      const usedUSD = usdFromQuota(c.used_quota)
+      const baseline = snapshotBaseline[c.id]
+      const deltaUSD = baseline ? usdFromQuota(c.used_quota - baseline.used_quota) : null
+      return [
+        c.id, c.name, c.type, c.group, c.tag, c.priority,
+        usedUSD.toFixed(4),
+        deltaUSD != null ? deltaUSD.toFixed(4) : '',
+        c.quota_usd != null ? c.quota_usd.toFixed(2) : '',
+        c.unit_price_cny != null ? c.unit_price_cny.toFixed(4) : '',
+        STATUS_LABEL[c.status] ?? c.status,
+        c.created_time ? new Date(c.created_time * 1000).toISOString() : '',
+        c.note || '',
+      ].map(escape).join(',')
+    })
+    const csv = [header.join(','), ...rows].join('\n')
+    // BOM so Excel opens it as UTF-8 without garbling.
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    const suffix = (filterStart || filterEnd) ? `_${filterStart || 'any'}_${filterEnd || 'any'}` : ''
+    const profileName = profiles.find(p => p.id === selectedID)?.name || 'remote'
+    a.href = url
+    a.download = `remote-channels_${profileName}${suffix}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  // Top-of-page actions: profile-level ops only. Everything else moved
+  // into the channels-table toolbar so it lives next to the data it
+  // affects. Profile CRUD is gated to super admin — admin sees an empty
+  // action row (channel operations still available inline).
+  const actions = isSuperAdmin ? (
+    <div className="flex items-center gap-2 flex-wrap">
+      <button
+        onClick={openCreate}
+        className="border border-border text-foreground rounded-md px-3 py-1.5 text-xs hover:bg-muted"
+      >
+        + New profile
+      </button>
+    </div>
+  ) : null
+
+  // Channel-table toolbar. Rendered above the table, right-aligned so
+  // the numbers stay dominant. Filters + row-selection actions + fetch.
+  const tableToolbar = (
+    <div className="flex items-center gap-2 flex-wrap justify-end">
+      <div className="flex items-center gap-1">
+        <input
+          type="date"
+          value={filterStart}
+          onChange={e => setFilterStart(e.target.value)}
+          className="border border-border rounded-md px-2 py-1.5 text-xs bg-card"
+          title="创建时间 ≥"
+        />
+        <span className="text-muted-foreground text-xs">→</span>
+        <input
+          type="date"
+          value={filterEnd}
+          onChange={e => setFilterEnd(e.target.value)}
+          className="border border-border rounded-md px-2 py-1.5 text-xs bg-card"
+          title="创建时间 ≤"
+        />
+        {(filterStart || filterEnd) && (
+          <button
+            onClick={() => { setFilterStart(''); setFilterEnd('') }}
+            className="text-[10px] text-muted-foreground hover:text-foreground px-1"
+            title="清除日期筛选"
+          >×</button>
+        )}
+      </div>
+      <button
+        onClick={exportCSV}
+        disabled={filteredChannels.length === 0}
+        className="border border-border text-foreground rounded-md px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-40"
+      >
+        导出 CSV
+      </button>
+      <button
+        onClick={openBulkCost}
+        disabled={selectedIDs.size === 0}
+        className="border border-warning/40 text-warning rounded-md px-3 py-1.5 text-xs hover:bg-warning/10 disabled:opacity-40"
+        title="将勾选行的单价 (CNY) 批量写到本地"
+      >
+        批量设成本
+        {selectedIDs.size > 0 && <span className="ml-1 text-warning font-medium">({selectedIDs.size})</span>}
+      </button>
+      <button
+        onClick={openBulkPrio}
+        disabled={selectedIDs.size === 0}
+        className="border border-indigo-500 text-indigo-700 rounded-md px-3 py-1.5 text-xs hover:bg-indigo-50 disabled:opacity-40"
+        title="将勾选行的优先级批量改到远端"
+      >
+        批量改优先级
+        {selectedIDs.size > 0 && <span className="ml-1 text-indigo-600 font-medium">({selectedIDs.size})</span>}
+      </button>
+      <button
+        onClick={openBatch}
+        disabled={!selectedID}
+        className="border border-success/40 text-success rounded-md px-3 py-1.5 text-xs hover:bg-success/10 disabled:opacity-40"
+      >
+        + 批量上 key
+      </button>
+      <div className="inline-flex items-center gap-1 border border-destructive/40 rounded-md">
+        <select
+          value={errWindowSec}
+          onChange={e => setErrWindowSec(parseInt(e.target.value, 10))}
+          className="text-xs px-2 py-1.5 bg-card text-destructive border-r border-destructive/40 focus:outline-none rounded-l-md"
+          title="错误率统计的时间窗口"
+        >
+          <option value={5 * 60}>过去 5 分钟</option>
+          <option value={15 * 60}>过去 15 分钟</option>
+          <option value={60 * 60}>过去 1 小时</option>
+          <option value={6 * 60 * 60}>过去 6 小时</option>
+          <option value={24 * 60 * 60}>过去 24 小时</option>
+        </select>
+        <button
+          onClick={loadErrorRates}
+          disabled={!selectedID || errRateLoading || channels.length === 0}
+          className="text-destructive px-2.5 py-1.5 text-xs hover:bg-destructive/10 disabled:opacity-40 rounded-r-md"
+          title="用选中的时间窗口拉每个渠道的成功/错误数，计算错误率。5 分钟缓存。"
+        >
+          {errRateLoading ? '加载中…' : '加载错误率'}
+        </button>
+      </div>
+      <button
+        onClick={fetchChannels}
+        disabled={!selectedID || fetching}
+        className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700 disabled:opacity-50"
+      >
+        {fetching ? 'Fetching…' : 'Fetch channels'}
+      </button>
+    </div>
+  )
+
+  return (
+    <Layout
+      title="Remote Channels"
+      subtitle={`拉取外部 new-api 部署的所有渠道与累计用量${refreshedAt ? ` · 更新于 ${refreshedAt}` : ''}`}
+      actions={actions}
+    >
+      <div className="space-y-4">
+        {/* Profile selector */}
+        <section className="bg-card border border-border rounded-xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="mono-label">Profile</h2>
+            {loadingProfiles && <span className="text-[11px] text-muted-foreground">loading…</span>}
+          </div>
+          {profiles.length === 0 && !loadingProfiles && (
+            <p className="text-xs text-muted-foreground">
+              {isSuperAdmin
+                ? <>还没有 profile，点右上角 <span className="font-medium">"+ New profile"</span> 添加。</>
+                : <>还没有 profile。联系 super admin 创建后再回来。</>}
+            </p>
+          )}
+          {profiles.length > 0 && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+              {profiles.map(p => {
+                const active = selectedID === p.id
+                return (
+                  <div
+                    key={p.id}
+                    onClick={() => setSelectedID(p.id)}
+                    className={`border rounded-md p-3 cursor-pointer transition-colors ${
+                      active ? 'border-ring bg-muted' : 'border-border hover:border-border'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-foreground truncate">{p.name}</div>
+                        {/* URL is intentionally not shown on the card,
+                            even for super admin — it's still editable
+                            through the edit modal. Keeps the display
+                            surface clean of credential-adjacent info. */}
+                        {isSuperAdmin && (
+                          <div className="text-[10px] text-muted-foreground mt-1">
+                            user_id={p.user_id} · token {p.has_token ? '已保存' : '未设'}
+                          </div>
+                        )}
+                      </div>
+                      {isSuperAdmin && (
+                        <div className="flex flex-col gap-1 shrink-0">
+                          <button
+                            onClick={e => { e.stopPropagation(); openEdit(p) }}
+                            className="text-[10px] text-muted-foreground hover:text-foreground"
+                          >编辑</button>
+                          <button
+                            onClick={e => { e.stopPropagation(); void deleteProfile(p) }}
+                            className="text-[10px] text-destructive hover:text-destructive"
+                          >删除</button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </section>
+
+        {/* 到额自动禁用循环：全局开关 + 频率。仅 admin+ 可见/可改
+            （后端路由挂在 adminAPI 上）。开关是全局的；具体是否作用
+            到某个 channel 还要看这个 channel 的 auto_disable 勾选 +
+            额度是否设置。 */}
+        <section className="bg-card border border-border rounded-xl p-4">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="mono-label">
+              到额自动禁用（全局）
+            </h2>
+            {autoDisableMsg && (
+              <span className={`text-[11px] ${autoDisableMsg.ok ? 'text-success' : 'text-destructive'}`}>
+                {autoDisableMsg.text}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center flex-wrap gap-4 text-sm">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={autoDisableEnabled}
+                disabled={autoDisableSaving}
+                onChange={e => void saveAutoDisableConfig({ enabled: e.target.checked })}
+                className="rounded border-border"
+              />
+              <span className="text-foreground">启用循环</span>
+            </label>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-muted-foreground">检查间隔</span>
+              <input
+                type="number"
+                min={5}
+                max={3600}
+                step={5}
+                value={autoDisableIntervalSec}
+                onChange={e => setAutoDisableIntervalSec(e.target.value)}
+                onBlur={() => {
+                  const n = parseInt(autoDisableIntervalSec.trim(), 10)
+                  if (!isNaN(n) && n >= 5 && n <= 3600) {
+                    void saveAutoDisableConfig({ interval_sec: n })
+                  }
+                }}
+                disabled={autoDisableSaving}
+                className="w-24 border border-border rounded-md px-2 py-1 text-sm tabular-nums focus:outline-none focus:border-ring"
+              />
+              <span className="text-[11px] text-muted-foreground">秒（5–3600）</span>
+            </div>
+          </div>
+          <p className="text-[10px] text-muted-foreground mt-2 leading-relaxed">
+            仅对勾选了「到额自动禁用」<em>且</em>已设置额度的渠道生效。
+            触发条件：<code className="font-mono">已用 ≥ 额度 − 保留额</code>，命中后把远端 status 置为 2（手动禁用）。
+            循环独立于 15 分钟快照，可随时开关。
+          </p>
+        </section>
+        {fetchErr && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {fetchErr}
+          </div>
+        )}
+
+        {/* Upload queue (drip pool). Collapsed by default; expands into a
+            table when the operator wants to see what's staged. Pool
+            throttle knobs live in the header so they're right next to
+            the queue they control. */}
+        {selectedID && (
+          <section className="bg-card border border-border rounded-xl overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setPendingOpen(v => !v)}
+              className="w-full flex items-center justify-between px-4 py-2.5 border-b border-border hover:bg-muted"
+            >
+              <div className="text-sm font-semibold text-foreground flex items-center gap-2">
+                上 Key 队列
+                <span className="mono-label">
+                  {pending.filter(p => p.status === 'pending').length} pending ·{' '}
+                  {pending.filter(p => p.status === 'active').length} active ·{' '}
+                  {pending.filter(p => p.status === 'used').length} used ·{' '}
+                  <span className={pending.filter(p => p.status === 'failed').length > 0 ? 'text-destructive' : ''}>
+                    {pending.filter(p => p.status === 'failed').length} failed
+                  </span>
+                </span>
+              </div>
+              <span className="text-muted-foreground">{pendingOpen ? '▾' : '▸'}</span>
+            </button>
+            {/* Pool 节流 — 前一批 key 死光后，下一 tick 从 pending 里
+                按 FIFO 取 N 个上传，priority 自动累加。仅对 pool 模式
+                (pool_size > 0) 的行生效；pool_size=0 的立即上传不受影响。
+                自动模式打开时"每次上"变成上限，实际值 =
+                min(cap, ceil(rpm / rpm_base))，rpm < rpm_min 时暂停上传。 */}
+            <div
+              className="flex flex-wrap items-center gap-3 px-4 py-2.5 border-b border-border bg-muted/50"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="mono-label">
+                Pool 节流
+              </div>
+              <label className="flex items-center gap-1.5 text-xs text-foreground">
+                检查间隔
+                <input
+                  value={poolIntervalSec}
+                  onChange={e => { setPoolIntervalSec(e.target.value); setPoolDirty(true) }}
+                  inputMode="numeric"
+                  className="w-16 border border-border rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none focus:border-ring"
+                />
+                <span className="text-[10px] text-muted-foreground">秒</span>
+              </label>
+              <label className="flex items-center gap-1.5 text-xs text-foreground">
+                {poolAutoMode ? '上限' : '每次上'}
+                <input
+                  value={poolBatchSize}
+                  onChange={e => { setPoolBatchSize(e.target.value); setPoolDirty(true) }}
+                  inputMode="numeric"
+                  className="w-14 border border-border rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none focus:border-ring"
+                />
+                <span className="text-[10px] text-muted-foreground">个 key</span>
+              </label>
+              <label className="flex items-center gap-1.5 text-xs text-foreground border-l border-border pl-3 ml-1">
+                <input
+                  type="checkbox"
+                  checked={poolAutoMode}
+                  onChange={e => { setPoolAutoMode(e.target.checked); setPoolDirty(true) }}
+                />
+                自动模式
+              </label>
+              {poolAutoMode && (
+                <>
+                  <label className="flex items-center gap-1.5 text-xs text-foreground">
+                    RPM/key
+                    <input
+                      value={poolRPMBase}
+                      onChange={e => { setPoolRPMBase(e.target.value); setPoolDirty(true) }}
+                      inputMode="numeric"
+                      className="w-16 border border-border rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none focus:border-ring"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1.5 text-xs text-foreground">
+                    低于
+                    <input
+                      value={poolRPMMin}
+                      onChange={e => { setPoolRPMMin(e.target.value); setPoolDirty(true) }}
+                      inputMode="numeric"
+                      className="w-14 border border-border rounded px-1.5 py-0.5 text-xs tabular-nums text-right focus:outline-none focus:border-ring"
+                    />
+                    <span className="text-[10px] text-muted-foreground">RPM 停</span>
+                  </label>
+                </>
+              )}
+              <button
+                type="button"
+                onClick={savePoolTuning}
+                disabled={poolSaving || !poolDirty}
+                className="bg-brand text-white rounded px-2 py-0.5 text-xs hover:bg-brand-700 disabled:opacity-40"
+              >
+                {poolSaving ? '保存中…' : '保存'}
+              </button>
+              {poolMsg && (
+                <span className={`text-[11px] ${poolMsg.ok ? 'text-success' : 'text-destructive'}`}>
+                  {poolMsg.text}
+                </span>
+              )}
+              <span className="text-[10px] text-muted-foreground ml-auto">
+                Priority = 存活最高 + 1，逐条累加
+              </span>
+            </div>
+            {pendingOpen && pending.length === 0 && (
+              <div className="px-4 py-4 text-xs text-muted-foreground">队列为空</div>
+            )}
+            {pendingOpen && pending.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead className="bg-muted border-b border-border text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium">ID</th>
+                      <th className="px-3 py-2 text-left font-medium">Key</th>
+                      <th className="px-3 py-2 text-left font-medium">Status</th>
+                      <th className="px-3 py-2 text-right font-medium">Pool</th>
+                      <th className="px-3 py-2 text-right font-medium">Quota</th>
+                      <th className="px-3 py-2 text-left font-medium">Prefix</th>
+                      <th className="px-3 py-2 text-right font-medium">Channel</th>
+                      <th className="px-3 py-2 text-right font-medium">Try</th>
+                      <th className="px-3 py-2 text-left font-medium">Error / 更新</th>
+                      <th className="px-3 py-2 text-left font-medium">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pending.map(row => (
+                      <tr key={row.id} className="border-b border-border hover:bg-muted">
+                        <td className="px-3 py-2 tabular-nums">{row.id}</td>
+                        <td className="px-3 py-2 font-mono text-[11px]">{row.key_masked}</td>
+                        <td className="px-3 py-2">
+                          <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] ${
+                            row.status === 'active' ? 'text-success bg-[#E6F4EE]'
+                              : row.status === 'used' ? 'bg-muted text-muted-foreground'
+                              : row.status === 'failed' ? 'bg-destructive/10 text-destructive'
+                              : 'bg-primary/10 text-primary'
+                          }`}>{row.status}</span>
+                        </td>
+                        <td className="px-3 py-2 tabular-nums text-right">
+                          {row.pool_size === 0 ? <span className="text-muted-foreground">立即</span> : row.pool_size}
+                        </td>
+                        <td className="px-3 py-2 tabular-nums text-right">
+                          {row.quota_usd > 0 ? '$' + row.quota_usd.toFixed(2) : '—'}
+                        </td>
+                        <td className="px-3 py-2 text-muted-foreground">{row.name_prefix || '—'}</td>
+                        <td className="px-3 py-2 tabular-nums text-right">
+                          {row.remote_channel_id > 0 ? row.remote_channel_id : '—'}
+                        </td>
+                        <td className="px-3 py-2 tabular-nums text-right">{row.attempts}</td>
+                        <td className="px-3 py-2 text-[10px] text-muted-foreground max-w-[240px] truncate" title={row.failed_reason || fmtTime(row.updated_at)}>
+                          {row.failed_reason
+                            ? <span className="text-destructive">{row.failed_reason}</span>
+                            : fmtTime(row.updated_at)}
+                        </td>
+                        <td className="px-3 py-2">
+                          {(row.status === 'pending' || row.status === 'failed') && (
+                            <button
+                              onClick={() => void cancelPending(row)}
+                              className="text-[10px] text-destructive hover:text-destructive"
+                            >
+                              删除
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Studio policy — flip whether each studio may enqueue new keys
+            on this profile. Rows come from any explicit policy row + any
+            studio that has ever appeared as remote_pending_key.tag. */}
+        {selectedID && studioPolicies.length > 0 && (
+          <section className="bg-card border border-border rounded-xl overflow-hidden">
+            <div className="px-4 py-2.5 border-b border-border flex items-center justify-between">
+              <div>
+                <div className="text-sm font-semibold text-foreground">工作室上 Key 策略</div>
+                <div className="text-[11px] text-muted-foreground mt-0.5">
+                  关掉后，对应工作室提交批量 Key 时会被拒绝。默认接收。
+                </div>
+              </div>
+              {policyErr && <span className="text-[11px] text-destructive">{policyErr}</span>}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-muted border-b border-border text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-medium">Studio</th>
+                    <th className="px-3 py-2 text-left font-medium">状态</th>
+                    <th className="px-3 py-2 text-left font-medium">最后调整</th>
+                    <th className="px-3 py-2 text-right font-medium">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {studioPolicies.map(p => (
+                    <tr key={p.studio} className="border-b border-border hover:bg-muted">
+                      <td className="px-3 py-2 font-mono">{p.studio}</td>
+                      <td className="px-3 py-2">
+                        {p.accepting_keys ? (
+                          <span className="inline-block px-2 py-0.5 rounded-full text-[10px] text-success bg-[#E6F4EE]">
+                            接收{p.has_row ? '' : '（默认）'}
+                          </span>
+                        ) : (
+                          <span className="inline-block px-2 py-0.5 rounded-full text-[10px] bg-destructive/10 text-destructive">
+                            拒绝
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-[10px] text-muted-foreground">
+                        {p.has_row ? fmtTime(p.updated_at) : '—'}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <button
+                          type="button"
+                          onClick={() => void toggleStudioPolicy(p.studio, !p.accepting_keys)}
+                          disabled={policyBusy === p.studio}
+                          className={`text-[11px] px-2 py-0.5 rounded border disabled:opacity-40 ${
+                            p.accepting_keys
+                              ? 'border-destructive/40 text-destructive hover:bg-destructive/10'
+                              : 'border-success/40 text-success hover:bg-success/10'
+                          }`}
+                        >
+                          {policyBusy === p.studio ? '…' : p.accepting_keys ? '关闭上 Key' : '开放上 Key'}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+        {selectedID != null && tableToolbar}
+        {channels.length > 0 && meta && (
+          <>
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+              <MetricCard label="渠道总数" value={String(summary.count)} />
+              <MetricCard label="启用" value={String(summary.enabled)} color="text-success" />
+              <MetricCard label="禁用" value={String(summary.disabled)} color="text-destructive" />
+              <MetricCard label="累计已用" value={'$' + summary.totalUsedUSD.toFixed(2)} color="text-primary" />
+              <MetricCard
+                label="实时 RPM"
+                value={summary.totalRpm.toLocaleString()}
+                color={summary.totalRpm > 0 ? 'text-success' : 'text-muted-foreground'}
+              />
+              <MetricCard
+                label="实时 TPM"
+                value={summary.totalTpm.toLocaleString()}
+                color={summary.totalTpm > 0 ? 'text-success' : 'text-muted-foreground'}
+              />
+            </div>
+            {meta.truncated && (
+              <div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+                结果被截断 —— 远端 total={meta.total}, 只拉到 {channels.length}。远端超过 5000 个渠道时启用。
+              </div>
+            )}
+            {selectedID && (
+              <ProfileErrorSummary
+                profileID={selectedID}
+                windowSec={errWindowSec}
+                onWindowChange={setErrWindowSec}
+              />
+            )}
+            <div className="bg-card border border-border rounded-xl overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead className="bg-muted border-b border-border text-muted-foreground">
+                    <tr>
+                      <th className="px-2 py-2 text-center font-medium">
+                        <input
+                          type="checkbox"
+                          checked={allVisibleSelected}
+                          ref={el => { if (el) el.indeterminate = someVisibleSelected && !allVisibleSelected }}
+                          onChange={e => toggleAllSelected(filteredChannels, e.target.checked)}
+                          title="全选当前视图"
+                        />
+                      </th>
+                      <th className="px-3 py-2 text-left font-medium" title="点击 📈 展开 24h 曲线"></th>
+                      <th className="px-3 py-2 text-left font-medium">ID</th>
+                      <th className="px-3 py-2 text-left font-medium">名称</th>
+                      <th className="px-3 py-2 text-left font-medium">Type</th>
+                      <th className="px-3 py-2 text-left font-medium">Group</th>
+                      <th className="px-3 py-2 text-left font-medium">Tag</th>
+                      <th className="px-3 py-2 text-right font-medium">Priority</th>
+                      <th className="px-3 py-2 text-right font-medium">已用 (USD)</th>
+                      <th className="px-3 py-2 text-right font-medium" title="距上一次后台快照的用量增量">Δ</th>
+                      <th className="px-3 py-2 text-right font-medium">额度 (USD)</th>
+                      <th className="px-3 py-2 text-right font-medium" title="本地维护的上游成本, CNY / USD 额度">单价 CNY</th>
+                      <th className="px-3 py-2 text-left font-medium">状态</th>
+                      <th className="px-3 py-2 text-right font-medium" title="过去 60 秒的错误率 = err_rpm / (rpm + err_rpm)。点击单元格查看错误类型分桶。">错误率</th>
+                      <th className="px-3 py-2 text-left font-medium">Note</th>
+                      <th className="px-3 py-2 text-left font-medium">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredChannels.map(c => {
+                      const usedUSD = usdFromQuota(c.used_quota)
+                      const pct = c.quota_usd && c.quota_usd > 0 ? Math.min(100, (usedUSD / c.quota_usd) * 100) : null
+                      // Δ vs last background snapshot. If we have no baseline
+                      // yet (channel first seen this session), leave it blank
+                      // rather than showing a misleading zero.
+                      const baseline = snapshotBaseline[c.id]
+                      const deltaUSD = baseline ? usdFromQuota(c.used_quota - baseline.used_quota) : null
+                      const isOpen = expandedRow === c.id
+                      const series = seriesCache[c.id]
+                      return (
+                        <FragmentRow key={c.id}>
+                          <tr className={`border-b border-border hover:bg-muted ${selectedIDs.has(c.id) ? 'bg-primary/10' : ''}`}>
+                            <td className="px-2 py-2 text-center">
+                              <input
+                                type="checkbox"
+                                checked={selectedIDs.has(c.id)}
+                                onChange={e => toggleRowSelected(c.id, e.target.checked)}
+                              />
+                            </td>
+                            <td className="px-2 py-2 text-center">
+                              <button
+                                onClick={() => void toggleSparkline(c.id)}
+                                className={`text-[10px] ${isOpen ? 'text-success' : 'text-muted-foreground hover:text-foreground'}`}
+                                title={isOpen ? '收起' : '查看 24h 曲线'}
+                              >
+                                {isOpen ? '▾' : '▸'}
+                              </button>
+                            </td>
+                            <td className="px-3 py-2 tabular-nums">{c.id}</td>
+                            <td className="px-3 py-2 font-mono text-[11px] max-w-[280px] truncate" title={c.name}>{c.name}</td>
+                            <td className="px-3 py-2 tabular-nums">{c.type}</td>
+                            <td className="px-3 py-2">{c.group || '—'}</td>
+                            <td className="px-3 py-2 text-muted-foreground">{c.tag || '—'}</td>
+                            <td className="px-3 py-2 tabular-nums text-right">{c.priority}</td>
+                            <td className="px-3 py-2 tabular-nums text-right font-medium">${usedUSD.toFixed(2)}</td>
+                            <td className="px-3 py-2 tabular-nums text-right">
+                              {deltaUSD != null ? (
+                                <span
+                                  className={deltaUSD > 0 ? 'text-destructive' : 'text-muted-foreground'}
+                                  title={baseline ? `since ${new Date(baseline.captured_at * 1000).toLocaleTimeString('zh-CN')}` : ''}
+                                >
+                                  {deltaUSD > 0 ? '+' : ''}${deltaUSD.toFixed(4)}
+                                </span>
+                              ) : (
+                                <span className="text-muted-foreground">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 tabular-nums text-right">
+                              {c.quota_usd != null ? (
+                                <div className="flex flex-col items-end gap-0.5">
+                                  <span>${c.quota_usd.toFixed(2)}</span>
+                                  {pct != null && (
+                                    <div className="w-16 h-1 bg-muted rounded overflow-hidden">
+                                      <div
+                                        className={`h-full ${pct >= 100 ? 'bg-destructive' : pct >= 80 ? 'bg-warning' : 'bg-success'}`}
+                                        style={{ width: pct + '%' }}
+                                      />
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-muted-foreground">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 tabular-nums text-right">
+                              {c.unit_price_cny != null ? (
+                                <span className="text-foreground">¥{c.unit_price_cny.toFixed(4)}</span>
+                              ) : <span className="text-muted-foreground">—</span>}
+                            </td>
+                            <td className="px-3 py-2">
+                              <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] ${STATUS_CLS[c.status] ?? 'bg-muted text-muted-foreground'}`}>
+                                {STATUS_LABEL[c.status] ?? c.status}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 tabular-nums text-right">
+                              <ErrorRateCell
+                                stat={errStats[c.id]}
+                                onOpen={() => setBreakdownFor({ id: c.id, name: c.name })}
+                              />
+                            </td>
+                            <td className="px-3 py-2 text-muted-foreground max-w-[180px] truncate" title={c.note || ''}>
+                              {c.note || '—'}
+                            </td>
+                            <td className="px-3 py-2">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <button
+                                  onClick={() => openRowEdit(c)}
+                                  className="text-[10px] text-muted-foreground hover:text-foreground"
+                                >编辑</button>
+                                <button
+                                  onClick={() => void testRow(c)}
+                                  disabled={testingID === c.id}
+                                  className="text-[10px] text-primary hover:text-primary disabled:opacity-40"
+                                >{testingID === c.id ? '测试中…' : '测试'}</button>
+                                <button
+                                  onClick={() => void deleteRow(c)}
+                                  className="text-[10px] text-destructive hover:text-destructive"
+                                >删除</button>
+                                {testMsg[c.id] && (
+                                  <span
+                                    className={`text-[10px] ${testMsg[c.id].startsWith('✓') ? 'text-success' : 'text-destructive'}`}
+                                    title={testMsg[c.id]}
+                                  >
+                                    {testMsg[c.id].length > 24 ? testMsg[c.id].slice(0, 24) + '…' : testMsg[c.id]}
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                          {isOpen && (
+                            <tr className="bg-muted/60 border-b border-border">
+                              <td colSpan={16} className="px-4 py-3">
+                                {seriesLoading === c.id ? (
+                                  <div className="text-[11px] text-muted-foreground">加载 24h 数据…</div>
+                                ) : series && series.length >= 2 ? (
+                                  <Sparkline points={series} />
+                                ) : (
+                                  <div className="text-[11px] text-muted-foreground">
+                                    暂无历史点（后台每 15 min 采一次；等下一轮就有数据了）
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                        </FragmentRow>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="px-3 py-2 text-[10px] text-muted-foreground border-t border-border">
+                创建时间列已从表格移除以节省空间；如需查看，将鼠标悬停到名称。
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Modal: bulk set unit_price_cny across the selected rows.
+          Purely local — never touches the remote. */}
+      {bulkCostOpen && (
+        <div
+          className="fixed inset-0 z-50 flex justify-end bg-black/50"
+          onClick={() => !bulkCostBusy && setBulkCostOpen(false)}
+        >
+          <div
+            className="drawer-panel max-w-md p-5"
+            onClick={e => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-semibold text-foreground mb-1">批量设成本</h3>
+            <p className="text-xs text-muted-foreground mb-4">
+              将 <span className="font-medium text-foreground">{selectedIDs.size}</span> 个选中渠道的单价改为下面填写的值 (CNY / 每 USD 上游额度)。仅本地存储，不写远端。
+              <br />
+              <span className="text-muted-foreground">下游折扣按 profile 每日单独在 Profit 页面配置。</span>
+            </p>
+            <Field label="单价 (CNY)">
+              <input
+                type="number"
+                step="0.001"
+                min="0"
+                value={bulkCostValue}
+                onChange={e => setBulkCostValue(e.target.value)}
+                placeholder="例如 4.3"
+                autoFocus
+                className="w-full border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
+              />
+            </Field>
+            {bulkCostErr && <p className="mt-2 text-xs text-destructive">{bulkCostErr}</p>}
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setBulkCostOpen(false)}
+                disabled={bulkCostBusy}
+                className="border border-border rounded-md px-3 py-1.5 text-sm text-foreground hover:bg-muted"
+              >
+                取消
+              </button>
+              <button
+                onClick={submitBulkCost}
+                disabled={bulkCostBusy}
+                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
+              >
+                {bulkCostBusy ? '保存中…' : `保存 (${selectedIDs.size})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: bulk update priority. Same three modes as the
+          batch-upload priority selector. Sequential (desc/asc) walks
+          selected channels by ±1 from the base, ordered by channel_id
+          ascending so the result is stable across sessions. */}
+      {bulkPrioOpen && (
+        <div
+          className="fixed inset-0 z-50 flex justify-end bg-black/50"
+          onClick={() => !bulkPrioBusy && setBulkPrioOpen(false)}
+        >
+          <div
+            className="drawer-panel max-w-md p-5"
+            onClick={e => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-semibold text-foreground mb-1">批量改优先级</h3>
+            <p className="text-xs text-muted-foreground mb-4">
+              选中 <span className="font-medium text-foreground">{selectedIDs.size}</span> 个渠道，改到远端。
+              <br />
+              <span className="text-muted-foreground">顺序模式下按 channel_id 升序依次分配，priority 最小 1（负值会被夹到 1）。</span>
+            </p>
+            <div className="space-y-3">
+              <Field label={`起始优先级${bulkPrioMode === 'desc' ? '（base − i）' : bulkPrioMode === 'asc' ? '（base + i）' : ''}`}>
+                <div className="flex gap-1">
+                  <input
+                    type="number"
+                    step="1"
+                    min="1"
+                    value={bulkPrioValue}
+                    onChange={e => setBulkPrioValue(e.target.value)}
+                    placeholder={bulkPrioMode === 'same' ? '例如 1001' : '起始 base'}
+                    autoFocus
+                    className="flex-1 border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
+                  />
+                  <select
+                    value={bulkPrioMode}
+                    onChange={e => setBulkPrioMode(e.target.value as 'same' | 'desc' | 'asc')}
+                    className="border border-border rounded-md px-2 py-1.5 text-sm bg-card focus:outline-none focus:border-ring"
+                    title="统一 = 所有 key 同一值；顺序 = 每个 key 依次递减/递增"
+                  >
+                    <option value="same">统一</option>
+                    <option value="desc">顺序 ↓</option>
+                    <option value="asc">顺序 ↑</option>
+                  </select>
+                </div>
+              </Field>
+              {bulkPrioProgress && (
+                <div className="text-xs text-muted-foreground">
+                  进度: {bulkPrioProgress.done} / {bulkPrioProgress.total}
+                  <div className="mt-1 h-1 bg-muted rounded overflow-hidden">
+                    <div
+                      className="h-full bg-indigo-500"
+                      style={{ width: `${(bulkPrioProgress.done / Math.max(1, bulkPrioProgress.total)) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+              {bulkPrioErr && <p className="text-xs text-destructive">{bulkPrioErr}</p>}
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setBulkPrioOpen(false)}
+                disabled={bulkPrioBusy}
+                className="border border-border rounded-md px-3 py-1.5 text-sm text-foreground hover:bg-muted"
+              >
+                取消
+              </button>
+              <button
+                onClick={submitBulkPrio}
+                disabled={bulkPrioBusy}
+                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
+              >
+                {bulkPrioBusy ? `保存中… ${bulkPrioProgress?.done ?? 0}/${bulkPrioProgress?.total ?? 0}` : `保存 (${selectedIDs.size})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: batch upload keys */}
+      {batchOpen && (
+        <div
+          className="fixed inset-0 z-50 flex justify-end bg-black/50"
+          onClick={() => !batchBusy && setBatchOpen(false)}
+        >
+          <div
+            className="drawer-panel max-w-2xl p-5"
+            onClick={e => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-semibold text-foreground mb-3">批量上 key 到远端 new-api</h3>
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <Field label="名字中间段（最终 = <日期>-<你填>-<key末8>-<hash8>）">
+                <div className="flex items-center gap-1.5">
+                  <input
+                    value={batchDatePrefix}
+                    onChange={e => setBatchDatePrefix(e.target.value)}
+                    placeholder={todayYYYYMMDD()}
+                    className="w-24 border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring tabular-nums"
+                  />
+                  <span className="text-[11px] text-muted-foreground font-mono">-</span>
+                  <input
+                    value={batchPrefix}
+                    onChange={e => setBatchPrefix(e.target.value)}
+                    placeholder="例如 pipi-a"
+                    className="flex-1 border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+                  />
+                </div>
+              </Field>
+              <Field label="Group">
+                <input
+                  value={batchGroup}
+                  onChange={e => setBatchGroup(e.target.value)}
+                  placeholder="default"
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+                />
+              </Field>
+              <Field label="Tag（可选）">
+                <input
+                  value={batchTag}
+                  onChange={e => setBatchTag(e.target.value)}
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+                />
+              </Field>
+              <Field label={`Priority${batchPrioMode === 'desc' ? '（base − i）' : batchPrioMode === 'asc' ? '（base + i）' : '（可选）'}`}>
+                <div className="flex gap-1">
+                  <input
+                    type="number"
+                    min="0"
+                    value={batchPriority}
+                    onChange={e => setBatchPriority(e.target.value)}
+                    placeholder={batchPrioMode === 'same' ? '例如 1001' : '起始 base'}
+                    className="flex-1 border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
+                  />
+                  <select
+                    value={batchPrioMode}
+                    onChange={e => setBatchPrioMode(e.target.value as 'same' | 'desc' | 'asc')}
+                    className="border border-border rounded-md px-2 py-1.5 text-sm bg-card focus:outline-none focus:border-ring"
+                    title="统一 = 所有 key 用同一 priority；顺序 = 每个 key 依次递减/递增"
+                  >
+                    <option value="same">统一</option>
+                    <option value="desc">顺序 ↓</option>
+                    <option value="asc">顺序 ↑</option>
+                  </select>
+                </div>
+              </Field>
+            </div>
+
+            {/* Queue mode toggle. When on, keys stage into
+                remote_pending_key and the scheduler goroutine uploads
+                them. Immediate mode (default) is the original
+                synchronous path. */}
+            <div className="mb-3 rounded-md border border-border bg-muted p-3 space-y-2">
+              <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={batchQueue}
+                  onChange={e => setBatchQueue(e.target.checked)}
+                />
+                使用队列（定时上传 / drip 池）
+              </label>
+              {batchQueue && (
+                <div className="pl-6 space-y-1.5">
+                  <label className="block text-[11px] text-muted-foreground">
+                    Pool size（<span className="text-muted-foreground">0 = 全部立即上；N = 一批 N 个，全部用完了再上下一批 N 个</span>）
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    value={batchPoolSize}
+                    onChange={e => setBatchPoolSize(e.target.value)}
+                    className="w-24 border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
+                  />
+                  <p className="text-[10px] text-muted-foreground">
+                    队列由后台 goroutine 每 20s 扫描一次；只有当整批 key 都被 remote 自动禁用（status ≠ 1），才会一起上下一批。上传失败会重试 3 次。
+                  </p>
+                </div>
+              )}
+            </div>
+            <Field label="渠道类型">
+              {/* Custom dropdown so each provider shows its coloured logo. */}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setBatchTypeOpen(v => !v)}
+                  className="w-full flex items-center justify-between gap-2 border border-border rounded-md px-2 py-1.5 text-sm bg-card focus:outline-none focus:border-ring"
+                >
+                  {(() => {
+                    const cur = CHANNEL_TYPE_PRESETS.find(x => x.id === batchPresetID) ?? CHANNEL_TYPE_PRESETS[0]
+                    return <ProviderOption type={cur.type} label={cur.label} size={20} />
+                  })()}
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`text-muted-foreground transition-transform ${batchTypeOpen ? 'rotate-180' : ''}`}>
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                </button>
+                {batchTypeOpen && (
+                  <>
+                    <div className="fixed inset-0 z-10" onClick={() => setBatchTypeOpen(false)} />
+                    <ul className="absolute z-20 mt-1 w-full max-h-72 overflow-auto rounded-md border border-border bg-card py-1 shadow-lg">
+                      {CHANNEL_TYPE_PRESETS.map(p => {
+                        const active = p.id === batchPresetID
+                        return (
+                          <li key={p.id}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setBatchPresetID(p.id)
+                                const prof = profiles.find(x => x.id === selectedID)
+                                setBatchModels(resolvePresetModels(p, prof))
+                                setBatchGroup(resolvePresetGroup(p, prof))
+                                if (p.kind === 'aws') {
+                                  setBatchRegion('us-east-1')
+                                  setBatchAwsRegions(prev => (prev.length ? prev : awsDefaultRegions))
+                                  if (awsDefaultGroup) setBatchGroup(awsDefaultGroup)
+                                  if (awsDefaultModels) setBatchModels(awsDefaultModels)
+                                } else if (p.kind === 'vertex') {
+                                  setBatchRegion('{"default": "global"}')
+                                }
+                                setBatchTypeOpen(false)
+                              }}
+                              className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-sm text-left hover:bg-muted ${active ? 'bg-brand-50/60 text-brand' : 'text-foreground'}`}
+                            >
+                              <ProviderOption type={p.type} label={p.label} size={20} />
+                              {active && (
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" className="ml-auto">
+                                  <polyline points="20 6 9 17 4 12" />
+                                </svg>
+                              )}
+                            </button>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </>
+                )}
+              </div>
+              <p className="text-[10px] text-muted-foreground mt-1">
+                切换预设会同步重写下方的 <span className="font-mono">Models</span> 和 <span className="font-mono">Group</span>。Gemini 用站点上配置的 <span className="font-mono">default_gemini_group</span> / <span className="font-mono">default_gemini_models</span>；未设置则回退到内置默认。
+              </p>
+            </Field>
+            <Field label="Models（逗号分隔）">
+              <textarea
+                value={batchModels}
+                onChange={e => setBatchModels(e.target.value)}
+                rows={2}
+                className="w-full border border-border rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-ring"
+              />
+            </Field>
+            {!(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude') && (() => {
+              const keyLabel = batchPresetID === 'aws' ? (batchAwsKeyMode === 'ak_sk' ? 'ak|sk' : 'apikey') : 'key'
+              return (
+                <div className="mt-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[11px] text-muted-foreground">
+                      Keys —— <code className="text-foreground bg-muted px-1">{keyLabel} [额度USD] [备注...]</code>
+                    </label>
+                    <div className="inline-flex rounded-md border border-border overflow-hidden">
+                      {([{ id: 'paste', label: '粘贴' }, { id: 'table', label: '表格' }] as { id: 'paste' | 'table'; label: string }[]).map(m => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => switchBatchInputMode(m.id)}
+                          className={`px-3 py-1 text-[11px] border-r border-border last:border-r-0 transition-colors ${batchInputMode === m.id ? 'bg-brand text-white' : 'bg-card text-foreground hover:bg-muted'}`}
+                        >
+                          {m.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {batchInputMode === 'paste' ? (
+                    <textarea
+                      value={batchInput}
+                      onChange={e => setBatchInput(e.target.value)}
+                      rows={8}
+                      placeholder={'sk-ant-api03-xxxx 220\nsk-ant-api03-yyyy 500 备注文字\n# 井号开头的行会被忽略'}
+                      className="w-full border border-border rounded-md p-2 text-[11px] font-mono resize-y focus:outline-none focus:border-ring"
+                    />
+                  ) : (
+                    <div className="border border-border rounded-md overflow-hidden">
+                      <div className="grid grid-cols-[1fr_5rem_1fr_2rem] gap-2 px-2 py-1.5 bg-muted border-b border-border text-[10px] text-muted-foreground uppercase tracking-wide">
+                        <span>{keyLabel}</span><span>额度 USD</span><span>备注</span><span />
+                      </div>
+                      <div className="max-h-64 overflow-y-auto divide-y divide-border">
+                        {batchKeyRows.map((r, i) => (
+                          <div key={i} className="grid grid-cols-[1fr_5rem_1fr_2rem] gap-2 px-2 py-1 items-center">
+                            <input value={r.key} onChange={e => setBatchKeyRows(prev => prev.map((x, j) => j === i ? { ...x, key: e.target.value } : x))} placeholder={keyLabel} className="w-full border border-border rounded px-2 py-1 text-[11px] font-mono bg-card focus:outline-none focus:border-ring" />
+                            <input type="number" step="0.01" min="0" value={r.quota} onChange={e => setBatchKeyRows(prev => prev.map((x, j) => j === i ? { ...x, quota: e.target.value } : x))} placeholder="可选" className="w-full border border-border rounded px-2 py-1 text-[11px] tabular-nums bg-card focus:outline-none focus:border-ring" />
+                            <input value={r.note} onChange={e => setBatchKeyRows(prev => prev.map((x, j) => j === i ? { ...x, note: e.target.value } : x))} placeholder="可选" className="w-full border border-border rounded px-2 py-1 text-[11px] bg-card focus:outline-none focus:border-ring" />
+                            <button type="button" onClick={() => setBatchKeyRows(prev => prev.length > 1 ? prev.filter((_, j) => j !== i) : [{ key: '', quota: '', note: '' }])} title="删除该行" className="text-muted-foreground hover:text-destructive flex items-center justify-center">
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex items-center justify-between px-2 py-1.5 border-t border-border bg-muted/60">
+                        <button type="button" onClick={() => setBatchKeyRows(prev => [...prev, { key: '', quota: '', note: '' }])} className="inline-flex items-center gap-1 text-[11px] text-brand hover:text-brand-700">
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+                          添加一行
+                        </button>
+                        <span className="text-[10px] text-muted-foreground tabular-nums">{batchKeyRows.filter(r => r.key.trim()).length} 条</span>
+                      </div>
+                    </div>
+                  )}
+                  <p className="text-[10px] text-muted-foreground mt-1">
+                    额度和备注可省。额度写在本地 remote_channel_meta；key 明文只走一次 POST，不落本地。
+                  </p>
+                </div>
+              )
+            })()}
+            {(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude') && (
+              <div className="mt-3 space-y-3 border border-dashed border-border rounded-md p-3 bg-muted/50">
+                <p className="text-[11px] text-muted-foreground">
+                  Vertex 走独立通道，绕过 Pending 队列 —— 不会出现在下方"上传队列"，直接创建远端渠道。
+                </p>
+                <VertexAdminInputSection
+                  region={batchRegion}
+                  onRegionChange={setBatchRegion}
+                  keyMode={batchVertexKeyMode}
+                  onKeyModeChange={setBatchVertexKeyMode}
+                  files={batchVertexFiles}
+                  onFilesChange={setBatchVertexFiles}
+                  onPickFiles={async list => {
+                    const { parsed, errors } = await readVertexAdminFiles(list)
+                    setBatchVertexFiles(prev => [...prev, ...parsed])
+                    if (errors.length) setBatchErr(errors.join('; '))
+                  }}
+                  apiKeysText={batchVertexKeysText}
+                  onApiKeysTextChange={setBatchVertexKeysText}
+                />
+              </div>
+            )}
+            {batchPresetID === 'azure' && (
+              <div className="mt-3 space-y-2 border border-dashed border-border rounded-md p-3 bg-muted/50">
+                <p className="text-[11px] text-muted-foreground">
+                  Azure 走独立通道，绕过 Pending 队列 —— 直接创建远端渠道。同批 Key 共享同一 base_url + api version。
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] text-muted-foreground mb-1">
+                      Resource Endpoint <span className="text-destructive">*</span>
+                    </label>
+                    <input
+                      value={batchAzureBaseUrl}
+                      onChange={e => setBatchAzureBaseUrl(e.target.value)}
+                      placeholder="https://<resource>.openai.azure.com"
+                      className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
+                    />
+                    <p className="text-[10px] text-muted-foreground mt-1">写进 channel.base_url。</p>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-muted-foreground mb-1">API Version</label>
+                    <input
+                      value={batchAzureApiVersion}
+                      onChange={e => setBatchAzureApiVersion(e.target.value)}
+                      placeholder={AZURE_DEFAULT_API_VERSION}
+                      className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
+                    />
+                    <p className="text-[10px] text-muted-foreground mt-1">写进 channel.other，缺省 {AZURE_DEFAULT_API_VERSION}。</p>
+                  </div>
+                </div>
+              </div>
+            )}
+            {batchPresetID === 'aws' && (
+              <div className="mt-3 space-y-2 border border-dashed border-border rounded-md p-3 bg-muted/50">
+                <p className="text-[11px] text-muted-foreground">
+                  AWS Bedrock 走独立通道，绕过 Pending 队列。每个 key 会在每个所选 Region 各建一个渠道；Region 拼进 channel.key，模型映射前缀由后台 <span className="font-mono">Settings → AWS</span> 的区域→前缀映射自动决定。
+                </p>
+                <div>
+                  <label className="block text-[11px] text-muted-foreground mb-1">
+                    Regions <span className="text-destructive">*</span>
+                  </label>
+                  <div className="flex flex-wrap gap-1.5 mb-2 min-h-[1.5rem]">
+                    {batchAwsRegions.length === 0 && <span className="text-[10px] text-muted-foreground">未选择区域</span>}
+                    {batchAwsRegions.map(r => (
+                      <span key={r} className="inline-flex items-center gap-1 rounded-full bg-brand-50 text-brand px-2 py-0.5 text-[11px] font-mono">
+                        {r}
+                        <button type="button" onClick={() => setBatchAwsRegions(prev => prev.filter(x => x !== r))} className="hover:text-brand-700" title="移除">
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    {AWS_COMMON_REGIONS.filter(r => !batchAwsRegions.includes(r)).map(r => (
+                      <button key={r} type="button" onClick={() => setBatchAwsRegions(prev => prev.includes(r) ? prev : [...prev, r])} className="rounded-full border border-border bg-card px-2 py-0.5 text-[11px] font-mono text-muted-foreground hover:border-brand hover:text-brand">
+                        + {r}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex gap-1">
+                    <input
+                      value={batchAwsRegionInput}
+                      onChange={e => setBatchAwsRegionInput(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault()
+                          const v = batchAwsRegionInput.trim()
+                          if (v && !batchAwsRegions.includes(v)) setBatchAwsRegions(prev => [...prev, v])
+                          setBatchAwsRegionInput('')
+                        }
+                      }}
+                      placeholder="自定义区域，回车添加（例 me-central-1）"
+                      className="flex-1 border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
+                    />
+                    <button type="button" onClick={() => { const v = batchAwsRegionInput.trim(); if (v && !batchAwsRegions.includes(v)) setBatchAwsRegions(prev => [...prev, v]); setBatchAwsRegionInput('') }} className="border border-border rounded-md px-3 text-xs text-muted-foreground hover:bg-muted">添加</button>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-muted-foreground mb-1">认证方式</label>
+                  <div className="inline-flex rounded-md border border-border overflow-hidden">
+                    <button type="button" onClick={() => setBatchAwsKeyMode('ak_sk')} className={`px-3 py-1.5 text-xs border-r border-border transition-colors ${batchAwsKeyMode === 'ak_sk' ? 'bg-brand text-white' : 'bg-card text-foreground hover:bg-muted'}`}>AK/SK</button>
+                    <button type="button" onClick={() => setBatchAwsKeyMode('api_key')} className={`px-3 py-1.5 text-xs transition-colors ${batchAwsKeyMode === 'api_key' ? 'bg-brand text-white' : 'bg-card text-foreground hover:bg-muted'}`}>API Key</button>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground mt-1">
+                    {batchAwsKeyMode === 'ak_sk' ? '每行填 ak|sk（Region 自动追加）。' : '每行填 apikey（Region 自动追加）。'}
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-muted-foreground mb-1">Proxy（可选）</label>
+                  <input
+                    value={batchAwsProxy}
+                    onChange={e => setBatchAwsProxy(e.target.value)}
+                    placeholder="http://user:pass@host:port（留空则不走代理）"
+                    className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
+                  />
+                  <p className="text-[10px] text-muted-foreground mt-1">写入 channel.settings.proxy，作用于本批全部渠道；默认为空。</p>
+                </div>
+              </div>
+            )}
+            {batchErr && <p className="text-xs text-destructive mt-2">{batchErr}</p>}
+            {batchResults && (
+              <div className="mt-3 border border-border rounded-md max-h-56 overflow-y-auto">
+                <table className="w-full text-[11px]">
+                  <thead className="bg-muted text-muted-foreground sticky top-0">
+                    <tr>
+                      <th className="px-2 py-1 text-left">Key</th>
+                      <th className="px-2 py-1 text-left">结果</th>
+                      <th className="px-2 py-1 text-left">Channel</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {batchResults.map((r, i) => (
+                      <tr key={i} className="border-t border-border">
+                        <td className="px-2 py-1 font-mono">{r.key}</td>
+                        <td className="px-2 py-1">
+                          {r.ok ? <span className="text-success">✓ 成功</span>
+                                : <span className="text-destructive" title={r.error}>✗ {(r.error ?? '失败').slice(0, 40)}</span>}
+                        </td>
+                        <td className="px-2 py-1 text-muted-foreground">
+                          {r.channel_id ? `#${r.channel_id} ${r.name ?? ''}` : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setBatchOpen(false)}
+                disabled={batchBusy}
+                className="border border-border rounded-md px-3 py-1.5 text-sm text-foreground hover:bg-muted"
+              >
+                关闭
+              </button>
+              <button
+                onClick={submitBatch}
+                disabled={batchBusy}
+                className="bg-success text-white rounded-md px-3 py-1.5 text-sm hover:opacity-85 disabled:opacity-50"
+              >
+                {batchBusy ? '上传中…' : '上传'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: row edit */}
+      {rowOpen && rowChannel && (
+        <div
+          className="fixed inset-0 z-50 flex justify-end bg-black/50"
+          onClick={() => !rowBusy && setRowOpen(false)}
+        >
+          <div
+            className="drawer-panel max-w-md p-5"
+            onClick={e => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-semibold text-foreground mb-3">
+              编辑渠道 #{rowChannel.id}
+            </h3>
+            <div className="space-y-3">
+              <Field label="Name">
+                <input
+                  value={rowName}
+                  onChange={e => setRowName(e.target.value)}
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
+                />
+              </Field>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Group">
+                  <input
+                    value={rowGroup}
+                    onChange={e => setRowGroup(e.target.value)}
+                    className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+                  />
+                </Field>
+                <Field label="Tag">
+                  <input
+                    value={rowTag}
+                    onChange={e => setRowTag(e.target.value)}
+                    className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+                  />
+                </Field>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Status">
+                  <select
+                    value={rowStatus}
+                    onChange={e => setRowStatus(parseInt(e.target.value, 10))}
+                    className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+                  >
+                    <option value={1}>1 · 启用</option>
+                    <option value={2}>2 · 手动禁用</option>
+                    <option value={3}>3 · 自动禁用</option>
+                  </select>
+                </Field>
+                <Field label="Priority">
+                  <input
+                    type="number"
+                    value={rowPriority}
+                    onChange={e => setRowPriority(e.target.value)}
+                    className="w-full border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
+                  />
+                </Field>
+              </div>
+              <Field label="额度上限 (USD) · 本地存储">
+                <input
+                  type="number"
+                  step="0.01"
+                  value={rowQuotaUSD}
+                  onChange={e => setRowQuotaUSD(e.target.value)}
+                  placeholder="留空清除"
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
+                />
+              </Field>
+              <Field label="Note · 本地存储">
+                <textarea
+                  value={rowNote}
+                  onChange={e => setRowNote(e.target.value)}
+                  rows={2}
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+                />
+              </Field>
+              <div className="border-t border-border pt-3">
+                <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={rowAutoDisable}
+                    onChange={e => setRowAutoDisable(e.target.checked)}
+                    className="rounded border-border"
+                  />
+                  <span>到额自动禁用（本地存储）</span>
+                </label>
+                <p className="text-[10px] text-muted-foreground mt-1 leading-relaxed">
+                  勾选后，后台自动循环会在 <code className="font-mono">used_usd ≥ 额度 − 保留额</code> 时把远端 status 改为 2。
+                  额度未设置时本行不生效。
+                </p>
+                <Field label="保留额 USD（缓冲；到 额度 − 保留额 就下）">
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={rowAutoDisableReserveUSD}
+                    onChange={e => setRowAutoDisableReserveUSD(e.target.value)}
+                    placeholder="0"
+                    disabled={!rowAutoDisable}
+                    className="w-full border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring disabled:bg-muted disabled:text-muted-foreground"
+                  />
+                </Field>
+              </div>
+              {rowErr && <p className="text-xs text-destructive">{rowErr}</p>}
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setRowOpen(false)}
+                disabled={rowBusy}
+                className="border border-border rounded-md px-3 py-1.5 text-sm text-foreground hover:bg-muted"
+              >
+                取消
+              </button>
+              <button
+                onClick={submitRowEdit}
+                disabled={rowBusy}
+                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
+              >
+                {rowBusy ? '保存中…' : '保存'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: create / edit */}
+      {formOpen && (
+        <div
+          className="fixed inset-0 z-50 flex justify-end bg-black/50"
+          onClick={() => !formBusy && setFormOpen(false)}
+        >
+          <div
+            className="drawer-panel max-w-md p-5"
+            onClick={e => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-semibold text-foreground mb-3">
+              {editingID === 0 ? 'New remote profile' : 'Edit profile'}
+            </h3>
+            <div className="space-y-3">
+              <Field label="Name">
+                <input
+                  value={formName}
+                  onChange={e => setFormName(e.target.value)}
+                  placeholder="例如 newapi-remote"
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+                />
+              </Field>
+              <Field label="Host">
+                <input
+                  value={formHost}
+                  onChange={e => setFormHost(e.target.value)}
+                  placeholder={editingID === 0 ? 'http://example.com' : '留空 = 保持原 host 不变'}
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
+                />
+              </Field>
+              <Field label="Proxy (可选)">
+                <input
+                  value={formProxy}
+                  onChange={e => setFormProxy(e.target.value)}
+                  placeholder="http://user:pass@host:port（留空 = 直连，不走代理）"
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
+                />
+              </Field>
+              <Field label="User ID (New-Api-User header)">
+                <input
+                  type="number"
+                  min="1"
+                  value={formUserID}
+                  onChange={e => setFormUserID(e.target.value)}
+                  placeholder="例如 1"
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm tabular-nums focus:outline-none focus:border-ring"
+                />
+              </Field>
+              <Field label={editingID === 0 ? 'Access token' : 'Access token (留空保留原值)'}>
+                <input
+                  type="password"
+                  value={formToken}
+                  onChange={e => setFormToken(e.target.value)}
+                  placeholder={editingID === 0 ? 'new-api access_token' : '••••••••'}
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
+                />
+              </Field>
+
+              {/* Defaults preloaded into the batch-upload modal so the
+                  operator only has to type the "middle" segment of the
+                  channel name and pick keys. */}
+              <div className="pt-2 border-t border-border">
+                <div className="mono-label mb-2">
+                  批量上传默认值
+                </div>
+                <Field label="默认 Group (Anthropic)">
+                  <input
+                    value={formDefaultGroup}
+                    onChange={e => setFormDefaultGroup(e.target.value)}
+                    placeholder="例如 default"
+                    className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+                  />
+                </Field>
+                <Field label="默认 Group (Gemini)">
+                  <input
+                    value={formDefaultGeminiGroup}
+                    onChange={e => setFormDefaultGeminiGroup(e.target.value)}
+                    placeholder="例如 gemini（留空则用 'gemini'）"
+                    className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+                  />
+                </Field>
+                <Field label="默认 Group (OpenAI)">
+                  <input
+                    value={formDefaultOpenAIGroup}
+                    onChange={e => setFormDefaultOpenAIGroup(e.target.value)}
+                    placeholder="例如 openai（留空则用 'openai'）"
+                    className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+                  />
+                </Field>
+                <Field label="默认 Models (Anthropic, 逗号分隔)">
+                  <textarea
+                    value={formDefaultModels}
+                    onChange={e => setFormDefaultModels(e.target.value)}
+                    rows={3}
+                    placeholder="claude-opus-4-7,claude-sonnet-4-6,..."
+                    className="w-full border border-border rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-ring"
+                  />
+                </Field>
+                <Field label="默认 Models (Gemini, 逗号分隔)">
+                  <textarea
+                    value={formDefaultGeminiModels}
+                    onChange={e => setFormDefaultGeminiModels(e.target.value)}
+                    rows={3}
+                    placeholder="gemini-2.5-flash,gemini-2.5-pro,...（留空则用内置默认）"
+                    className="w-full border border-border rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-ring"
+                  />
+                </Field>
+                <Field label="默认 Models (OpenAI, 逗号分隔)">
+                  <textarea
+                    value={formDefaultOpenAIModels}
+                    onChange={e => setFormDefaultOpenAIModels(e.target.value)}
+                    rows={3}
+                    placeholder="gpt-4o,gpt-4o-mini,gpt-5,...（留空则用内置默认）"
+                    className="w-full border border-border rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-ring"
+                  />
+                </Field>
+              </div>
+
+              {/* Per-profile visibility. Empty allowlist = visible to all
+                  remote_studio_operator users (backward-compatible default).
+                  One or more selected = only those users may see the profile
+                  in the operator picker AND pass the upload preflight. */}
+              <div className="pt-2 border-t border-border">
+                <div className="mono-label mb-2 flex items-center gap-2">
+                  <span>Remote Studio Operator 可见性</span>
+                  {visLoading && <span className="text-muted-foreground">加载中…</span>}
+                </div>
+                {visOperators.length === 0 && !visLoading && (
+                  <p className="text-[11px] text-muted-foreground">未找到 role=3 用户，或未来才创建。可稍后回来配置。</p>
+                )}
+                {visOperators.length > 0 && (
+                  <>
+                    <p className="text-[11px] text-muted-foreground mb-2">
+                      {visAllowlist.size === 0
+                        ? '未勾选任何人 → 所有 remote studio operator 均可见（默认）'
+                        : `已勾选 ${visAllowlist.size} 位用户 → 仅这些用户可见`}
+                    </p>
+                    <div className="grid grid-cols-2 gap-1 max-h-40 overflow-y-auto border border-border rounded-md p-2 bg-muted/40">
+                      {visOperators.map(u => (
+                        <label key={u.id} className="flex items-center gap-2 text-[11px] cursor-pointer hover:bg-card rounded px-1 py-0.5">
+                          <input
+                            type="checkbox"
+                            checked={visAllowlist.has(u.id)}
+                            onChange={e => {
+                              setVisAllowlist(prev => {
+                                const next = new Set(prev)
+                                if (e.target.checked) next.add(u.id)
+                                else next.delete(u.id)
+                                return next
+                              })
+                            }}
+                          />
+                          <span className="font-mono flex-1 truncate">{u.username}</span>
+                          {u.studio && <span className="text-muted-foreground text-[10px] truncate" title={u.studio}>{u.studio}</span>}
+                        </label>
+                      ))}
+                    </div>
+                    <div className="mt-1 flex gap-2 text-[10px]">
+                      <button
+                        type="button"
+                        onClick={() => setVisAllowlist(new Set(visOperators.map(u => u.id)))}
+                        className="text-muted-foreground hover:text-foreground underline underline-offset-2"
+                      >全选</button>
+                      <button
+                        type="button"
+                        onClick={() => setVisAllowlist(new Set())}
+                        className="text-muted-foreground hover:text-foreground underline underline-offset-2"
+                      >清空（改为全可见）</button>
+                    </div>
+                  </>
+                )}
+              </div>
+              {formErr && <p className="text-xs text-destructive">{formErr}</p>}
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setFormOpen(false)}
+                disabled={formBusy}
+                className="border border-border rounded-md px-3 py-1.5 text-sm text-foreground hover:bg-muted"
+              >
+                取消
+              </button>
+              <button
+                onClick={submitForm}
+                disabled={formBusy}
+                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
+              >
+                {formBusy ? '保存中…' : '保存'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {breakdownFor && selectedID && (
+        <BreakdownModal
+          profileID={selectedID}
+          channel={breakdownFor}
+          windowSec={errWindowSec}
+          onClose={() => setBreakdownFor(null)}
+        />
+      )}
+    </Layout>
+  )
+}
+
+// ErrorRateCell renders "err / (err+ok)" as a percentage in a coloured
+// pill. Clicking opens the breakdown modal for the same channel.
+// stat=undefined ⇒ user hasn't clicked "加载错误率" yet.
+function ErrorRateCell({
+  stat,
+  onOpen,
+}: {
+  stat: { success: number; errors: number } | undefined
+  onOpen: () => void
+}) {
+  if (!stat) return <span className="text-muted-foreground">—</span>
+  const total = stat.success + stat.errors
+  if (total === 0) return <span className="text-muted-foreground" title="窗口内无请求">0</span>
+  const rate = stat.errors / total
+  const pct = rate * 100
+  const cls =
+    pct >= 20 ? 'bg-destructive/10 text-destructive border-destructive/40'
+    : pct >= 5 ? 'bg-warning/10 text-warning border-warning/40'
+    : pct > 0  ? 'bg-success/10 text-success border-success/40'
+    : 'bg-muted text-muted-foreground border-border'
+  return (
+    <button
+      onClick={onOpen}
+      className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[11px] tabular-nums hover:opacity-80 ${cls}`}
+      title={`${stat.errors} 错误 / ${total} 总请求 · 点击查看类型分桶`}
+    >
+      {pct.toFixed(pct < 1 ? 2 : 1)}%
+    </button>
+  )
+}
+
+// BreakdownModal fetches (error_type, status_code) buckets for one
+// channel over the same window as the summary cell. Backend already
+// caches for 5min so this is cheap even on repeated opens.
+function BreakdownModal({
+  profileID,
+  channel,
+  windowSec,
+  onClose,
+}: {
+  profileID: number
+  channel: { id: number; name: string }
+  windowSec: number
+  onClose: () => void
+}) {
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState<string | null>(null)
+  const [data, setData] = useState<{
+    total: number
+    buckets: Array<{ error_type: string; status_code: number; count: number }>
+    sample_size?: number
+  } | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      setLoading(true)
+      setErr(null)
+      try {
+        const res = await api.remoteChannelErrors(profileID, channel.id, windowSec)
+        if (cancelled) return
+        setData(res)
+      } catch (e: any) {
+        if (cancelled) return
+        setErr(e?.message || String(e))
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [profileID, channel.id, windowSec])
+
+  const humanWindow = windowSec < 3600
+    ? `${Math.round(windowSec / 60)} 分钟`
+    : `${(windowSec / 3600).toFixed(windowSec % 3600 === 0 ? 0 : 1)} 小时`
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/50" onClick={onClose}>
+      <div className="drawer-panel max-w-lg" onClick={e => e.stopPropagation()}>
+        <div className="px-4 py-3 border-b border-border flex items-start justify-between">
+          <div>
+            <div className="text-sm font-medium text-foreground">
+              渠道 <span className="font-mono text-xs">{channel.name}</span> · 错误类型分桶
+            </div>
+            <div className="text-[11px] text-muted-foreground mt-0.5">过去 {humanWindow}</div>
+          </div>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground text-lg leading-none">×</button>
+        </div>
+        <div className="p-4 max-h-[60vh] overflow-y-auto">
+          {loading && <div className="text-sm text-muted-foreground">加载中…</div>}
+          {err && <div className="text-sm text-destructive">{err}</div>}
+          {data && (
+            <>
+              <div className="mb-3 text-sm text-foreground">
+                共 <span className="font-semibold text-destructive">{data.total}</span> 条错误日志
+                {data.sample_size !== undefined && data.sample_size < data.total && (
+                  <span className="text-[11px] text-muted-foreground ml-2">
+                    （分桶基于最新 {data.sample_size} 条采样）
+                  </span>
+                )}
+              </div>
+              {data.buckets.length === 0 ? (
+                <div className="text-sm text-muted-foreground">窗口内没有错误</div>
+              ) : (
+                <table className="w-full text-xs">
+                  <thead className="bg-muted text-muted-foreground">
+                    <tr>
+                      <th className="text-left px-3 py-2 font-medium">错误类型</th>
+                      <th className="text-left px-3 py-2 font-medium">状态码</th>
+                      <th className="text-right px-3 py-2 font-medium">数量</th>
+                      <th className="text-right px-3 py-2 font-medium">占比</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.buckets.map((b, i) => {
+                      const share = data.sample_size ? (b.count / data.sample_size) * 100 : 0
+                      return (
+                        <tr key={i} className="border-t border-border">
+                          <td className="px-3 py-2 font-mono text-[11px]">{b.error_type || '—'}</td>
+                          <td className="px-3 py-2 tabular-nums">{b.status_code || '—'}</td>
+                          <td className="px-3 py-2 tabular-nums text-right">{b.count}</td>
+                          <td className="px-3 py-2 tabular-nums text-right text-muted-foreground">
+                            {share > 0 ? share.toFixed(1) + '%' : '—'}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ProfileErrorSummary sits above the channels table and shows the
+// profile-wide aggregate for the selected time window: total requests,
+// total errors, error rate, plus a sorted-by-count breakdown of every
+// (error_type, status_code) bucket. Clicking a row narrows the summary
+// to just that code so it's easy to answer "how many 429s in the last
+// hour?" without eyeballing per-channel numbers.
+function ProfileErrorSummary({
+  profileID,
+  windowSec,
+  onWindowChange,
+}: {
+  profileID: number
+  windowSec: number
+  onWindowChange: (secs: number) => void
+}) {
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [data, setData] = useState<{
+    total_success: number
+    total_errors: number
+    error_rate: number
+    buckets: Array<{ error_type: string; status_code: number; count: number; share: number }>
+    sample_size: number
+    truncated: boolean
+    window_sec: number
+    cached: boolean
+    last_synced_at?: number
+    sync_lag_sec?: number
+  } | null>(null)
+  const [selectedCode, setSelectedCode] = useState<number | null>(null)
+  const [selectedType, setSelectedType] = useState<string | null>(null)
+
+  const load = async () => {
+    setLoading(true)
+    setErr(null)
+    try {
+      const res = await api.remoteProfileErrorSummary(profileID, windowSec)
+      setData(res)
+      setSelectedCode(null)
+      setSelectedType(null)
+    } catch (e: any) {
+      setErr(e?.message || String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Auto-load when profile or window changes. Backend caches 5min so
+  // toggling the dropdown doesn't hammer the remote.
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileID, windowSec])
+
+  const filteredBuckets = data
+    ? data.buckets.filter(b => {
+        if (selectedCode != null && b.status_code !== selectedCode) return false
+        if (selectedType != null && b.error_type !== selectedType) return false
+        return true
+      })
+    : []
+  const filteredErrors = filteredBuckets.reduce((s, b) => s + b.count, 0)
+  const total = data ? data.total_success + data.total_errors : 0
+  const shownRate = (selectedCode != null || selectedType != null)
+    ? (total > 0 ? filteredErrors / total : 0)
+    : (data?.error_rate ?? 0)
+
+  const humanWindow = windowSec < 3600
+    ? `过去 ${Math.round(windowSec / 60)} 分钟`
+    : `过去 ${(windowSec / 3600).toFixed(windowSec % 3600 === 0 ? 0 : 1)} 小时`
+
+  return (
+    <section className="bg-card border border-border rounded-xl overflow-hidden">
+      <div className="px-4 py-2.5 border-b border-border flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <div className="text-sm font-semibold text-foreground">错误率汇总 · {humanWindow}</div>
+          <div className="text-[11px] text-muted-foreground mt-0.5">
+            profile 层面聚合，本地按分钟同步的错误日志分析。点击下方状态码 / 类型行只看该类错误。
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <select
+            value={windowSec}
+            onChange={e => onWindowChange(parseInt(e.target.value, 10))}
+            className="text-xs px-2 py-1 border border-border rounded-md bg-card"
+          >
+            <option value={5 * 60}>过去 5 分钟</option>
+            <option value={15 * 60}>过去 15 分钟</option>
+            <option value={60 * 60}>过去 1 小时</option>
+            <option value={6 * 60 * 60}>过去 6 小时</option>
+            <option value={24 * 60 * 60}>过去 24 小时</option>
+          </select>
+          <button
+            onClick={load}
+            disabled={loading}
+            className="text-xs px-2 py-1 border border-border rounded-md hover:bg-muted disabled:opacity-40"
+          >
+            {loading ? '加载中…' : '刷新'}
+          </button>
+        </div>
+      </div>
+
+      <div className="p-4 space-y-3">
+        {err && <div className="text-xs text-destructive">{err}</div>}
+        <div className="grid grid-cols-4 gap-3">
+          <MetricCard
+            label="总请求"
+            value={data ? total.toLocaleString() : '—'}
+          />
+          <MetricCard
+            label={selectedCode != null || selectedType != null ? '过滤后错误数' : '错误数'}
+            value={data ? filteredErrors.toLocaleString() : '—'}
+            color={filteredErrors > 0 ? 'text-destructive' : 'text-muted-foreground'}
+          />
+          <MetricCard
+            label={selectedCode != null || selectedType != null ? '过滤后错误率' : '错误率'}
+            value={data && total > 0 ? (shownRate * 100).toFixed(shownRate < 0.01 ? 3 : 2) + '%' : '—'}
+            color={
+              shownRate >= 0.2 ? 'text-destructive'
+              : shownRate >= 0.05 ? 'text-warning'
+              : shownRate > 0 ? 'text-success'
+              : 'text-muted-foreground'
+            }
+          />
+          <MetricCard
+            label="成功数"
+            value={data ? data.total_success.toLocaleString() : '—'}
+            color="text-success"
+          />
+        </div>
+
+        {data && data.sync_lag_sec !== undefined && data.sync_lag_sec > 180 && (
+          <div className="text-[11px] text-warning bg-warning/10 border border-warning/40 rounded px-2 py-1">
+            本地错误日志同步落后 {Math.round(data.sync_lag_sec / 60)} 分钟 —— 最新的错误可能还没进本地分析。
+          </div>
+        )}
+
+        {(selectedCode != null || selectedType != null) && (
+          <div className="text-[11px] flex items-center gap-2">
+            <span className="text-muted-foreground">当前过滤：</span>
+            {selectedCode != null && (
+              <span className="px-1.5 py-0.5 rounded-md bg-destructive/10 text-destructive border border-destructive/40 font-mono">
+                {selectedCode}
+              </span>
+            )}
+            {selectedType != null && (
+              <span className="px-1.5 py-0.5 rounded-md bg-indigo-100 text-indigo-700 border border-indigo-200 font-mono">
+                {selectedType}
+              </span>
+            )}
+            <button
+              onClick={() => { setSelectedCode(null); setSelectedType(null) }}
+              className="text-muted-foreground hover:text-foreground underline"
+            >
+              清除
+            </button>
+          </div>
+        )}
+
+        {data && data.buckets.length > 0 && (
+          <div className="border border-border rounded overflow-hidden">
+            <table className="w-full text-xs">
+              <thead className="bg-muted text-muted-foreground">
+                <tr>
+                  <th className="text-left px-3 py-2 font-medium">状态码</th>
+                  <th className="text-left px-3 py-2 font-medium">错误类型</th>
+                  <th className="text-right px-3 py-2 font-medium">数量</th>
+                  <th className="text-right px-3 py-2 font-medium">占错误 %</th>
+                  <th className="text-right px-3 py-2 font-medium">占总请求 %</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.buckets.map((b, i) => {
+                  const active =
+                    (selectedCode == null || selectedCode === b.status_code) &&
+                    (selectedType == null || selectedType === b.error_type)
+                  const overallShare = total > 0 ? b.count / total : 0
+                  return (
+                    <tr
+                      key={i}
+                      className={`border-t border-border hover:bg-muted cursor-pointer ${active ? '' : 'opacity-40'}`}
+                      onClick={() => {
+                        // Toggle-friendly: clicking the currently focused
+                        // row clears the filter.
+                        if (selectedCode === b.status_code && selectedType === b.error_type) {
+                          setSelectedCode(null); setSelectedType(null)
+                        } else {
+                          setSelectedCode(b.status_code || null)
+                          setSelectedType(b.error_type || null)
+                        }
+                      }}
+                    >
+                      <td className="px-3 py-1.5 tabular-nums">
+                        <span className={`inline-block px-1.5 py-0.5 rounded font-mono text-[11px] ${
+                          b.status_code === 429 ? 'bg-warning/10 text-warning' :
+                          b.status_code >= 500 ? 'bg-destructive/10 text-destructive' :
+                          b.status_code >= 400 ? 'bg-orange-100 text-orange-800' :
+                          'bg-muted text-foreground'
+                        }`}>
+                          {b.status_code || '—'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-1.5 font-mono text-[11px]">{b.error_type || 'unknown'}</td>
+                      <td className="px-3 py-1.5 tabular-nums text-right">{b.count.toLocaleString()}</td>
+                      <td className="px-3 py-1.5 tabular-nums text-right text-muted-foreground">
+                        {(b.share * 100).toFixed(1)}%
+                      </td>
+                      <td className="px-3 py-1.5 tabular-nums text-right text-muted-foreground">
+                        {(overallShare * 100).toFixed(overallShare < 0.001 ? 3 : 2)}%
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {data && data.total_errors === 0 && (
+          <div className="text-xs text-muted-foreground">窗口内没有错误 ✨</div>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="block text-[11px] text-muted-foreground mb-1">{label}</label>
+      {children}
+    </div>
+  )
+}
+
+function MetricCard({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div className="bg-card border border-border rounded-xl p-3">
+      <div className="mono-label">{label}</div>
+      <div className={`mt-1 text-lg font-semibold tabular-nums ${color ?? 'text-foreground'}`}>{value}</div>
+    </div>
+  )
+}

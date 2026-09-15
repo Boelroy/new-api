@@ -1,0 +1,1869 @@
+import { useCallback, useEffect, useState } from 'react'
+import Layout from '../components/Layout'
+import { api, type PendingKey, type RemoteChannel, type RemoteProfile } from '../api'
+import { readRememberedProfileID, writeRememberedProfileID } from '../lib/rememberProfile'
+import { confirmDialog, toast } from '../components/feedback'
+
+// Studio-operator slim view of Remote Channels. Deliberately does NOT
+// share code with the super_admin RemoteChannels.tsx — that page has
+// 1800+ lines of channel-table + profile CRUD + bulk-price editor
+// surface that operators must not see. Isolating the two shapes here
+// means:
+//   • operator UI can't accidentally render a URL / user_id / priority
+//     control if a future refactor forgets a role gate
+//   • RemoteChannels.tsx can keep evolving without threading role flags
+//     through its state machine
+//
+// The backend enforces the actual permissions (profile list strips
+// host / user_id / has_token, pending list filters by tag = studio,
+// enqueue overwrites tag + zeroes priority). This file is the shape
+// contract for the operator, not the security boundary.
+
+const DEFAULT_ANTHROPIC_MODELS = [
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-sonnet-4-6',
+  'claude-opus-4-6',
+  'claude-haiku-4-5-20251001',
+  'claude-sonnet-4-5-20250929',
+  'claude-opus-4-5-20251101',
+  'claude-fable-5',
+  'claude-sonnet-5',
+  'claude-opus-5',
+].join(',')
+
+const DEFAULT_GEMINI_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-image',
+  'gemini-2.5-flash-preview-tts',
+  'gemini-2.5-pro',
+  'gemini-3-flash-preview',
+  'gemini-3-pro-image',
+  'gemini-3-pro-image-preview',
+  'gemini-3.1-flash-image',
+  'gemini-3.1-flash-image-preview',
+  'gemini-3.1-flash-lite',
+  'gemini-3.1-flash-lite-preview',
+  'gemini-3.1-pro-preview',
+  'gemini-3.1-pro-preview-customtools',
+  'gemini-3.5-flash',
+].join(',')
+
+// Vertex hosts Google's Gemini family (Anthropic-on-Vertex uses a separate
+// pricing/keying flow that hasn't been productised on this page), so the
+// default deployment list mirrors DEFAULT_GEMINI_MODELS. Profiles that need
+// a different set can still override via default_vertex_models.
+const DEFAULT_VERTEX_MODELS = DEFAULT_GEMINI_MODELS
+
+// Fallback model list for the native OpenAI preset (channel_type=1) AND
+// the Azure preset (channel_type=3), which hosts the same model family.
+// Profiles can override per-preset via default_openai_models /
+// default_models.
+const DEFAULT_OPENAI_MODELS = [
+  'gpt-5',
+  'gpt-5-mini',
+  'gpt-5-nano',
+  'gpt-4.1',
+  'gpt-4o',
+  'gpt-4o-mini',
+  'o4-mini',
+  'o3',
+].join(',')
+
+// Azure default API version, kept in sync with new-api's
+// AZURE_DEFAULT_API_VERSION so uploads created here behave identically to
+// ones created through the admin UI.
+const AZURE_DEFAULT_API_VERSION = '2025-04-01-preview'
+
+// Channel type integers from newapi's constant/channel.go — 1 = OpenAI,
+// 3 = Azure, 14 = Anthropic, 24 = Gemini, 41 = Vertex AI. OpenAI /
+// Anthropic / Gemini flow through remotePendingEnqueue; Vertex and Azure
+// each have their own bypass endpoint (remoteVertexCreate /
+// remoteAzureCreate) because per-batch base_url + other + settings don't
+// fit the pending schema.
+const CHANNEL_TYPE_OPENAI = 1
+const CHANNEL_TYPE_ANTHROPIC = 14
+const CHANNEL_TYPE_GEMINI = 24
+const CHANNEL_TYPE_VERTEX = 41
+const CHANNEL_TYPE_AZURE = 3
+const CHANNEL_TYPE_AWS = 33
+const CHANNEL_TYPE_OPENROUTER = 20
+
+// Claude-on-Bedrock model list advertised by the AWS preset. The backend
+// pairs each name with a region-prefixed Bedrock model id in
+// channel.model_mapping (e.g. region us-east-1 → "us.anthropic.…"), so the
+// operator never edits the mapping directly — they just pick the region.
+const DEFAULT_AWS_CLAUDE_MODELS = [
+  'claude-opus-4-6',
+  'claude-opus-4-5-20251101',
+  'claude-sonnet-4-6',
+  'claude-sonnet-4-5-20250929',
+  'claude-haiku-4-5-20251001',
+].join(',')
+
+// OpenRouter (channel_type=20) is OpenAI-compatible; the backend maps these
+// friendly names onto anthropic/* slugs in channel.model_mapping, so the
+// operator never edits the mapping — they just pick the preset.
+const DEFAULT_OPENROUTER_MODELS = [
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-sonnet-4-6',
+  'claude-opus-4-6',
+  'claude-haiku-4-5-20251001',
+  'claude-sonnet-4-5-20250929',
+  'claude-opus-4-5-20251101',
+  'claude-fable-5',
+  'claude-sonnet-5',
+  'claude-opus-5',
+].join(',')
+
+// Anthropic-on-Vertex reuses the same channel_type=41 + SA JSON / API-key
+// flow as regular Vertex, but lands in a distinct upstream group so
+// routing keys point at the Claude family separately from Gemini. It
+// deliberately skips profileGroupField/profileModelsField so the fixed
+// 'claude-vertex' group + Claude model list always apply, regardless of
+// whatever the profile stashes under default_vertex_models.
+const DEFAULT_VERTEX_CLAUDE_MODELS = [
+  'claude-opus-4-7',
+  'claude-sonnet-4-6',
+  'claude-opus-4-6',
+  'claude-haiku-4-5-20251001',
+  'claude-sonnet-4-5-20250929',
+  'claude-opus-4-5-20251101',
+  'claude-opus-4-8',
+  'claude-fable-5',
+  'claude-sonnet-5',
+].join(',')
+
+type PresetID = 'anthropic' | 'openai' | 'gemini' | 'vertex' | 'vertex-claude' | 'azure' | 'aws' | 'openrouter'
+// `kind` gates the modal's form flow: 'text' presets use the per-line
+// key textarea + pending-queue path; 'vertex' presets swap in a JSON
+// file picker + region input and post directly to remoteVertexCreate;
+// 'azure' presets keep the per-line key textarea but add base_url +
+// api_version inputs and post directly to remoteAzureCreate; 'aws' presets
+// keep the per-line key textarea but add a region + key-mode selector and
+// post directly to remoteAwsCreate.
+type PresetSpec = {
+  id: PresetID
+  label: string
+  kind: 'text' | 'vertex' | 'azure' | 'aws'
+  type: number
+  fallbackModels: string
+  fallbackGroup: string
+  // Optional: when omitted the resolver skips the profile-level lookup
+  // and always uses fallbackGroup / fallbackModels. Used by vertex-claude
+  // so its Claude group/model list can't be shadowed by an admin who set
+  // default_vertex_models for the Gemini variant.
+  profileGroupField?: 'default_group' | 'default_gemini_group' | 'default_openai_group'
+  profileModelsField?: 'default_models' | 'default_gemini_models' | 'default_vertex_models' | 'default_openai_models'
+}
+const CHANNEL_TYPE_PRESETS: PresetSpec[] = [
+  { id: 'anthropic',     label: 'Anthropic (Claude)',  kind: 'text',   type: CHANNEL_TYPE_ANTHROPIC, fallbackModels: DEFAULT_ANTHROPIC_MODELS,     fallbackGroup: 'default',        profileGroupField: 'default_group',        profileModelsField: 'default_models' },
+  { id: 'openai',        label: 'OpenAI',              kind: 'text',   type: CHANNEL_TYPE_OPENAI,    fallbackModels: DEFAULT_OPENAI_MODELS,        fallbackGroup: 'openai',         profileGroupField: 'default_openai_group', profileModelsField: 'default_openai_models' },
+  { id: 'gemini',        label: 'Gemini',              kind: 'text',   type: CHANNEL_TYPE_GEMINI,    fallbackModels: DEFAULT_GEMINI_MODELS,        fallbackGroup: 'gemini',         profileGroupField: 'default_gemini_group', profileModelsField: 'default_gemini_models' },
+  { id: 'vertex',        label: 'Vertex AI',           kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_MODELS,        fallbackGroup: 'gemini',         profileGroupField: 'default_gemini_group', profileModelsField: 'default_vertex_models' },
+  { id: 'vertex-claude', label: 'Vertex AI (Claude)',  kind: 'vertex', type: CHANNEL_TYPE_VERTEX,    fallbackModels: DEFAULT_VERTEX_CLAUDE_MODELS, fallbackGroup: 'claude-vertex' },
+  { id: 'azure',         label: 'Azure',               kind: 'azure',  type: CHANNEL_TYPE_AZURE,     fallbackModels: DEFAULT_OPENAI_MODELS,        fallbackGroup: 'openai',         profileGroupField: 'default_group',        profileModelsField: 'default_models' },
+  { id: 'aws',           label: 'AWS (Bedrock)',       kind: 'aws',    type: CHANNEL_TYPE_AWS,       fallbackModels: DEFAULT_AWS_CLAUDE_MODELS,    fallbackGroup: 'claude-aws' },
+  { id: 'openrouter',    label: 'OpenRouter',          kind: 'text',   type: CHANNEL_TYPE_OPENROUTER, fallbackModels: DEFAULT_OPENROUTER_MODELS,    fallbackGroup: 'default' },
+]
+
+function resolvePresetGroup(preset: PresetSpec, profile: RemoteProfile | undefined): string {
+  if (!preset.profileGroupField) return preset.fallbackGroup
+  const fromProfile = (profile?.[preset.profileGroupField] || '').trim()
+  return fromProfile || preset.fallbackGroup
+}
+function resolvePresetModels(preset: PresetSpec, profile: RemoteProfile | undefined): string {
+  if (!preset.profileModelsField) return preset.fallbackModels
+  const fromProfile = (profile?.[preset.profileModelsField] || '').trim()
+  return fromProfile || preset.fallbackModels
+}
+
+function todayYYYYMMDD() {
+  const d = new Date()
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${y}${m}${dd}`
+}
+
+function fmtTime(epoch: number) {
+  if (!epoch) return '—'
+  return new Date(epoch * 1000).toLocaleString()
+}
+
+const STATUS_LABEL: Record<PendingKey['status'], string> = {
+  pending: '待上传',
+  active:  '已上传',
+  used:    '已消耗',
+  failed:  '失败',
+}
+const STATUS_CLS: Record<PendingKey['status'], string> = {
+  pending: 'text-warning bg-[#FBF0DC]',
+  active:  'text-success bg-[#E6F4EE]',
+  used:    'bg-muted text-muted-foreground',
+  failed:  'bg-destructive/10 text-destructive',
+}
+
+// Remote-channel status codes come from newapi's channel model:
+//   1 = enabled, 2 = manually disabled, 3 = auto-disabled (upstream error).
+// The studio operator sees only the badge; the underlying number is not
+// exposed. Any unknown value falls back to a neutral gray label.
+function channelStatusLabel(status: number): string {
+  if (status === 1) return '启用'
+  if (status === 2) return '手动禁用'
+  if (status === 3) return '自动禁用'
+  return `状态 ${status}`
+}
+function channelStatusCls(status: number): string {
+  if (status === 1) return 'text-success bg-[#E6F4EE]'
+  if (status === 3) return 'bg-destructive/10 text-destructive'
+  return 'bg-muted text-muted-foreground'
+}
+
+function UsagePct({ used, quota }: { used: number; quota: number }) {
+  if (!quota || quota <= 0) return <span className="text-muted-foreground text-[11px]">—</span>
+  const pct = Math.min(100, (used / quota) * 100)
+  return (
+    <div className="flex items-center gap-2 justify-end">
+      <div className="w-16 h-1 bg-muted rounded overflow-hidden">
+        <div
+          className={`h-full ${pct >= 100 ? 'bg-destructive' : pct >= 80 ? 'bg-warning' : 'bg-success'}`}
+          style={{ width: pct + '%' }}
+        />
+      </div>
+      <span className="text-[10px] tabular-nums text-muted-foreground w-8 text-right">{pct.toFixed(0)}%</span>
+    </div>
+  )
+}
+
+// One parsed Service Account JSON in the Vertex upload UI. Files are
+// parsed on selection so validation errors surface before submit, and
+// the JSON blob is kept ready for `remoteVertexCreate`.
+type VertexFile = { name: string; json: unknown; quotaUSD?: number; note?: string }
+
+// Vertex-mode form section. Used inside both the batch and immediate
+// modals; kept a plain function component (no memoisation, no props
+// callback tricks) because there are only two callers on the same page.
+//
+// keyMode toggles between the two Vertex auth flavors newapi supports:
+// 'json' = Service Account JSON files (Bearer-token auth downstream),
+// 'api_key' = per-line Vertex Express API keys (?key= URL auth). Region
+// applies to both modes.
+type VertexKeyMode = 'json' | 'api_key'
+function VertexInputSection({
+  region,
+  onRegionChange,
+  keyMode,
+  onKeyModeChange,
+  files,
+  onFilesChange,
+  onPickFiles,
+  apiKeysText,
+  onApiKeysTextChange,
+}: {
+  region: string
+  onRegionChange: (v: string) => void
+  keyMode: VertexKeyMode
+  onKeyModeChange: (v: VertexKeyMode) => void
+  files: VertexFile[]
+  onFilesChange: (next: VertexFile[]) => void
+  onPickFiles: (list: FileList | null) => void
+  apiKeysText: string
+  onApiKeysTextChange: (v: string) => void
+}) {
+  return (
+    <>
+      <div>
+        <label className="block text-[11px] text-muted-foreground mb-1">Auth Mode</label>
+        <div className="inline-flex rounded-md border border-border overflow-hidden">
+          {(
+            [
+              { id: 'json',    label: 'Service Account JSON' },
+              { id: 'api_key', label: 'API Key' },
+            ] as { id: VertexKeyMode; label: string }[]
+          ).map(m => {
+            const active = keyMode === m.id
+            return (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => onKeyModeChange(m.id)}
+                className={`px-3 py-1 text-[11px] border-r border-border last:border-r-0 transition-colors ${
+                  active ? 'bg-brand text-white' : 'bg-card text-foreground hover:bg-muted'
+                }`}
+              >
+                {m.label}
+              </button>
+            )
+          })}
+        </div>
+        <p className="text-[10px] text-muted-foreground mt-1">
+          JSON 走 Bearer Token 鉴权；API Key 走 <code className="font-mono">?key=</code> URL 鉴权。写进 channel.settings 的 <code className="font-mono">vertex_key_type</code>。
+        </p>
+      </div>
+      <div>
+        <label className="block text-[11px] text-muted-foreground mb-1">
+          Deployment Region
+        </label>
+        <input
+          value={region}
+          onChange={e => onRegionChange(e.target.value)}
+          placeholder="global"
+          className="w-full border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
+        />
+        <p className="text-[10px] text-muted-foreground mt-1">
+          输入部署区域或 JSON 映射：<code className="font-mono">{'{"default": "us-central1", "claude-3-5-sonnet-20240620": "europe-west1"}'}</code>。默认 <code className="font-mono">global</code>。写进 channel.other，本批次共用。
+        </p>
+      </div>
+      {keyMode === 'json' ? (
+        <div>
+          <label className="block text-[11px] text-muted-foreground mb-1">
+            Service Account JSON 文件（可多选）
+          </label>
+          <input
+            type="file"
+            accept=".json,application/json"
+            multiple
+            onChange={e => {
+              onPickFiles(e.target.files)
+              // allow re-picking the same file
+              e.target.value = ''
+            }}
+            className="block w-full text-[11px] text-foreground file:mr-3 file:py-1 file:px-2 file:rounded file:border file:border-border file:text-[11px] file:bg-muted file:hover:bg-muted"
+          />
+          {files.length > 0 && (
+            <ul className="mt-2 divide-y divide-border border border-border rounded-md">
+              {files.map((f, i) => (
+                <li key={i} className="px-3 py-2 flex items-center gap-2 text-[11px]">
+                  <span className="flex-1 truncate font-mono text-foreground" title={f.name}>{f.name}</span>
+                  <input
+                    type="number"
+                    placeholder="quota"
+                    step="0.01"
+                    value={f.quotaUSD ?? ''}
+                    onChange={e => {
+                      const v = e.target.value === '' ? undefined : parseFloat(e.target.value)
+                      const next = files.slice()
+                      next[i] = { ...f, quotaUSD: v && v > 0 ? v : undefined }
+                      onFilesChange(next)
+                    }}
+                    className="w-20 border border-border rounded px-1.5 py-0.5 text-[11px] tabular-nums focus:outline-none focus:border-ring"
+                  />
+                  <input
+                    type="text"
+                    placeholder="备注"
+                    value={f.note ?? ''}
+                    onChange={e => {
+                      const next = files.slice()
+                      next[i] = { ...f, note: e.target.value }
+                      onFilesChange(next)
+                    }}
+                    className="w-36 border border-border rounded px-1.5 py-0.5 text-[11px] focus:outline-none focus:border-ring"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => onFilesChange(files.filter((_, j) => j !== i))}
+                    className="text-destructive hover:underline"
+                  >
+                    删除
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : (
+        <div>
+          <label className="block text-[11px] text-muted-foreground mb-1">
+            Vertex API Keys —— 每行 <code className="text-foreground bg-muted px-1">key [额度USD] [备注...]</code>
+          </label>
+          <textarea
+            value={apiKeysText}
+            onChange={e => onApiKeysTextChange(e.target.value)}
+            rows={6}
+            placeholder={'AIzaSy... 220\nAIzaSy... 500 备注\n# 井号开头的行会被忽略'}
+            className="w-full border border-border rounded-md p-2 text-[11px] font-mono resize-y focus:outline-none focus:border-ring"
+          />
+          <p className="text-[10px] text-muted-foreground mt-1">
+            额度和备注可省。key 明文只走一次 POST，不落本地。
+          </p>
+        </div>
+      )}
+    </>
+  )
+}
+
+// Azure-mode extras. The Azure preset reuses the per-line key textarea,
+// so this section only carries the two per-batch fields (resource
+// endpoint + api version). Rendered inside both the batch and immediate
+// modals — same visual language as VertexInputSection.
+function AzureInputSection({
+  baseUrl,
+  onBaseUrlChange,
+  apiVersion,
+  onApiVersionChange,
+}: {
+  baseUrl: string
+  onBaseUrlChange: (v: string) => void
+  apiVersion: string
+  onApiVersionChange: (v: string) => void
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-2 border border-dashed border-border rounded-md p-3 bg-muted/50">
+      <div>
+        <label className="block text-[11px] text-muted-foreground mb-1">
+          Resource Endpoint <span className="text-destructive">*</span>
+        </label>
+        <input
+          value={baseUrl}
+          onChange={e => onBaseUrlChange(e.target.value)}
+          placeholder="https://<resource>.openai.azure.com"
+          className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
+        />
+        <p className="text-[10px] text-muted-foreground mt-1">写进 channel.base_url，本批次共用。</p>
+      </div>
+      <div>
+        <label className="block text-[11px] text-muted-foreground mb-1">API Version</label>
+        <input
+          value={apiVersion}
+          onChange={e => onApiVersionChange(e.target.value)}
+          placeholder={AZURE_DEFAULT_API_VERSION}
+          className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
+        />
+        <p className="text-[10px] text-muted-foreground mt-1">写进 channel.other，缺省 {AZURE_DEFAULT_API_VERSION}。</p>
+      </div>
+    </div>
+  )
+}
+
+// AwsInputSection is the region + auth-mode selector for the AWS (Bedrock)
+// preset. The per-line key textarea stays outside this block (shared with the
+// text/azure flows); here the operator only picks the region (baked into
+// channel.key + model_mapping by the backend) and the auth flavour.
+type AwsKeyMode = 'ak_sk' | 'api_key'
+function AwsInputSection({
+  region,
+  onRegionChange,
+  keyMode,
+  onKeyModeChange,
+  proxy,
+  onProxyChange,
+}: {
+  region: string
+  onRegionChange: (v: string) => void
+  keyMode: AwsKeyMode
+  onKeyModeChange: (v: AwsKeyMode) => void
+  proxy: string
+  onProxyChange: (v: string) => void
+}) {
+  return (
+    <div className="space-y-2 border border-dashed border-border rounded-md p-3 bg-muted/50">
+      <p className="text-[11px] text-muted-foreground">
+        本批次共用一个 Region；Region 会拼进 channel.key 并按区域生成 Claude 模型映射（例: us-east-1 → <span className="font-mono">us.anthropic.*</span>）。
+      </p>
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <label className="block text-[11px] text-muted-foreground mb-1">
+            Region <span className="text-destructive">*</span>
+          </label>
+          <input
+            value={region}
+            onChange={e => onRegionChange(e.target.value)}
+            placeholder="us-east-1"
+            className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
+          />
+          <p className="text-[10px] text-muted-foreground mt-1">前缀自动推导：us→us、eu→eu、ap→apac。</p>
+        </div>
+        <div>
+          <label className="block text-[11px] text-muted-foreground mb-1">认证方式</label>
+          <div className="inline-flex rounded-md border border-border overflow-hidden">
+            <button
+              type="button"
+              onClick={() => onKeyModeChange('ak_sk')}
+              className={`px-3 py-1.5 text-xs border-r border-border transition-colors ${
+                keyMode === 'ak_sk' ? 'bg-brand text-white' : 'bg-card text-foreground hover:bg-muted'
+              }`}
+            >
+              AK/SK
+            </button>
+            <button
+              type="button"
+              onClick={() => onKeyModeChange('api_key')}
+              className={`px-3 py-1.5 text-xs transition-colors ${
+                keyMode === 'api_key' ? 'bg-brand text-white' : 'bg-card text-foreground hover:bg-muted'
+              }`}
+            >
+              API Key
+            </button>
+          </div>
+          <p className="text-[10px] text-muted-foreground mt-1">
+            {keyMode === 'ak_sk' ? '每行填 ak|sk（Region 自动追加）。' : '每行填 apikey（Region 自动追加）。'}
+          </p>
+        </div>
+      </div>
+      <div>
+        <label className="block text-[11px] text-muted-foreground mb-1">Proxy（可选）</label>
+        <input
+          value={proxy}
+          onChange={e => onProxyChange(e.target.value)}
+          placeholder="http://user:pass@host:port（留空则不走代理）"
+          className="w-full border border-border rounded-md px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ring"
+        />
+        <p className="text-[10px] text-muted-foreground mt-1">写入 channel.settings.proxy，作用于本批全部渠道；默认为空。</p>
+      </div>
+    </div>
+  )
+}
+
+export default function RemoteChannelsStudio() {
+  const [profiles, setProfiles] = useState<RemoteProfile[]>([])
+  // Initialise from localStorage so a page refresh doesn't force operators
+  // back to the first profile. Validated against the loaded list below.
+  const [selectedID, setSelectedID] = useState<number | null>(readRememberedProfileID)
+  const [loadingProfiles, setLoadingProfiles] = useState(true)
+  const [pending, setPending] = useState<PendingKey[]>([])
+  // Live mirror of remote channels the operator uploaded — server-side
+  // filters this to (studio, uploaded_by) so we don't have to guard here.
+  const [channels, setChannels] = useState<RemoteChannel[]>([])
+  // "获取用量" fires a real remote fetch and rewrites the mirror; disable
+  // the button while it's running so back-to-back clicks don't stack
+  // 429s at the backend guard.
+  const [refreshingRemote, setRefreshingRemote] = useState(false)
+  // Studio bound to this JWT — used as the default "middle segment" of
+  // new channel names. Fetched once on mount; empty string until it
+  // arrives (openBatch guards against opening the modal before that).
+  const [userStudio, setUserStudio] = useState('')
+
+  const [batchOpen, setBatchOpen] = useState(false)
+  const [batchPrefix, setBatchPrefix] = useState('')
+  // Date segment prepended to the channel name. Defaults to today when the
+  // modal opens (see openBatch) but is editable — an operator uploading
+  // yesterday's keys can backdate the tag so the batch groups together.
+  const [batchDatePrefix, setBatchDatePrefix] = useState('')
+  const [batchGroup, setBatchGroup] = useState('default')
+  const [batchModels, setBatchModels] = useState(DEFAULT_ANTHROPIC_MODELS)
+  const [batchPresetID, setBatchPresetID] = useState<PresetID>('anthropic')
+  const [batchInput, setBatchInput] = useState('')
+  const [batchBusy, setBatchBusy] = useState(false)
+  const [batchErr, setBatchErr] = useState<string | null>(null)
+
+  // "上普通 Key" — separate immediate-upload lane (pool_size=0 on the
+  // backend). Same fields as the pool modal, but the intent is
+  // different enough that a shared modal-with-toggle would blur the
+  // mental model. Keep them side by side and let the operator pick.
+  const [immOpen, setImmOpen] = useState(false)
+  const [immPrefix, setImmPrefix] = useState('')
+  const [immDatePrefix, setImmDatePrefix] = useState('')
+  const [immGroup, setImmGroup] = useState('default')
+  const [immModels, setImmModels] = useState(DEFAULT_ANTHROPIC_MODELS)
+  const [immPresetID, setImmPresetID] = useState<PresetID>('anthropic')
+  const [immInput, setImmInput] = useState('')
+  const [immBusy, setImmBusy] = useState(false)
+  const [immErr, setImmErr] = useState<string | null>(null)
+
+  // Vertex-only state. Deliberately not merged with batch/immediate text
+  // state: the inputs are different shapes (JSON files + region vs
+  // multi-line key textarea), and keeping them siblings makes the
+  // conditional render branches inside each modal small and readable.
+  //
+  // Files are pre-parsed on selection so we can (a) reject invalid JSON
+  // early, (b) render the filename list back to the operator, and (c)
+  // ship the JSON body without a re-read. `perFile` carries the optional
+  // quota + note per SA JSON (parallel to text-mode's line syntax).
+  const [batchRegion, setBatchRegion] = useState('global')
+  const [batchVertexFiles, setBatchVertexFiles] = useState<VertexFile[]>([])
+  const [batchVertexKeyMode, setBatchVertexKeyMode] = useState<VertexKeyMode>('json')
+  const [batchVertexKeysText, setBatchVertexKeysText] = useState('')
+  const [immRegion, setImmRegion] = useState('global')
+  const [immVertexFiles, setImmVertexFiles] = useState<VertexFile[]>([])
+  const [immVertexKeyMode, setImmVertexKeyMode] = useState<VertexKeyMode>('json')
+  const [immVertexKeysText, setImmVertexKeysText] = useState('')
+
+  // Azure-only state. Same rationale as the Vertex block above: the input
+  // shape (per-line api-key + per-batch base_url + api_version) doesn't
+  // reuse either the text or the vertex flow, so it stays sibling to both.
+  const [batchAzureBaseUrl, setBatchAzureBaseUrl] = useState('')
+  const [batchAzureApiVersion, setBatchAzureApiVersion] = useState(AZURE_DEFAULT_API_VERSION)
+  const [immAzureBaseUrl, setImmAzureBaseUrl] = useState('')
+  const [immAzureApiVersion, setImmAzureApiVersion] = useState(AZURE_DEFAULT_API_VERSION)
+
+  // AWS Bedrock preset state. Region reuses batchRegion/immRegion (same
+  // sentinel-vs-real handling as Vertex); the key-mode selector picks the
+  // auth flavour (ak_sk default / api_key) posted to remoteAwsCreate.
+  const [batchAwsKeyMode, setBatchAwsKeyMode] = useState<AwsKeyMode>('ak_sk')
+  const [immAwsKeyMode, setImmAwsKeyMode] = useState<AwsKeyMode>('ak_sk')
+  // Optional outbound proxy for AWS channels (channel.settings.proxy). Empty → none.
+  const [batchAwsProxy, setBatchAwsProxy] = useState('')
+  const [immAwsProxy, setImmAwsProxy] = useState('')
+
+  // Key usage list. Two YYYY-MM-DD date inputs (interpreted in local
+  // time, so "2026-07-23" = local 00:00 that day). Default range = today
+  // 00:00 → now. Empty end input keeps end = "now" and updates on refresh.
+  const todayLocalYMD = () => {
+    const d = new Date()
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const dd = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${dd}`
+  }
+  const [usageStart, setUsageStart] = useState<string>(todayLocalYMD())
+  const [usageEnd, setUsageEnd] = useState<string>(todayLocalYMD())
+  const [usageData, setUsageData] = useState<Record<string, number>>({}) // channel_id → raw quota
+  const [usageTotal, setUsageTotal] = useState<number>(0)
+  const [usageLoading, setUsageLoading] = useState(false)
+  const [usageErr, setUsageErr] = useState<string | null>(null)
+  const [usageFetchedAt, setUsageFetchedAt] = useState<number>(0)
+
+  // Read a FileList → VertexFile[]. On parse failure we skip the bad
+  // file and surface a message; partial success is fine and matches how
+  // the backend treats the batch (per-item error results).
+  const readVertexFiles = useCallback(async (files: FileList | null): Promise<{ parsed: VertexFile[]; errors: string[] }> => {
+    if (!files || files.length === 0) return { parsed: [], errors: [] }
+    const parsed: VertexFile[] = []
+    const errors: string[] = []
+    for (const f of Array.from(files)) {
+      try {
+        const txt = await f.text()
+        const json = JSON.parse(txt)
+        parsed.push({ name: f.name, json })
+      } catch (e: any) {
+        errors.push(`${f.name}: ${e?.message || 'JSON 解析失败'}`)
+      }
+    }
+    return { parsed, errors }
+  }, [])
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const me = await api.getAuthMe()
+        setUserStudio((me?.studio || '').trim())
+      } catch (e) {
+        console.warn('getAuthMe failed', e)
+      }
+    })()
+  }, [])
+
+  const reloadProfiles = useCallback(async () => {
+    setLoadingProfiles(true)
+    try {
+      const res = await api.remoteProfiles()
+      setProfiles(res.profiles)
+      // Keep the previously remembered profile if it's still in the loaded
+      // list; otherwise fall back to the first available profile.
+      setSelectedID(prev => {
+        if (prev != null && res.profiles.some(p => p.id === prev)) return prev
+        return res.profiles[0]?.id ?? null
+      })
+    } catch (e) {
+      console.warn('remoteProfiles failed', e)
+    } finally {
+      setLoadingProfiles(false)
+    }
+  }, [])
+
+  // Persist selection so a refresh preserves the operator's context.
+  useEffect(() => { writeRememberedProfileID(selectedID) }, [selectedID])
+
+  useEffect(() => { void reloadProfiles() }, [reloadProfiles])
+
+  const reloadPending = useCallback(async () => {
+    if (!selectedID) {
+      setPending([])
+      return
+    }
+    try {
+      const res = await api.remotePendingList(selectedID)
+      setPending(res.items)
+    } catch (e) {
+      console.warn('pending list failed', e)
+    }
+  }, [selectedID])
+
+  const reloadChannels = useCallback(async () => {
+    if (!selectedID) {
+      setChannels([])
+      return
+    }
+    try {
+      const res = await api.remoteCachedChannels(selectedID)
+      setChannels(res.channels)
+    } catch (e) {
+      console.warn('cached channels failed', e)
+    }
+  }, [selectedID])
+
+  const refreshRemoteUsage = useCallback(async () => {
+    if (!selectedID || refreshingRemote) return
+    setRefreshingRemote(true)
+    try {
+      const res = await api.remoteChannelsRefresh(selectedID)
+      await reloadChannels()
+      toast.success(`已从远端拉取 ${res.fetched} 条渠道`)
+    } catch (e: any) {
+      toast.error('获取用量失败: ' + (e?.message || e))
+    } finally {
+      setRefreshingRemote(false)
+    }
+  }, [selectedID, refreshingRemote, reloadChannels])
+
+  // Convert YYYY-MM-DD (local) → epoch seconds at 00:00 local. For the
+  // end field we push to 24:00 (start of next day) so the window
+  // includes activity all through the end date.
+  const ymdToLocalEpoch = (ymd: string, endOfDay: boolean): number | null => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null
+    const [y, m, d] = ymd.split('-').map(n => parseInt(n, 10))
+    const base = new Date(y, m - 1, d, 0, 0, 0, 0)
+    if (isNaN(base.getTime())) return null
+    return Math.floor(base.getTime() / 1000) + (endOfDay ? 86400 : 0)
+  }
+
+  const loadUsage = useCallback(async () => {
+    if (!selectedID) {
+      setUsageData({})
+      setUsageTotal(0)
+      return
+    }
+    const startEpoch = ymdToLocalEpoch(usageStart, false)
+    if (startEpoch == null) {
+      setUsageErr('起始日期格式错误')
+      return
+    }
+    // End = min(next-day-00:00 of usageEnd, now). Selecting today means
+    // "up to this moment", which is what operators expect.
+    const endEpochRaw = ymdToLocalEpoch(usageEnd, true)
+    if (endEpochRaw == null) {
+      setUsageErr('结束日期格式错误')
+      return
+    }
+    const nowEpoch = Math.floor(Date.now() / 1000)
+    const endEpoch = Math.min(endEpochRaw, nowEpoch)
+    if (endEpoch <= startEpoch) {
+      setUsageErr('结束日期必须不早于起始日期')
+      return
+    }
+    setUsageErr(null)
+    setUsageLoading(true)
+    try {
+      const res = await api.remoteChannelUsageRange({
+        profile_id: selectedID,
+        start_timestamp: startEpoch,
+        end_timestamp: endEpoch,
+      })
+      setUsageData(res.data || {})
+      setUsageTotal(res.total_used_usd || 0)
+      setUsageFetchedAt(Date.now())
+    } catch (e: any) {
+      setUsageErr(e?.message || String(e))
+    } finally {
+      setUsageLoading(false)
+    }
+  }, [selectedID, usageStart, usageEnd])
+
+  // First load per profile + when date inputs change. Wait until the
+  // channel list has been fetched so the table renders channel names
+  // alongside the usage numbers.
+  useEffect(() => {
+    if (!selectedID) return
+    void loadUsage()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedID, usageStart, usageEnd])
+
+  useEffect(() => {
+    void reloadPending()
+    void reloadChannels()
+    // Auto-refresh both cards on the same tick so used_quota and the
+    // queue's active/used transitions stay in sync without doubling the
+    // network chatter.
+    const t = setInterval(() => {
+      void reloadPending()
+      void reloadChannels()
+    }, 30000)
+    return () => clearInterval(t)
+  }, [selectedID, reloadPending, reloadChannels])
+
+  const openBatch = () => {
+    const p = profiles.find(x => x.id === selectedID)
+    // Middle segment defaults to the operator's bound studio — that's
+    // the identifier they use to distinguish batches downstream. They
+    // can still edit it (e.g. append -alpha / -beta) but the studio
+    // stays visible.
+    setBatchPrefix(userStudio)
+    // Seed the date segment with today; operators can still backdate an
+    // upload (e.g. keys they already staged yesterday) so the resulting
+    // channel names group with that day's batch downstream.
+    setBatchDatePrefix(todayYYYYMMDD())
+    const initialPreset = CHANNEL_TYPE_PRESETS[0]
+    setBatchPresetID(initialPreset.id)
+    setBatchGroup(resolvePresetGroup(initialPreset, p))
+    setBatchModels(resolvePresetModels(initialPreset, p))
+    setBatchInput('')
+    setBatchVertexFiles([])
+    setBatchVertexKeyMode('json')
+    setBatchVertexKeysText('')
+    setBatchRegion('global')
+    setBatchAzureBaseUrl('')
+    setBatchAzureApiVersion(AZURE_DEFAULT_API_VERSION)
+    setBatchAwsKeyMode('ak_sk')
+    setBatchAwsProxy('')
+    setBatchErr(null)
+    setBatchOpen(true)
+  }
+
+  const submitBatch = async () => {
+    if (!selectedID) return
+    setBatchErr(null)
+    if (!batchPrefix.trim()) return setBatchErr('中间段不能为空')
+    if (!batchModels.trim()) return setBatchErr('models 不能为空')
+    const preset = CHANNEL_TYPE_PRESETS.find(p => p.id === batchPresetID)
+    // Empty date input falls back to today so the field never produces a
+    // dangling leading dash. Anything the operator types is passed
+    // through unchanged — we don't validate YYYYMMDD shape.
+    const datePrefix = batchDatePrefix.trim() || todayYYYYMMDD()
+    const fullNamePrefix = datePrefix + '-' + batchPrefix.trim()
+
+    if (preset?.kind === 'vertex') {
+      const vertexItems: (
+        | { key_json: unknown; quota_usd?: number; note?: string }
+        | { key: string;       quota_usd?: number; note?: string }
+      )[] = []
+      if (batchVertexKeyMode === 'json') {
+        if (batchVertexFiles.length === 0) return setBatchErr('请至少选择一个 Service Account JSON 文件')
+        for (const f of batchVertexFiles) {
+          vertexItems.push({ key_json: f.json, quota_usd: f.quotaUSD, note: f.note })
+        }
+      } else {
+        for (const raw of batchVertexKeysText.split('\n')) {
+          const t = raw.trim()
+          if (!t || t.startsWith('#')) continue
+          const parts = t.split(/[\s,]+/)
+          const key = parts[0]
+          if (!key) continue
+          const item: { key: string; quota_usd?: number; note?: string } = { key }
+          if (parts[1]) {
+            const q = parseFloat(parts[1])
+            if (!isNaN(q) && q > 0) item.quota_usd = q
+          }
+          if (parts.length > 2) item.note = parts.slice(2).join(' ')
+          vertexItems.push(item)
+        }
+        if (vertexItems.length === 0) return setBatchErr('未解析到有效行')
+      }
+      setBatchBusy(true)
+      try {
+        const res = await api.remoteVertexCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: batchModels.trim(),
+          group: batchGroup.trim() || 'default',
+          region: batchRegion.trim() || 'global',
+          key_type: batchVertexKeyMode,
+          items: vertexItems,
+        })
+        const failed = res.results.filter(r => !r.ok)
+        if (failed.length === 0) {
+          toast.success(`已上传 ${res.ok} 个 Vertex 渠道`)
+        } else {
+          toast.error(`成功 ${res.ok} / ${res.total}\n失败：\n` + failed.map(r => `#${r.index} ${r.error}`).join('\n'))
+        }
+        setBatchOpen(false)
+        // Vertex bypasses the pending queue — refresh channels instead.
+        void reloadChannels()
+      } catch (e: any) {
+        setBatchErr(e?.message || String(e))
+      } finally {
+        setBatchBusy(false)
+      }
+      return
+    }
+
+    if (preset?.kind === 'azure') {
+      if (!batchAzureBaseUrl.trim()) return setBatchErr('Azure 需要 Resource Endpoint (例: https://<resource>.openai.azure.com)')
+      const azureItems: { key: string; quota_usd?: number; note?: string }[] = []
+      for (const raw of batchInput.split('\n')) {
+        const t = raw.trim()
+        if (!t || t.startsWith('#')) continue
+        const parts = t.split(/[\s,]+/)
+        const key = parts[0]
+        if (!key) continue
+        const item: { key: string; quota_usd?: number; note?: string } = { key }
+        if (parts[1]) {
+          const q = parseFloat(parts[1])
+          if (!isNaN(q) && q > 0) item.quota_usd = q
+        }
+        if (parts.length > 2) item.note = parts.slice(2).join(' ')
+        azureItems.push(item)
+      }
+      if (azureItems.length === 0) return setBatchErr('未解析到有效行')
+      setBatchBusy(true)
+      try {
+        const res = await api.remoteAzureCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: batchModels.trim(),
+          group: batchGroup.trim() || 'openai',
+          base_url: batchAzureBaseUrl.trim(),
+          api_version: batchAzureApiVersion.trim() || AZURE_DEFAULT_API_VERSION,
+          items: azureItems,
+        })
+        const failed = res.results.filter(r => !r.ok)
+        if (failed.length === 0) {
+          toast.success(`已上传 ${res.ok} 个 Azure 渠道`)
+        } else {
+          toast.error(`成功 ${res.ok} / ${res.total}\n失败：\n` + failed.map(r => `#${r.index} ${r.error}`).join('\n'))
+        }
+        setBatchOpen(false)
+        void reloadChannels()
+      } catch (e: any) {
+        setBatchErr(e?.message || String(e))
+      } finally {
+        setBatchBusy(false)
+      }
+      return
+    }
+
+    if (preset?.kind === 'aws') {
+      if (!batchRegion.trim()) return setBatchErr('AWS 需要填写 Region (例: us-east-1)')
+      const awsItems: { key: string; quota_usd?: number; note?: string }[] = []
+      for (const raw of batchInput.split('\n')) {
+        const t = raw.trim()
+        if (!t || t.startsWith('#')) continue
+        const parts = t.split(/[\s,]+/)
+        const key = parts[0]
+        if (!key) continue
+        const item: { key: string; quota_usd?: number; note?: string } = { key }
+        if (parts[1]) {
+          const q = parseFloat(parts[1])
+          if (!isNaN(q) && q > 0) item.quota_usd = q
+        }
+        if (parts.length > 2) item.note = parts.slice(2).join(' ')
+        awsItems.push(item)
+      }
+      if (awsItems.length === 0) return setBatchErr('未解析到有效行')
+      setBatchBusy(true)
+      try {
+        const res = await api.remoteAwsCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: batchModels.trim(),
+          group: batchGroup.trim() || 'claude-aws',
+          region: batchRegion.trim(),
+          key_type: batchAwsKeyMode,
+          ...(batchAwsProxy.trim() ? { proxy: batchAwsProxy.trim() } : {}),
+          items: awsItems,
+        })
+        const failed = res.results.filter(r => !r.ok)
+        if (failed.length === 0) {
+          toast.success(`已上传 ${res.ok} 个 AWS 渠道`)
+        } else {
+          toast.error(`成功 ${res.ok} / ${res.total}\n失败：\n` + failed.map(r => `#${r.index} ${r.error}`).join('\n'))
+        }
+        setBatchOpen(false)
+        void reloadChannels()
+      } catch (e: any) {
+        setBatchErr(e?.message || String(e))
+      } finally {
+        setBatchBusy(false)
+      }
+      return
+    }
+
+    const items: { key: string; quota_usd?: number; note?: string }[] = []
+    for (const raw of batchInput.split('\n')) {
+      const t = raw.trim()
+      if (!t || t.startsWith('#')) continue
+      const parts = t.split(/[\s,]+/)
+      const key = parts[0]
+      if (!key) continue
+      const item: { key: string; quota_usd?: number; note?: string } = { key }
+      if (parts[1]) {
+        const q = parseFloat(parts[1])
+        if (!isNaN(q) && q > 0) item.quota_usd = q
+      }
+      if (parts.length > 2) {
+        item.note = parts.slice(2).join(' ')
+      }
+      items.push(item)
+    }
+    if (items.length === 0) return setBatchErr('未解析到有效行')
+    setBatchBusy(true)
+    try {
+      // pool_size=1 = "go into the pool" sentinel. Actual throttle
+      // (interval + batch size) is set on the profile by the super
+      // admin — operator never sees or picks it. Backend rewrites tag
+      // to the caller's studio and zeroes any priority we might send,
+      // so we intentionally don't pass tag / priority here.
+      const res = await api.remotePendingEnqueue({
+        profile_id: selectedID,
+        name_prefix: fullNamePrefix,
+        type: preset?.type,
+        group: batchGroup.trim() || 'default',
+        models: batchModels.trim(),
+        pool_size: 1,
+        items,
+      })
+      toast.success(`已入队 ${res.inserted} 条${res.skipped ? `（${res.skipped} 条跳过 / 已存在）` : ''}`)
+      setBatchOpen(false)
+      void reloadPending()
+    } catch (e: any) {
+      setBatchErr(e?.message || String(e))
+    } finally {
+      setBatchBusy(false)
+    }
+  }
+
+  const openImmediate = () => {
+    const p = profiles.find(x => x.id === selectedID)
+    setImmPrefix(userStudio)
+    setImmDatePrefix(todayYYYYMMDD())
+    const initialPreset = CHANNEL_TYPE_PRESETS[0]
+    setImmPresetID(initialPreset.id)
+    setImmGroup(resolvePresetGroup(initialPreset, p))
+    setImmModels(resolvePresetModels(initialPreset, p))
+    setImmInput('')
+    setImmVertexFiles([])
+    setImmVertexKeyMode('json')
+    setImmVertexKeysText('')
+    setImmRegion('global')
+    setImmAzureBaseUrl('')
+    setImmAzureApiVersion(AZURE_DEFAULT_API_VERSION)
+    setImmAwsKeyMode('ak_sk')
+    setImmAwsProxy('')
+    setImmErr(null)
+    setImmOpen(true)
+  }
+
+  const submitImmediate = async () => {
+    if (!selectedID) return
+    setImmErr(null)
+    if (!immPrefix.trim()) return setImmErr('中间段不能为空')
+    if (!immModels.trim()) return setImmErr('models 不能为空')
+    const preset = CHANNEL_TYPE_PRESETS.find(p => p.id === immPresetID)
+    const immDate = immDatePrefix.trim() || todayYYYYMMDD()
+    const fullNamePrefix = immDate + '-' + immPrefix.trim()
+
+    if (preset?.kind === 'vertex') {
+      const vertexItems: (
+        | { key_json: unknown; quota_usd?: number; note?: string }
+        | { key: string;       quota_usd?: number; note?: string }
+      )[] = []
+      if (immVertexKeyMode === 'json') {
+        if (immVertexFiles.length === 0) return setImmErr('请至少选择一个 Service Account JSON 文件')
+        for (const f of immVertexFiles) {
+          vertexItems.push({ key_json: f.json, quota_usd: f.quotaUSD, note: f.note })
+        }
+      } else {
+        for (const raw of immVertexKeysText.split('\n')) {
+          const t = raw.trim()
+          if (!t || t.startsWith('#')) continue
+          const parts = t.split(/[\s,]+/)
+          const key = parts[0]
+          if (!key) continue
+          const item: { key: string; quota_usd?: number; note?: string } = { key }
+          if (parts[1]) {
+            const q = parseFloat(parts[1])
+            if (!isNaN(q) && q > 0) item.quota_usd = q
+          }
+          if (parts.length > 2) item.note = parts.slice(2).join(' ')
+          vertexItems.push(item)
+        }
+        if (vertexItems.length === 0) return setImmErr('未解析到有效行')
+      }
+      setImmBusy(true)
+      try {
+        const res = await api.remoteVertexCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: immModels.trim(),
+          group: immGroup.trim() || 'default',
+          region: immRegion.trim() || 'global',
+          key_type: immVertexKeyMode,
+          items: vertexItems,
+        })
+        const failed = res.results.filter(r => !r.ok)
+        if (failed.length === 0) {
+          toast.success(`已上传 ${res.ok} 个 Vertex 渠道`)
+        } else {
+          toast.error(`成功 ${res.ok} / ${res.total}\n失败：\n` + failed.map(r => `#${r.index} ${r.error}`).join('\n'))
+        }
+        setImmOpen(false)
+        void reloadChannels()
+      } catch (e: any) {
+        setImmErr(e?.message || String(e))
+      } finally {
+        setImmBusy(false)
+      }
+      return
+    }
+
+    if (preset?.kind === 'azure') {
+      if (!immAzureBaseUrl.trim()) return setImmErr('Azure 需要 Resource Endpoint (例: https://<resource>.openai.azure.com)')
+      const azureItems: { key: string; quota_usd?: number; note?: string }[] = []
+      for (const raw of immInput.split('\n')) {
+        const t = raw.trim()
+        if (!t || t.startsWith('#')) continue
+        const parts = t.split(/[\s,]+/)
+        const key = parts[0]
+        if (!key) continue
+        const item: { key: string; quota_usd?: number; note?: string } = { key }
+        if (parts[1]) {
+          const q = parseFloat(parts[1])
+          if (!isNaN(q) && q > 0) item.quota_usd = q
+        }
+        if (parts.length > 2) item.note = parts.slice(2).join(' ')
+        azureItems.push(item)
+      }
+      if (azureItems.length === 0) return setImmErr('未解析到有效行')
+      setImmBusy(true)
+      try {
+        const res = await api.remoteAzureCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: immModels.trim(),
+          group: immGroup.trim() || 'openai',
+          base_url: immAzureBaseUrl.trim(),
+          api_version: immAzureApiVersion.trim() || AZURE_DEFAULT_API_VERSION,
+          items: azureItems,
+        })
+        const failed = res.results.filter(r => !r.ok)
+        if (failed.length === 0) {
+          toast.success(`已上传 ${res.ok} 个 Azure 渠道`)
+        } else {
+          toast.error(`成功 ${res.ok} / ${res.total}\n失败：\n` + failed.map(r => `#${r.index} ${r.error}`).join('\n'))
+        }
+        setImmOpen(false)
+        void reloadChannels()
+      } catch (e: any) {
+        setImmErr(e?.message || String(e))
+      } finally {
+        setImmBusy(false)
+      }
+      return
+    }
+
+    if (preset?.kind === 'aws') {
+      if (!immRegion.trim()) return setImmErr('AWS 需要填写 Region (例: us-east-1)')
+      const awsItems: { key: string; quota_usd?: number; note?: string }[] = []
+      for (const raw of immInput.split('\n')) {
+        const t = raw.trim()
+        if (!t || t.startsWith('#')) continue
+        const parts = t.split(/[\s,]+/)
+        const key = parts[0]
+        if (!key) continue
+        const item: { key: string; quota_usd?: number; note?: string } = { key }
+        if (parts[1]) {
+          const q = parseFloat(parts[1])
+          if (!isNaN(q) && q > 0) item.quota_usd = q
+        }
+        if (parts.length > 2) item.note = parts.slice(2).join(' ')
+        awsItems.push(item)
+      }
+      if (awsItems.length === 0) return setImmErr('未解析到有效行')
+      setImmBusy(true)
+      try {
+        const res = await api.remoteAwsCreate({
+          profile_id: selectedID,
+          name_prefix: fullNamePrefix,
+          models: immModels.trim(),
+          group: immGroup.trim() || 'claude-aws',
+          region: immRegion.trim(),
+          key_type: immAwsKeyMode,
+          ...(immAwsProxy.trim() ? { proxy: immAwsProxy.trim() } : {}),
+          items: awsItems,
+        })
+        const failed = res.results.filter(r => !r.ok)
+        if (failed.length === 0) {
+          toast.success(`已上传 ${res.ok} 个 AWS 渠道`)
+        } else {
+          toast.error(`成功 ${res.ok} / ${res.total}\n失败：\n` + failed.map(r => `#${r.index} ${r.error}`).join('\n'))
+        }
+        setImmOpen(false)
+        void reloadChannels()
+      } catch (e: any) {
+        setImmErr(e?.message || String(e))
+      } finally {
+        setImmBusy(false)
+      }
+      return
+    }
+
+    const items: { key: string; quota_usd?: number; note?: string }[] = []
+    for (const raw of immInput.split('\n')) {
+      const t = raw.trim()
+      if (!t || t.startsWith('#')) continue
+      const parts = t.split(/[\s,]+/)
+      const key = parts[0]
+      if (!key) continue
+      const item: { key: string; quota_usd?: number; note?: string } = { key }
+      if (parts[1]) {
+        const q = parseFloat(parts[1])
+        if (!isNaN(q) && q > 0) item.quota_usd = q
+      }
+      if (parts.length > 2) item.note = parts.slice(2).join(' ')
+      items.push(item)
+    }
+    if (items.length === 0) return setImmErr('未解析到有效行')
+    setImmBusy(true)
+    try {
+      // immediate=true → server flips pool_size to 0 so the row goes
+      // through the immediate lane on the next scheduler tick (no drip,
+      // no wait). priority stays server-forced at 0 for operator.
+      const res = await api.remotePendingEnqueue({
+        profile_id: selectedID,
+        name_prefix: fullNamePrefix,
+        type: preset?.type,
+        group: immGroup.trim() || 'default',
+        models: immModels.trim(),
+        pool_size: 0,
+        immediate: true,
+        items,
+      })
+      toast.success(`已入队 ${res.inserted} 条${res.skipped ? `（${res.skipped} 条跳过 / 已存在）` : ''}`)
+      setImmOpen(false)
+      void reloadPending()
+    } catch (e: any) {
+      setImmErr(e?.message || String(e))
+    } finally {
+      setImmBusy(false)
+    }
+  }
+
+  const cancelPending = async (row: PendingKey) => {
+    if (row.status !== 'pending' && row.status !== 'failed') return
+    if (!(await confirmDialog({ message: `删除队列条目 (${row.key_masked})？只能删 pending/failed 的。`, danger: true, confirmText: '删除' }))) return
+    try {
+      await api.remotePendingDelete(row.id)
+      await reloadPending()
+    } catch (e: any) {
+      toast.error('删除失败: ' + (e?.message || e))
+    }
+  }
+
+  const selectedProfile = profiles.find(p => p.id === selectedID)
+
+  return (
+    <Layout
+      title="Other Newapi Key"
+      subtitle="批量上传 Key 到远端 New-Api"
+      actions={
+        <div className="flex items-center gap-2">
+          <button
+            onClick={openImmediate}
+            disabled={!selectedID}
+            className="border border-border text-foreground rounded-md px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+          >
+            上普通 Key
+          </button>
+          <button
+            onClick={openBatch}
+            disabled={!selectedID}
+            className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
+          >
+            批量上 5刀key (Pool)
+          </button>
+        </div>
+      }
+    >
+      <div className="space-y-4">
+        <div className="bg-card border border-border rounded-xl p-4">
+          <label className="block text-[11px] text-muted-foreground mb-1">Profile</label>
+          {loadingProfiles ? (
+            <div className="text-xs text-muted-foreground">加载中…</div>
+          ) : profiles.length === 0 ? (
+            <div className="text-xs text-muted-foreground">还没有配置 Profile，请联系管理员。</div>
+          ) : (
+            <select
+              value={selectedID ?? ''}
+              onChange={e => setSelectedID(parseInt(e.target.value, 10) || null)}
+              className="border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+            >
+              {profiles.map(p => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          )}
+          {selectedProfile && (
+            <div className="text-[11px] text-muted-foreground mt-2">
+              默认 Models: <span className="font-mono">{selectedProfile.default_models || '未设置'}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="bg-card border border-border rounded-xl">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+            <div>
+              <div className="text-sm font-medium text-foreground">我的远程渠道</div>
+              <div className="text-[11px] text-muted-foreground mt-0.5">
+                每 30 秒从本地镜像刷新一次；远端用量每 15 分钟同步一次，需要立即拉取请按「获取用量」。
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => void refreshRemoteUsage()}
+                disabled={refreshingRemote || !selectedID}
+                className="text-xs text-white bg-brand rounded-md px-2 py-1 hover:bg-brand-700 disabled:opacity-50"
+                title="向远端 new-api 发起一次拉取，更新用量数据"
+              >
+                {refreshingRemote ? '拉取中…' : '获取用量'}
+              </button>
+              <button
+                onClick={() => void reloadChannels()}
+                className="text-xs text-muted-foreground border border-border rounded-md px-2 py-1 hover:bg-muted"
+              >
+                刷新
+              </button>
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-muted mono-label">
+                <tr>
+                  <th className="text-left px-4 py-2 font-medium">名称</th>
+                  <th className="text-left px-4 py-2 font-medium">状态</th>
+                  <th className="text-left px-4 py-2 font-medium">Group</th>
+                  <th className="text-right px-4 py-2 font-medium" title="从 remote_channel_current 同步的累计用量">已用</th>
+                  <th className="text-right px-4 py-2 font-medium" title="上传时填写的额度上限">额度</th>
+                  <th className="text-right px-4 py-2 font-medium">剩余</th>
+                  <th className="text-left px-4 py-2 font-medium">创建时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                {channels.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-6 text-center text-xs text-muted-foreground">
+                      暂无渠道，先在下方队列上传 Key
+                    </td>
+                  </tr>
+                ) : (
+                  channels.map(ch => {
+                    const usedUSD = ch.used_quota / 500000
+                    const quotaUSD = ch.quota_usd ?? 0
+                    return (
+                      <tr key={ch.id} className="border-t border-border">
+                        <td className="px-4 py-2 font-mono text-[11px]">{ch.name}</td>
+                        <td className="px-4 py-2">
+                          <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] ${channelStatusCls(ch.status)}`}>
+                            {channelStatusLabel(ch.status)}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2 text-[11px] text-muted-foreground">{ch.group || '—'}</td>
+                        <td className="px-4 py-2 text-right tabular-nums text-[11px]">${usedUSD.toFixed(4)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums text-[11px]">
+                          {quotaUSD > 0 ? `$${quotaUSD.toFixed(2)}` : <span className="text-muted-foreground">—</span>}
+                        </td>
+                        <td className="px-4 py-2 text-right">
+                          <UsagePct used={usedUSD} quota={quotaUSD} />
+                        </td>
+                        <td className="px-4 py-2 text-[11px] text-muted-foreground">{fmtTime(ch.created_time)}</td>
+                      </tr>
+                    )
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Key 用量统计（按时间窗口）。数据源是远端 /api/log/stat?type=2
+            的窗口 quota，不是快照差值，所以是精确的实际消耗。默认当天
+            00:00 → 现在，改日期即刻重新拉。 */}
+        <div className="bg-card border border-border rounded-xl">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-border gap-3 flex-wrap">
+            <div>
+              <div className="text-sm font-medium text-foreground">Key 用量统计</div>
+              <div className="text-[11px] text-muted-foreground mt-0.5">
+                窗口内实际消耗（USD）。默认当天。
+                {usageFetchedAt > 0 && (
+                  <span> · 更新于 {new Date(usageFetchedAt).toLocaleTimeString()}</span>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <label className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                起
+                <input
+                  type="date"
+                  value={usageStart}
+                  onChange={e => setUsageStart(e.target.value)}
+                  className="border border-border rounded-md px-2 py-1 text-xs focus:outline-none focus:border-ring"
+                />
+              </label>
+              <label className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                止
+                <input
+                  type="date"
+                  value={usageEnd}
+                  onChange={e => setUsageEnd(e.target.value)}
+                  className="border border-border rounded-md px-2 py-1 text-xs focus:outline-none focus:border-ring"
+                />
+              </label>
+              <button
+                onClick={() => {
+                  const t = todayLocalYMD()
+                  setUsageStart(t)
+                  setUsageEnd(t)
+                }}
+                className="text-[11px] text-muted-foreground border border-border rounded-md px-2 py-1 hover:bg-muted"
+              >
+                今天
+              </button>
+              <button
+                onClick={() => void loadUsage()}
+                disabled={usageLoading}
+                className="text-xs text-white bg-brand rounded-md px-2 py-1 hover:bg-brand-700 disabled:opacity-50"
+              >
+                {usageLoading ? '拉取中…' : '刷新'}
+              </button>
+            </div>
+          </div>
+          {usageErr && (
+            <div className="px-4 py-2 text-[11px] text-destructive border-b border-border bg-destructive/10">
+              {usageErr}
+            </div>
+          )}
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-muted mono-label">
+                <tr>
+                  <th className="text-left px-4 py-2 font-medium">名称</th>
+                  <th className="text-left px-4 py-2 font-medium">Group</th>
+                  <th className="text-right px-4 py-2 font-medium">窗口内消耗 (USD)</th>
+                  <th className="text-right px-4 py-2 font-medium" title="上传时设置的额度上限">额度</th>
+                  <th className="text-right px-4 py-2 font-medium" title="窗口内消耗 / 额度">占比</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(() => {
+                  // Rows are driven by the channel list (so operators see
+                  // all their channels even if usage is 0), sorted by
+                  // window usage desc, with a total row at the bottom.
+                  const rows = channels.map(ch => {
+                    const raw = usageData[String(ch.id)] || 0
+                    const usedUSD = raw / 500000
+                    const quotaUSD = ch.quota_usd ?? 0
+                    const pct = quotaUSD > 0 ? Math.min(100, (usedUSD / quotaUSD) * 100) : null
+                    return { ch, usedUSD, quotaUSD, pct }
+                  })
+                  rows.sort((a, b) => b.usedUSD - a.usedUSD)
+                  if (rows.length === 0) {
+                    return (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-6 text-center text-xs text-muted-foreground">
+                          {usageLoading ? '加载中…' : '暂无渠道'}
+                        </td>
+                      </tr>
+                    )
+                  }
+                  return (
+                    <>
+                      {rows.map(r => (
+                        <tr key={r.ch.id} className="border-t border-border">
+                          <td className="px-4 py-2 font-mono text-[11px]">{r.ch.name}</td>
+                          <td className="px-4 py-2 text-[11px] text-muted-foreground">{r.ch.group || '—'}</td>
+                          <td className="px-4 py-2 text-right tabular-nums text-[11px]">
+                            {r.usedUSD > 0 ? `$${r.usedUSD.toFixed(4)}` : <span className="text-muted-foreground">$0</span>}
+                          </td>
+                          <td className="px-4 py-2 text-right tabular-nums text-[11px]">
+                            {r.quotaUSD > 0 ? `$${r.quotaUSD.toFixed(2)}` : <span className="text-muted-foreground">—</span>}
+                          </td>
+                          <td className="px-4 py-2 text-right tabular-nums text-[11px]">
+                            {r.pct != null ? `${r.pct.toFixed(1)}%` : <span className="text-muted-foreground">—</span>}
+                          </td>
+                        </tr>
+                      ))}
+                      <tr className="border-t-2 border-border bg-muted">
+                        <td className="px-4 py-2 text-xs font-medium text-foreground" colSpan={2}>合计</td>
+                        <td className="px-4 py-2 text-right tabular-nums text-xs font-medium">
+                          ${usageTotal.toFixed(4)}
+                        </td>
+                        <td className="px-4 py-2" colSpan={2}></td>
+                      </tr>
+                    </>
+                  )
+                })()}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="bg-card border border-border rounded-xl">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+            <div>
+              <div className="text-sm font-medium text-foreground">上传队列</div>
+              <div className="text-[11px] text-muted-foreground mt-0.5">
+                pending → active → used。每 30 秒自动刷新一次。
+              </div>
+            </div>
+            <button
+              onClick={() => void reloadPending()}
+              className="text-xs text-muted-foreground border border-border rounded-md px-2 py-1 hover:bg-muted"
+            >
+              刷新
+            </button>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-muted mono-label">
+                <tr>
+                  <th className="text-left px-4 py-2 font-medium">Key</th>
+                  <th className="text-left px-4 py-2 font-medium">状态</th>
+                  <th className="text-right px-4 py-2 font-medium" title="从 remote_channel_current 同步的累计用量">已用</th>
+                  <th className="text-right px-4 py-2 font-medium" title="上传时填写的额度上限">额度</th>
+                  <th className="text-left px-4 py-2 font-medium">尝试</th>
+                  <th className="text-left px-4 py-2 font-medium">创建时间</th>
+                  <th className="text-left px-4 py-2 font-medium">失败原因</th>
+                  <th className="text-right px-4 py-2 font-medium">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pending.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="px-4 py-6 text-center text-xs text-muted-foreground">
+                      队列为空
+                    </td>
+                  </tr>
+                ) : (
+                  pending.map(row => {
+                    const pct = row.quota_usd > 0 ? Math.min(100, (row.used_usd / row.quota_usd) * 100) : null
+                    return (
+                    <tr key={row.id} className="border-t border-border">
+                      <td className="px-4 py-2 font-mono text-[11px]">{row.key_masked}</td>
+                      <td className="px-4 py-2">
+                        <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] ${STATUS_CLS[row.status]}`}>
+                          {STATUS_LABEL[row.status]}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2 text-right tabular-nums">
+                        {row.used_usd > 0 ? (
+                          <div className="flex flex-col items-end gap-0.5">
+                            <span className="text-[11px]">${row.used_usd.toFixed(4)}</span>
+                            {pct != null && (
+                              <div className="w-14 h-1 bg-muted rounded overflow-hidden">
+                                <div
+                                  className={`h-full ${pct >= 100 ? 'bg-destructive' : pct >= 80 ? 'bg-warning' : 'bg-success'}`}
+                                  style={{ width: pct + '%' }}
+                                />
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2 text-right tabular-nums text-[11px]">
+                        {row.quota_usd > 0 ? `$${row.quota_usd.toFixed(2)}` : <span className="text-muted-foreground">—</span>}
+                      </td>
+                      <td className="px-4 py-2 text-xs tabular-nums">{row.attempts}</td>
+                      <td className="px-4 py-2 text-[11px] text-muted-foreground">{fmtTime(row.created_at)}</td>
+                      <td className="px-4 py-2 text-[11px] text-destructive max-w-xs truncate" title={row.failed_reason || ''}>
+                        {row.failed_reason || '—'}
+                      </td>
+                      <td className="px-4 py-2 text-right">
+                        {(row.status === 'pending' || row.status === 'failed') ? (
+                          <button
+                            onClick={() => void cancelPending(row)}
+                            className="text-[11px] text-destructive hover:underline"
+                          >
+                            撤销
+                          </button>
+                        ) : (
+                          <span className="text-[11px] text-muted-foreground">—</span>
+                        )}
+                      </td>
+                    </tr>
+                    )
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      {batchOpen && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/50">
+          <div className="drawer-panel max-w-lg p-5">
+            <div className="text-base font-semibold mb-3">批量上 Key</div>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-[11px] text-muted-foreground mb-1">
+                  名字中间段（最终 = &lt;日期&gt;-&lt;你填&gt;-&lt;key末8&gt;-&lt;hash8&gt;）
+                </label>
+                <div className="flex items-center gap-1">
+                  <input
+                    value={batchDatePrefix}
+                    onChange={e => setBatchDatePrefix(e.target.value)}
+                    placeholder={todayYYYYMMDD()}
+                    className="w-24 border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring tabular-nums"
+                  />
+                  <span className="text-[11px] text-muted-foreground font-mono">-</span>
+                  <input
+                    value={batchPrefix}
+                    onChange={e => setBatchPrefix(e.target.value)}
+                    placeholder="例如 anthropic-A"
+                    className="flex-1 border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-muted-foreground mb-1">渠道类型</label>
+                <select
+                  value={batchPresetID}
+                  onChange={e => {
+                    const p = CHANNEL_TYPE_PRESETS.find(x => x.id === (e.target.value as PresetID))
+                    if (!p) return
+                    setBatchPresetID(p.id)
+                    const prof = profiles.find(x => x.id === selectedID)
+                    setBatchGroup(resolvePresetGroup(p, prof))
+                    setBatchModels(resolvePresetModels(p, prof))
+                    // AWS needs a real region (baked into the key + model
+                    // mapping); Vertex uses the "global" sentinel.
+                    if (p.kind === 'aws') setBatchRegion('us-east-1')
+                    else if (p.kind === 'vertex') setBatchRegion('global')
+                  }}
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm bg-card focus:outline-none focus:border-ring"
+                >
+                  {CHANNEL_TYPE_PRESETS.map(p => (
+                    <option key={p.id} value={p.id}>{p.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-muted-foreground mb-1">Group</label>
+                <input
+                  value={batchGroup}
+                  onChange={e => setBatchGroup(e.target.value)}
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-muted-foreground mb-1">Models（逗号分隔）</label>
+                <textarea
+                  value={batchModels}
+                  onChange={e => setBatchModels(e.target.value)}
+                  rows={2}
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-ring"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-muted-foreground mb-1">
+                  Keys（每行一个，可选 <code>quota_usd</code> / 备注：<code>key 10 备注</code>）
+                </label>
+                <textarea
+                  value={batchInput}
+                  onChange={e => setBatchInput(e.target.value)}
+                  rows={8}
+                  placeholder="sk-... 10&#10;sk-... 20 备注"
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-ring"
+                  disabled={batchPresetID === 'vertex' || batchPresetID === 'vertex-claude'}
+                />
+              </div>
+              {(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude') && (
+                <VertexInputSection
+                  region={batchRegion}
+                  onRegionChange={setBatchRegion}
+                  keyMode={batchVertexKeyMode}
+                  onKeyModeChange={setBatchVertexKeyMode}
+                  files={batchVertexFiles}
+                  onFilesChange={setBatchVertexFiles}
+                  onPickFiles={async list => {
+                    const { parsed, errors } = await readVertexFiles(list)
+                    setBatchVertexFiles(prev => [...prev, ...parsed])
+                    if (errors.length) setBatchErr(errors.join('; '))
+                  }}
+                  apiKeysText={batchVertexKeysText}
+                  onApiKeysTextChange={setBatchVertexKeysText}
+                />
+              )}
+              {batchPresetID === 'azure' && (
+                <AzureInputSection
+                  baseUrl={batchAzureBaseUrl}
+                  onBaseUrlChange={setBatchAzureBaseUrl}
+                  apiVersion={batchAzureApiVersion}
+                  onApiVersionChange={setBatchAzureApiVersion}
+                />
+              )}
+              {batchPresetID === 'aws' && (
+                <AwsInputSection
+                  region={batchRegion}
+                  onRegionChange={setBatchRegion}
+                  keyMode={batchAwsKeyMode}
+                  onKeyModeChange={setBatchAwsKeyMode}
+                  proxy={batchAwsProxy}
+                  onProxyChange={setBatchAwsProxy}
+                />
+              )}
+              <p className="text-[11px] text-muted-foreground">
+                {(batchPresetID === 'vertex' || batchPresetID === 'vertex-claude')
+                  ? 'Vertex 走独立通道 —— 上传后不进 Pool 队列，直接创建远端渠道。'
+                  : batchPresetID === 'azure'
+                  ? 'Azure 走独立通道 —— 上传后不进 Pool 队列，直接创建远端渠道。同批 Key 共享同一 base_url + api version。'
+                  : batchPresetID === 'aws'
+                  ? 'AWS 走独立通道 —— 上传后不进 Pool 队列，直接创建远端渠道。同批凭证共享同一 Region；每行填 ' + (batchAwsKeyMode === 'ak_sk' ? 'ak|sk' : 'apikey') + '。'
+                  : '上 Key 后进入 Pool 队列。管理员配置了每次上几个 + 检查间隔。同批 Key 会按 FIFO 依次进池，前一批全部消耗完之前不会开始新一批。'}
+              </p>
+              {batchErr && <p className="text-xs text-destructive">{batchErr}</p>}
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setBatchOpen(false)}
+                disabled={batchBusy}
+                className="border border-border rounded-md px-3 py-1.5 text-sm text-foreground hover:bg-muted"
+              >
+                取消
+              </button>
+              <button
+                onClick={submitBatch}
+                disabled={batchBusy}
+                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
+              >
+                {batchBusy ? '入队中…' : '入队上传'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {immOpen && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/50">
+          <div className="drawer-panel max-w-lg p-5">
+            <div className="text-base font-semibold mb-1">上普通 Key</div>
+            <div className="text-[11px] text-muted-foreground mb-3">
+              立即上传（不进 Pool 队列），默认 priority = 0。
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-[11px] text-muted-foreground mb-1">
+                  名字中间段（最终 = &lt;日期&gt;-&lt;你填&gt;-&lt;key末8&gt;-&lt;hash8&gt;）
+                </label>
+                <div className="flex items-center gap-1">
+                  <input
+                    value={immDatePrefix}
+                    onChange={e => setImmDatePrefix(e.target.value)}
+                    placeholder={todayYYYYMMDD()}
+                    className="w-24 border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring tabular-nums"
+                  />
+                  <span className="text-[11px] text-muted-foreground font-mono">-</span>
+                  <input
+                    value={immPrefix}
+                    onChange={e => setImmPrefix(e.target.value)}
+                    placeholder="例如 studio-A"
+                    className="flex-1 border border-border rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-ring"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11px] text-muted-foreground mb-1">渠道类型</label>
+                <select
+                  value={immPresetID}
+                  onChange={e => {
+                    const p = CHANNEL_TYPE_PRESETS.find(x => x.id === (e.target.value as PresetID))
+                    if (!p) return
+                    setImmPresetID(p.id)
+                    const prof = profiles.find(x => x.id === selectedID)
+                    setImmGroup(resolvePresetGroup(p, prof))
+                    setImmModels(resolvePresetModels(p, prof))
+                    if (p.kind === 'aws') setImmRegion('us-east-1')
+                    else if (p.kind === 'vertex') setImmRegion('global')
+                  }}
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm bg-card focus:outline-none focus:border-ring"
+                >
+                  {CHANNEL_TYPE_PRESETS.map(p => (
+                    <option key={p.id} value={p.id}>{p.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] text-muted-foreground mb-1">Group</label>
+                <input
+                  value={immGroup}
+                  onChange={e => setImmGroup(e.target.value)}
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-muted-foreground mb-1">Models（逗号分隔）</label>
+                <textarea
+                  value={immModels}
+                  onChange={e => setImmModels(e.target.value)}
+                  rows={2}
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-ring"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-muted-foreground mb-1">
+                  Keys（每行一个，可选 <code>quota_usd</code> / 备注：<code>key 10 备注</code>）
+                </label>
+                <textarea
+                  value={immInput}
+                  onChange={e => setImmInput(e.target.value)}
+                  rows={8}
+                  placeholder="sk-... 10&#10;sk-... 20 备注"
+                  className="w-full border border-border rounded-md px-2 py-1.5 text-[11px] font-mono focus:outline-none focus:border-ring"
+                  disabled={immPresetID === 'vertex' || immPresetID === 'vertex-claude'}
+                />
+              </div>
+              {(immPresetID === 'vertex' || immPresetID === 'vertex-claude') && (
+                <VertexInputSection
+                  region={immRegion}
+                  onRegionChange={setImmRegion}
+                  keyMode={immVertexKeyMode}
+                  onKeyModeChange={setImmVertexKeyMode}
+                  files={immVertexFiles}
+                  onFilesChange={setImmVertexFiles}
+                  onPickFiles={async list => {
+                    const { parsed, errors } = await readVertexFiles(list)
+                    setImmVertexFiles(prev => [...prev, ...parsed])
+                    if (errors.length) setImmErr(errors.join('; '))
+                  }}
+                  apiKeysText={immVertexKeysText}
+                  onApiKeysTextChange={setImmVertexKeysText}
+                />
+              )}
+              {immPresetID === 'azure' && (
+                <AzureInputSection
+                  baseUrl={immAzureBaseUrl}
+                  onBaseUrlChange={setImmAzureBaseUrl}
+                  apiVersion={immAzureApiVersion}
+                  onApiVersionChange={setImmAzureApiVersion}
+                />
+              )}
+              {immPresetID === 'aws' && (
+                <AwsInputSection
+                  region={immRegion}
+                  onRegionChange={setImmRegion}
+                  keyMode={immAwsKeyMode}
+                  onKeyModeChange={setImmAwsKeyMode}
+                  proxy={immAwsProxy}
+                  onProxyChange={setImmAwsProxy}
+                />
+              )}
+              {immErr && <p className="text-xs text-destructive">{immErr}</p>}
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setImmOpen(false)}
+                disabled={immBusy}
+                className="border border-border rounded-md px-3 py-1.5 text-sm text-foreground hover:bg-muted"
+              >
+                取消
+              </button>
+              <button
+                onClick={submitImmediate}
+                disabled={immBusy}
+                className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
+              >
+                {immBusy ? '上传中…' : '立即上传'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </Layout>
+  )
+}
