@@ -4852,13 +4852,16 @@ func handleRemoteChannelDeleteOperator(c *gin.Context) {
 // operator handlers.
 func handleRemoteChannelUpdateOperator(c *gin.Context) {
 	var body struct {
-		ProfileID int64    `json:"profile_id"`
-		ChannelID int64    `json:"channel_id"`
-		Name      *string  `json:"name,omitempty"`
-		Status    *int     `json:"status,omitempty"`
-		Group     *string  `json:"group,omitempty"`
-		QuotaUSD  *float64 `json:"quota_usd,omitempty"`
-		Note      *string  `json:"note,omitempty"`
+		ProfileID  int64    `json:"profile_id"`
+		ChannelID  int64    `json:"channel_id"`
+		Name       *string  `json:"name,omitempty"`
+		Status     *int     `json:"status,omitempty"`
+		Group      *string  `json:"group,omitempty"`
+		Models     *string  `json:"models,omitempty"`
+		BaseURL    *string  `json:"base_url,omitempty"`
+		APIVersion *string  `json:"api_version,omitempty"`
+		QuotaUSD   *float64 `json:"quota_usd,omitempty"`
+		Note       *string  `json:"note,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -4891,7 +4894,8 @@ func handleRemoteChannelUpdateOperator(c *gin.Context) {
 		return
 	}
 
-	if body.Name != nil || body.Status != nil || body.Group != nil {
+	if body.Name != nil || body.Status != nil || body.Group != nil ||
+		body.Models != nil || body.BaseURL != nil || body.APIVersion != nil {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
 		defer cancel()
 		data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/channel/"+strconv.FormatInt(body.ChannelID, 10), token, userID, nil, nil)
@@ -4912,6 +4916,16 @@ func handleRemoteChannelUpdateOperator(c *gin.Context) {
 		}
 		if body.Group != nil {
 			current["group"] = *body.Group
+		}
+		if body.Models != nil {
+			current["models"] = *body.Models
+		}
+		if body.BaseURL != nil {
+			current["base_url"] = *body.BaseURL
+		}
+		if body.APIVersion != nil {
+			// Azure api-version lives in channel.other.
+			current["other"] = *body.APIVersion
 		}
 		if _, err := remoteDoJSON(ctx, http.MethodPut, host, "/api/channel/", token, userID, nil, current); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "update: " + err.Error()})

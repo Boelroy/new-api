@@ -615,6 +615,9 @@ export default function RemoteChannelsStudio() {
   const [editName, setEditName] = useState('')
   const [editStatus, setEditStatus] = useState(1)
   const [editGroup, setEditGroup] = useState('')
+  const [editModels, setEditModels] = useState('')
+  const [editBaseURL, setEditBaseURL] = useState('')
+  const [editApiVersion, setEditApiVersion] = useState('')
   const [editQuota, setEditQuota] = useState('')
   const [editNote, setEditNote] = useState('')
   // Studio bound to this JWT — used as the default "middle segment" of
@@ -860,6 +863,9 @@ export default function RemoteChannelsStudio() {
     setEditName(ch.name)
     setEditStatus(ch.status)
     setEditGroup(ch.group || '')
+    setEditModels(ch.models || '')
+    setEditBaseURL('')
+    setEditApiVersion('')
     setEditQuota(ch.quota_usd != null ? String(ch.quota_usd) : '')
     setEditNote(ch.note || '')
   }
@@ -884,6 +890,11 @@ export default function RemoteChannelsStudio() {
     if (editName.trim() !== editCh.name) payload.name = editName.trim()
     if (editStatus !== editCh.status) payload.status = editStatus
     if (editGroup.trim() !== (editCh.group || '')) payload.group = editGroup.trim()
+    if (editModels.trim() !== (editCh.models || '')) payload.models = editModels.trim()
+    // base_url / api_version aren't in the mirror — blank means "keep", so only
+    // send when the operator typed something.
+    if (editBaseURL.trim() !== '') payload.base_url = editBaseURL.trim()
+    if (editApiVersion.trim() !== '') payload.api_version = editApiVersion.trim()
     if (quotaNum !== (editCh.quota_usd ?? null)) payload.quota_usd = quotaNum
     if (editNote !== (editCh.note || '')) payload.note = editNote
     setEditBusy(true)
@@ -897,6 +908,7 @@ export default function RemoteChannelsStudio() {
                 name: payload.name ?? c.name,
                 status: payload.status ?? c.status,
                 group: payload.group ?? c.group,
+                models: payload.models ?? c.models,
                 quota_usd: payload.quota_usd !== undefined ? payload.quota_usd : c.quota_usd,
                 note: payload.note ?? c.note,
               }
@@ -1594,6 +1606,22 @@ export default function RemoteChannelsStudio() {
             <div>
               <label className="block text-xs text-muted-foreground mb-1">分组 (group)</label>
               <Input value={editGroup} onChange={e => setEditGroup(e.target.value)} placeholder="openai" />
+            </div>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-1">模型 (models，逗号分隔)</label>
+              <Textarea value={editModels} onChange={e => setEditModels(e.target.value)} rows={2} placeholder="gpt-5.6-sol,gpt-5.6-terra" />
+            </div>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-1">Endpoint / Base URL（留空 = 不改）</label>
+              <Input
+                value={editBaseURL}
+                onChange={e => setEditBaseURL(e.target.value)}
+                placeholder="https://<resource>.openai.azure.com 或 https://api.xxx.com"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-1">API 版本（Azure，留空 = 不改）</label>
+              <Input value={editApiVersion} onChange={e => setEditApiVersion(e.target.value)} placeholder="2025-04-01-preview" />
             </div>
             <div>
               <label className="block text-xs text-muted-foreground mb-1">额度 (USD，留空 = 不限)</label>

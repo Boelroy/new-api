@@ -1467,6 +1467,9 @@ export const api = {
     name?: string
     status?: number
     group?: string
+    models?: string
+    base_url?: string
+    api_version?: string
     quota_usd?: number | null
     note?: string
   }) =>
