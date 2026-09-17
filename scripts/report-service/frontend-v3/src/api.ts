@@ -1459,6 +1459,23 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  // Studio-scoped edit: name/status/group + local quota_usd/note on a channel
+  // the operator owns. Only fields present are changed.
+  remoteChannelUpdateOperator: (payload: {
+    profile_id: number
+    channel_id: number
+    name?: string
+    status?: number
+    group?: string
+    quota_usd?: number | null
+    note?: string
+  }) =>
+    request<{ ok: boolean }>('/api/remote-newapi/channels/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
   // Categorised error breakdown for one channel over the past N seconds
   // (default 1h). Groups upstream error logs by (error_type, status_code).
   // Backend caches for 5min per (profile, channel, window).

@@ -609,6 +609,14 @@ export default function RemoteChannelsStudio() {
   const [testingCh, setTestingCh] = useState<number | null>(null)
   const [testMsg, setTestMsg] = useState<Record<number, { ok: boolean; latency: number; message: string }>>({})
   const [deletingCh, setDeletingCh] = useState<number | null>(null)
+  // Edit-channel panel state (studio-scoped: name/status/group/额度/备注).
+  const [editCh, setEditCh] = useState<RemoteChannel | null>(null)
+  const [editBusy, setEditBusy] = useState(false)
+  const [editName, setEditName] = useState('')
+  const [editStatus, setEditStatus] = useState(1)
+  const [editGroup, setEditGroup] = useState('')
+  const [editQuota, setEditQuota] = useState('')
+  const [editNote, setEditNote] = useState('')
   // Studio bound to this JWT — used as the default "middle segment" of
   // new channel names. Fetched once on mount; empty string until it
   // arrives (openBatch guards against opening the modal before that).
@@ -846,6 +854,63 @@ export default function RemoteChannelsStudio() {
     },
     [selectedID],
   )
+
+  const openEdit = (ch: RemoteChannel) => {
+    setEditCh(ch)
+    setEditName(ch.name)
+    setEditStatus(ch.status)
+    setEditGroup(ch.group || '')
+    setEditQuota(ch.quota_usd != null ? String(ch.quota_usd) : '')
+    setEditNote(ch.note || '')
+  }
+
+  const submitEdit = async () => {
+    if (!selectedID || !editCh) return
+    // Validate 额度: empty = unlimited (clear), else a non-negative number.
+    const qRaw = editQuota.trim()
+    let quotaNum: number | null = null
+    if (qRaw !== '') {
+      const n = parseFloat(qRaw)
+      if (isNaN(n) || n < 0) {
+        toast.error('额度必须是非负数字（USD），留空表示不限')
+        return
+      }
+      quotaNum = n
+    }
+    const payload: Parameters<typeof api.remoteChannelUpdateOperator>[0] = {
+      profile_id: selectedID,
+      channel_id: editCh.id,
+    }
+    if (editName.trim() !== editCh.name) payload.name = editName.trim()
+    if (editStatus !== editCh.status) payload.status = editStatus
+    if (editGroup.trim() !== (editCh.group || '')) payload.group = editGroup.trim()
+    if (quotaNum !== (editCh.quota_usd ?? null)) payload.quota_usd = quotaNum
+    if (editNote !== (editCh.note || '')) payload.note = editNote
+    setEditBusy(true)
+    try {
+      await api.remoteChannelUpdateOperator(payload)
+      setChannels(prev =>
+        prev.map(c =>
+          c.id === editCh.id
+            ? {
+                ...c,
+                name: payload.name ?? c.name,
+                status: payload.status ?? c.status,
+                group: payload.group ?? c.group,
+                quota_usd: payload.quota_usd !== undefined ? payload.quota_usd : c.quota_usd,
+                note: payload.note ?? c.note,
+              }
+            : c,
+        ),
+      )
+      toast.success('已保存')
+      setEditCh(null)
+    } catch (e: any) {
+      toast.error('保存失败: ' + (e?.message || e))
+    } finally {
+      setEditBusy(false)
+    }
+  }
 
   // Convert YYYY-MM-DD (local) → epoch seconds at 00:00 local. For the
   // end field we push to 24:00 (start of next day) so the window
@@ -1450,6 +1515,13 @@ export default function RemoteChannelsStudio() {
                                 ))}
                               <Button
                                 variant="outline"
+                                onClick={() => openEdit(ch)}
+                                className="border px-2"
+                              >
+                                编辑
+                              </Button>
+                              <Button
+                                variant="outline"
                                 onClick={() => void testChannel(ch.id)}
                                 disabled={testingCh === ch.id}
                                 className="border px-2 disabled:opacity-50"
@@ -1486,6 +1558,60 @@ export default function RemoteChannelsStudio() {
           </div>
         </div>
       </div>
+
+      {editCh && (
+        <SidePanel
+          title={<>编辑渠道</>}
+          busy={editBusy}
+          onClose={() => setEditCh(null)}
+          footer={
+            <div className="mt-5 flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setEditCh(null)} disabled={editBusy} className="border px-3">
+                取消
+              </Button>
+              <Button variant="primary" onClick={submitEdit} disabled={editBusy} className="px-3 disabled:opacity-50">
+                {editBusy ? '保存中…' : '保存'}
+              </Button>
+            </div>
+          }
+        >
+          <FormSection>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-1">名称</label>
+              <Input value={editName} onChange={e => setEditName(e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-1">状态</label>
+              <Select
+                value={editStatus}
+                onChange={e => setEditStatus(parseInt(e.target.value, 10))}
+                className="border border-border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-ring"
+              >
+                <option value={1}>启用</option>
+                <option value={2}>禁用</option>
+              </Select>
+            </div>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-1">分组 (group)</label>
+              <Input value={editGroup} onChange={e => setEditGroup(e.target.value)} placeholder="openai" />
+            </div>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-1">额度 (USD，留空 = 不限)</label>
+              <Input
+                type="number"
+                step="0.01"
+                value={editQuota}
+                onChange={e => setEditQuota(e.target.value)}
+                placeholder="不限"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-1">备注</label>
+              <Textarea value={editNote} onChange={e => setEditNote(e.target.value)} rows={2} />
+            </div>
+          </FormSection>
+        </SidePanel>
+      )}
 
       {batchOpen && (
         <SidePanel

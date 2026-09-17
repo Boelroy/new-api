@@ -1139,6 +1139,26 @@ func remoteHTTPClient(proxyURL string) *http.Client {
 // On 2xx + success=true it returns the raw `data` payload. On any other
 // outcome it returns a wrapped error including a snippet of the body.
 func remoteDoJSON(ctx context.Context, method, host, path, token string, userID int64, query url.Values, body any) (json.RawMessage, error) {
+	raw, err := remoteDoRaw(ctx, method, host, path, token, userID, query, body)
+	if err != nil {
+		return nil, err
+	}
+	var env remoteEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, fmt.Errorf("decode envelope: %v", err)
+	}
+	if !env.Success {
+		return nil, fmt.Errorf("remote: %s", env.Message)
+	}
+	return env.Data, nil
+}
+
+// remoteDoRaw performs the request and returns the raw 2xx body WITHOUT
+// unwrapping the standard {success,message,data} envelope. Use it for remote
+// endpoints whose response isn't that shape — e.g. GET /api/channel/test/:id
+// returns {success,message,time} at the top level (no data), which remoteDoJSON
+// would wrongly treat as empty on success.
+func remoteDoRaw(ctx context.Context, method, host, path, token string, userID int64, query url.Values, body any) ([]byte, error) {
 	endpoint := host + path
 	if query != nil && len(query) > 0 {
 		if strings.Contains(endpoint, "?") {
@@ -1182,14 +1202,7 @@ func remoteDoJSON(ctx context.Context, method, host, path, token string, userID 
 		}
 		return nil, fmt.Errorf("remote returned %d: %s", resp.StatusCode, snippet)
 	}
-	var env remoteEnvelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("decode envelope: %v", err)
-	}
-	if !env.Success {
-		return nil, fmt.Errorf("remote: %s", env.Message)
-	}
-	return env.Data, nil
+	return raw, nil
 }
 
 // loadRemoteProfileByID hydrates saved credentials for a profile row. Never
@@ -4752,7 +4765,9 @@ func handleRemoteChannelTest(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
 	defer cancel()
-	data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/channel/test/"+strconv.FormatInt(body.ChannelID, 10), token, userID, q, nil)
+	// The test endpoint returns {success,message,time} at the top level (no
+	// data envelope), so read the raw body — remoteDoJSON would drop it.
+	data, err := remoteDoRaw(ctx, http.MethodGet, host, "/api/channel/test/"+strconv.FormatInt(body.ChannelID, 10), token, userID, q, nil)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"ok": false, "message": err.Error(), "latency_ms": 0})
 		return
@@ -4825,6 +4840,95 @@ func handleRemoteChannelDeleteOperator(c *gin.Context) {
 	// mirror on the next read; meta rows are harmless if left behind.
 	_ = deleteMeta(body.ProfileID, body.ChannelID)
 	_, _ = db.Exec(`DELETE FROM remote_channel_current WHERE profile_id=$1 AND remote_channel_id=$2`, body.ProfileID, body.ChannelID)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ---- Handler: studio-scoped channel edit ----
+
+// handleRemoteChannelUpdateOperator lets a studio operator edit a channel they
+// own. Deliberately a safe subset: name / status / group on the remote, plus
+// local quota_usd / note. tag, priority and pricing stay admin-only (changing
+// tag would move the channel out of the studio). Scoped by tag like the other
+// operator handlers.
+func handleRemoteChannelUpdateOperator(c *gin.Context) {
+	var body struct {
+		ProfileID int64    `json:"profile_id"`
+		ChannelID int64    `json:"channel_id"`
+		Name      *string  `json:"name,omitempty"`
+		Status    *int     `json:"status,omitempty"`
+		Group     *string  `json:"group,omitempty"`
+		QuotaUSD  *float64 `json:"quota_usd,omitempty"`
+		Note      *string  `json:"note,omitempty"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.ProfileID <= 0 || body.ChannelID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id and channel_id are required"})
+		return
+	}
+	scoped, err := resolveUsageRangeChannelIDs(c, body.ProfileID, []int64{body.ChannelID})
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	inScope := false
+	for _, id := range scoped {
+		if id == body.ChannelID {
+			inScope = true
+			break
+		}
+	}
+	if !inScope {
+		c.JSON(http.StatusForbidden, gin.H{"error": "channel not in your scope"})
+		return
+	}
+
+	host, userID, token, err := loadRemoteProfileByID(body.ProfileID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if body.Name != nil || body.Status != nil || body.Group != nil {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
+		defer cancel()
+		data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/channel/"+strconv.FormatInt(body.ChannelID, 10), token, userID, nil, nil)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "fetch current: " + err.Error()})
+			return
+		}
+		var current map[string]any
+		if err := json.Unmarshal(data, &current); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "decode current: " + err.Error()})
+			return
+		}
+		if body.Name != nil {
+			current["name"] = *body.Name
+		}
+		if body.Status != nil {
+			current["status"] = *body.Status
+		}
+		if body.Group != nil {
+			current["group"] = *body.Group
+		}
+		if _, err := remoteDoJSON(ctx, http.MethodPut, host, "/api/channel/", token, userID, nil, current); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "update: " + err.Error()})
+			return
+		}
+	}
+
+	if body.QuotaUSD != nil || body.Note != nil {
+		note := ""
+		if body.Note != nil {
+			note = strings.TrimSpace(*body.Note)
+		}
+		if err := upsertMeta(body.ProfileID, body.ChannelID, body.QuotaUSD, nil, note, nil, nil); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "save meta: " + err.Error()})
+			return
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

@@ -5128,6 +5128,9 @@ func main() {
 	// Studio-scoped channel delete: operators can delete channels they
 	// uploaded (scoped inside the handler); admin+ can delete any on the profile.
 	remoteOperatorAPI.POST("/remote-newapi/channels/delete", handleRemoteChannelDeleteOperator)
+	// Studio-scoped channel edit: operators edit a safe subset (name/status/
+	// group + quota_usd/note) of channels they own.
+	remoteOperatorAPI.POST("/remote-newapi/channels/update", handleRemoteChannelUpdateOperator)
 	// Auto-disable-on-quota: global on/off + tick interval. Admin+ can
 	// toggle because this only takes down channels operators have
 	// explicitly opted in (per-channel auto_disable=TRUE flag on
