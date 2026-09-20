@@ -38,6 +38,13 @@ func main() {
 			return
 		}
 
+		// /api/user/auth/refresh — upstream requires session cookie which we
+		// don't have; handle locally by re-issuing a fresh JWT.
+		if path == "/api/user/auth/refresh" && r.Method == http.MethodPost {
+			handler.RefreshToken(w, r)
+			return
+		}
+
 		// /api/channel/:id — extract id from path
 		if strings.HasPrefix(path, "/api/channel/") {
 			rest := strings.TrimPrefix(path, "/api/channel/")

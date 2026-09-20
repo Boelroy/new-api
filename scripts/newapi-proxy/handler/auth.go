@@ -108,6 +108,61 @@ func Logout(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"success": true, "message": ""})
 }
 
+// RefreshToken re-issues a fresh JWT for the already-authenticated caller.
+// The upstream new-api requires a browser session cookie for its refresh
+// endpoint which this proxy cannot provide, so we handle it locally.
+func RefreshToken(w http.ResponseWriter, r *http.Request) {
+	uid := middleware.UserIDFromCtx(r)
+	var username, studio string
+	var status int
+	err := store.DB.QueryRow(
+		`SELECT username, studio, status FROM rs_auth_user WHERE id=$1`, uid,
+	).Scan(&username, &studio, &status)
+	if err != nil {
+		jsonErr(w, http.StatusInternalServerError, "user lookup failed")
+		return
+	}
+	if status == 0 {
+		jsonErr(w, http.StatusUnauthorized, "account disabled")
+		return
+	}
+
+	now := time.Now()
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub":      username,
+		"user_id":  uid,
+		"username": username,
+		"role":     10,
+		"studio":   studio,
+		"exp":      now.Add(24 * time.Hour).Unix(),
+		"iat":      now.Unix(),
+	})
+	signed, err := token.SignedString(config.JWTSecret)
+	if err != nil {
+		jsonErr(w, http.StatusInternalServerError, "token sign error")
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "token",
+		Value:    signed,
+		Path:     "/",
+		MaxAge:   86400,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	jsonOK(w, map[string]any{
+		"success": true,
+		"message": "",
+		"data": map[string]any{
+			"access_token":      signed,
+			"token_type":        "Bearer",
+			"access_expires_at": now.Add(24 * time.Hour).Unix(),
+			"user":              buildUser(uid, username, status),
+		},
+	})
+}
+
 func GetSelf(w http.ResponseWriter, r *http.Request) {
 	uid := middleware.UserIDFromCtx(r)
 	var username string
