@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
 	"newapi-proxy/config"
@@ -33,16 +34,25 @@ func RoleFromCtx(r *http.Request) int {
 	return v
 }
 
-// AuthHTTP validates the JWT cookie and injects user info into the context.
+// AuthHTTP validates the JWT cookie or Authorization Bearer header
+// and injects user info into the context.
 func AuthHTTP(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie("token")
-		if err != nil {
+		var tokenStr string
+
+		// Prefer cookie; fall back to Authorization: Bearer header.
+		if cookie, err := r.Cookie("token"); err == nil {
+			tokenStr = cookie.Value
+		} else if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			tokenStr = strings.TrimPrefix(auth, "Bearer ")
+		}
+
+		if tokenStr == "" {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "message": "unauthorized"})
 			return
 		}
 
-		parsed, err := jwt.Parse(cookie.Value, func(t *jwt.Token) (any, error) {
+		parsed, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
 			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("unexpected signing method")
 			}

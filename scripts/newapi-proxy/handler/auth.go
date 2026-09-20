@@ -90,6 +90,7 @@ func Login(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   86400,
 		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
 	})
 	jsonOK(w, map[string]any{
 		"success": true,

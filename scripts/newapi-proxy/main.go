@@ -32,6 +32,12 @@ func main() {
 	mux.Handle("/api/", middleware.AuthHTTP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
+		// /api/user/self
+		if path == "/api/user/self" && r.Method == http.MethodGet {
+			handler.GetSelf(w, r)
+			return
+		}
+
 		// /api/channel/:id — extract id from path
 		if strings.HasPrefix(path, "/api/channel/") {
 			rest := strings.TrimPrefix(path, "/api/channel/")
