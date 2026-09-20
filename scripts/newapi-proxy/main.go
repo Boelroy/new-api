@@ -2,8 +2,9 @@ package main
 
 import (
 	"log"
+	"net/http"
+	"strings"
 
-	"github.com/gin-gonic/gin"
 	"newapi-proxy/config"
 	"newapi-proxy/handler"
 	"newapi-proxy/middleware"
@@ -13,42 +14,44 @@ import (
 func main() {
 	config.Load()
 	store.Init(config.DatabaseURL)
-	gin.SetMode(config.GinMode)
 
-	r := gin.Default()
+	mux := http.NewServeMux()
 
-	// ── Auth (no cookie required) ────────────────────────────────────────────
-	r.POST("/api/user/login", handler.Login)
-	r.GET("/api/user/logout", handler.Logout)
+	// Public auth endpoints (no auth middleware)
+	mux.HandleFunc("POST /api/user/login", handler.Login)
+	mux.HandleFunc("GET /api/user/logout", handler.Logout)
 
-	// ── Authenticated routes ─────────────────────────────────────────────────
-	// NOTE: gin does not allow a catch-all wildcard on the same prefix as
-	// concrete children. We attach the auth middleware per-route instead of
-	// using a group so that /api/*path does not conflict with the explicit
-	// /api/user/* and /api/channel/* routes.
-	authMW := middleware.Auth()
+	// Authenticated: user self
+	mux.Handle("GET /api/user/self", middleware.AuthHTTP(http.HandlerFunc(handler.GetSelf)))
 
-	// Self
-	r.GET("/api/user/self", authMW, handler.GetSelf)
+	// Authenticated: channel CRUD (exact paths)
+	mux.Handle("GET /api/channel/", middleware.AuthHTTP(http.HandlerFunc(handler.ChannelList)))
+	mux.Handle("POST /api/channel/", middleware.AuthHTTP(http.HandlerFunc(handler.ChannelCreate)))
 
-	// Channels — ownership-filtered
-	r.GET("/api/channel/", authMW, handler.ChannelList)
-	r.POST("/api/channel/", authMW, handler.ChannelCreate)
-	r.GET("/api/channel/:id", authMW, handler.ChannelGet)
-	r.PUT("/api/channel/:id", authMW, handler.ChannelUpdate)
-	r.DELETE("/api/channel/:id", authMW, handler.ChannelDelete)
+	// Authenticated: all other /api/* → passthrough; channel /:id matched inside
+	mux.Handle("/api/", middleware.AuthHTTP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
 
-	// Everything else — transparent passthrough to upstream new-api.
-	// Use a dedicated sub-router so the wildcard does not see the routes above.
-	pass := r.Group("/api", authMW)
-	pass.Any("/*path", handler.Passthrough)
+		// /api/channel/:id — extract id from path
+		if strings.HasPrefix(path, "/api/channel/") {
+			rest := strings.TrimPrefix(path, "/api/channel/")
+			// single segment only (no sub-resource interception)
+			if rest != "" && !strings.Contains(rest, "/") {
+				handler.ChannelDispatch(w, r, rest)
+				return
+			}
+		}
+		// Everything else → transparent passthrough
+		handler.PassthroughHTTP(w, r)
+	})))
 
-	// ── Static frontend (new-api web build) ─────────────────────────────────
-	// Mount last so API routes always win.
-	r.NoRoute(handler.ServeStatic)
+	// Static frontend — catch-all
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		handler.ServeStatic(w, r)
+	})
 
 	log.Printf("newapi-proxy listening on %s → upstream %s", config.ListenAddr, config.RemoteURL)
-	if err := r.Run(config.ListenAddr); err != nil {
+	if err := http.ListenAndServe(config.ListenAddr, mux); err != nil {
 		log.Fatalf("server: %v", err)
 	}
 }

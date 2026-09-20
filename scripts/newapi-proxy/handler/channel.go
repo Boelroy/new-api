@@ -7,113 +7,41 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"newapi-proxy/config"
+	"newapi-proxy/middleware"
 	"newapi-proxy/store"
 )
 
-// channelListResponse is a partial decode of the upstream channel list so we
-// can filter to only the rows the caller owns.
-type channelListResponse struct {
-	Success bool            `json:"success"`
-	Message string          `json:"message"`
-	Data    json.RawMessage `json:"data"`
-}
-
-type channelRow struct {
-	ID   int64           `json:"id"`
-	Rest json.RawMessage `json:"-"`
-}
-
-// fetchUpstream GETs path from upstream and returns the decoded JSON or an error.
-func fetchUpstream(ctx *gin.Context, path string) ([]byte, int, error) {
-	url := config.RemoteURL + path
-	if q := ctx.Request.URL.RawQuery; q != "" {
-		url += "?" + q
-	}
-	req, err := http.NewRequestWithContext(ctx.Request.Context(), http.MethodGet, url, nil)
-	if err != nil {
-		return nil, http.StatusBadGateway, err
-	}
-	req.Header.Set("Authorization", "Bearer "+config.RemoteAdminToken)
-	resp, err := getUpstreamClient().Do(req)
-	if err != nil {
-		return nil, http.StatusBadGateway, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	return body, resp.StatusCode, err
-}
-
-// ownerChannelIDs returns the set of remote channel IDs owned by userID.
-func ownerChannelIDs(userID int64) (map[int64]bool, error) {
-	rows, err := store.DB.Query(
-		`SELECT remote_channel_id FROM proxy_channel_ownership WHERE user_id=$1`, userID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make(map[int64]bool)
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out[id] = true
-	}
-	return out, nil
-}
-
-// recordOwnership inserts a proxy_channel_ownership row, ignoring conflicts.
-func recordOwnership(userID, channelID int64) error {
-	_, err := store.DB.Exec(
-		`INSERT INTO proxy_channel_ownership (remote_channel_id, user_id, created_at)
-		 VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-		channelID, userID, time.Now().Unix(),
-	)
-	return err
-}
-
-// assertOwns returns true when userID owns channelID.
-func assertOwns(userID, channelID int64) (bool, error) {
-	var n int
-	err := store.DB.QueryRow(
-		`SELECT COUNT(*) FROM proxy_channel_ownership WHERE remote_channel_id=$1 AND user_id=$2`,
-		channelID, userID,
-	).Scan(&n)
-	return n > 0, err
-}
-
 // ChannelList returns only the channels owned by the calling user.
 // Superadmin (role >= 100) sees all channels.
-func ChannelList(c *gin.Context) {
-	userID, _ := c.Get("user_id")
-	uid, _ := userID.(int64)
-	role, _ := c.Get("role")
-	r, _ := role.(int)
+func ChannelList(w http.ResponseWriter, r *http.Request) {
+	uid := middleware.UserIDFromCtx(r)
+	role := middleware.RoleFromCtx(r)
 
-	body, status, err := fetchUpstream(c, "/api/channel/")
+	body, status, err := fetchUpstreamBody(r, "/api/channel/")
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": err.Error()})
+		jsonErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	if status != http.StatusOK {
-		c.Data(status, "application/json", body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		w.Write(body)
 		return
 	}
 
-	// Superadmin: pass through as-is.
-	if r >= 100 {
-		c.Data(http.StatusOK, "application/json", body)
+	// Superadmin sees everything.
+	if role >= 100 {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
 		return
 	}
 
-	// Decode the upstream response to filter rows.
 	var wrapper struct {
-		Success bool `json:"success"`
+		Success bool   `json:"success"`
 		Message string `json:"message"`
 		Data    struct {
 			Channels []json.RawMessage `json:"channels"`
@@ -121,14 +49,14 @@ func ChannelList(c *gin.Context) {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &wrapper); err != nil {
-		// Unexpected shape — pass through.
-		c.Data(http.StatusOK, "application/json", body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
 		return
 	}
 
 	owned, err := ownerChannelIDs(uid)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "ownership lookup failed"})
+		jsonErr(w, http.StatusInternalServerError, "ownership lookup failed")
 		return
 	}
 
@@ -145,39 +73,38 @@ func ChannelList(c *gin.Context) {
 	wrapper.Data.Total = len(filtered)
 
 	out, _ := json.Marshal(wrapper)
-	c.Data(http.StatusOK, "application/json", out)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(out)
 }
 
 // ChannelCreate creates a channel on upstream and records ownership.
-func ChannelCreate(c *gin.Context) {
-	userID, _ := c.Get("user_id")
-	uid, _ := userID.(int64)
+func ChannelCreate(w http.ResponseWriter, r *http.Request) {
+	uid := middleware.UserIDFromCtx(r)
 
-	bodyBytes, err := readBody(c)
+	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "cannot read request body"})
+		jsonErr(w, http.StatusBadRequest, "cannot read request body")
 		return
 	}
 
-	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost,
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
 		config.RemoteURL+"/api/channel/", bytes.NewReader(bodyBytes))
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": err.Error()})
+		jsonErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+config.RemoteAdminToken)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := (&http.Client{}).Do(req)
+	resp, err := getUpstreamClient().Do(req)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": err.Error()})
+		jsonErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode == http.StatusOK {
-		// Extract the new channel id and record ownership.
 		var result struct {
 			Data struct {
 				ID int64 `json:"id"`
@@ -185,104 +112,96 @@ func ChannelCreate(c *gin.Context) {
 		}
 		if json.Unmarshal(respBody, &result) == nil && result.Data.ID > 0 {
 			if err := recordOwnership(uid, result.Data.ID); err != nil {
-				// Non-fatal: log but still return success to the client.
 				fmt.Printf("[channel] recordOwnership uid=%d cid=%d: %v\n", uid, result.Data.ID, err)
 			}
 		}
 	}
 
-	c.Data(resp.StatusCode, "application/json", respBody)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	w.Write(respBody)
 }
 
-// channelIDFromPath extracts the numeric id from paths like /api/channel/42 or /api/channel/42/...
-func channelIDFromPath(c *gin.Context) (int64, bool) {
-	idStr := c.Param("id")
-	if idStr == "" {
-		return 0, false
+// ChannelDispatch handles GET/PUT/DELETE /api/channel/:id.
+// idStr is the raw path segment after /api/channel/.
+func ChannelDispatch(w http.ResponseWriter, r *http.Request, idStr string) {
+	// Strip trailing slash if any
+	idStr = strings.TrimSuffix(idStr, "/")
+	// If there is a sub-path (e.g. /api/channel/42/test), pass through directly
+	if strings.Contains(idStr, "/") {
+		doUpstream(w, r, r.Method, r.URL.Path, r.Body)
+		return
 	}
+
 	id, err := strconv.ParseInt(idStr, 10, 64)
-	return id, err == nil
-}
-
-// ChannelGet returns a single channel only if the caller owns it (or is superadmin).
-func ChannelGet(c *gin.Context) {
-	id, ok := channelIDFromPath(c)
-	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid channel id"})
+	if err != nil {
+		jsonErr(w, http.StatusBadRequest, "invalid channel id")
 		return
 	}
-	userID, _ := c.Get("user_id")
-	uid, _ := userID.(int64)
-	role, _ := c.Get("role")
-	r, _ := role.(int)
 
-	if r < 100 {
+	uid := middleware.UserIDFromCtx(r)
+	role := middleware.RoleFromCtx(r)
+
+	if role < 100 {
 		owns, err := assertOwns(uid, id)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "ownership check failed"})
+			jsonErr(w, http.StatusInternalServerError, "ownership check failed")
 			return
 		}
 		if !owns {
-			c.JSON(http.StatusForbidden, gin.H{"success": false, "message": "forbidden"})
+			jsonErr(w, http.StatusForbidden, "forbidden")
 			return
 		}
 	}
 
-	do(c, http.MethodGet, fmt.Sprintf("/api/channel/%d", id), nil)
+	switch r.Method {
+	case http.MethodGet:
+		doUpstream(w, r, http.MethodGet, fmt.Sprintf("/api/channel/%d", id), nil)
+	case http.MethodPut:
+		doUpstream(w, r, http.MethodPut, fmt.Sprintf("/api/channel/%d", id), r.Body)
+	case http.MethodDelete:
+		if role < 100 {
+			store.DB.Exec(`DELETE FROM proxy_channel_ownership WHERE remote_channel_id=$1 AND user_id=$2`, id, uid)
+		}
+		doUpstream(w, r, http.MethodDelete, fmt.Sprintf("/api/channel/%d", id), nil)
+	default:
+		doUpstream(w, r, r.Method, r.URL.Path, r.Body)
+	}
 }
 
-// ChannelUpdate updates a channel only if the caller owns it (or is superadmin).
-func ChannelUpdate(c *gin.Context) {
-	id, ok := channelIDFromPath(c)
-	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid channel id"})
-		return
+func ownerChannelIDs(userID int64) (map[int64]bool, error) {
+	rows, err := store.DB.Query(
+		`SELECT remote_channel_id FROM proxy_channel_ownership WHERE user_id=$1`, userID,
+	)
+	if err != nil {
+		return nil, err
 	}
-	userID, _ := c.Get("user_id")
-	uid, _ := userID.(int64)
-	role, _ := c.Get("role")
-	r, _ := role.(int)
-
-	if r < 100 {
-		owns, err := assertOwns(uid, id)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "ownership check failed"})
-			return
+	defer rows.Close()
+	out := make(map[int64]bool)
+	for rows.Next() {
+		var cid int64
+		if err := rows.Scan(&cid); err != nil {
+			return nil, err
 		}
-		if !owns {
-			c.JSON(http.StatusForbidden, gin.H{"success": false, "message": "forbidden"})
-			return
-		}
+		out[cid] = true
 	}
-
-	do(c, http.MethodPut, fmt.Sprintf("/api/channel/%d", id), c.Request.Body)
+	return out, nil
 }
 
-// ChannelDelete deletes a channel only if the caller owns it (or is superadmin).
-func ChannelDelete(c *gin.Context) {
-	id, ok := channelIDFromPath(c)
-	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid channel id"})
-		return
-	}
-	userID, _ := c.Get("user_id")
-	uid, _ := userID.(int64)
-	role, _ := c.Get("role")
-	r, _ := role.(int)
+func recordOwnership(userID, channelID int64) error {
+	_, err := store.DB.Exec(
+		`INSERT INTO proxy_channel_ownership (remote_channel_id, user_id, created_at)
+		 VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+		channelID, userID, time.Now().Unix(),
+	)
+	return err
+}
 
-	if r < 100 {
-		owns, err := assertOwns(uid, id)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "ownership check failed"})
-			return
-		}
-		if !owns {
-			c.JSON(http.StatusForbidden, gin.H{"success": false, "message": "forbidden"})
-			return
-		}
-		// Remove ownership row on delete.
-		store.DB.Exec(`DELETE FROM proxy_channel_ownership WHERE remote_channel_id=$1 AND user_id=$2`, id, uid)
-	}
-
-	do(c, http.MethodDelete, fmt.Sprintf("/api/channel/%d", id), nil)
+func assertOwns(userID, channelID int64) (bool, error) {
+	var n int
+	err := store.DB.QueryRow(
+		`SELECT COUNT(*) FROM proxy_channel_ownership WHERE remote_channel_id=$1 AND user_id=$2`,
+		channelID, userID,
+	).Scan(&n)
+	return n > 0, err
 }
