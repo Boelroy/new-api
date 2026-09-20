@@ -22,21 +22,26 @@ func main() {
 	r.GET("/api/user/logout", handler.Logout)
 
 	// ── Authenticated routes ─────────────────────────────────────────────────
-	auth := r.Group("/", middleware.Auth())
-	{
-		// Self
-		auth.GET("/api/user/self", handler.GetSelf)
+	// NOTE: gin does not allow a catch-all wildcard on the same prefix as
+	// concrete children. We attach the auth middleware per-route instead of
+	// using a group so that /api/*path does not conflict with the explicit
+	// /api/user/* and /api/channel/* routes.
+	authMW := middleware.Auth()
 
-		// Channels — ownership-filtered
-		auth.GET("/api/channel/", handler.ChannelList)
-		auth.POST("/api/channel/", handler.ChannelCreate)
-		auth.GET("/api/channel/:id", handler.ChannelGet)
-		auth.PUT("/api/channel/:id", handler.ChannelUpdate)
-		auth.DELETE("/api/channel/:id", handler.ChannelDelete)
+	// Self
+	r.GET("/api/user/self", authMW, handler.GetSelf)
 
-		// Everything else — transparent passthrough to upstream new-api
-		auth.Any("/api/*path", handler.Passthrough)
-	}
+	// Channels — ownership-filtered
+	r.GET("/api/channel/", authMW, handler.ChannelList)
+	r.POST("/api/channel/", authMW, handler.ChannelCreate)
+	r.GET("/api/channel/:id", authMW, handler.ChannelGet)
+	r.PUT("/api/channel/:id", authMW, handler.ChannelUpdate)
+	r.DELETE("/api/channel/:id", authMW, handler.ChannelDelete)
+
+	// Everything else — transparent passthrough to upstream new-api.
+	// Use a dedicated sub-router so the wildcard does not see the routes above.
+	pass := r.Group("/api", authMW)
+	pass.Any("/*path", handler.Passthrough)
 
 	// ── Static frontend (new-api web build) ─────────────────────────────────
 	// Mount last so API routes always win.
