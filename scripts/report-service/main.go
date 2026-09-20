@@ -5131,6 +5131,10 @@ func main() {
 	// Studio-scoped channel edit: operators edit a safe subset (name/status/
 	// group + quota_usd/note) of channels they own.
 	remoteOperatorAPI.POST("/remote-newapi/channels/update", handleRemoteChannelUpdateOperator)
+	// Azure region detection: decrypts the channel's locally-stored key and
+	// probes Azure regional endpoints to find which region it belongs to.
+	// Scoped to the caller's channels inside the handler (Azure only).
+	remoteOperatorAPI.POST("/remote-newapi/channels/detect-region", handleRemoteChannelDetectRegion)
 	// Auto-disable-on-quota: global on/off + tick interval. Admin+ can
 	// toggle because this only takes down channels operators have
 	// explicitly opted in (per-channel auto_disable=TRUE flag on

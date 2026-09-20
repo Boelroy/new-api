@@ -1450,6 +1450,19 @@ export const api = {
       },
     ),
 
+  // Azure region detection: decrypts the channel's locally-stored key and
+  // probes Azure regional endpoints to find its region. Azure channels only;
+  // ok=false with a message when there's no local key / no region matched.
+  remoteChannelDetectRegion: (payload: { profile_id: number; channel_id: number }) =>
+    request<{ ok: boolean; region?: string; message?: string }>(
+      '/api/remote-newapi/channels/detect-region',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+    ),
+
   // Studio-scoped delete: an operator deletes a channel they uploaded (removed
   // on the remote new-api too). Server-side scoped to the caller's channels.
   remoteChannelDeleteOperator: (payload: { profile_id: number; channel_id: number }) =>

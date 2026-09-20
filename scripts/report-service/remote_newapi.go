@@ -4788,6 +4788,138 @@ func handleRemoteChannelTest(c *gin.Context) {
 	})
 }
 
+// ---- Handler: Azure channel region detection ----
+
+// azureRegionModelsPath is a cheap authenticated probe (list models) that only
+// needs the api-key header — no deployment name required.
+const azureRegionModelsPath = "/openai/models?api-version=2024-10-21"
+
+// azureRegions is the set of Azure OpenAI regional endpoints we probe. Missing
+// a region only yields a false "not found"; it never produces a wrong hit, so
+// this list can be extended as Azure adds regions.
+var azureRegions = []string{
+	"eastus", "eastus2", "westus", "westus3", "southcentralus", "northcentralus", "centralus",
+	"westeurope", "northeurope", "francecentral", "swedencentral", "switzerlandnorth",
+	"germanywestcentral", "norwayeast", "polandcentral", "uksouth", "japaneast", "koreacentral",
+	"australiaeast", "southindia", "canadaeast", "canadacentral", "brazilsouth", "southafricanorth",
+	"uaenorth", "spaincentral", "italynorth",
+}
+
+// handleRemoteChannelDetectRegion figures out which Azure region an existing
+// Azure channel's key belongs to. Azure keys carry no region metadata — the
+// region is only discoverable by probing each regional endpoint and seeing
+// which one does NOT return 401. The key is read from the LOCAL encrypted
+// store: Azure create writes only to remote_pending_key (channel_type=3), never
+// to remote_channel_credential, so channels created outside this service (no
+// local key) can't be probed. Scope rules match handleRemoteChannelTest.
+func handleRemoteChannelDetectRegion(c *gin.Context) {
+	var body struct {
+		ProfileID int64 `json:"profile_id"`
+		ChannelID int64 `json:"channel_id"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.ProfileID <= 0 || body.ChannelID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id and channel_id are required"})
+		return
+	}
+	// Studio operators can only probe their own channels; admin+ any channel on
+	// the profile.
+	scoped, err := resolveUsageRangeChannelIDs(c, body.ProfileID, []int64{body.ChannelID})
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	inScope := false
+	for _, id := range scoped {
+		if id == body.ChannelID {
+			inScope = true
+			break
+		}
+	}
+	if !inScope {
+		c.JSON(http.StatusForbidden, gin.H{"error": "channel not in your scope"})
+		return
+	}
+
+	// remote_pending_key is keyed on (profile_id, key_hash), so pick the newest
+	// row that carries this channel id.
+	var enc string
+	err = db.QueryRow(
+		`SELECT key_encrypted FROM remote_pending_key
+		 WHERE profile_id = $1 AND remote_channel_id = $2 AND channel_type = 3
+		 ORDER BY id DESC LIMIT 1`,
+		body.ProfileID, body.ChannelID,
+	).Scan(&enc)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusOK, gin.H{"ok": false, "message": "无本地密钥（仅支持通过本服务上传的 Azure 渠道）"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"ok": false, "message": "读取本地密钥失败: " + err.Error()})
+		return
+	}
+	key, err := decryptRemoteToken(enc)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"ok": false, "message": "解密本地密钥失败: " + err.Error()})
+		return
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		c.JSON(http.StatusOK, gin.H{"ok": false, "message": "无本地密钥（仅支持通过本服务上传的 Azure 渠道）"})
+		return
+	}
+
+	region := detectAzureRegion(c.Request.Context(), key)
+	if region == "" {
+		c.JSON(http.StatusOK, gin.H{"ok": false, "message": "未命中任何区域（key 可能失效，或区域不在探测列表）"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "region": region})
+}
+
+// detectAzureRegion probes every azureRegions endpoint concurrently with the
+// given key and returns the first region whose endpoint accepts it (HTTP 200).
+// 401 means wrong region / invalid key. Returns "" if none match. The first
+// hit cancels the remaining in-flight probes.
+func detectAzureRegion(parent context.Context, key string) string {
+	ctx, cancel := context.WithTimeout(parent, 25*time.Second)
+	defer cancel()
+	client := detectHTTPClient()
+	hits := make(chan string, len(azureRegions))
+	var wg sync.WaitGroup
+	for _, region := range azureRegions {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			endpoint := "https://" + region + ".api.cognitive.microsoft.com" + azureRegionModelsPath
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+			if err != nil {
+				return
+			}
+			req.Header.Set("api-key", key)
+			resp, err := client.Do(req)
+			if err != nil {
+				return
+			}
+			io.Copy(io.Discard, io.LimitReader(resp.Body, detectMaxBodyBytes))
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				select {
+				case hits <- region:
+				default:
+				}
+				cancel() // first hit wins; abort the rest
+			}
+		}()
+	}
+	wg.Wait()
+	close(hits)
+	return <-hits
+}
+
 // ---- Handler: studio-scoped channel delete ----
 
 // handleRemoteChannelDeleteOperator lets a studio operator delete a channel

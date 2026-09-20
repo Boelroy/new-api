@@ -772,6 +772,8 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   // Per-row test result (channel_id -> pretty message).
   const [testMsg, setTestMsg] = useState<Record<number, string>>({})
   const [testingID, setTestingID] = useState<number | null>(null)
+  // Azure-only region detection: which channel id is currently being probed.
+  const [detectingID, setDetectingID] = useState<number | null>(null)
 
   // Global on/off for the auto-disable-on-quota loop (scoped to admin+
   // by the backend). Per-channel opt-in still lives on the row edit
@@ -1806,6 +1808,26 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     }
   }
 
+  // Azure region detection: the backend decrypts the channel's locally-stored
+  // key and probes Azure regional endpoints to find its region. Azure channels
+  // only (gated on ch.type === 3 at the call site).
+  const detectRegion = async (ch: RemoteChannel) => {
+    if (!selectedID) return
+    setDetectingID(ch.id)
+    try {
+      const res = await api.remoteChannelDetectRegion({ profile_id: selectedID, channel_id: ch.id })
+      if (res.ok && res.region) {
+        toast.success(`区域: ${res.region}`)
+      } else {
+        toast.error(res.message || '未检测到区域')
+      }
+    } catch (e: any) {
+      toast.error(`检测失败: ${e?.message || String(e)}`)
+    } finally {
+      setDetectingID(null)
+    }
+  }
+
   // Client-side date filter on channel.created_time. Dates are interpreted
   // in UTC (Z suffix) so [today, today] = "since UTC 00:00 today, up to but
   // not including UTC 00:00 tomorrow", independent of browser timezone.
@@ -2588,6 +2610,16 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                                 >
                                   {testingID === c.id ? '测试中…' : '测试'}
                                 </Button>
+                                {c.type === 3 && (
+                                  <Button
+                                    variant="ghost"
+                                    onClick={() => void detectRegion(c)}
+                                    disabled={detectingID === c.id}
+                                    className="disabled:opacity-40"
+                                  >
+                                    {detectingID === c.id ? '检测中…' : '测区域'}
+                                  </Button>
+                                )}
                                 <Button
                                   variant="danger"
                                   onClick={() => void deleteRow(c)}

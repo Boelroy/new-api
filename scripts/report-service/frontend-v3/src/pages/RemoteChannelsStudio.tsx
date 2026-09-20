@@ -609,6 +609,8 @@ export default function RemoteChannelsStudio() {
   const [testingCh, setTestingCh] = useState<number | null>(null)
   const [testMsg, setTestMsg] = useState<Record<number, { ok: boolean; latency: number; message: string }>>({})
   const [deletingCh, setDeletingCh] = useState<number | null>(null)
+  // Azure-only region detection: which channel id is currently being probed.
+  const [detectingCh, setDetectingCh] = useState<number | null>(null)
   // Edit-channel panel state (studio-scoped: name/status/group/额度/备注).
   const [editCh, setEditCh] = useState<RemoteChannel | null>(null)
   const [editBusy, setEditBusy] = useState(false)
@@ -828,6 +830,29 @@ export default function RemoteChannelsStudio() {
         toast.error(`测试失败: ${msg}`)
       } finally {
         setTestingCh(null)
+      }
+    },
+    [selectedID],
+  )
+
+  // Azure region detection: the backend decrypts the channel's locally-stored
+  // key and probes Azure regional endpoints to find its region. Azure channels
+  // only (gated on ch.type === 3 at the call site).
+  const detectRegion = useCallback(
+    async (channelID: number) => {
+      if (!selectedID) return
+      setDetectingCh(channelID)
+      try {
+        const res = await api.remoteChannelDetectRegion({ profile_id: selectedID, channel_id: channelID })
+        if (res.ok && res.region) {
+          toast.success(`区域: ${res.region}`)
+        } else {
+          toast.error(res.message || '未检测到区域')
+        }
+      } catch (e: any) {
+        toast.error(`检测失败: ${e?.message || String(e)}`)
+      } finally {
+        setDetectingCh(null)
       }
     },
     [selectedID],
@@ -1540,6 +1565,16 @@ export default function RemoteChannelsStudio() {
                               >
                                 {testingCh === ch.id ? '测试中…' : '测试'}
                               </Button>
+                              {ch.type === 3 && (
+                                <Button
+                                  variant="outline"
+                                  onClick={() => void detectRegion(ch.id)}
+                                  disabled={detectingCh === ch.id}
+                                  className="border px-2 disabled:opacity-50"
+                                >
+                                  {detectingCh === ch.id ? '检测中…' : '测区域'}
+                                </Button>
+                              )}
                               <Button
                                 variant="danger"
                                 onClick={() => void deleteChannel(ch)}
