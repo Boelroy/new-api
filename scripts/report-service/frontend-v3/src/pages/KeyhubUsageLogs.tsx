@@ -98,14 +98,25 @@ function tokensText(r: Record<string, unknown>): string {
 function Muted() {
   return <span className="text-muted-foreground/50">—</span>
 }
-function Pill({ children, tone = 'default' }: { children: ReactNode; tone?: 'default' | 'green' | 'muted' }) {
+function Pill({ children, tone = 'default' }: { children: ReactNode; tone?: 'default' | 'green' | 'red' | 'muted' }) {
   const cls =
     tone === 'green'
       ? 'bg-emerald-50 text-emerald-700 ring-emerald-200'
-      : tone === 'muted'
-        ? 'bg-muted text-muted-foreground ring-border'
-        : 'bg-background text-foreground ring-border'
+      : tone === 'red'
+        ? 'bg-red-50 text-red-700 ring-red-200'
+        : tone === 'muted'
+          ? 'bg-muted text-muted-foreground ring-border'
+          : 'bg-background text-foreground ring-border'
   return <span className={'inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] ring-1 ' + cls}>{children}</span>
+}
+
+// pd-maas log_type: mirrors new-api's LogType enum (2=consume, 5=error, …).
+const LOG_TYPE_LABELS: Record<number, { label: string; tone: 'default' | 'green' | 'red' | 'muted' }> = {
+  1: { label: '充值', tone: 'muted' },
+  2: { label: '消费', tone: 'green' },
+  3: { label: '管理', tone: 'muted' },
+  4: { label: '系统', tone: 'muted' },
+  5: { label: '错误', tone: 'red' },
 }
 
 function cellText(v: unknown): string {
@@ -127,10 +138,23 @@ type LogColumn = {
 // (hidden-by-default) column, so nothing is lost.
 const KNOWN_COLUMNS: LogColumn[] = [
   {
-    key: 'use_time',
+    key: 'remote_created_at',
     label: '时间',
     defaultVisible: true,
-    render: (r) => <span className="tnum whitespace-nowrap text-muted-foreground">{fmtLogTime(r.use_time)}</span>,
+    render: (r) => (
+      <span className="tnum whitespace-nowrap text-muted-foreground">{fmtLogTime(r.remote_created_at)}</span>
+    ),
+  },
+  {
+    key: 'log_type',
+    label: '类型',
+    defaultVisible: true,
+    render: (r) => {
+      const t = statNum(r.log_type)
+      const m = t != null ? LOG_TYPE_LABELS[t] : undefined
+      if (m) return <Pill tone={m.tone}>{m.label}</Pill>
+      return t != null ? <Pill tone="muted">{`类型 ${t}`}</Pill> : <Muted />
+    },
   },
   {
     key: 'remote_token_name',
@@ -196,6 +220,40 @@ const KNOWN_COLUMNS: LogColumn[] = [
   },
   // --- optional (hidden by default) ---
   {
+    key: 'remote_channel_name',
+    label: '渠道',
+    defaultVisible: false,
+    render: (r) =>
+      r.remote_channel_name ? (
+        <span className="block max-w-[220px] truncate" title={String(r.remote_channel_name)}>
+          {String(r.remote_channel_name)}
+        </span>
+      ) : (
+        <Muted />
+      ),
+  },
+  {
+    key: 'remote_username',
+    label: '用户',
+    defaultVisible: false,
+    render: (r) => (r.remote_username ? <span>{String(r.remote_username)}</span> : <Muted />),
+  },
+  {
+    key: 'use_time',
+    label: '用时',
+    defaultVisible: false,
+    render: (r) => {
+      const n = statNum(r.use_time)
+      return n == null ? <Muted /> : <span className="tnum">{`${n}s`}</span>
+    },
+  },
+  {
+    key: 'group',
+    label: '分组',
+    defaultVisible: false,
+    render: (r) => (r.group ? <span className="tnum">{String(r.group)}</span> : <Muted />),
+  },
+  {
     key: 'category_code',
     label: '类别代码',
     defaultVisible: false,
@@ -208,18 +266,30 @@ const KNOWN_COLUMNS: LogColumn[] = [
     render: (r) => <span className="tnum">{fmtInt(r.quota_per_unit)}</span>,
   },
   {
-    key: '_token_id',
+    key: 'remote_token_id',
     label: '令牌 ID',
     defaultVisible: false,
-    render: (r) => (r._token_id != null ? <span className="tnum">{String(r._token_id)}</span> : <Muted />),
+    render: (r) => (r.remote_token_id != null ? <span className="tnum">{String(r.remote_token_id)}</span> : <Muted />),
+  },
+  {
+    key: 'request_id',
+    label: '请求 ID',
+    defaultVisible: false,
+    render: (r) =>
+      r.request_id ? <span className="font-mono text-[11px]">{String(r.request_id)}</span> : <Muted />,
   },
 ]
 
 // Field names already surfaced (directly or derived) by KNOWN_COLUMNS, so they
 // aren't re-added as generic discovered columns.
 const CONSUMED_KEYS = new Set<string>([
+  'remote_created_at',
+  'log_type',
   'use_time',
   'remote_token_name',
+  'remote_token_id',
+  'remote_channel_name',
+  'remote_username',
   'key_hint',
   'category',
   'category_label',
@@ -231,13 +301,14 @@ const CONSUMED_KEYS = new Set<string>([
   'completion_tokens',
   'raw_cost_usd',
   'quota_per_unit',
-  '_token_id',
+  'group',
+  'request_id',
   'content',
 ])
 
-// v2: content promoted to a default column — bump the key so returning browsers
-// pick up the new defaults instead of a stale stored set.
-const COLS_STORAGE_KEY = 'keyhub_log_visible_cols_v2'
+// v3: 时间 now reads remote_created_at + a 类型 (log_type) column was added, so
+// bump the key to reset returning browsers to the new default column set.
+const COLS_STORAGE_KEY = 'keyhub_log_visible_cols_v3'
 
 // ---- stat panel ----
 
