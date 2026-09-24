@@ -177,6 +177,23 @@ const KNOWN_COLUMNS: LogColumn[] = [
     defaultVisible: true,
     render: (r) => <Pill tone="green">{fmtUSD(r.raw_cost_usd)}</Pill>,
   },
+  {
+    // content is often a long error string; cap the width and single-line
+    // truncate so it doesn't blow the table out. Full text on hover.
+    key: 'content',
+    label: '内容',
+    defaultVisible: true,
+    render: (r) => {
+      const t = cellText(r.content)
+      return t ? (
+        <span className="block max-w-[360px] truncate text-muted-foreground" title={t}>
+          {t}
+        </span>
+      ) : (
+        <Muted />
+      )
+    },
+  },
   // --- optional (hidden by default) ---
   {
     key: 'category_code',
@@ -215,9 +232,12 @@ const CONSUMED_KEYS = new Set<string>([
   'raw_cost_usd',
   'quota_per_unit',
   '_token_id',
+  'content',
 ])
 
-const COLS_STORAGE_KEY = 'keyhub_log_visible_cols'
+// v2: content promoted to a default column — bump the key so returning browsers
+// pick up the new defaults instead of a stale stored set.
+const COLS_STORAGE_KEY = 'keyhub_log_visible_cols_v2'
 
 // ---- stat panel ----
 
