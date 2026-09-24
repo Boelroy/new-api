@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import Layout from '../components/Layout'
 import { Button, Card, Input, Select } from '../components/ui'
 import { toast } from '../components/feedback'
@@ -69,10 +69,169 @@ function extractTotal(data: unknown): number | undefined {
   return undefined
 }
 
-function cellText(v: unknown): string {
-  if (v == null) return ''
-  if (typeof v === 'object') return JSON.stringify(v)
-  return String(v)
+// ---- log table (curated, pretty columns instead of a raw key dump) ----
+
+// use_time is a unix timestamp (seconds); render it in local time. Falls back to
+// the raw string for ISO / unexpected shapes.
+function fmtLogTime(v: unknown): string {
+  let d: Date | null = null
+  if (typeof v === 'number') d = new Date(v < 1e12 ? v * 1000 : v)
+  else if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v)
+    d = !Number.isNaN(n) ? new Date(n < 1e12 ? n * 1000 : n) : new Date(v)
+  }
+  if (!d || Number.isNaN(d.getTime())) return typeof v === 'string' ? v : ''
+  const p = (x: number) => String(x).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+// tokens: prompt / completion when available, else the combined total.
+function tokensText(r: Record<string, unknown>): string {
+  const pt = statNum(r.prompt_tokens)
+  const ct = statNum(r.completion_tokens)
+  if (pt != null || ct != null) return `${pt ?? 0} / ${ct ?? 0}`
+  const t = statNum(r.tokens)
+  return t == null ? '—' : t.toLocaleString()
+}
+
+function Muted() {
+  return <span className="text-muted-foreground/50">—</span>
+}
+function Pill({ children, tone = 'default' }: { children: ReactNode; tone?: 'default' | 'green' | 'muted' }) {
+  const cls =
+    tone === 'green'
+      ? 'bg-emerald-50 text-emerald-700 ring-emerald-200'
+      : tone === 'muted'
+        ? 'bg-muted text-muted-foreground ring-border'
+        : 'bg-background text-foreground ring-border'
+  return <span className={'inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] ring-1 ' + cls}>{children}</span>
+}
+
+type LogColumn = { key: string; label: string; render: (r: Record<string, unknown>) => ReactNode }
+
+const LOG_COLUMNS: LogColumn[] = [
+  {
+    key: 'use_time',
+    label: '时间',
+    render: (r) => <span className="tnum whitespace-nowrap text-muted-foreground">{fmtLogTime(r.use_time)}</span>,
+  },
+  {
+    key: 'remote_token_name',
+    label: '令牌',
+    render: (r) => (r.remote_token_name ? <Pill tone="muted">{String(r.remote_token_name)}</Pill> : <Muted />),
+  },
+  {
+    key: 'key_hint',
+    label: 'Key',
+    render: (r) => (r.key_hint ? <span className="font-mono text-[11px]">{String(r.key_hint)}</span> : <Muted />),
+  },
+  {
+    key: 'category',
+    label: '类别',
+    render: (r) => {
+      const t = (r.category_label as string) || (r.category_code as string) || ''
+      return t ? <span>{t}</span> : <Muted />
+    },
+  },
+  {
+    key: 'model_name',
+    label: '模型',
+    render: (r) => (r.model_name ? <Pill>{String(r.model_name)}</Pill> : <Muted />),
+  },
+  {
+    key: 'is_stream',
+    label: '流',
+    render: (r) => <span className="text-muted-foreground">{r.is_stream ? '流' : '非流'}</span>,
+  },
+  {
+    key: 'tokens',
+    label: 'Tokens',
+    render: (r) => <span className="tnum whitespace-nowrap">{tokensText(r)}</span>,
+  },
+  {
+    key: 'raw_cost_usd',
+    label: '费用',
+    render: (r) => <Pill tone="green">{fmtUSD(r.raw_cost_usd)}</Pill>,
+  },
+]
+
+// ---- stat panel ----
+
+type KeyhubStat = {
+  quota?: number
+  raw_cost_usd?: string | number
+  request_count?: number
+  tokens?: number
+  rpm?: number
+  tpm?: number
+  sampled_at?: string
+  rate_window_start?: string
+  partial?: boolean
+  failed_platform_count?: number
+}
+
+function statNum(v: unknown): number | undefined {
+  if (typeof v === 'number') return v
+  if (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))) return Number(v)
+  return undefined
+}
+function fmtInt(v: unknown): string {
+  const n = statNum(v)
+  return n == null ? '—' : n.toLocaleString()
+}
+function fmtUSD(v: unknown): string {
+  const n = statNum(v)
+  if (n == null) return '—'
+  if (n === 0) return '$0.00'
+  return '$' + (n < 0.01 ? n.toFixed(6) : n.toFixed(2))
+}
+function fmtTime(v: unknown): string {
+  if (typeof v !== 'string' || !v) return ''
+  return v.replace('T', ' ').replace(/(\+|-)\d{2}:\d{2}$/, '').replace(/Z$/, '')
+}
+
+// StatPanel renders the usage stat object as labelled metric tiles instead of
+// a raw JSON dump. Unknown/missing fields fall back to «—».
+function StatPanel({ stat }: { stat: KeyhubStat }) {
+  const tiles: { label: string; value: string; hint?: string }[] = [
+    { label: '请求数', value: fmtInt(stat.request_count) },
+    { label: 'Tokens', value: fmtInt(stat.tokens) },
+    { label: '花费', value: fmtUSD(stat.raw_cost_usd), hint: 'USD' },
+    { label: 'RPM', value: fmtInt(stat.rpm), hint: '每分钟请求' },
+    { label: 'TPM', value: fmtInt(stat.tpm), hint: '每分钟 tokens' },
+  ]
+  const sampled = fmtTime(stat.sampled_at)
+  const windowStart = fmtTime(stat.rate_window_start)
+  const failed = statNum(stat.failed_platform_count) ?? 0
+  return (
+    <Card className="mt-4 space-y-3 p-4">
+      <div className="flex items-center gap-2">
+        <div className="text-sm font-semibold">统计</div>
+        {stat.partial === true && (
+          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] text-amber-700">数据不完整</span>
+        )}
+        {failed > 0 && (
+          <span className="rounded-full bg-red-100 px-2 py-0.5 text-[11px] text-red-700">
+            {failed} 个平台采集失败
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+        {tiles.map((t) => (
+          <div key={t.label} className="rounded-lg border border-border bg-muted/30 px-3 py-2.5">
+            <div className="text-[11px] text-muted-foreground">{t.label}</div>
+            <div className="mt-0.5 text-lg font-semibold tnum text-foreground">{t.value}</div>
+            {t.hint && <div className="text-[10px] text-muted-foreground/70">{t.hint}</div>}
+          </div>
+        ))}
+      </div>
+      {(sampled || windowStart) && (
+        <div className="text-[11px] text-muted-foreground">
+          {windowStart && sampled ? `速率窗口 ${windowStart} → ${sampled}` : `采样时间 ${sampled || windowStart}`}
+        </div>
+      )}
+    </Card>
+  )
 }
 
 const PAGE_SIZE = 20
@@ -145,22 +304,6 @@ export default function KeyhubUsageLogs() {
     },
     [buildQuery, selectedBatches],
   )
-
-  const columns = useMemo(() => {
-    const seen = new Set<string>()
-    const cols: string[] = []
-    for (const r of rows) {
-      if (r && typeof r === 'object') {
-        for (const k of Object.keys(r)) {
-          if (!seen.has(k)) {
-            seen.add(k)
-            cols.push(k)
-          }
-        }
-      }
-    }
-    return cols
-  }, [rows])
 
   const totalPages = total != null ? Math.max(1, Math.ceil(total / PAGE_SIZE)) : undefined
 
@@ -243,14 +386,7 @@ export default function KeyhubUsageLogs() {
         </div>
       </Card>
 
-      {stat != null && (
-        <Card className="mt-4 space-y-2 p-4">
-          <div className="text-sm font-semibold">统计 (stat)</div>
-          <pre className="max-h-56 overflow-auto rounded-md bg-muted p-3 text-[11px] leading-relaxed">
-            {JSON.stringify(stat, null, 2)}
-          </pre>
-        </Card>
-      )}
+      {stat != null && <StatPanel stat={stat as KeyhubStat} />}
 
       <Card className="mt-4 overflow-hidden p-0">
         <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
@@ -291,19 +427,19 @@ export default function KeyhubUsageLogs() {
             <table className="w-full text-left text-xs">
               <thead className="bg-muted/50 text-muted-foreground">
                 <tr>
-                  {columns.map((c) => (
-                    <th key={c} className="whitespace-nowrap px-3 py-2 font-medium">
-                      {c}
+                  {LOG_COLUMNS.map((c) => (
+                    <th key={c.key} className="whitespace-nowrap px-3 py-2 font-medium">
+                      {c.label}
                     </th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r, ri) => (
-                  <tr key={ri} className="border-t border-border">
-                    {columns.map((c) => (
-                      <td key={c} className="max-w-[280px] truncate px-3 py-1.5 tnum" title={cellText(r[c])}>
-                        {cellText(r[c])}
+                  <tr key={ri} className="border-t border-border transition-colors hover:bg-muted/30">
+                    {LOG_COLUMNS.map((c) => (
+                      <td key={c.key} className="px-3 py-2 align-middle">
+                        {c.render(r as Record<string, unknown>)}
                       </td>
                     ))}
                   </tr>
