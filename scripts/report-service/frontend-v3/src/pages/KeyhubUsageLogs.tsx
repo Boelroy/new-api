@@ -23,6 +23,23 @@ function optionValue(o: KeyhubFilterOption): string {
   return o.value != null ? String(o.value) : ''
 }
 
+// Batches come from pd-maas shaped as {id, category_label, key_count, tag,
+// note, owner_name, ...} — no value/label — so the generic helpers render blank
+// chips. Map id → value and a human note/tag (+ category + count) → label.
+function batchValue(b: KeyhubFilterOption): string {
+  const id = b.id ?? b.value
+  return id != null ? String(id) : ''
+}
+function batchLabel(b: KeyhubFilterOption): string {
+  const name = (b.note as string) || (b.tag as string) || ''
+  const cat = (b.category_label as string) || (b.category_code as string) || ''
+  const cnt = b.key_count != null ? `${b.key_count} key` : ''
+  const idTail = typeof b.id === 'string' ? b.id.slice(-6) : ''
+  const head = name || idTail || '(批次)'
+  const meta = [cat, cnt].filter(Boolean).join(' · ')
+  return meta ? `${head}（${meta}）` : head
+}
+
 function isoDaysAgo(days: number): string {
   const d = new Date()
   d.setDate(d.getDate() - days)
@@ -193,7 +210,7 @@ export default function KeyhubUsageLogs() {
           ) : (
             <div className="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto rounded-lg border border-border p-2">
               {batches.map((b, i) => {
-                const val = optionValue(b)
+                const val = batchValue(b)
                 const active = selectedBatches.includes(val)
                 return (
                   <button
@@ -211,7 +228,7 @@ export default function KeyhubUsageLogs() {
                         : 'border-border bg-background text-muted-foreground hover:bg-muted')
                     }
                   >
-                    {optionLabel(b)}
+                    {batchLabel(b)}
                   </button>
                 )
               })}

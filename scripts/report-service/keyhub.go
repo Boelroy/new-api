@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -384,10 +385,13 @@ func keyhubFilterEnvelopeRows(body []byte, group string) []byte {
 }
 
 // keyhubScopeFilterOptions narrows a logs filter-options envelope to a single
-// supplier: the `groups` list keeps only their private group. batches/keys/
-// models are left as-is (their elements don't carry a group tag), which is safe
-// because log queries are group-guarded — a foreign batch simply returns no rows.
-func keyhubScopeFilterOptions(body []byte, group string) []byte {
+// supplier: `groups` keeps only their private group, and `batches` keeps only
+// the import batches they own (id ∈ allowedBatch). All suppliers share one
+// pd-maas owner, so a batch's owner_id can't isolate them — allowedBatch is
+// derived from the supplier's own key rows (see keyhubSupplierBatchIDs). keys/
+// models are left as-is; log queries are additionally group-guarded, so a
+// stray option can't return foreign rows.
+func keyhubScopeFilterOptions(body []byte, group string, allowedBatch map[string]bool) []byte {
 	var env map[string]any
 	if err := json.Unmarshal(body, &env); err != nil {
 		return body
@@ -405,12 +409,61 @@ func keyhubScopeFilterOptions(body []byte, group string) []byte {
 		}
 		data["groups"] = out
 	}
+	if batches, ok := data["batches"].([]any); ok {
+		out := make([]any, 0, len(batches))
+		for _, b := range batches {
+			m, ok := b.(map[string]any)
+			if !ok {
+				continue
+			}
+			// batch id may surface as "id" or "value"; match either.
+			id, _ := m["id"].(string)
+			if id == "" {
+				id, _ = m["value"].(string)
+			}
+			if id != "" && allowedBatch[id] {
+				out = append(out, m)
+			}
+		}
+		data["batches"] = out
+	}
 	env["data"] = data
 	out, err := json.Marshal(env)
 	if err != nil {
 		return body
 	}
 	return out
+}
+
+// keyhubSupplierBatchIDs returns the set of import_batch_id values belonging to
+// `group` — i.e. the batches this supplier imported — by scanning their key
+// rows. Used to scope the filter-options batch picker so a supplier can't see
+// other suppliers' batch metadata (note/tag/owner_name).
+func keyhubSupplierBatchIDs(group string) (map[string]bool, error) {
+	ids := map[string]bool{}
+	st, body, err := keyhubProxy(http.MethodGet, "/api/admin/key-management/keys?page=1&page_size=500", nil)
+	if err != nil {
+		return nil, err
+	}
+	if st < 200 || st >= 300 {
+		return nil, fmt.Errorf("keys: %s", keyhubErr(body))
+	}
+	var env struct {
+		Data struct {
+			Items []map[string]any `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, err
+	}
+	for _, r := range env.Data.Items {
+		if g, ok := keyhubGroupOf(r); ok && g == group {
+			if bid, ok := r["import_batch_id"].(string); ok && bid != "" {
+				ids[bid] = true
+			}
+		}
+	}
+	return ids, nil
 }
 
 // keyhubOptionMatches reports whether a filter-option element (a bare string, or
@@ -556,7 +609,14 @@ func handleKeyhubUsageFilterOptions(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
-	c.Data(st, "application/json; charset=utf-8", keyhubScopeFilterOptions(body, group))
+	// Restrict the batch picker to this supplier's own imports. If we can't
+	// resolve their batch ids, fail closed (empty set) rather than leak others'.
+	allowed, berr := keyhubSupplierBatchIDs(group)
+	if berr != nil {
+		log.Printf("[keyhub] batch-id scope fetch failed for %s: %v", group, berr)
+		allowed = map[string]bool{}
+	}
+	c.Data(st, "application/json; charset=utf-8", keyhubScopeFilterOptions(body, group, allowed))
 }
 
 func handleKeyhubUsageLogs(c *gin.Context) {
