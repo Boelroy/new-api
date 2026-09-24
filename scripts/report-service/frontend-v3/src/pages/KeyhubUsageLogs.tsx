@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { SlidersHorizontal } from 'lucide-react'
 import Layout from '../components/Layout'
 import { Button, Card, Input, Select } from '../components/ui'
 import { toast } from '../components/feedback'
@@ -107,27 +108,46 @@ function Pill({ children, tone = 'default' }: { children: ReactNode; tone?: 'def
   return <span className={'inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] ring-1 ' + cls}>{children}</span>
 }
 
-type LogColumn = { key: string; label: string; render: (r: Record<string, unknown>) => ReactNode }
+function cellText(v: unknown): string {
+  if (v == null) return ''
+  if (typeof v === 'object') return JSON.stringify(v)
+  return String(v)
+}
 
-const LOG_COLUMNS: LogColumn[] = [
+type LogColumn = {
+  key: string
+  label: string
+  defaultVisible: boolean
+  render: (r: Record<string, unknown>) => ReactNode
+}
+
+// Curated columns. The first block (defaultVisible: true) mirrors the pd-maas
+// native usage view; the rest ship hidden and are toggled on via 显示列. Any raw
+// row key not covered here is discovered at runtime and appended as an optional
+// (hidden-by-default) column, so nothing is lost.
+const KNOWN_COLUMNS: LogColumn[] = [
   {
     key: 'use_time',
     label: '时间',
+    defaultVisible: true,
     render: (r) => <span className="tnum whitespace-nowrap text-muted-foreground">{fmtLogTime(r.use_time)}</span>,
   },
   {
     key: 'remote_token_name',
     label: '令牌',
+    defaultVisible: true,
     render: (r) => (r.remote_token_name ? <Pill tone="muted">{String(r.remote_token_name)}</Pill> : <Muted />),
   },
   {
     key: 'key_hint',
     label: 'Key',
+    defaultVisible: true,
     render: (r) => (r.key_hint ? <span className="font-mono text-[11px]">{String(r.key_hint)}</span> : <Muted />),
   },
   {
     key: 'category',
     label: '类别',
+    defaultVisible: true,
     render: (r) => {
       const t = (r.category_label as string) || (r.category_code as string) || ''
       return t ? <span>{t}</span> : <Muted />
@@ -136,24 +156,68 @@ const LOG_COLUMNS: LogColumn[] = [
   {
     key: 'model_name',
     label: '模型',
+    defaultVisible: true,
     render: (r) => (r.model_name ? <Pill>{String(r.model_name)}</Pill> : <Muted />),
   },
   {
     key: 'is_stream',
     label: '流',
+    defaultVisible: true,
     render: (r) => <span className="text-muted-foreground">{r.is_stream ? '流' : '非流'}</span>,
   },
   {
     key: 'tokens',
     label: 'Tokens',
+    defaultVisible: true,
     render: (r) => <span className="tnum whitespace-nowrap">{tokensText(r)}</span>,
   },
   {
     key: 'raw_cost_usd',
     label: '费用',
+    defaultVisible: true,
     render: (r) => <Pill tone="green">{fmtUSD(r.raw_cost_usd)}</Pill>,
   },
+  // --- optional (hidden by default) ---
+  {
+    key: 'category_code',
+    label: '类别代码',
+    defaultVisible: false,
+    render: (r) => (r.category_code ? <span className="tnum">{String(r.category_code)}</span> : <Muted />),
+  },
+  {
+    key: 'quota_per_unit',
+    label: '单位配额',
+    defaultVisible: false,
+    render: (r) => <span className="tnum">{fmtInt(r.quota_per_unit)}</span>,
+  },
+  {
+    key: '_token_id',
+    label: '令牌 ID',
+    defaultVisible: false,
+    render: (r) => (r._token_id != null ? <span className="tnum">{String(r._token_id)}</span> : <Muted />),
+  },
 ]
+
+// Field names already surfaced (directly or derived) by KNOWN_COLUMNS, so they
+// aren't re-added as generic discovered columns.
+const CONSUMED_KEYS = new Set<string>([
+  'use_time',
+  'remote_token_name',
+  'key_hint',
+  'category',
+  'category_label',
+  'category_code',
+  'model_name',
+  'is_stream',
+  'tokens',
+  'prompt_tokens',
+  'completion_tokens',
+  'raw_cost_usd',
+  'quota_per_unit',
+  '_token_id',
+])
+
+const COLS_STORAGE_KEY = 'keyhub_log_visible_cols'
 
 // ---- stat panel ----
 
@@ -307,6 +371,65 @@ export default function KeyhubUsageLogs() {
 
   const totalPages = total != null ? Math.max(1, Math.ceil(total / PAGE_SIZE)) : undefined
 
+  // Column visibility: curated defaults + any extra raw fields discovered in the
+  // rows (appended hidden). Choice is persisted per browser.
+  const [visibleCols, setVisibleCols] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(COLS_STORAGE_KEY)
+      if (raw) {
+        const arr = JSON.parse(raw)
+        if (Array.isArray(arr)) return new Set(arr.map(String))
+      }
+    } catch {
+      /* ignore malformed storage */
+    }
+    return new Set(KNOWN_COLUMNS.filter((c) => c.defaultVisible).map((c) => c.key))
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem(COLS_STORAGE_KEY, JSON.stringify([...visibleCols]))
+    } catch {
+      /* ignore */
+    }
+  }, [visibleCols])
+  const toggleCol = useCallback((key: string) => {
+    setVisibleCols((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }, [])
+
+  const allColumns = useMemo<LogColumn[]>(() => {
+    const extra: LogColumn[] = []
+    const seen = new Set<string>()
+    const known = new Set(KNOWN_COLUMNS.map((c) => c.key))
+    for (const r of rows) {
+      if (r && typeof r === 'object') {
+        for (const k of Object.keys(r)) {
+          if (CONSUMED_KEYS.has(k) || known.has(k) || seen.has(k)) continue
+          seen.add(k)
+          extra.push({
+            key: k,
+            label: k,
+            defaultVisible: false,
+            render: (row) => {
+              const t = cellText(row[k])
+              return t ? <span className="tnum">{t}</span> : <Muted />
+            },
+          })
+        }
+      }
+    }
+    return [...KNOWN_COLUMNS, ...extra]
+  }, [rows])
+
+  const shownColumns = useMemo(() => {
+    const cols = allColumns.filter((c) => visibleCols.has(c.key))
+    return cols.length > 0 ? cols : allColumns.filter((c) => c.defaultVisible)
+  }, [allColumns, visibleCols])
+
   return (
     <Layout title="使用日志" subtitle="KHub（pd-maas）调用日志">
       <Card className="space-y-4 p-4">
@@ -388,7 +511,32 @@ export default function KeyhubUsageLogs() {
 
       {stat != null && <StatPanel stat={stat as KeyhubStat} />}
 
-      <Card className="mt-4 overflow-hidden p-0">
+      <div className="mt-4 flex items-center justify-end">
+        <details className="relative">
+          <summary className="flex cursor-pointer list-none items-center gap-1 rounded-md border border-border bg-background px-2.5 py-1 text-xs text-foreground hover:bg-muted [&::-webkit-details-marker]:hidden">
+            <SlidersHorizontal className="size-3.5" />
+            显示列
+          </summary>
+          <div className="absolute right-0 z-20 mt-1 max-h-72 w-44 overflow-y-auto rounded-lg border border-border bg-background p-1.5 shadow-lg">
+            {allColumns.map((c) => (
+              <label
+                key={c.key}
+                className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-muted"
+              >
+                <input
+                  type="checkbox"
+                  className="size-3.5 accent-primary"
+                  checked={visibleCols.has(c.key)}
+                  onChange={() => toggleCol(c.key)}
+                />
+                <span className="min-w-0 flex-1 truncate">{c.label}</span>
+              </label>
+            ))}
+          </div>
+        </details>
+      </div>
+
+      <Card className="mt-2 overflow-hidden p-0">
         <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
           <div className="text-sm font-semibold">日志</div>
           <div className="flex items-center gap-2 text-[11px] text-muted-foreground tnum">
@@ -427,7 +575,7 @@ export default function KeyhubUsageLogs() {
             <table className="w-full text-left text-xs">
               <thead className="bg-muted/50 text-muted-foreground">
                 <tr>
-                  {LOG_COLUMNS.map((c) => (
+                  {shownColumns.map((c) => (
                     <th key={c.key} className="whitespace-nowrap px-3 py-2 font-medium">
                       {c.label}
                     </th>
@@ -437,7 +585,7 @@ export default function KeyhubUsageLogs() {
               <tbody>
                 {rows.map((r, ri) => (
                   <tr key={ri} className="border-t border-border transition-colors hover:bg-muted/30">
-                    {LOG_COLUMNS.map((c) => (
+                    {shownColumns.map((c) => (
                       <td key={c.key} className="px-3 py-2 align-middle">
                         {c.render(r as Record<string, unknown>)}
                       </td>
