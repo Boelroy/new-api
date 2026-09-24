@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -258,6 +259,174 @@ func keyhubForwardQuery(c *gin.Context, base string, allowed []string) {
 	keyhubForward(c, path)
 }
 
+// ---- per-supplier scoping (方案 B) ----
+//
+// supplier_02 users share ONE KHub provider account (asl) with everyone else,
+// so isolation is enforced here in the proxy: every supplier's uploads are
+// stamped with a private group ("sup_<user_id>") and every read is constrained
+// to that group. Admins (and higher tiers) are unscoped and see the whole
+// shared pool.
+
+const keyhubGroupPrefix = "sup_"
+
+// keyhubScope reports whether the caller's KHub access must be constrained to a
+// private group. scoped=true → stamp/filter by `group`. ok=false → the caller
+// is a supplier but we couldn't resolve their user_id; callers MUST fail closed
+// (403) rather than fall through to the shared pool.
+func keyhubScope(c *gin.Context) (scoped bool, group string, ok bool) {
+	roleAny, _ := c.Get("role")
+	role, _ := roleAny.(int)
+	if role != minSupplierRole02 {
+		return false, "", true // admin / higher tier: unscoped
+	}
+	uidAny, exists := c.Get("user_id")
+	id, _ := uidAny.(int)
+	if !exists || id <= 0 {
+		return true, "", false // supplier without identity: fail closed
+	}
+	return true, keyhubGroupPrefix + strconv.Itoa(id), true
+}
+
+// keyhubDenyNoIdentity writes the fail-closed 403 shared by every scoped handler
+// when a supplier's identity can't be resolved.
+func keyhubDenyNoIdentity(c *gin.Context) {
+	c.JSON(http.StatusForbidden, gin.H{"error": "keyhub: cannot resolve supplier identity"})
+}
+
+// keyhubForwardQueryScoped is keyhubForwardQuery plus forced query params: it
+// drops any client-supplied copy of the forced keys, then injects our values.
+// Used to pin `group` for supplier reads regardless of client input.
+func keyhubForwardQueryScoped(c *gin.Context, base string, allowed []string, forced map[string]string) {
+	q := url.Values{}
+	src := c.Request.URL.Query()
+	for _, k := range allowed {
+		if _, isForced := forced[k]; isForced {
+			continue // forced keys are injected below, never taken from the client
+		}
+		for _, v := range src[k] {
+			if v != "" {
+				q.Add(k, v)
+			}
+		}
+	}
+	for k, v := range forced {
+		if v != "" {
+			q.Set(k, v)
+		}
+	}
+	path := base
+	if enc := q.Encode(); enc != "" {
+		path = base + "?" + enc
+	}
+	keyhubForward(c, path)
+}
+
+// keyhubGroupOf best-effort extracts a row's group label across the field-name
+// variants KHub might use.
+func keyhubGroupOf(row map[string]any) (string, bool) {
+	for _, k := range []string{"group", "group_name", "groupName"} {
+		if s, ok := row[k].(string); ok {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+// keyhubFilterEnvelopeRows keeps only rows whose group matches `group` inside a
+// KHub JSON envelope {code,message,data}. It handles data shaped as a bare
+// array or as {items:[],total:n}. Rows without a recognizable group field are
+// dropped (fail closed). On any parse failure the body is relayed unchanged
+// (the caller has already decided this response should be scoped, but a shape
+// we don't understand is left to KHub rather than silently emptied — this only
+// applies to non-JSON/HTTP-error bodies since success envelopes parse fine).
+func keyhubFilterEnvelopeRows(body []byte, group string) []byte {
+	var env map[string]any
+	if err := json.Unmarshal(body, &env); err != nil {
+		return body
+	}
+	data, ok := env["data"]
+	if !ok || data == nil {
+		return body
+	}
+	keep := func(rows []any) []any {
+		out := make([]any, 0, len(rows))
+		for _, r := range rows {
+			m, ok := r.(map[string]any)
+			if !ok {
+				continue
+			}
+			if g, has := keyhubGroupOf(m); has && g == group {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+	switch d := data.(type) {
+	case []any:
+		env["data"] = keep(d)
+	case map[string]any:
+		if items, ok := d["items"].([]any); ok {
+			kept := keep(items)
+			d["items"] = kept
+			if _, hasTotal := d["total"]; hasTotal {
+				d["total"] = len(kept)
+			}
+			env["data"] = d
+		}
+	}
+	out, err := json.Marshal(env)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// keyhubScopeFilterOptions narrows a logs filter-options envelope to a single
+// supplier: the `groups` list keeps only their private group. batches/keys/
+// models are left as-is (their elements don't carry a group tag), which is safe
+// because log queries are group-guarded — a foreign batch simply returns no rows.
+func keyhubScopeFilterOptions(body []byte, group string) []byte {
+	var env map[string]any
+	if err := json.Unmarshal(body, &env); err != nil {
+		return body
+	}
+	data, ok := env["data"].(map[string]any)
+	if !ok {
+		return body
+	}
+	if groups, ok := data["groups"].([]any); ok {
+		out := make([]any, 0, len(groups))
+		for _, g := range groups {
+			if keyhubOptionMatches(g, group) {
+				out = append(out, g)
+			}
+		}
+		data["groups"] = out
+	}
+	env["data"] = data
+	out, err := json.Marshal(env)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// keyhubOptionMatches reports whether a filter-option element (a bare string, or
+// an object with value/label/group) refers to `group`.
+func keyhubOptionMatches(el any, group string) bool {
+	switch v := el.(type) {
+	case string:
+		return v == group
+	case map[string]any:
+		for _, k := range []string{"value", "label", "group", "group_name"} {
+			if s, ok := v[k].(string); ok && s == group {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // ---- handlers ----
 
 // keyhubUsageLogParams are the filters accepted by the usage-log + stat views.
@@ -272,12 +441,46 @@ func handleKeyhubCategories(c *gin.Context) {
 }
 
 func handleKeyhubKeysList(c *gin.Context) {
-	keyhubForwardQuery(c, "/api/admin/key-management/keys", []string{"page", "page_size", "category_code", "keyword"})
+	scoped, group, ok := keyhubScope(c)
+	if !ok {
+		keyhubDenyNoIdentity(c)
+		return
+	}
+	if !scoped {
+		keyhubForwardQuery(c, "/api/admin/key-management/keys", []string{"page", "page_size", "category_code", "keyword"})
+		return
+	}
+	// KHub keys-list can't filter by group, so pull a wide page and keep only
+	// this supplier's rows (fail closed if rows carry no recognizable group).
+	if !keyhubConfigured() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "keyhub not configured"})
+		return
+	}
+	q := url.Values{}
+	q.Set("page", "1")
+	q.Set("page_size", "500")
+	if v := strings.TrimSpace(c.Query("category_code")); v != "" {
+		q.Set("category_code", v)
+	}
+	if v := strings.TrimSpace(c.Query("keyword")); v != "" {
+		q.Set("keyword", v)
+	}
+	st, body, err := keyhubProxy(http.MethodGet, "/api/admin/key-management/keys?"+q.Encode(), nil)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.Data(st, "application/json; charset=utf-8", keyhubFilterEnvelopeRows(body, group))
 }
 
 func handleKeyhubImport(c *gin.Context) {
 	if !keyhubConfigured() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "keyhub not configured"})
+		return
+	}
+	scoped, group, ok := keyhubScope(c)
+	if !ok {
+		keyhubDenyNoIdentity(c)
 		return
 	}
 	raw, err := io.ReadAll(io.LimitReader(c.Request.Body, 8<<20))
@@ -294,6 +497,21 @@ func handleKeyhubImport(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "category_code and raw_text are required"})
 		return
 	}
+	// Suppliers are pinned to their private group so their keys stay isolated;
+	// any client-supplied group_name is overridden.
+	if scoped {
+		var obj map[string]any
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
+		obj["group_name"] = group
+		raw, err = json.Marshal(obj)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode request"})
+			return
+		}
+	}
 	st, body, err := keyhubProxy(http.MethodPost, "/api/admin/key-management/keys/import", raw)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
@@ -303,18 +521,65 @@ func handleKeyhubImport(c *gin.Context) {
 }
 
 func handleKeyhubUsageOverview(c *gin.Context) {
+	scoped, _, ok := keyhubScope(c)
+	if !ok {
+		keyhubDenyNoIdentity(c)
+		return
+	}
+	if scoped {
+		// The overview endpoint can't be filtered by group, so suppliers are
+		// denied here (the UI hides it too); they use 使用日志 instead.
+		c.JSON(http.StatusForbidden, gin.H{"error": "keyhub: overview not available for suppliers"})
+		return
+	}
 	keyhubForwardQuery(c, "/api/provider/keyhub-usage/dashboard/overview", []string{"start_timestamp", "end_timestamp"})
 }
 
 func handleKeyhubUsageFilterOptions(c *gin.Context) {
-	keyhubForward(c, "/api/provider/keyhub-usage/logs/filter-options")
+	scoped, group, ok := keyhubScope(c)
+	if !ok {
+		keyhubDenyNoIdentity(c)
+		return
+	}
+	if !scoped {
+		keyhubForward(c, "/api/provider/keyhub-usage/logs/filter-options")
+		return
+	}
+	if !keyhubConfigured() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "keyhub not configured"})
+		return
+	}
+	st, body, err := keyhubProxy(http.MethodGet, "/api/provider/keyhub-usage/logs/filter-options", nil)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.Data(st, "application/json; charset=utf-8", keyhubScopeFilterOptions(body, group))
 }
 
 func handleKeyhubUsageLogs(c *gin.Context) {
+	scoped, group, ok := keyhubScope(c)
+	if !ok {
+		keyhubDenyNoIdentity(c)
+		return
+	}
+	if scoped {
+		keyhubForwardQueryScoped(c, "/api/provider/keyhub-usage/logs", keyhubUsageLogParams, map[string]string{"group": group})
+		return
+	}
 	keyhubForwardQuery(c, "/api/provider/keyhub-usage/logs", keyhubUsageLogParams)
 }
 
 func handleKeyhubUsageLogStat(c *gin.Context) {
+	scoped, group, ok := keyhubScope(c)
+	if !ok {
+		keyhubDenyNoIdentity(c)
+		return
+	}
+	if scoped {
+		keyhubForwardQueryScoped(c, "/api/provider/keyhub-usage/logs/stat", keyhubUsageLogParams, map[string]string{"group": group})
+		return
+	}
 	keyhubForwardQuery(c, "/api/provider/keyhub-usage/logs/stat", keyhubUsageLogParams)
 }
 

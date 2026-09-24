@@ -38,10 +38,12 @@ const GROUPS: NavGroup[] = [
         allow: (r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_02,
       },
       {
+        // 用量概览 (overview) can't be filtered per-supplier upstream, so it's
+        // admin-only; suppliers use 使用日志 (group-scoped) for their own usage.
         to: '/keyhub-usage',
         label: '用量概览',
         icon: BarChart3,
-        allow: (r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_02,
+        allow: (r) => r >= ROLE_ADMIN,
       },
       {
         to: '/keyhub-logs',

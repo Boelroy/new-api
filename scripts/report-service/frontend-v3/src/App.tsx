@@ -79,7 +79,7 @@ export default function App() {
         <Route
           path="/keyhub-usage"
           element={
-            <RoleGate allow={(r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_02}>
+            <RoleGate allow={(r) => r >= ROLE_ADMIN}>
               <KeyhubUsageOverview />
             </RoleGate>
           }

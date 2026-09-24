@@ -3,7 +3,8 @@ import { Plus, Trash2 } from 'lucide-react'
 import Layout from '../components/Layout'
 import { Button, Card, Input, Select, Textarea } from '../components/ui'
 import { toast } from '../components/feedback'
-import { api, type KeyhubCategory, type KeyhubCategoryField } from '../api'
+import { api, ROLE_SUPPLIER_02, type KeyhubCategory, type KeyhubCategoryField } from '../api'
+import { getCachedRole, loadRole } from '../auth'
 
 // 上传 Key — imports credentials into KHub (pd-maas) via the report-service
 // proxy. The category list (and each category's import profile) comes from
@@ -95,6 +96,15 @@ export default function KeyhubUpload() {
   const [note, setNote] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [result, setResult] = useState<unknown>(null)
+  const [role, setRole] = useState<number | null>(getCachedRole())
+
+  // Suppliers are pinned to a server-assigned private group ("sup_<id>"), so
+  // the group field is locked for them — the server overrides it regardless.
+  useEffect(() => {
+    if (role !== null) return
+    void loadRole().then(setRole)
+  }, [role])
+  const isSupplier = role === ROLE_SUPPLIER_02
 
   useEffect(() => {
     let alive = true
@@ -222,7 +232,16 @@ export default function KeyhubUpload() {
             </label>
             <label className="space-y-1.5">
               <span className="text-xs font-medium text-muted-foreground">分组 (group_name)</span>
-              <Input value={groupName} onChange={(e) => setGroupName(e.target.value)} placeholder="default" />
+              {isSupplier ? (
+                <>
+                  <Input value="按供应商自动隔离" disabled readOnly />
+                  <span className="block text-[11px] text-muted-foreground">
+                    已按你的账号自动分配隔离分组，无需填写。
+                  </span>
+                </>
+              ) : (
+                <Input value={groupName} onChange={(e) => setGroupName(e.target.value)} placeholder="default" />
+              )}
             </label>
           </div>
 
