@@ -9,14 +9,33 @@ import { api, type KeyhubCategory } from '../api'
 // pd-maas; multi-field categories (serialize 'pipe') join their fields with
 // '|', one credential per line.
 
+// One-line format hint. Prefer the upstream formatHint (carries per-category
+// quirks like "（ApiVersion 可选）"); fall back to joining field names.
 function fieldHint(cat: KeyhubCategory | undefined): string {
   if (!cat) return ''
   const prof = cat.import_profile_json
+  if (prof?.formatHint) return prof.formatHint
   if (!prof || !Array.isArray(prof.fields) || prof.fields.length === 0) return ''
   if (prof.serialize === 'pipe') {
     return prof.fields.map((f) => f.name).join(' | ')
   }
   return prof.fields[0]?.name ?? ''
+}
+
+// Textarea placeholder for the selected category. Prefer upstream exampleLines
+// (e.g. azure_openai → "https://example.openai.azure.com|api-key|2024-12-01-preview");
+// fall back to joining each field's own placeholder, then a generic default.
+function rawTextPlaceholder(cat: KeyhubCategory | undefined): string {
+  const prof = cat?.import_profile_json
+  if (prof?.exampleLines && prof.exampleLines.length > 0) {
+    return prof.exampleLines.join('\n')
+  }
+  const fields = prof?.fields
+  if (fields && fields.length > 0) {
+    const parts = fields.map((f) => f.placeholder || f.name)
+    return prof?.serialize === 'pipe' ? parts.join('|') : parts[0]
+  }
+  return 'sk-...'
 }
 
 export default function KeyhubUpload() {
@@ -130,20 +149,15 @@ export default function KeyhubUpload() {
               <span className="text-[11px] text-muted-foreground tnum">{lineCount} 行</span>
             </div>
             {hint && (
-              <div className="rounded-md bg-muted px-2.5 py-1.5 text-[11px] text-muted-foreground">
-                每行一条{currentCat?.import_profile_json?.serialize === 'pipe' ? '，字段用 | 分隔：' : '：'}
-                <span className="font-mono">{hint}</span>
+              <div className="rounded-md bg-muted px-2.5 py-1.5 font-mono text-[11px] text-muted-foreground">
+                {hint}
               </div>
             )}
             <Textarea
               className="min-h-52 font-mono text-xs"
               value={rawText}
               onChange={(e) => setRawText(e.target.value)}
-              placeholder={
-                currentCat?.import_profile_json?.serialize === 'pipe'
-                  ? 'AccessKey|SecretKey|Region'
-                  : 'sk-...'
-              }
+              placeholder={rawTextPlaceholder(currentCat)}
               spellCheck={false}
             />
           </label>

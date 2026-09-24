@@ -856,6 +856,13 @@ export type KeyhubCategoryField = {
 export type KeyhubImportProfile = {
   serialize: 'single' | 'pipe'
   fields: KeyhubCategoryField[]
+  // Upstream-provided, category-specific hints. formatHint is a one-line
+  // human description ("每行格式：Endpoint|ApiKey|ApiVersion（ApiVersion 可选）");
+  // exampleLines are ready-to-show placeholder rows. Prefer these over
+  // reconstructing from `fields` so per-category quirks (optional cols,
+  // ordering) stay correct.
+  formatHint?: string
+  exampleLines?: string[]
 }
 
 export type KeyhubCategory = {
