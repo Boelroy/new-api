@@ -2,7 +2,10 @@ import { useEffect, useState, type ReactElement } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import Login from './pages/Login'
 import RemoteChannels from './pages/RemoteChannels'
-import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR } from './api'
+import KeyhubUpload from './pages/KeyhubUpload'
+import KeyhubUsageOverview from './pages/KeyhubUsageOverview'
+import KeyhubUsageLogs from './pages/KeyhubUsageLogs'
+import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_SUPPLIER_02 } from './api'
 import { getCachedRole, loadRole } from './auth'
 import { APP_BASE } from './basePath'
 import { Toaster, ConfirmHost, PromptHost } from './components/feedback'
@@ -19,6 +22,22 @@ function RoleGate({ allow, children }: { allow: (role: number) => boolean; child
   if (role === null) return null
   if (!allow(role)) return <NoAccess />
   return children
+}
+
+// DefaultLanding picks a home route from the caller's role so a supplier_02
+// (KHub-only) user isn't bounced to the remote-channels NoAccess screen on
+// login. Admin+ and remote operators keep landing on remote-channels.
+function DefaultLanding() {
+  const [role, setRole] = useState<number | null>(getCachedRole())
+  useEffect(() => {
+    if (role !== null) return
+    void loadRole().then(setRole)
+  }, [role])
+  if (role === null) return null
+  if (role === ROLE_SUPPLIER_02 && role < ROLE_ADMIN) {
+    return <Navigate to="/keyhub-upload" replace />
+  }
+  return <Navigate to="/remote-channels" replace />
 }
 
 function NoAccess() {
@@ -49,8 +68,32 @@ export default function App() {
             </RoleGate>
           }
         />
-        <Route path="/" element={<Navigate to="/remote-channels" replace />} />
-        <Route path="*" element={<Navigate to="/remote-channels" replace />} />
+        <Route
+          path="/keyhub-upload"
+          element={
+            <RoleGate allow={(r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_02}>
+              <KeyhubUpload />
+            </RoleGate>
+          }
+        />
+        <Route
+          path="/keyhub-usage"
+          element={
+            <RoleGate allow={(r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_02}>
+              <KeyhubUsageOverview />
+            </RoleGate>
+          }
+        />
+        <Route
+          path="/keyhub-logs"
+          element={
+            <RoleGate allow={(r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_02}>
+              <KeyhubUsageLogs />
+            </RoleGate>
+          }
+        />
+        <Route path="/" element={<DefaultLanding />} />
+        <Route path="*" element={<DefaultLanding />} />
       </Routes>
     </>
   )

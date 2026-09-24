@@ -71,6 +71,7 @@ const (
 	minRemoteStudioOperatorRole = 3   // batch-upload REMOTE channels, scoped to bound studio
 	minSupplierRole             = 4   // supplier_01: upload keys to the account portal, own usage only
 	minTesterRole               = 5   // Key Tester + Provider Testing only
+	minSupplierRole02           = 6   // supplier_02: KHub (pd-maas) key upload + usage, own scope only
 	minProjectAdminRole         = 7   // Key Capacity + Key Tester only
 	minAdminRole                = 10  // common.RoleAdminUser
 	minSuperAdminRole           = 100 // common.RoleRootUser
@@ -336,6 +337,23 @@ func requireRoleOrSupplier(min int) gin.HandlerFunc {
 		roleAny, _ := c.Get("role")
 		role, _ := roleAny.(int)
 		if role >= min || role == minSupplierRole {
+			c.Next()
+			return
+		}
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		c.Abort()
+	}
+}
+
+// requireRoleOrSupplier02 grants access to callers at min tier OR the
+// supplier_02 role. Supplier_02 (role=6) is a horizontal specialization:
+// they can upload keys to KHub (pd-maas) and see only KHub key/usage
+// surfaces. The keyhub handlers proxy a single shared provider account.
+func requireRoleOrSupplier02(min int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		roleAny, _ := c.Get("role")
+		role, _ := roleAny.(int)
+		if role >= min || role == minSupplierRole02 {
 			c.Next()
 			return
 		}
@@ -1970,7 +1988,7 @@ func handleLogout(c *gin.Context) {
 func isValidRoleTier(role int) bool {
 	switch role {
 	case minUserRole, minStudioOperatorRole, minRemoteStudioOperatorRole,
-		minSupplierRole, minTesterRole, minProjectAdminRole, minAdminRole, minSuperAdminRole:
+		minSupplierRole, minSupplierRole02, minTesterRole, minProjectAdminRole, minAdminRole, minSuperAdminRole:
 		return true
 	}
 	return false
@@ -2016,7 +2034,7 @@ func handleUserCreate(c *gin.Context) {
 		return
 	}
 	if !isValidRoleTier(body.Role) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 4, 5, 7, 10, or 100"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 4, 5, 6, 7, 10, or 100"})
 		return
 	}
 	// Anti-escalation on create: an admin (non-super) can only mint accounts
@@ -2081,7 +2099,7 @@ func handleUserUpdate(c *gin.Context) {
 	// out, and cannot demote the last remaining super admin via this handler.
 	if body.Role != nil {
 		if !isValidRoleTier(*body.Role) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 4, 5, 7, 10, or 100"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 4, 5, 6, 7, 10, or 100"})
 			return
 		}
 		if target.Role >= minSuperAdminRole && *body.Role < minSuperAdminRole {
@@ -4095,6 +4113,9 @@ func main() {
 	supplierAccountPassword = os.Getenv("SUPPLIER_ACCOUNT_PASSWORD")
 	supplierAccountToken = strings.TrimSpace(os.Getenv("SUPPLIER_ACCOUNT_TOKEN"))
 	supplierQuotaWebhook = strings.TrimSpace(os.Getenv("SUPPLIER_QUOTA_WEBHOOK"))
+	keyhubBaseURL = strings.TrimRight(os.Getenv("KEYHUB_BASE_URL"), "/")
+	keyhubUsername = strings.TrimSpace(os.Getenv("KEYHUB_USERNAME"))
+	keyhubPassword = os.Getenv("KEYHUB_PASSWORD")
 	pipiReportURL = os.Getenv("PIPI_REPORT_URL")
 	pipiReportAPIKey = os.Getenv("PIPI_REPORT_API_KEY")
 	larkWebhook = os.Getenv("LARK_WEBHOOK")
@@ -4913,6 +4934,21 @@ func main() {
 	// the group's admin-or-supplier gate to admin+).
 	supplierAPI.GET("/settings", requireRole(minAdminRole), handleSupplierSettingsGet)
 	supplierAPI.PUT("/settings", requireRole(minAdminRole), handleSupplierSettingsSet)
+
+	// KHub (pd-maas) proxy — key upload + provider-scoped usage. Gated to
+	// supplier_02 (role=6) and admins; report-service holds ONE shared KHub
+	// provider account server-side (see keyhub.go).
+	keyhubAPI := api.Group("/keyhub", requireRoleOrSupplier02(minAdminRole))
+	keyhubAPI.GET("/categories", handleKeyhubCategories)
+	keyhubAPI.POST("/keys/import", handleKeyhubImport)
+	keyhubAPI.GET("/keys", handleKeyhubKeysList)
+	keyhubAPI.GET("/usage/overview", handleKeyhubUsageOverview)
+	keyhubAPI.GET("/usage/logs/filter-options", handleKeyhubUsageFilterOptions)
+	keyhubAPI.GET("/usage/logs", handleKeyhubUsageLogs)
+	keyhubAPI.GET("/usage/logs/stat", handleKeyhubUsageLogStat)
+	// KHub connection settings (base_url/username/password) are admin-only.
+	keyhubAPI.GET("/settings", requireRole(minAdminRole), handleKeyhubSettingsGet)
+	keyhubAPI.PUT("/settings", requireRole(minAdminRole), handleKeyhubSettingsSet)
 
 	// Per-role sidebar visibility config — super admin only. GET is also
 	// used by the settings page to prefill; the live Sidebar reads the same

@@ -38,6 +38,7 @@ const (
 	RoleStudioOperator       = "studio_operator"
 	RoleRemoteStudioOperator = "remote_studio_operator"
 	RoleSupplier01           = "supplier_01"
+	RoleSupplier02           = "supplier_02"
 	RoleTester               = "tester"
 	RoleUser                 = "user"
 )
@@ -50,6 +51,7 @@ const (
 	LevelAdmin                = 50
 	LevelProjectAdmin         = 25
 	LevelRemoteStudioOperator = 22
+	LevelSupplier02           = 23
 	LevelSupplier01           = 21
 	LevelStudioOperator       = 20
 	LevelTester               = 15
@@ -104,6 +106,8 @@ const (
 
 	ActionSupplierAccountManage = "supplier_account.manage"
 
+	ActionKeyhubManage = "keyhub.manage"
+
 	ActionSystemConfig         = "system.config"
 )
 
@@ -140,6 +144,7 @@ var actionCatalog = []struct {
 	{"testing", ActionTestingKeyTester, "Use Key Tester"},
 	{"testing", ActionTestingProviderTesting, "Use Provider Testing"},
 	{"supplier_account", ActionSupplierAccountManage, "Upload / view supplier account portal keys"},
+	{"keyhub", ActionKeyhubManage, "Upload keys + view usage on KHub (pd-maas)"},
 	{"system", ActionSystemConfig, "System configuration"},
 }
 
@@ -209,6 +214,8 @@ var actionAllowedScopes = map[string]map[string]bool{
 	ActionTestingProviderTesting: {ScopeGlobal: true},
 	// Supplier account portal: own-studio for suppliers, any/global for admin.
 	ActionSupplierAccountManage: {ScopeOwnStudio: true, ScopeAnyStudio: true, ScopeGlobal: true},
+	// KHub proxy is backed by one shared provider account — global-only.
+	ActionKeyhubManage: {ScopeGlobal: true},
 }
 
 // IsAllowedActionScope returns whether (action, scope) is a sensible pair.
@@ -686,6 +693,8 @@ func legacyLevelForRole(v1Role int) int {
 		return LevelRemoteStudioOperator
 	case minSupplierRole:
 		return LevelSupplier01
+	case minSupplierRole02:
+		return LevelSupplier02
 	case minStudioOperatorRole:
 		return LevelStudioOperator
 	case minTesterRole:

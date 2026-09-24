@@ -121,6 +121,17 @@ var builtinRoleSeeds = []builtinRoleSeed{
 		},
 	},
 	{
+		// Supplier 02: uploads keys to KHub (pd-maas) and sees only the KHub
+		// key/usage surfaces. The keyhub routes gate on the V1 numeric tier
+		// (minSupplierRole02); this V2 grant keeps the RBAC catalog coherent.
+		Name:        RoleSupplier02,
+		DisplayName: "Supplier 02",
+		Level:       LevelSupplier02,
+		Permissions: []Permission{
+			{ActionKeyhubManage, ScopeGlobal},
+		},
+	},
+	{
 		Name:        RoleTester,
 		DisplayName: "Tester",
 		Level:       LevelTester,
@@ -272,6 +283,8 @@ func builtinRoleNameForLegacy(v1Role int) string {
 		return RoleRemoteStudioOperator
 	case minSupplierRole:
 		return RoleSupplier01
+	case minSupplierRole02:
+		return RoleSupplier02
 	case minStudioOperatorRole:
 		return RoleStudioOperator
 	case minTesterRole:

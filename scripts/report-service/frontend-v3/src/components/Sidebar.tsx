@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { NavLink } from 'react-router-dom'
-import { Radio, type LucideIcon } from 'lucide-react'
-import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR } from '../api'
+import { Radio, Upload, BarChart3, ScrollText, type LucideIcon } from 'lucide-react'
+import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_SUPPLIER_02 } from '../api'
 import { getCachedRole, loadRole } from '../auth'
 import { cx } from './ui'
 
@@ -25,6 +25,29 @@ const GROUPS: NavGroup[] = [
         label: 'NewAPI',
         icon: Radio,
         allow: (r) => r >= ROLE_ADMIN || r === ROLE_REMOTE_STUDIO_OPERATOR,
+      },
+    ],
+  },
+  {
+    title: 'KHub',
+    items: [
+      {
+        to: '/keyhub-upload',
+        label: '上传 Key',
+        icon: Upload,
+        allow: (r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_02,
+      },
+      {
+        to: '/keyhub-usage',
+        label: '用量概览',
+        icon: BarChart3,
+        allow: (r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_02,
+      },
+      {
+        to: '/keyhub-logs',
+        label: '使用日志',
+        icon: ScrollText,
+        allow: (r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_02,
       },
     ],
   },

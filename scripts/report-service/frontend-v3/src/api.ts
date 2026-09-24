@@ -558,6 +558,9 @@ export const ROLE_STUDIO_OPERATOR = 2
 export const ROLE_REMOTE_STUDIO_OPERATOR = 3
 export const ROLE_SUPPLIER_01 = 4
 export const ROLE_TESTER = 5
+// KHub (pd-maas) key upload + usage. Horizontal specialization; does NOT
+// inherit admin via numeric compare (gated with an explicit === check).
+export const ROLE_SUPPLIER_02 = 6
 export const ROLE_PROJECT_ADMIN = 7
 export const ROLE_ADMIN = 10
 export const ROLE_SUPER_ADMIN = 100
@@ -830,6 +833,134 @@ export type PendingKey = {
   uploaded_by: number
   created_at: number
   updated_at: number
+}
+
+// ---- KHub (pd-maas) proxy shapes ----
+//
+// report-service proxies the pd-maas API verbatim, so every response carries
+// the upstream envelope { code, data, message }. `code === 'ok'` on success.
+export type KeyhubEnvelope<T> = {
+  code: string
+  data: T
+  message?: string
+}
+
+// One field in a category's import profile. Multi-field categories (serialize
+// 'pipe', e.g. aws_bedrock: AccessKey|SecretKey|Region) join fields with '|'.
+export type KeyhubCategoryField = {
+  name: string
+  placeholder?: string
+  required?: boolean
+}
+
+export type KeyhubImportProfile = {
+  serialize: 'single' | 'pipe'
+  fields: KeyhubCategoryField[]
+}
+
+export type KeyhubCategory = {
+  code: string
+  label: string
+  newapi_type: number
+  import_profile_json: KeyhubImportProfile
+}
+
+// Body for POST /keyhub/keys/import. raw_text = credentials, one per line
+// (fields joined by '|' for pipe categories). Only category_code + raw_text
+// are required; the rest mirror pd-maas' import form defaults.
+export type KeyhubImportPayload = {
+  category_code: string
+  raw_text: string
+  endpoint_url?: string
+  models?: string[]
+  group_name?: string
+  tag?: string
+  note?: string
+  channel_name_prefix?: string
+  channel_name_suffix?: string
+  model_mapping?: string
+  system_prompt?: string
+  system_prompt_override?: boolean
+  channel_relay?: string
+}
+
+export type KeyhubUsageOverview = {
+  summary: {
+    request_count: number
+    tokens: number
+    raw_cost_usd: number
+    [k: string]: unknown
+  }
+  series: Array<Record<string, unknown>>
+}
+
+// Filter options for the usage-logs view. Shapes vary upstream, so each list
+// is a permissive label/value option and the page reads defensively.
+export type KeyhubFilterOption = {
+  label?: string
+  value?: string | number
+  [k: string]: unknown
+}
+
+export type KeyhubFilterOptions = {
+  categories?: KeyhubFilterOption[]
+  models?: KeyhubFilterOption[]
+  keys?: KeyhubFilterOption[]
+  groups?: KeyhubFilterOption[]
+  batches?: KeyhubFilterOption[]
+  [k: string]: unknown
+}
+
+// A usage-log row. pd-maas returns a wide, evolving row; keep it permissive and
+// surface known columns where present.
+export type KeyhubLogRow = Record<string, unknown>
+
+export type KeyhubLogsData = {
+  items?: KeyhubLogRow[]
+  total?: number
+  page?: number
+  page_size?: number
+  [k: string]: unknown
+}
+
+// Filters shared by the logs list + stat endpoints. import_batch_id is
+// required by the upstream (400 otherwise) and may repeat.
+export type KeyhubLogQuery = {
+  start_timestamp?: number | string
+  end_timestamp?: number | string
+  page?: number
+  page_size?: number
+  import_batch_id?: Array<string | number>
+  category_code?: string
+  model_name?: string
+  api_key_id?: string | number
+  group?: string
+  log_type?: string
+  is_stream?: string
+  request_id?: string
+  upstream_request_id?: string
+}
+
+export type KeyhubSettings = {
+  base_url: string
+  username: string
+  password_set: boolean
+  configured: boolean
+}
+
+function keyhubLogQueryString(q: KeyhubLogQuery): string {
+  const qs = new URLSearchParams()
+  Object.entries(q).forEach(([k, v]) => {
+    if (v === undefined || v === null || v === '') return
+    if (Array.isArray(v)) {
+      v.forEach((item) => {
+        if (item !== undefined && item !== null && item !== '') qs.append(k, String(item))
+      })
+    } else {
+      qs.set(k, String(v))
+    }
+  })
+  return qs.toString()
 }
 
 export const api = {
@@ -2049,6 +2180,61 @@ export const api = {
   // form. Available to suppliers too.
   getSupplierProviderDefaults: () =>
     request<{ defaults: Record<string, SupplierProviderDefault>; default_tpm?: string; default_rpm?: string }>('/api/supplier-account/provider-defaults'),
+
+  // ---- KHub (pd-maas) proxy. All calls hit report-service, which forwards to
+  // pd-maas with a shared server-side provider token. Gated to supplier_02 +
+  // admin on the server. Responses carry the upstream { code, data, message }.
+
+  keyhubCategories: () =>
+    request<KeyhubEnvelope<KeyhubCategory[]>>('/api/keyhub/categories'),
+
+  keyhubKeys: (params?: { page?: number; page_size?: number; category_code?: string; keyword?: string }) => {
+    const qs = new URLSearchParams()
+    if (params?.page != null) qs.set('page', String(params.page))
+    if (params?.page_size != null) qs.set('page_size', String(params.page_size))
+    if (params?.category_code) qs.set('category_code', params.category_code)
+    if (params?.keyword) qs.set('keyword', params.keyword)
+    const suffix = qs.toString()
+    return request<KeyhubEnvelope<unknown>>(`/api/keyhub/keys${suffix ? '?' + suffix : ''}`)
+  },
+
+  keyhubImport: (payload: KeyhubImportPayload) =>
+    request<KeyhubEnvelope<unknown>>('/api/keyhub/keys/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  keyhubUsageOverview: (start?: number | string, end?: number | string) => {
+    const qs = new URLSearchParams()
+    if (start != null && start !== '') qs.set('start_timestamp', String(start))
+    if (end != null && end !== '') qs.set('end_timestamp', String(end))
+    const suffix = qs.toString()
+    return request<KeyhubEnvelope<KeyhubUsageOverview>>(`/api/keyhub/usage/overview${suffix ? '?' + suffix : ''}`)
+  },
+
+  keyhubUsageFilterOptions: () =>
+    request<KeyhubEnvelope<KeyhubFilterOptions>>('/api/keyhub/usage/logs/filter-options'),
+
+  keyhubUsageLogs: (query: KeyhubLogQuery) => {
+    const suffix = keyhubLogQueryString(query)
+    return request<KeyhubEnvelope<KeyhubLogsData>>(`/api/keyhub/usage/logs${suffix ? '?' + suffix : ''}`)
+  },
+
+  keyhubUsageLogStat: (query: KeyhubLogQuery) => {
+    const suffix = keyhubLogQueryString(query)
+    return request<KeyhubEnvelope<unknown>>(`/api/keyhub/usage/logs/stat${suffix ? '?' + suffix : ''}`)
+  },
+
+  // Admin-only connection settings.
+  getKeyhubSettings: () => request<KeyhubSettings>('/api/keyhub/settings'),
+
+  setKeyhubSettings: (payload: { base_url?: string; username?: string; password?: string }) =>
+    request<KeyhubSettings>('/api/keyhub/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
 }
 
 // One stored credential and its resolved local-channel target. Mirrors the

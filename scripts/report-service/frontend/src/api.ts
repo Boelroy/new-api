@@ -558,6 +558,9 @@ export const ROLE_STUDIO_OPERATOR = 2
 export const ROLE_REMOTE_STUDIO_OPERATOR = 3
 export const ROLE_SUPPLIER_01 = 4
 export const ROLE_TESTER = 5
+// KHub (pd-maas) key upload + usage. Horizontal role (v3 pages only); the v1
+// frontend surfaces it here just so admins can assign it from Users.
+export const ROLE_SUPPLIER_02 = 6
 export const ROLE_PROJECT_ADMIN = 7
 export const ROLE_ADMIN = 10
 export const ROLE_SUPER_ADMIN = 100
