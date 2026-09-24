@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { NavLink } from 'react-router-dom'
-import { Radio, Upload, BarChart3, ScrollText, type LucideIcon } from 'lucide-react'
+import { Radio, Upload, BarChart3, ScrollText, KeyRound, type LucideIcon } from 'lucide-react'
 import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_SUPPLIER_02 } from '../api'
 import { getCachedRole, loadRole } from '../auth'
 import { cx } from './ui'
@@ -35,6 +35,12 @@ const GROUPS: NavGroup[] = [
         to: '/keyhub-upload',
         label: '上传 Key',
         icon: Upload,
+        allow: (r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_02,
+      },
+      {
+        to: '/keyhub-keys',
+        label: 'Key 列表',
+        icon: KeyRound,
         allow: (r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_02,
       },
       {

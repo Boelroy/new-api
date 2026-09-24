@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import Login from './pages/Login'
 import RemoteChannels from './pages/RemoteChannels'
 import KeyhubUpload from './pages/KeyhubUpload'
+import KeyhubKeys from './pages/KeyhubKeys'
 import KeyhubUsageOverview from './pages/KeyhubUsageOverview'
 import KeyhubUsageLogs from './pages/KeyhubUsageLogs'
 import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_SUPPLIER_02 } from './api'
@@ -73,6 +74,14 @@ export default function App() {
           element={
             <RoleGate allow={(r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_02}>
               <KeyhubUpload />
+            </RoleGate>
+          }
+        />
+        <Route
+          path="/keyhub-keys"
+          element={
+            <RoleGate allow={(r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_02}>
+              <KeyhubKeys />
             </RoleGate>
           }
         />
