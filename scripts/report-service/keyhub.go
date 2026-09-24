@@ -279,12 +279,14 @@ func keyhubScope(c *gin.Context) (scoped bool, group string, ok bool) {
 	if role != minSupplierRole02 {
 		return false, "", true // admin / higher tier: unscoped
 	}
-	uidAny, exists := c.Get("user_id")
-	id, _ := uidAny.(int)
-	if !exists || id <= 0 {
+	// user_id is stored as int64 across the service (see callerUserID); reuse
+	// it so the assertion matches. It's 0 for SSO-issued tokens (user_id=0) and
+	// absent tokens — both mean we can't isolate this supplier, so fail closed.
+	id := callerUserID(c)
+	if id <= 0 {
 		return true, "", false // supplier without identity: fail closed
 	}
-	return true, keyhubGroupPrefix + strconv.Itoa(id), true
+	return true, keyhubGroupPrefix + strconv.FormatInt(id, 10), true
 }
 
 // keyhubDenyNoIdentity writes the fail-closed 403 shared by every scoped handler
