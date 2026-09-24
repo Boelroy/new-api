@@ -348,15 +348,23 @@ function fmtTime(v: unknown): string {
 // StatPanel renders the usage stat object as labelled metric tiles instead of
 // a raw JSON dump. Unknown/missing fields fall back to «—».
 function StatPanel({ stat }: { stat: KeyhubStat }) {
-  const tiles: { label: string; value: string; hint?: string }[] = [
+  const sampled = fmtTime(stat.sampled_at)
+  const windowStart = fmtTime(stat.rate_window_start)
+  // rate window shown under RPM/TPM, e.g. 「2026-09-24 16:11:03 ~ 16:12:03」
+  // (drop the repeated date on the end time when it's the same day).
+  const range = !windowStart
+    ? sampled
+    : !sampled
+      ? windowStart
+      : `${windowStart} ~ ${windowStart.slice(0, 10) === sampled.slice(0, 10) ? sampled.slice(11) : sampled}`
+  const rateHint = '按当前筛选已同步的消费日志，取最新一条时刻往前 60 秒'
+  const tiles: { label: string; value: string; hint?: string; title?: string }[] = [
     { label: '请求数', value: fmtInt(stat.request_count) },
     { label: 'Tokens', value: fmtInt(stat.tokens) },
     { label: '花费', value: fmtUSD(stat.raw_cost_usd), hint: 'USD' },
-    { label: 'RPM', value: fmtInt(stat.rpm), hint: '每分钟请求' },
-    { label: 'TPM', value: fmtInt(stat.tpm), hint: '每分钟 tokens' },
+    { label: 'RPM', value: fmtInt(stat.rpm), hint: range || '每分钟请求', title: rateHint },
+    { label: 'TPM', value: fmtInt(stat.tpm), hint: range || '每分钟 tokens', title: rateHint },
   ]
-  const sampled = fmtTime(stat.sampled_at)
-  const windowStart = fmtTime(stat.rate_window_start)
   const failed = statNum(stat.failed_platform_count) ?? 0
   return (
     <Card className="mt-4 space-y-3 p-4">
@@ -373,18 +381,14 @@ function StatPanel({ stat }: { stat: KeyhubStat }) {
       </div>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         {tiles.map((t) => (
-          <div key={t.label} className="rounded-lg border border-border bg-muted/30 px-3 py-2.5">
+          <div key={t.label} title={t.title} className="rounded-lg border border-border bg-muted/30 px-3 py-2.5">
             <div className="text-[11px] text-muted-foreground">{t.label}</div>
             <div className="mt-0.5 text-lg font-semibold tnum text-foreground">{t.value}</div>
-            {t.hint && <div className="text-[10px] text-muted-foreground/70">{t.hint}</div>}
+            {t.hint && <div className="mt-0.5 text-[10px] leading-tight text-muted-foreground/70">{t.hint}</div>}
           </div>
         ))}
       </div>
-      {(sampled || windowStart) && (
-        <div className="text-[11px] text-muted-foreground">
-          {windowStart && sampled ? `速率窗口 ${windowStart} → ${sampled}` : `采样时间 ${sampled || windowStart}`}
-        </div>
-      )}
+      {sampled && <div className="text-[11px] text-muted-foreground">采样时间 {sampled}</div>}
     </Card>
   )
 }
