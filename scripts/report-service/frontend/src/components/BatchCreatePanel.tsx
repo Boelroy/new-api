@@ -12,6 +12,11 @@ type Props = {
   // Admins can configure the default model list; the operator role cannot.
   // Hiding the entire config UI keeps the panel focused for them.
   canConfigureModels?: boolean
+  // Priority is an admin-only scheduling lever. Studio Operators upload into
+  // the shared pool, so their batches always land on the backend default
+  // (1001) and the field is hidden. The backend drops any priority they send
+  // regardless — this only keeps the form honest.
+  canSetPriority?: boolean
 }
 
 // Provider presets for the local batch-create panel. Mirrors the shape used
@@ -138,7 +143,7 @@ const VERTEX_REGION_DEFAULT = '{"default":"global"}'
 // parsed on selection so JSON validation errors surface before submit.
 type VertexFile = { name: string; json: unknown; quotaUSD: number }
 
-export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigureModels = true }: Props) {
+export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigureModels = true, canSetPriority = true }: Props) {
   const [studio, setStudio] = useState(lockedStudio ?? '')
   const [studioMode, setStudioMode] = useState<'pick' | 'new'>('pick')
   const [suffix, setSuffix] = useState('')
@@ -485,7 +490,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
           quota_usd: f.quotaUSD > 0 ? f.quotaUSD : 5,
         }))
       }
-      const basePriority = priorityInput.trim() ? parseInt(priorityInput.trim(), 10) : NaN
+      const basePriority = canSetPriority && priorityInput.trim() ? parseInt(priorityInput.trim(), 10) : NaN
       if (!isNaN(basePriority) && basePriority > 0) baseDefaults.priority = basePriority
       setSubmitting(true)
       try {
@@ -514,7 +519,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
     // Sequential-priority mode assigns per-channel priorities BEFORE the
     // request goes out. In 'same' mode we leave channels[i].priority unset
     // and rely on the batch-level `defaults.priority` (existing behaviour).
-    const basePriority = priorityInput.trim() ? parseInt(priorityInput.trim(), 10) : NaN
+    const basePriority = canSetPriority && priorityInput.trim() ? parseInt(priorityInput.trim(), 10) : NaN
     if (!isNaN(basePriority) && basePriority > 0) {
       if (prioMode === 'same') {
         baseDefaults.priority = basePriority
@@ -651,7 +656,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
           />
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-2 mb-2">
+      <div className={`grid gap-2 mb-2 ${canSetPriority ? 'grid-cols-2' : 'grid-cols-1'}`}>
         <div>
           <label className="block text-[11px] text-gray-500 mb-1">默认成本 (CNY/USD 上游单价)</label>
           <input
@@ -664,36 +669,38 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
             className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
           />
         </div>
-        <div>
-          <label className="block text-[11px] text-gray-500 mb-1">
-            默认优先级
-            <span className="text-gray-400 font-normal">
-              {prioMode === 'desc' && '（起始值 base，key[i] = base − i）'}
-              {prioMode === 'asc' && '（起始值 base，key[i] = base + i）'}
-            </span>
-          </label>
-          <div className="flex gap-1">
-            <input
-              type="number"
-              step="1"
-              min="1"
-              value={priorityInput}
-              onChange={e => setPriorityInput(e.target.value)}
-              placeholder={prioMode === 'same' ? '例如 2，空=默认 1001' : '起始 base'}
-              className="flex-1 border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
-            />
-            <select
-              value={prioMode}
-              onChange={e => setPrioMode(e.target.value as 'same' | 'desc' | 'asc')}
-              className="border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-white focus:outline-none focus:border-gray-900"
-              title="统一 = 所有 key 用同一 priority；顺序 = 每个 key 依次递减/递增"
-            >
-              <option value="same">统一</option>
-              <option value="desc">顺序 ↓</option>
-              <option value="asc">顺序 ↑</option>
-            </select>
+        {canSetPriority && (
+          <div>
+            <label className="block text-[11px] text-gray-500 mb-1">
+              默认优先级
+              <span className="text-gray-400 font-normal">
+                {prioMode === 'desc' && '（起始值 base，key[i] = base − i）'}
+                {prioMode === 'asc' && '（起始值 base，key[i] = base + i）'}
+              </span>
+            </label>
+            <div className="flex gap-1">
+              <input
+                type="number"
+                step="1"
+                min="1"
+                value={priorityInput}
+                onChange={e => setPriorityInput(e.target.value)}
+                placeholder={prioMode === 'same' ? '例如 2，空=默认 1001' : '起始 base'}
+                className="flex-1 border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
+              />
+              <select
+                value={prioMode}
+                onChange={e => setPrioMode(e.target.value as 'same' | 'desc' | 'asc')}
+                className="border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-white focus:outline-none focus:border-gray-900"
+                title="统一 = 所有 key 用同一 priority；顺序 = 每个 key 依次递减/递增"
+              >
+                <option value="same">统一</option>
+                <option value="desc">顺序 ↓</option>
+                <option value="asc">顺序 ↑</option>
+              </select>
+            </div>
           </div>
-        </div>
+        )}
       </div>
       {/* 可折叠：默认模型列表配置。改了只作用到当前预设 —— 每个 preset
           (Anthropic / OpenAI / Gemini / Vertex) 各自有一条 report_config 记录。
@@ -1107,7 +1114,8 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
         </>
       )}
       <p className="text-[10px] text-gray-400 mt-2 leading-relaxed">
-        命名 MMDD-工作室-后缀-容量；上方"默认成本/优先级"会写到所有新建渠道；channels.tag 用作 user 角色可见范围
+        命名 MMDD-工作室-后缀-容量；上方{canSetPriority ? '"默认成本/优先级"' : '"默认成本"'}会写到所有新建渠道；channels.tag 用作 user 角色可见范围
+        {!canSetPriority && <>。优先级由管理员统一维护，本账号新建的渠道固定为默认 1001</>}
         {!studioLocked && studios.length > 0 && <>。已有：{studios.join('、')}</>}
       </p>
       <button

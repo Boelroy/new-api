@@ -1576,10 +1576,10 @@ func handleSSOCallback(c *gin.Context) {
 
 func handleAuthConfig(c *gin.Context) {
 	resp := gin.H{
-		"profit_enabled":           profitEnabled,
-		"grader_configured":        graderConfigured(),
-		"r2_configured":            r2Configured(),
-		"supplier_account_enabled":      supplierAccountEnabled(),
+		"profit_enabled":                 profitEnabled,
+		"grader_configured":              graderConfigured(),
+		"r2_configured":                  r2Configured(),
+		"supplier_account_enabled":       supplierAccountEnabled(),
 		"supplier_account_openapi_ready": supplierOpenAPIConfigured(),
 		// Per-role sidebar visibility overrides for THIS deployment. Map of
 		// role value (as string) -> list of hidden nav item keys (route
@@ -2933,6 +2933,15 @@ func handleBatchCreateChannels(c *gin.Context) {
 			return
 		}
 		studio = userStudio
+		// Priority is an admin-only scheduling lever — an operator must not be
+		// able to push their own studio's keys ahead of everyone else's. Drop
+		// the batch-level value and every per-key override so the batch falls
+		// back to defaultChannelPriority below. Mirrors the remote keypool
+		// enqueue path, which zeroes priority for studio operators too.
+		payload.Priority = 0
+		for i := range payload.Channels {
+			payload.Channels[i].Priority = nil
+		}
 	}
 	// Backward compat: older admin clients only sent `suffix`. Keep the
 	// legacy `pipi` literal so previously-named batches stay consistent.

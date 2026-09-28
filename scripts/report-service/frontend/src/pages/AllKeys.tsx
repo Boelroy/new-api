@@ -236,6 +236,7 @@ export default function AllKeys() {
             onCreated={() => load(start, end)}
             lockedStudio={isStudioOperator ? studio : undefined}
             canConfigureModels={!isStudioOperator}
+            canSetPriority={!isStudioOperator}
           />
         </div>
       )}
