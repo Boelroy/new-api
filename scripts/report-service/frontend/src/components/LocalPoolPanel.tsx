@@ -3,10 +3,13 @@ import { api, type LocalPendingKey, type LocalPoolConfig } from '../api'
 import { confirmDialog } from './feedback'
 
 // Channel types the local pool can serve. Mirrors localPoolSupportedTypes in
-// the backend (14 Anthropic, 20 OpenRouter).
+// the backend (14 Anthropic, 20 OpenRouter (Claude), 1020 OpenRouter (OpenAI)).
+// 1020 is a report-service preset code, stored upstream as a type-20 channel.
+const OPENROUTER_OPENAI_PRESET_TYPE = 1020
 const LOCAL_POOL_PROVIDERS = [
   { type: 14, label: 'Anthropic' },
-  { type: 20, label: 'OpenRouter' },
+  { type: 20, label: 'OpenRouter (Claude)' },
+  { type: OPENROUTER_OPENAI_PRESET_TYPE, label: 'OpenRouter (OpenAI)' },
 ] as const
 
 // Local pool panel — the "Pool 上 Key" tab on KeyCapacity. Same drip
@@ -52,9 +55,11 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
   const [studioMode, setStudioMode] = useState<'pick' | 'new'>('pick')
   const [studios, setStudios] = useState<string[]>([])
   const [suffix, setSuffix] = useState('')
-  // Provider preset: 14 = Anthropic (default), 20 = OpenRouter. Only affects
-  // channel_type at enqueue; the backend derives model_mapping/param_override
-  // from it. Model names stay the same friendly Claude names for both.
+  // Provider preset: 14 = Anthropic (default), 20 = OpenRouter (Claude),
+  // 1020 = OpenRouter (OpenAI). Only affects channel_type at enqueue; the
+  // backend derives model_mapping/param_override from it. The two Claude
+  // presets share the pool's default_models; OpenRouter (OpenAI) uses its own
+  // batch-create default list instead.
   const [channelType, setChannelType] = useState(14)
   // Operator's configured per-studio limit (empty = unrestricted). Admin
   // leaves this empty and the form derives the set from cfg.studio_type_limits.
@@ -68,10 +73,26 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
   // enqueue form (only if the operator hasn't started typing their own
   // list). Prevents "loaded panel, form empty, submit fails silently".
   const [modelsDirty, setModelsDirty] = useState(false)
+  // OpenRouter (OpenAI) default list, fetched the first time it's selected.
+  const [openaiDefaultModels, setOpenaiDefaultModels] = useState('')
+  useEffect(() => {
+    if (channelType !== OPENROUTER_OPENAI_PRESET_TYPE || openaiDefaultModels) return
+    void (async () => {
+      try {
+        const res = await api.getBatchCreateModels(OPENROUTER_OPENAI_PRESET_TYPE)
+        setOpenaiDefaultModels(res.models)
+      } catch (e) {
+        console.warn('openrouter openai default models failed', e)
+      }
+    })()
+  }, [channelType, openaiDefaultModels])
+  const defaultModels = channelType === OPENROUTER_OPENAI_PRESET_TYPE
+    ? openaiDefaultModels
+    : (cfg?.default_models ?? '')
   useEffect(() => {
     if (modelsDirty) return
-    if (cfg?.default_models) setModels(cfg.default_models)
-  }, [cfg?.default_models, modelsDirty])
+    setModels(defaultModels)
+  }, [defaultModels, modelsDirty])
 
   const [pending, setPending] = useState<LocalPendingKey[]>([])
   const studioLocked = !!lockedStudio
@@ -502,7 +523,7 @@ export default function LocalPoolPanel({ lockedStudio, configEditable = true }: 
             {modelsDirty && (
               <button
                 type="button"
-                onClick={() => { setModels(cfg?.default_models ?? ''); setModelsDirty(false) }}
+                onClick={() => { setModels(defaultModels); setModelsDirty(false) }}
                 className="text-[10px] text-gray-400 hover:text-gray-700"
               >
                 恢复默认

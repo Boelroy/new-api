@@ -23,7 +23,7 @@ type Props = {
 // by RemoteChannelsStudio.tsx — same integers, same groups, same fallback
 // model lists — but the two components stay standalone on purpose (remote
 // upload vs local channel insert diverge downstream).
-type PresetID = 'anthropic' | 'openai' | 'azure' | 'gemini' | 'vertex' | 'vertex-claude' | 'aws' | 'openrouter'
+type PresetID = 'anthropic' | 'openai' | 'azure' | 'gemini' | 'vertex' | 'vertex-claude' | 'aws' | 'openrouter' | 'openrouter-openai'
 type PresetSpec = {
   id: PresetID
   label: string
@@ -110,6 +110,22 @@ const DEFAULT_OPENROUTER_MODELS = [
   'claude-opus-5',
 ].join(',')
 
+// OpenRouter (OpenAI) preset. 1020 is a report-service preset code, not a
+// newapi channel type: the backend stores it as a native OpenRouter channel
+// (type 20) and maps each name onto its openai/* slug in channel.model_mapping.
+const OPENROUTER_OPENAI_PRESET_TYPE = 1020
+const DEFAULT_OPENROUTER_OPENAI_MODELS = [
+  'gpt-6-sol',
+  'gpt-6-luna',
+  'gpt-6-astra',
+  'gpt-5.6-sol',
+  'gpt-5.6-terra',
+  'gpt-5.6-luna',
+  'gpt-5.5',
+  'gpt-5.4',
+  'gpt-5.4-mini',
+].join(',')
+
 const PRESETS: PresetSpec[] = [
   { id: 'anthropic',     label: 'Anthropic',        kind: 'text',   type: 14, fallbackGroup: 'default',        fallbackModels: DEFAULT_ANTHROPIC_MODELS },
   { id: 'openai',        label: 'OpenAI',           kind: 'text',   type: 1,  fallbackGroup: 'openai',         fallbackModels: DEFAULT_OPENAI_MODELS },
@@ -118,7 +134,8 @@ const PRESETS: PresetSpec[] = [
   { id: 'vertex',        label: 'Vertex AI',        kind: 'vertex', type: 41, fallbackGroup: 'gemini',         fallbackModels: DEFAULT_VERTEX_MODELS },
   { id: 'vertex-claude', label: 'Vertex AI (Claude)', kind: 'vertex', type: 41, fallbackGroup: 'claude-vertex', fallbackModels: DEFAULT_VERTEX_CLAUDE_MODELS },
   { id: 'aws',           label: 'AWS (Bedrock)',    kind: 'aws',    type: 33, fallbackGroup: 'claude-aws',     fallbackModels: DEFAULT_AWS_CLAUDE_MODELS },
-  { id: 'openrouter',    label: 'OpenRouter',       kind: 'text',   type: 20, fallbackGroup: 'default',        fallbackModels: DEFAULT_OPENROUTER_MODELS },
+  { id: 'openrouter',    label: 'OpenRouter (Claude)', kind: 'text', type: 20, fallbackGroup: 'default',        fallbackModels: DEFAULT_OPENROUTER_MODELS },
+  { id: 'openrouter-openai', label: 'OpenRouter (OpenAI)', kind: 'text', type: OPENROUTER_OPENAI_PRESET_TYPE, fallbackGroup: 'openai', fallbackModels: DEFAULT_OPENROUTER_OPENAI_MODELS },
 ]
 
 // Azure only: default API version. Mirrors AZURE_DEFAULT_API_VERSION on the

@@ -2201,7 +2201,8 @@ export type LocalPoolConfig = {
   // change doesn't retarget already-queued keys. Empty → 'default'.
   default_group: string
   // Per-studio channel-type allowlist. A studio absent from the map (or with
-  // an empty list) is unrestricted. Supported types: 14 Anthropic, 20 OpenRouter.
+  // an empty list) is unrestricted. Supported types: 14 Anthropic, 20 OpenRouter (Claude),
+  // 1020 OpenRouter (OpenAI).
   studio_type_limits?: Record<string, number[]>
 }
 

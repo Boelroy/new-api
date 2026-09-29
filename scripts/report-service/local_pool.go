@@ -54,7 +54,8 @@ const (
 	// Per-studio channel-type allowlist for local-pool uploads, stored as a
 	// JSON object {studio: [types]}. A studio absent from the map (or mapped
 	// to an empty list) is unrestricted. Supported types mirror
-	// localPoolSupportedTypes (14 Anthropic, 20 OpenRouter).
+	// localPoolSupportedTypes (14 Anthropic, 20 OpenRouter (Claude),
+	// openRouterOpenAIPresetType OpenRouter (OpenAI)).
 	cfgLocalPoolStudioTypeLimits = "local_pool_studio_type_limits"
 
 	localPoolIntervalDef  = 60
@@ -147,8 +148,9 @@ func loadLocalPoolConfig() localPoolConfig {
 }
 
 // localPoolSupportedTypes are the channel types the local pool can serve.
-// 14 = Anthropic (default), 20 = OpenRouter.
-var localPoolSupportedTypes = []int{14, 20}
+// 14 = Anthropic (default), 20 = OpenRouter (Claude),
+// openRouterOpenAIPresetType = OpenRouter (OpenAI).
+var localPoolSupportedTypes = []int{14, 20, openRouterOpenAIPresetType}
 
 // localPoolAllowedTypes returns the channel types a studio may pick. A studio
 // with a non-empty configured limit is restricted to it (intersected with the
@@ -383,8 +385,9 @@ func handleLocalPoolEnqueue(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no channels provided"})
 		return
 	}
-	// Provider preset. The local pool serves Anthropic (14, default) and
-	// OpenRouter (20); the scheduler derives model_mapping / param_override
+	// Provider preset. The local pool serves Anthropic (14, default),
+	// OpenRouter (Claude) (20) and OpenRouter (OpenAI)
+	// (openRouterOpenAIPresetType); the scheduler derives model_mapping / param_override
 	// from this at upload time. Reject anything else so we don't stage rows
 	// the insert path can't serve.
 	channelType := body.Type
@@ -392,7 +395,7 @@ func handleLocalPoolEnqueue(c *gin.Context) {
 		channelType = 14
 	}
 	switch channelType {
-	case 14, 20:
+	case 14, 20, openRouterOpenAIPresetType:
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unsupported channel type %d for local pool", channelType)})
 		return
@@ -420,7 +423,9 @@ func handleLocalPoolEnqueue(c *gin.Context) {
 		}
 	}
 	models := strings.TrimSpace(body.Models)
-	if models == "" {
+	// The pool's default_models is a Claude list, so the OpenRouter (OpenAI)
+	// preset skips it and cascades to its own batch-create default instead.
+	if models == "" && channelType != openRouterOpenAIPresetType {
 		models = strings.TrimSpace(cfg.DefaultModels)
 	}
 	groupName := strings.TrimSpace(cfg.DefaultGroup)
@@ -803,11 +808,12 @@ func uploadLocalPoolBatch(n int) {
 			continue
 		}
 		modelsStr := strings.TrimSpace(j.models)
-		if modelsStr == "" {
+		if modelsStr == "" && j.channelType != openRouterOpenAIPresetType {
 			modelsStr = cfgFallbackModels
 		}
 		if modelsStr == "" {
-			// Per-type default: type 20 → OpenRouter list, else Anthropic.
+			// Per-type default: type 20 → OpenRouter (Claude) list,
+			// openRouterOpenAIPresetType → OpenRouter (OpenAI) list, else Anthropic.
 			modelsStr = getBatchCreateModels(j.channelType)
 		}
 		modelsList := strings.Split(modelsStr, ",")
@@ -859,7 +865,9 @@ func insertLocalChannelForPending(pendingID int64, studio, suffix, key string, q
 	// pins routing to the anthropic provider, and is persisted as an
 	// Anthropic-type channel pointed at OpenRouter's endpoint so new-api uses
 	// the native Anthropic wire format while the base URL redirects to
-	// OpenRouter.
+	// OpenRouter. OpenRouter (OpenAI) is stored as a native OpenRouter channel
+	// (20, OpenAI wire format, new-api's default base URL) with every model
+	// mapped onto its openai/* slug and routing pinned to OpenAI.
 	modelMapping := ""
 	paramOverride := ""
 	storedType := channelType
@@ -871,6 +879,13 @@ func insertLocalChannelForPending(pendingID int64, studio, suffix, key string, q
 		paramOverride = openRouterParamOverride
 		storedType = openRouterChannelType
 		baseURL = openRouterAnthropicBaseURL
+	}
+	if channelType == openRouterOpenAIPresetType {
+		if mm, mmErr := buildOpenRouterOpenAIModelMapping(models); mmErr == nil {
+			modelMapping = mm
+		}
+		paramOverride = openRouterOpenAIParamOverride
+		storedType = openRouterOpenAIChannelType
 	}
 
 	tx, err := db.Begin()

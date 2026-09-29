@@ -24,6 +24,8 @@ const BY_TYPE: Record<number, ProviderMeta> = {
   24: { key: 'gemini', label: 'Gemini', color: '#1C69FF' },
   33: { key: 'aws', label: 'AWS', color: '#FF9900', mono: 'aws' },
   41: { key: 'vertex', label: 'Vertex AI', color: '#34A853', mono: 'V' },
+  // OpenRouter (OpenAI) preset code — stored upstream as type 20.
+  1020: { key: 'openrouter', label: 'OpenRouter (OpenAI)', color: '#6467F2', mono: 'OR' },
 }
 
 export function providerMeta(type: number): ProviderMeta {

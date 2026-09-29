@@ -2710,6 +2710,21 @@ var defaultOpenRouterModels = strings.Join([]string{
 	"claude-opus-5",
 }, ",")
 
+// defaultOpenRouterOpenAIModels is the batch-create fallback for the
+// OpenRouter (OpenAI) preset (openRouterOpenAIPresetType). Every name is
+// mapped onto its openai/* slug by buildOpenRouterOpenAIModelMapping.
+var defaultOpenRouterOpenAIModels = strings.Join([]string{
+	"gpt-6-sol",
+	"gpt-6-luna",
+	"gpt-6-astra",
+	"gpt-5.6-sol",
+	"gpt-5.6-terra",
+	"gpt-5.6-luna",
+	"gpt-5.5",
+	"gpt-5.4",
+	"gpt-5.4-mini",
+}, ",")
+
 var defaultOpenAIModels = strings.Join([]string{
 	"gpt-5",
 	"gpt-5-mini",
@@ -2762,6 +2777,8 @@ func batchModelsFallback(channelType int) string {
 		return defaultVertexModels
 	case 20:
 		return defaultOpenRouterModels
+	case openRouterOpenAIPresetType:
+		return defaultOpenRouterOpenAIModels
 	}
 	return defaultAnthropicModels
 }
@@ -2974,6 +2991,7 @@ func handleBatchCreateChannels(c *gin.Context) {
 	}
 	switch channelType {
 	case 1, 3, 14, 20, 24, 33, 41: // OpenAI, Azure, Anthropic, OpenRouter, Gemini (AI Studio), AWS Bedrock, Vertex AI
+	case openRouterOpenAIPresetType: // OpenRouter (OpenAI) preset, stored as type 20
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unsupported channel type %d", channelType)})
 		return
@@ -2998,7 +3016,7 @@ func handleBatchCreateChannels(c *gin.Context) {
 	groupName := strings.TrimSpace(payload.Group)
 	if groupName == "" {
 		switch channelType {
-		case 1, 3:
+		case 1, 3, openRouterOpenAIPresetType:
 			groupName = "openai"
 		case 24, 41:
 			groupName = "gemini"
@@ -3124,6 +3142,20 @@ func handleBatchCreateChannels(c *gin.Context) {
 		activeModels = getBatchCreateModels(channelType)
 	}
 	models := strings.Split(activeModels, ",")
+	if channelType == openRouterOpenAIPresetType {
+		// OpenRouter (OpenAI): stored as a native OpenRouter channel so new-api
+		// uses the OpenAI wire format. Each advertised model maps onto its
+		// openai/* slug and routing is pinned to OpenAI's own upstream. An
+		// empty base_url falls back to new-api's OpenRouter default.
+		mm, err := buildOpenRouterOpenAIModelMapping(models)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "build model mapping: " + err.Error()})
+			return
+		}
+		modelMapping = mm
+		paramOverride = openRouterOpenAIParamOverride
+		storedType = openRouterOpenAIChannelType
+	}
 	now := time.Now().Unix()
 
 	tx, err := db.Begin()

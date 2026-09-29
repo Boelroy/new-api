@@ -2956,6 +2956,43 @@ const (
 	openRouterAnthropicBaseURL = "https://openrouter.ai/api"
 )
 
+// openRouterOpenAIPresetType is the batch-create / local-pool preset code for
+// "OpenRouter (OpenAI)". It is NOT a new-api channel type — the Claude preset
+// already owns 20 — so it only keys preset resolution (default models, group,
+// studio type limits). The channel itself is stored as a native OpenRouter
+// channel (openRouterOpenAIChannelType = 20), which new-api relays with the
+// OpenAI wire format against its default https://openrouter.ai/api base URL.
+const (
+	openRouterOpenAIPresetType  = 1020
+	openRouterOpenAIChannelType = 20
+)
+
+// openRouterOpenAIParamOverride pins OpenRouter requests for openai/* models to
+// OpenAI's own upstream (no reseller fallbacks), mirroring
+// openRouterParamOverride for the Claude preset.
+const openRouterOpenAIParamOverride = `{"operations":[{"mode":"set","path":"provider","logic":"AND","value":{"only":["openai"],"allow_fallbacks":false},"conditions":[{"mode":"prefix","path":"upstream_model","value":"openai/"}]}]}`
+
+// buildOpenRouterOpenAIModelMapping maps each advertised OpenAI model name onto
+// its OpenRouter slug ("gpt-5.5" → "openai/gpt-5.5"). Derived from the active
+// model list rather than a fixed table so a model added to the runtime-editable
+// default list is routable without a code change. Names that already carry a
+// vendor prefix are left unmapped.
+func buildOpenRouterOpenAIModelMapping(models []string) (string, error) {
+	mapping := make(map[string]string, len(models))
+	for _, m := range models {
+		m = strings.TrimSpace(m)
+		if m == "" || strings.Contains(m, "/") {
+			continue
+		}
+		mapping[m] = "openai/" + m
+	}
+	b, err := json.Marshal(mapping)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
 // handleAwsChannelCreate uploads one or more AWS Bedrock credentials to the
 // remote as newapi channels (channel_type = 33). Runs synchronously, one
 // channel per credential — AWS batches are small and serial makes each error
