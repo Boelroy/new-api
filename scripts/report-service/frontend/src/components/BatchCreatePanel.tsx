@@ -327,11 +327,13 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
     })()
   }, [preset.type, studio, groupLimits])
 
-  // Default to every allowed group whenever the allowlist (re)loads.
+  // A fresh allowlist resets the selection to "all allowed" (see effectiveGroup).
   useEffect(() => {
-    if (allowedGroups.length === 0) return
-    setGroup(allowedGroups.join(','))
+    if (allowedGroups.length > 0) setGroupDirty(false)
   }, [allowedGroups])
+  // With an allowlist and no manual pick, every allowed group is selected.
+  // Derived at render so async re-seeds of `group` can't narrow it.
+  const effectiveGroup = allowedGroups.length > 0 && !groupDirty ? allowedGroups.join(',') : group
 
   useEffect(() => {
     if (!canConfigureModels) return
@@ -520,7 +522,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       proxy?: string
     } = {
       type: preset.type,
-      group: group.trim() || allowedGroups.join(',') || preset.fallbackGroup,
+      group: effectiveGroup.trim() || preset.fallbackGroup,
       models: models.trim() || preset.fallbackModels,
     }
     if (costInput.trim()) {
@@ -938,7 +940,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
           {allowedGroups.length > 0 ? (
             <div className="flex flex-wrap gap-x-3 gap-y-1 border border-gray-200 rounded-md px-2 py-1.5 bg-gray-50">
               {allowedGroups.map(g => {
-                const picked = group.split(',').map(x => x.trim()).filter(Boolean)
+                const picked = effectiveGroup.split(',').map(x => x.trim()).filter(Boolean)
                 const checked = picked.includes(g)
                 return (
                   <label key={g} className="flex items-center gap-1 text-xs text-gray-700">
