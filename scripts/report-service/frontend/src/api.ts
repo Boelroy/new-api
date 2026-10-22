@@ -1035,6 +1035,25 @@ export const api = {
       body: JSON.stringify(type ? { models, type } : { models }),
     }),
 
+  // Group allowlist the batch-create panel should offer for (type, studio).
+  // Empty = unrestricted. Studio operators are pinned to their own studio
+  // server-side.
+  getBatchAllowedGroups: (type: number, studio: string) =>
+    request<{ groups: string[] }>(
+      `/api/config/batch-allowed-groups?type=${type}&studio=${encodeURIComponent(studio)}`,
+    ),
+
+  // Admin: full per-type / per-studio group allowlist config.
+  getBatchGroupLimits: () =>
+    request<{ limits: Record<string, BatchGroupRule> }>('/api/config/batch-group-limits'),
+
+  saveBatchGroupLimits: (limits: Record<string, BatchGroupRule>) =>
+    request<{ limits: Record<string, BatchGroupRule> }>('/api/config/batch-group-limits', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limits }),
+    }),
+
   getAllKeys: (start?: string, end?: string) => {
     const params = new URLSearchParams()
     if (start) params.set('start', start)
@@ -2184,6 +2203,13 @@ export type LocalHealthEvent = {
   detail: string
   dry_run: boolean
   created_at: number
+}
+
+// Per channel-type group allowlist for batch-create: `studios[studio]`
+// overrides `default` for that studio. Keyed by preset type in the map.
+export type BatchGroupRule = {
+  default: string[]
+  studios: Record<string, string[]>
 }
 
 export type LocalPoolConfig = {

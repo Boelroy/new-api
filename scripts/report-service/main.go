@@ -13,6 +13,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -3014,6 +3015,22 @@ func handleBatchCreateChannels(c *gin.Context) {
 		}
 	}
 	groupName := strings.TrimSpace(payload.Group)
+	// Per-type / per-studio group allowlist (batch_create_group_limits). Like
+	// the type limit above it binds admins acting on a studio's behalf too.
+	allowedGroups := allowedBatchGroups(loadBatchGroupLimits(), channelType, studio)
+	if groupName == "" && len(allowedGroups) > 0 {
+		groupName = allowedGroups[0]
+	}
+	if allowedGroups != nil {
+		picked := normalizeGroupList([]string{groupName})
+		for _, g := range picked {
+			if !slices.Contains(allowedGroups, g) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("group %q is not allowed for studio %q (allowed: %s)", g, studio, strings.Join(allowedGroups, ","))})
+				return
+			}
+		}
+		groupName = strings.Join(picked, ",")
+	}
 	if groupName == "" {
 		switch channelType {
 		case 1, 3, openRouterOpenAIPresetType:
@@ -4924,6 +4941,16 @@ func main() {
 		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 		c.Abort()
 	}, handleBatchCreateChannels)
+	api.GET("/config/batch-allowed-groups", func(c *gin.Context) {
+		roleAny, _ := c.Get("role")
+		role, _ := roleAny.(int)
+		if role >= minAdminRole || role == minStudioOperatorRole || role == minProjectAdminRole {
+			c.Next()
+			return
+		}
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		c.Abort()
+	}, handleBatchAllowedGroups)
 	api.GET("/config/batch-models", func(c *gin.Context) {
 		roleAny, _ := c.Get("role")
 		role, _ := roleAny.(int)
@@ -5010,6 +5037,8 @@ func main() {
 	adminAPI.GET("/export/csv", handleExportCSV)
 	adminAPI.GET("/export/html", handleExportHTML)
 	adminAPI.POST("/config/batch-models", handleSetBatchModels)
+	adminAPI.GET("/config/batch-group-limits", handleGetBatchGroupLimits)
+	adminAPI.PUT("/config/batch-group-limits", handleSetBatchGroupLimits)
 	adminAPI.GET("/cache-stats", handleCacheStats)
 	adminAPI.GET("/errors", handleErrorList)
 	adminAPI.GET("/errors/facets", handleErrorFacets)

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { api } from '../api'
+import { api, type BatchGroupRule } from '../api'
 import { withBase } from '../basePath'
 import { ProviderOption } from './ProviderMark'
 
@@ -200,6 +200,18 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
   const [group, setGroup] = useState('default')
   const [modelsDirty, setModelsDirty] = useState(false)
   const [groupDirty, setGroupDirty] = useState(false)
+  // Group allowlist for the current (preset type, studio) from
+  // batch_create_group_limits. Non-empty → the Group field becomes a
+  // checkbox list; empty = unrestricted free text. Backend enforces it too.
+  const [allowedGroups, setAllowedGroups] = useState<string[]>([])
+  // Admin-only editor for the allowlist. null = not loaded / no permission
+  // (the editor stays hidden).
+  const [groupLimits, setGroupLimits] = useState<Record<string, BatchGroupRule> | null>(null)
+  const [groupCfgOpen, setGroupCfgOpen] = useState(false)
+  const [groupDefaultDraft, setGroupDefaultDraft] = useState('')
+  const [groupStudioDrafts, setGroupStudioDrafts] = useState<{ studio: string; groups: string }[]>([])
+  const [groupCfgSaving, setGroupCfgSaving] = useState(false)
+  const [groupCfgMsg, setGroupCfgMsg] = useState<string | null>(null)
   // Vertex-only state. Region is the newapi channel.other value — either a
   // bare region string or a JSON model→region map. Every vertex preset
   // defaults to the JSON map form '{"default":"global"}' because the
@@ -303,6 +315,67 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       })()
     }
   }, [studioLocked])
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await api.getBatchAllowedGroups(preset.type, studio.trim())
+        setAllowedGroups(res.groups ?? [])
+      } catch {
+        setAllowedGroups([])
+      }
+    })()
+  }, [preset.type, studio, groupLimits])
+
+  // Keep the picked group inside the allowlist when it narrows.
+  useEffect(() => {
+    if (allowedGroups.length === 0) return
+    const picked = group.split(',').map(g => g.trim()).filter(Boolean)
+    if (picked.length === 0 || picked.some(g => !allowedGroups.includes(g))) {
+      setGroup(allowedGroups[0])
+    }
+  }, [allowedGroups, group])
+
+  useEffect(() => {
+    if (!canConfigureModels) return
+    void (async () => {
+      try {
+        const res = await api.getBatchGroupLimits()
+        setGroupLimits(res.limits ?? {})
+      } catch { /* no permission → editor hidden */ }
+    })()
+  }, [canConfigureModels])
+
+  // Load the current preset's rule into the editor drafts.
+  useEffect(() => {
+    const rule = groupLimits?.[String(preset.type)]
+    setGroupDefaultDraft((rule?.default ?? []).join(','))
+    setGroupStudioDrafts(Object.entries(rule?.studios ?? {}).map(([s, g]) => ({ studio: s, groups: g.join(',') })))
+    setGroupCfgMsg(null)
+  }, [groupLimits, preset.type])
+
+  const handleSaveGroupLimits = async () => {
+    if (!groupLimits) return
+    const split = (v: string) => v.split(/[\s,]+/).map(x => x.trim()).filter(Boolean)
+    const studios: Record<string, string[]> = {}
+    for (const d of groupStudioDrafts) {
+      const s = d.studio.trim()
+      const g = split(d.groups)
+      if (s && g.length) studios[s] = g
+    }
+    const next = { ...groupLimits, [String(preset.type)]: { default: split(groupDefaultDraft), studios } }
+    setGroupCfgSaving(true)
+    setGroupCfgMsg(null)
+    try {
+      const res = await api.saveBatchGroupLimits(next)
+      setGroupLimits(res.limits ?? {})
+      setGroupCfgMsg('已保存')
+    } catch (e: any) {
+      setGroupCfgMsg(`失败: ${e.message || e}`)
+    } finally {
+      setGroupCfgSaving(false)
+    }
+  }
 
   // Fetch the saved default-models list for the currently-selected preset
   // if we haven't cached it yet. Lazy per-preset so opening the panel only
@@ -450,7 +523,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       proxy?: string
     } = {
       type: preset.type,
-      group: group.trim() || preset.fallbackGroup,
+      group: group.trim() || (allowedGroups[0] ?? preset.fallbackGroup),
       models: models.trim() || preset.fallbackModels,
     }
     if (costInput.trim()) {
@@ -771,6 +844,91 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
           </div>
         )}
       </div>
+      {/* 可折叠：分组权限（batch_create_group_limits）。按当前预设的渠道类型
+          配置：默认可选分组 + 按工作室覆盖。仅管理员可见。 */}
+      {groupLimits && (
+        <div className="border border-gray-200 rounded-md mb-2 bg-gray-50/50">
+          <button
+            type="button"
+            onClick={() => setGroupCfgOpen(v => !v)}
+            className="w-full flex items-center justify-between px-2.5 py-1.5 text-[11px] text-gray-600 hover:bg-gray-100"
+          >
+            <span>
+              {preset.label} 分组权限{' '}
+              <span className="text-gray-400">
+                ({groupLimits[String(preset.type)] ? `${Object.keys(groupLimits[String(preset.type)].studios ?? {}).length} 个工作室单独配置` : '未限制'})
+              </span>
+            </span>
+            <span className="text-gray-400">{groupCfgOpen ? '▲' : '▼'}</span>
+          </button>
+          {groupCfgOpen && (
+            <div className="p-2.5 pt-1 space-y-2">
+              <p className="text-[10px] text-gray-400">
+                逗号分隔。工作室有单独配置时只用它的列表，否则用默认列表；都为空 = 不限制（自由填写）。
+              </p>
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">默认可选分组（其他工作室）</label>
+                <input
+                  value={groupDefaultDraft}
+                  onChange={e => setGroupDefaultDraft(e.target.value)}
+                  placeholder="例: openai,openai-alice"
+                  className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-white font-mono focus:outline-none focus:border-gray-900"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="block text-[11px] text-gray-500">按工作室覆盖</label>
+                {groupStudioDrafts.map((d, i) => (
+                  <div key={i} className="flex items-center gap-1.5">
+                    <input
+                      value={d.studio}
+                      onChange={e => setGroupStudioDrafts(prev => prev.map((x, j) => (j === i ? { ...x, studio: e.target.value } : x)))}
+                      list="batch-group-studios"
+                      placeholder="工作室"
+                      className="w-32 border border-gray-200 rounded-md px-2 py-1 text-xs bg-white focus:outline-none focus:border-gray-900"
+                    />
+                    <input
+                      value={d.groups}
+                      onChange={e => setGroupStudioDrafts(prev => prev.map((x, j) => (j === i ? { ...x, groups: e.target.value } : x)))}
+                      placeholder="例: openai-alice"
+                      className="flex-1 border border-gray-200 rounded-md px-2 py-1 text-xs bg-white font-mono focus:outline-none focus:border-gray-900"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setGroupStudioDrafts(prev => prev.filter((_, j) => j !== i))}
+                      className="text-[11px] text-rose-600 hover:underline"
+                    >
+                      删除
+                    </button>
+                  </div>
+                ))}
+                <datalist id="batch-group-studios">
+                  {studios.map(s => <option key={s} value={s} />)}
+                </datalist>
+                <button
+                  type="button"
+                  onClick={() => setGroupStudioDrafts(prev => [...prev, { studio: '', groups: '' }])}
+                  className="text-[11px] text-brand hover:underline"
+                >
+                  + 添加工作室
+                </button>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleSaveGroupLimits}
+                  disabled={groupCfgSaving}
+                  className="bg-brand text-white rounded-md px-3 py-1 text-[11px] hover:bg-brand-700 disabled:opacity-40"
+                >
+                  {groupCfgSaving ? '保存中…' : '保存分组权限'}
+                </button>
+                {groupCfgMsg && (
+                  <span className={`text-[11px] ${groupCfgMsg === '已保存' ? 'text-emerald-600' : 'text-rose-600'}`}>{groupCfgMsg}</span>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
       {/* Group + Models — per-preset overridable. Anthropic reads the
           server-side configurable list (via the collapsible section
           above); other presets seed from the baked fallback. Both
@@ -780,12 +938,37 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       <div className="grid grid-cols-2 gap-2 mb-2">
         <div>
           <label className="block text-[11px] text-gray-500 mb-1">Group（写入 channels."group"）</label>
-          <input
-            value={group}
-            onChange={e => { setGroup(e.target.value); setGroupDirty(true) }}
-            placeholder={preset.fallbackGroup}
-            className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
-          />
+          {allowedGroups.length > 0 ? (
+            <div className="flex flex-wrap gap-x-3 gap-y-1 border border-gray-200 rounded-md px-2 py-1.5 bg-gray-50">
+              {allowedGroups.map(g => {
+                const picked = group.split(',').map(x => x.trim()).filter(Boolean)
+                const checked = picked.includes(g)
+                return (
+                  <label key={g} className="flex items-center gap-1 text-xs text-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => {
+                        const next = checked ? picked.filter(x => x !== g) : [...picked, g]
+                        // Keep at least one group; order follows the allowlist.
+                        if (next.length === 0) return
+                        setGroup(allowedGroups.filter(x => next.includes(x)).join(','))
+                        setGroupDirty(true)
+                      }}
+                    />
+                    {g}
+                  </label>
+                )
+              })}
+            </div>
+          ) : (
+            <input
+              value={group}
+              onChange={e => { setGroup(e.target.value); setGroupDirty(true) }}
+              placeholder={preset.fallbackGroup}
+              className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900"
+            />
+          )}
         </div>
         <div>
           <label className="block text-[11px] text-gray-500 mb-1">Models（逗号分隔）</label>
