@@ -327,14 +327,11 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
     })()
   }, [preset.type, studio, groupLimits])
 
-  // Keep the picked group inside the allowlist when it narrows.
+  // Default to every allowed group whenever the allowlist (re)loads.
   useEffect(() => {
     if (allowedGroups.length === 0) return
-    const picked = group.split(',').map(g => g.trim()).filter(Boolean)
-    if (picked.length === 0 || picked.some(g => !allowedGroups.includes(g))) {
-      setGroup(allowedGroups[0])
-    }
-  }, [allowedGroups, group])
+    setGroup(allowedGroups.join(','))
+  }, [allowedGroups])
 
   useEffect(() => {
     if (!canConfigureModels) return
@@ -523,7 +520,7 @@ export default function BatchCreatePanel({ onCreated, lockedStudio, canConfigure
       proxy?: string
     } = {
       type: preset.type,
-      group: group.trim() || (allowedGroups[0] ?? preset.fallbackGroup),
+      group: group.trim() || allowedGroups.join(',') || preset.fallbackGroup,
       models: models.trim() || preset.fallbackModels,
     }
     if (costInput.trim()) {

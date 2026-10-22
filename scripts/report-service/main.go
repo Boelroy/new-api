@@ -3019,7 +3019,7 @@ func handleBatchCreateChannels(c *gin.Context) {
 	// the type limit above it binds admins acting on a studio's behalf too.
 	allowedGroups := allowedBatchGroups(loadBatchGroupLimits(), channelType, studio)
 	if groupName == "" && len(allowedGroups) > 0 {
-		groupName = allowedGroups[0]
+		groupName = strings.Join(allowedGroups, ",")
 	}
 	if allowedGroups != nil {
 		picked := normalizeGroupList([]string{groupName})
