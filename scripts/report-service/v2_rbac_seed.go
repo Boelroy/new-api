@@ -132,6 +132,18 @@ var builtinRoleSeeds = []builtinRoleSeed{
 		},
 	},
 	{
+		// Supplier CC Max: authorizes Claude (Max) accounts through their own
+		// socks5 and uploads them to the portal's claude lane, seeing only
+		// their own accounts + usage. The ccmax routes gate on the V1 numeric
+		// tier (minSupplierCCMaxRole); this V2 grant keeps the catalog coherent.
+		Name:        RoleSupplierCCMax,
+		DisplayName: "Supplier CC Max",
+		Level:       LevelSupplierCCMax,
+		Permissions: []Permission{
+			{ActionCCMaxManage, ScopeOwnStudio},
+		},
+	},
+	{
 		Name:        RoleTester,
 		DisplayName: "Tester",
 		Level:       LevelTester,
@@ -239,8 +251,8 @@ func mapLegacyUsersToRoles(roleIDByName map[string]int64) error {
 	defer rows.Close()
 
 	type todo struct {
-		userID  int64
-		v1Role  int
+		userID int64
+		v1Role int
 	}
 	pending := make([]todo, 0)
 	for rows.Next() {
@@ -285,6 +297,8 @@ func builtinRoleNameForLegacy(v1Role int) string {
 		return RoleSupplier01
 	case minSupplierRole02:
 		return RoleSupplier02
+	case minSupplierCCMaxRole:
+		return RoleSupplierCCMax
 	case minStudioOperatorRole:
 		return RoleStudioOperator
 	case minTesterRole:

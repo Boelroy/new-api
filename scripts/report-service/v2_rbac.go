@@ -39,6 +39,7 @@ const (
 	RoleRemoteStudioOperator = "remote_studio_operator"
 	RoleSupplier01           = "supplier_01"
 	RoleSupplier02           = "supplier_02"
+	RoleSupplierCCMax        = "supplier_ccmax"
 	RoleTester               = "tester"
 	RoleUser                 = "user"
 )
@@ -51,6 +52,7 @@ const (
 	LevelAdmin                = 50
 	LevelProjectAdmin         = 25
 	LevelRemoteStudioOperator = 22
+	LevelSupplierCCMax        = 24
 	LevelSupplier02           = 23
 	LevelSupplier01           = 21
 	LevelStudioOperator       = 20
@@ -60,10 +62,10 @@ const (
 
 // Scopes.
 const (
-	ScopeGlobal     = "global"
-	ScopeOwnStudio  = "own_studio"
-	ScopeAnyStudio  = "any_studio"
-	ScopeSelf       = "self"
+	ScopeGlobal    = "global"
+	ScopeOwnStudio = "own_studio"
+	ScopeAnyStudio = "any_studio"
+	ScopeSelf      = "self"
 )
 
 // Actions — grouped by module for readability. Keep in sync with
@@ -71,35 +73,35 @@ const (
 // via seed or the /v2/roles UI is the only way to introduce a new
 // permission point.
 const (
-	ActionKeysPoolUpload       = "keys.pool.upload"
-	ActionKeysPoolAssign       = "keys.pool.assign"
-	ActionKeysPoolView         = "keys.pool.view"
-	ActionKeysPoolDelete       = "keys.pool.delete"
-	ActionKeysNewapiUploadDir  = "keys.newapi.upload_direct"
-	ActionKeysNewapiView       = "keys.newapi.view"
-	ActionKeysNewapiRebind     = "keys.newapi.rebind"
-	ActionKeysNewapiDisable    = "keys.newapi.disable"
-	ActionKeysRevealDead       = "keys.reveal_dead"
-	ActionKeysPricingSet       = "keys.pricing.set"
+	ActionKeysPoolUpload      = "keys.pool.upload"
+	ActionKeysPoolAssign      = "keys.pool.assign"
+	ActionKeysPoolView        = "keys.pool.view"
+	ActionKeysPoolDelete      = "keys.pool.delete"
+	ActionKeysNewapiUploadDir = "keys.newapi.upload_direct"
+	ActionKeysNewapiView      = "keys.newapi.view"
+	ActionKeysNewapiRebind    = "keys.newapi.rebind"
+	ActionKeysNewapiDisable   = "keys.newapi.disable"
+	ActionKeysRevealDead      = "keys.reveal_dead"
+	ActionKeysPricingSet      = "keys.pricing.set"
 
-	ActionUsageView            = "usage.view"
+	ActionUsageView = "usage.view"
 
-	ActionReportsView          = "reports.view"
-	ActionReportsExport        = "reports.export"
+	ActionReportsView   = "reports.view"
+	ActionReportsExport = "reports.export"
 
-	ActionRemoteProfileManage  = "remote_newapi.profile.manage"
-	ActionRemotePolicyManage   = "remote_newapi.policy.manage"
+	ActionRemoteProfileManage = "remote_newapi.profile.manage"
+	ActionRemotePolicyManage  = "remote_newapi.policy.manage"
 
-	ActionUsersView            = "users.view"
-	ActionUsersCreate          = "users.create"
-	ActionUsersUpdate          = "users.update"
-	ActionUsersDelete          = "users.delete"
-	ActionUsersDisable         = "users.disable"
-	ActionUsersResetPassword   = "users.reset_password"
-	ActionUsersAssignRole      = "users.assign_role"
+	ActionUsersView          = "users.view"
+	ActionUsersCreate        = "users.create"
+	ActionUsersUpdate        = "users.update"
+	ActionUsersDelete        = "users.delete"
+	ActionUsersDisable       = "users.disable"
+	ActionUsersResetPassword = "users.reset_password"
+	ActionUsersAssignRole    = "users.assign_role"
 
-	ActionRolesView            = "roles.view"
-	ActionRolesManage          = "roles.manage"
+	ActionRolesView   = "roles.view"
+	ActionRolesManage = "roles.manage"
 
 	ActionTestingKeyTester       = "testing.key_tester"
 	ActionTestingProviderTesting = "testing.provider_testing"
@@ -108,7 +110,9 @@ const (
 
 	ActionKeyhubManage = "keyhub.manage"
 
-	ActionSystemConfig         = "system.config"
+	ActionCCMaxManage = "ccmax.manage"
+
+	ActionSystemConfig = "system.config"
 )
 
 // actionCatalog is the ordered list surfaced through /api/v2/permissions.
@@ -145,6 +149,7 @@ var actionCatalog = []struct {
 	{"testing", ActionTestingProviderTesting, "Use Provider Testing"},
 	{"supplier_account", ActionSupplierAccountManage, "Upload / view supplier account portal keys"},
 	{"keyhub", ActionKeyhubManage, "Upload keys + view usage on KHub (pd-maas)"},
+	{"ccmax", ActionCCMaxManage, "CC Max (Claude OAuth) onboarding + own usage"},
 	{"system", ActionSystemConfig, "System configuration"},
 }
 
@@ -216,6 +221,8 @@ var actionAllowedScopes = map[string]map[string]bool{
 	ActionSupplierAccountManage: {ScopeOwnStudio: true, ScopeAnyStudio: true, ScopeGlobal: true},
 	// KHub proxy is backed by one shared provider account — global-only.
 	ActionKeyhubManage: {ScopeGlobal: true},
+	// CC Max: own uploads for suppliers, everything for admin.
+	ActionCCMaxManage: {ScopeOwnStudio: true, ScopeGlobal: true},
 }
 
 // IsAllowedActionScope returns whether (action, scope) is a sensible pair.
@@ -695,6 +702,8 @@ func legacyLevelForRole(v1Role int) int {
 		return LevelSupplier01
 	case minSupplierRole02:
 		return LevelSupplier02
+	case minSupplierCCMaxRole:
+		return LevelSupplierCCMax
 	case minStudioOperatorRole:
 		return LevelStudioOperator
 	case minTesterRole:

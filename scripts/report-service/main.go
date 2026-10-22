@@ -74,6 +74,7 @@ const (
 	minTesterRole               = 5   // Key Tester + Provider Testing only
 	minSupplierRole02           = 6   // supplier_02: KHub (pd-maas) key upload + usage, own scope only
 	minProjectAdminRole         = 7   // Key Capacity + Key Tester only
+	minSupplierCCMaxRole        = 8   // supplier_ccmax: CC Max (Claude OAuth) 上号 + own usage only
 	minAdminRole                = 10  // common.RoleAdminUser
 	minSuperAdminRole           = 100 // common.RoleRootUser
 )
@@ -1989,7 +1990,7 @@ func handleLogout(c *gin.Context) {
 func isValidRoleTier(role int) bool {
 	switch role {
 	case minUserRole, minStudioOperatorRole, minRemoteStudioOperatorRole,
-		minSupplierRole, minSupplierRole02, minTesterRole, minProjectAdminRole, minAdminRole, minSuperAdminRole:
+		minSupplierRole, minSupplierRole02, minSupplierCCMaxRole, minTesterRole, minProjectAdminRole, minAdminRole, minSuperAdminRole:
 		return true
 	}
 	return false
@@ -5025,7 +5026,7 @@ func main() {
 	// Claude accounts through their own socks5 and upload them to the portal's
 	// claude lane (see ccmax.go). Handlers scope rows to the uploader; admin+
 	// see all.
-	ccmaxAPI := api.Group("/ccmax", requireRoleOrAnySupplier(minAdminRole))
+	ccmaxAPI := api.Group("/ccmax", requireRoleOrSupplierCCMax(minAdminRole))
 	ccmaxAPI.POST("/oauth/start", handleCCMaxOAuthStart)
 	ccmaxAPI.POST("/oauth/submit", handleCCMaxSubmit)
 	ccmaxAPI.GET("/options", handleCCMaxOptions)

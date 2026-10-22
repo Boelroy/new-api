@@ -562,6 +562,8 @@ export const ROLE_TESTER = 5
 // frontend surfaces it here just so admins can assign it from Users.
 export const ROLE_SUPPLIER_02 = 6
 export const ROLE_PROJECT_ADMIN = 7
+// supplier_ccmax: CC Max (Claude OAuth) 上号 + own usage only (v3 /ccmax).
+export const ROLE_SUPPLIER_CCMAX = 8
 export const ROLE_ADMIN = 10
 export const ROLE_SUPER_ADMIN = 100
 

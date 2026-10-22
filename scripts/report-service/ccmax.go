@@ -51,14 +51,14 @@ const (
 	ccmaxSessionTTL = 30 * time.Minute
 )
 
-// requireRoleOrAnySupplier grants access to callers at min tier OR either
-// supplier role (supplier_01 / supplier_02). The CC Max handlers enforce the
-// per-uploader scoping internally.
-func requireRoleOrAnySupplier(min int) gin.HandlerFunc {
+// requireRoleOrSupplierCCMax grants access to callers at min tier OR the
+// supplier_ccmax role (role=8), a horizontal specialization that only does CC
+// Max 上号. The CC Max handlers enforce the per-uploader scoping internally.
+func requireRoleOrSupplierCCMax(min int) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		roleAny, _ := c.Get("role")
 		role, _ := roleAny.(int)
-		if role >= min || role == minSupplierRole || role == minSupplierRole02 {
+		if role >= min || role == minSupplierCCMaxRole {
 			c.Next()
 			return
 		}

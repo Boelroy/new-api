@@ -7,7 +7,7 @@ import KeyhubKeys from './pages/KeyhubKeys'
 import KeyhubUsageOverview from './pages/KeyhubUsageOverview'
 import KeyhubUsageLogs from './pages/KeyhubUsageLogs'
 import CCMaxAccounts from './pages/CCMaxAccounts'
-import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_SUPPLIER_01, ROLE_SUPPLIER_02 } from './api'
+import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_SUPPLIER_02, ROLE_SUPPLIER_CCMAX } from './api'
 import { getCachedRole, loadRole } from './auth'
 import { APP_BASE } from './basePath'
 import { Toaster, ConfirmHost, PromptHost } from './components/feedback'
@@ -27,7 +27,7 @@ function RoleGate({ allow, children }: { allow: (role: number) => boolean; child
 }
 
 // DefaultLanding picks a home route from the caller's role so a supplier_02
-// (KHub) or supplier_01 (CC Max only) user isn't bounced to the remote-channels
+// (KHub) or supplier_ccmax (CC Max) user isn't bounced to the remote-channels
 // NoAccess screen on login. Admin+ and remote operators keep landing on
 // remote-channels.
 function DefaultLanding() {
@@ -40,7 +40,7 @@ function DefaultLanding() {
   if (role === ROLE_SUPPLIER_02 && role < ROLE_ADMIN) {
     return <Navigate to="/keyhub-upload" replace />
   }
-  if (role === ROLE_SUPPLIER_01) {
+  if (role === ROLE_SUPPLIER_CCMAX) {
     return <Navigate to="/ccmax" replace />
   }
   return <Navigate to="/remote-channels" replace />
@@ -109,7 +109,7 @@ export default function App() {
         <Route
           path="/ccmax"
           element={
-            <RoleGate allow={(r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_01 || r === ROLE_SUPPLIER_02}>
+            <RoleGate allow={(r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_CCMAX}>
               <CCMaxAccounts />
             </RoleGate>
           }
