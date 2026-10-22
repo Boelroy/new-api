@@ -22,7 +22,7 @@ import { getCachedRole, loadRole } from '../auth'
 // through that same socks5 and uploads the account to the 账号资源录入 portal's
 // claude lane. List + usage below come from the portal.
 
-const EMPTY_PROXY: CCMaxProxyInput = { host: '', port: '', username: '', password: '' }
+const EMPTY_PROXY: CCMaxProxyInput = { url: '', host: '', port: '', username: '', password: '' }
 const EMPTY_FORM: CCMaxSubmitForm = {
   plan: '',
   password: '',
@@ -138,8 +138,8 @@ export default function CCMaxAccounts() {
   }, [load, loadMetrics])
 
   async function start() {
-    if (!proxy.host.trim() || !proxy.port.trim()) {
-      toast.error('请填写 socks5 地址和端口')
+    if (!proxy.url.trim() && (!proxy.host.trim() || !proxy.port.trim())) {
+      toast.error('请填写代理 URL，或 socks5 地址和端口')
       return
     }
     setStarting(true)
@@ -191,7 +191,20 @@ export default function CCMaxAccounts() {
 
       <Card className="space-y-4 p-4">
         <div className="text-sm font-semibold">1. 填写 socks5 代理</div>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <label className="block space-y-1.5">
+          <span className="text-xs font-medium text-muted-foreground">代理 URL（直接粘贴，填了则忽略下方分项）</span>
+          <Input
+            value={proxy.url}
+            autoComplete="off"
+            onChange={(e) => setProxy({ ...proxy, url: e.target.value })}
+            placeholder="socks5://user:pass@1.2.3.4:1080"
+            className="font-mono"
+          />
+        </label>
+        <fieldset
+          disabled={!!proxy.url.trim()}
+          className="grid gap-4 disabled:opacity-50 sm:grid-cols-2 lg:grid-cols-4"
+        >
           <label className="space-y-1.5">
             <span className="text-xs font-medium text-muted-foreground">地址 (host)</span>
             <Input value={proxy.host} onChange={(e) => setProxy({ ...proxy, host: e.target.value })} placeholder="1.2.3.4" />
@@ -222,7 +235,7 @@ export default function CCMaxAccounts() {
               onChange={(e) => setProxy({ ...proxy, password: e.target.value })}
             />
           </label>
-        </div>
+        </fieldset>
         <div className="flex items-center gap-3">
           <Button onClick={start} disabled={starting}>
             {starting ? '检测代理中…' : session ? '重新生成授权链接' : '检测代理并生成授权链接'}

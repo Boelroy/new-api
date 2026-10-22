@@ -2510,7 +2510,10 @@ export type LocalPendingKey = {
   updated_at: number
 }
 
+// Either a pasted url (socks5://user:pass@host:port; wins when set) or the
+// separate fields.
 export type CCMaxProxyInput = {
+  url: string
   host: string
   port: string
   username: string

@@ -28,3 +28,35 @@ func TestCCMaxParseCode(t *testing.T) {
 		})
 	}
 }
+
+// Suppliers either paste a proxy URL or fill the fields; both must yield the
+// same canonical URL, and anything that is not a usable socks5 is rejected.
+func TestCCMaxProxyURL(t *testing.T) {
+	cases := []struct {
+		name string
+		in   ccmaxProxyInput
+		want string
+		ok   bool
+	}{
+		{"fields", ccmaxProxyInput{Host: "1.2.3.4", Port: "1080", Username: "u", Password: "p@ss"}, "socks5://u:p%40ss@1.2.3.4:1080", true},
+		{"fields no auth", ccmaxProxyInput{Host: "1.2.3.4", Port: "1080"}, "socks5://1.2.3.4:1080", true},
+		{"url", ccmaxProxyInput{URL: " socks5://u:p@1.2.3.4:1080 "}, "socks5://u:p@1.2.3.4:1080", true},
+		{"url keeps socks5h", ccmaxProxyInput{URL: "socks5h://u:p@proxy.example.com:1080"}, "socks5h://u:p@proxy.example.com:1080", true},
+		{"url without scheme", ccmaxProxyInput{URL: "u:p@1.2.3.4:1080"}, "socks5://u:p@1.2.3.4:1080", true},
+		{"url wins over fields", ccmaxProxyInput{URL: "socks5://1.2.3.4:1080", Host: "5.6.7.8", Port: "9"}, "socks5://1.2.3.4:1080", true},
+		{"http rejected", ccmaxProxyInput{URL: "http://1.2.3.4:8080"}, "", false},
+		{"missing port", ccmaxProxyInput{URL: "socks5://1.2.3.4"}, "", false},
+		{"bad port", ccmaxProxyInput{Host: "1.2.3.4", Port: "70000"}, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.in.proxyURL()
+			if !tc.ok {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}

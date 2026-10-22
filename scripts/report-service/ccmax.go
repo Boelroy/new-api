@@ -171,28 +171,57 @@ func ccmaxParseCode(raw string) (code, state string) {
 	return code, state
 }
 
-func handleCCMaxOAuthStart(c *gin.Context) {
-	var body struct {
-		Host     string `json:"host"`
-		Port     string `json:"port"`
-		Username string `json:"username"`
-		Password string `json:"password"`
+// ccmaxProxyInput is the supplier's socks5: either a pasted URL
+// (socks5://user:pass@host:port, scheme optional) or the separate fields. URL
+// wins when set.
+type ccmaxProxyInput struct {
+	URL      string `json:"url"`
+	Host     string `json:"host"`
+	Port     string `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// proxyURL validates the input and returns the canonical socks5/socks5h URL
+// used for every outbound call and written into the credential's proxy_url.
+func (in ccmaxProxyInput) proxyURL() (string, error) {
+	proxy := url.URL{Scheme: "socks5"}
+	host, portStr := strings.TrimSpace(in.Host), strings.TrimSpace(in.Port)
+	if raw := strings.TrimSpace(in.URL); raw != "" {
+		if !strings.Contains(raw, "://") {
+			raw = "socks5://" + raw
+		}
+		u, err := url.Parse(raw)
+		if err != nil {
+			return "", errors.New("代理 URL 格式不正确")
+		}
+		if u.Scheme != "socks5" && u.Scheme != "socks5h" {
+			return "", errors.New("代理 URL 须以 socks5:// 或 socks5h:// 开头")
+		}
+		proxy.Scheme, proxy.User = u.Scheme, u.User
+		host, portStr = u.Hostname(), u.Port()
+	} else if user := strings.TrimSpace(in.Username); user != "" {
+		proxy.User = url.UserPassword(user, in.Password)
 	}
+	port, err := strconv.Atoi(portStr)
+	if host == "" || err != nil || port < 1 || port > 65535 {
+		return "", errors.New("请填写正确的 socks5 地址和端口")
+	}
+	proxy.Host = net.JoinHostPort(host, strconv.Itoa(port))
+	return proxy.String(), nil
+}
+
+func handleCCMaxOAuthStart(c *gin.Context) {
+	var body ccmaxProxyInput
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-	host := strings.TrimSpace(body.Host)
-	port, err := strconv.Atoi(strings.TrimSpace(body.Port))
-	if host == "" || err != nil || port < 1 || port > 65535 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "请填写正确的 socks5 地址和端口"})
+	proxyURL, err := body.proxyURL()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	proxy := url.URL{Scheme: "socks5", Host: net.JoinHostPort(host, strconv.Itoa(port))}
-	if user := strings.TrimSpace(body.Username); user != "" {
-		proxy.User = url.UserPassword(user, body.Password)
-	}
-	proxyURL := proxy.String()
 
 	client, err := ccmaxProxyClient(proxyURL)
 	if err != nil {
