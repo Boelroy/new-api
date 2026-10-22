@@ -4170,6 +4170,9 @@ func main() {
 	supplierAccountUsername = strings.TrimSpace(os.Getenv("SUPPLIER_ACCOUNT_USERNAME"))
 	supplierAccountPassword = os.Getenv("SUPPLIER_ACCOUNT_PASSWORD")
 	supplierAccountToken = strings.TrimSpace(os.Getenv("SUPPLIER_ACCOUNT_TOKEN"))
+	ccmaxPortalUsername = strings.TrimSpace(os.Getenv("SUPPLIER_CCMAX_USERNAME"))
+	ccmaxPortalPassword = os.Getenv("SUPPLIER_CCMAX_PASSWORD")
+	ccmaxPortalToken = strings.TrimSpace(os.Getenv("SUPPLIER_CCMAX_TOKEN"))
 	supplierQuotaWebhook = strings.TrimSpace(os.Getenv("SUPPLIER_QUOTA_WEBHOOK"))
 	keyhubBaseURL = strings.TrimRight(os.Getenv("KEYHUB_BASE_URL"), "/")
 	keyhubUsername = strings.TrimSpace(os.Getenv("KEYHUB_USERNAME"))
@@ -5018,6 +5021,20 @@ func main() {
 	keyhubAPI.GET("/settings", requireRole(minAdminRole), handleKeyhubSettingsGet)
 	keyhubAPI.PUT("/settings", requireRole(minAdminRole), handleKeyhubSettingsSet)
 
+	// CC Max (Claude subscription) onboarding — suppliers authorize their own
+	// Claude accounts through their own socks5 and upload them to the portal's
+	// claude lane (see ccmax.go). Handlers scope rows to the uploader; admin+
+	// see all.
+	ccmaxAPI := api.Group("/ccmax", requireRoleOrAnySupplier(minAdminRole))
+	ccmaxAPI.POST("/oauth/start", handleCCMaxOAuthStart)
+	ccmaxAPI.POST("/oauth/submit", handleCCMaxSubmit)
+	ccmaxAPI.GET("/options", handleCCMaxOptions)
+	ccmaxAPI.GET("/accounts", handleCCMaxAccountList)
+	ccmaxAPI.POST("/metrics", handleCCMaxMetrics)
+	// CC Max portal login + OpenAPI token are admin-only.
+	ccmaxAPI.GET("/settings", requireRole(minAdminRole), handleCCMaxSettingsGet)
+	ccmaxAPI.PUT("/settings", requireRole(minAdminRole), handleCCMaxSettingsSet)
+
 	// Per-role sidebar visibility config — super admin only. GET is also
 	// used by the settings page to prefill; the live Sidebar reads the same
 	// data from /api/auth/config.
@@ -5295,9 +5312,10 @@ func main() {
 	// existing V1 /api/* endpoints, so no new routes — only the static SPA.
 	registerV3Frontend(r)
 
-	// Keep the supplier-portal WEB token warm (providers / models). No-op
-	// unless SUPPLIER_ACCOUNT_USERNAME / _PASSWORD are configured.
-	startSupplierWebTokenRefresher()
+	// Keep the supplier-portal WEB tokens warm (账号上号 + CC Max logins). Each
+	// idles until its username / password are configured.
+	supplierWeb.startRefresher()
+	ccmaxWeb.startRefresher()
 
 	// SPA — serve for all non-API routes
 	r.NoRoute(spaHandler())

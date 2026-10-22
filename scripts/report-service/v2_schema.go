@@ -100,6 +100,37 @@ var v2SchemaStatements = []string{
 	`ALTER TABLE rs_supplier_account ADD COLUMN IF NOT EXISTS quota_usd DOUBLE PRECISION NOT NULL DEFAULT 0`,
 	`ALTER TABLE rs_supplier_account ADD COLUMN IF NOT EXISTS quota_alerted_at BIGINT NOT NULL DEFAULT 0`,
 
+	// -- CC Max (Claude OAuth) ----------------------------------------------
+	// Pending OAuth logins (ccmax.go). One row per authorize URL handed out;
+	// holds the PKCE verifier + the supplier's socks5 (encrypted) until the
+	// account is uploaded. credential_enc parks the exchanged credential so a
+	// portal-side rejection can be retried without re-authorizing. Kept in the
+	// DB (not memory) because report-service runs multi-node.
+	`CREATE TABLE IF NOT EXISTS rs_ccmax_oauth_session (
+		state          TEXT   PRIMARY KEY,
+		user_id        BIGINT NOT NULL,
+		code_verifier  TEXT   NOT NULL,
+		proxy_enc      TEXT   NOT NULL,
+		proxy_tz       TEXT   NOT NULL DEFAULT '',
+		credential_enc TEXT   NOT NULL DEFAULT '',
+		created_at     BIGINT NOT NULL
+	)`,
+	// Ownership of CC Max accounts uploaded to the portal's claude lane. The
+	// portal holds the account itself; this only scopes visibility (suppliers
+	// see their own, admin+ all), like rs_supplier_account.
+	`CREATE TABLE IF NOT EXISTS rs_ccmax_account (
+		id                BIGSERIAL PRIMARY KEY,
+		uploaded_by       BIGINT NOT NULL,
+		studio            TEXT   NOT NULL DEFAULT '',
+		remote_account_id BIGINT NOT NULL,
+		alias             TEXT   NOT NULL DEFAULT '',
+		account           TEXT   NOT NULL DEFAULT '',
+		plan              TEXT   NOT NULL DEFAULT '',
+		created_at        BIGINT NOT NULL
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS ux_ccmax_account_remote_id ON rs_ccmax_account(remote_account_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_ccmax_account_uploaded_by ON rs_ccmax_account(uploaded_by)`,
+
 	// -- Model auto-cleanup ------------------------------------------------
 	// Append-only audit of the log-driven model auto-cleanup loop
 	// (model_cleanup.go): one row every time it strips a model from a

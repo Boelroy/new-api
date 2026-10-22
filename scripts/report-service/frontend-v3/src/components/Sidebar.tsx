@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { NavLink } from 'react-router-dom'
-import { Radio, Upload, BarChart3, ScrollText, KeyRound, type LucideIcon } from 'lucide-react'
-import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_SUPPLIER_02 } from '../api'
+import { Radio, Upload, BarChart3, ScrollText, KeyRound, BadgeCheck, type LucideIcon } from 'lucide-react'
+import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_SUPPLIER_01, ROLE_SUPPLIER_02 } from '../api'
 import { getCachedRole, loadRole } from '../auth'
 import { cx } from './ui'
 
@@ -56,6 +56,17 @@ const GROUPS: NavGroup[] = [
         label: '使用日志',
         icon: ScrollText,
         allow: (r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_02,
+      },
+    ],
+  },
+  {
+    title: 'CC Max',
+    items: [
+      {
+        to: '/ccmax',
+        label: 'CC Max 上号',
+        icon: BadgeCheck,
+        allow: (r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_01 || r === ROLE_SUPPLIER_02,
       },
     ],
   },

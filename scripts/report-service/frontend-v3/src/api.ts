@@ -2192,6 +2192,46 @@ export const api = {
   // pd-maas with a shared server-side provider token. Gated to supplier_02 +
   // admin on the server. Responses carry the upstream { code, data, message }.
 
+  // ---- CC Max (Claude OAuth) onboarding. Suppliers authorize their own
+  // Claude accounts through their own socks5; the server uploads them to the
+  // 账号资源录入 portal's claude lane. List + usage come from the portal, scoped
+  // to the uploader server-side (admins see all).
+
+  ccmaxOAuthStart: (proxy: CCMaxProxyInput) =>
+    request<CCMaxOAuthStart>('/api/ccmax/oauth/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(proxy),
+    }),
+
+  ccmaxSubmit: (payload: CCMaxSubmitForm & { state: string; code: string }) =>
+    request<{ id: number; alias: string; email: string; msg: string }>('/api/ccmax/oauth/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  ccmaxOptions: () =>
+    request<{ plans: string[]; register_locations: { value: string; label: string }[] | null }>('/api/ccmax/options'),
+
+  ccmaxAccounts: () => request<{ accounts: CCMaxAccount[]; fx_rate: number }>('/api/ccmax/accounts'),
+
+  ccmaxMetrics: (payload: { begin_time: string; end_time: string }) =>
+    request<{ accounts: SupplierMetric[] }>('/api/ccmax/metrics', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  getCCMaxSettings: () => request<CCMaxSettings>('/api/ccmax/settings'),
+
+  setCCMaxSettings: (payload: { username?: string; password?: string; openapi_token?: string }) =>
+    request<CCMaxSettings>('/api/ccmax/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
   keyhubCategories: () =>
     request<KeyhubEnvelope<KeyhubCategory[]>>('/api/keyhub/categories'),
 
@@ -2466,4 +2506,55 @@ export type LocalPendingKey = {
   failed_reason?: string
   created_at: number
   updated_at: number
+}
+
+export type CCMaxProxyInput = {
+  host: string
+  port: string
+  username: string
+  password: string
+}
+
+// Response of POST /api/ccmax/oauth/start: the authorize URL plus the socks5
+// exit (as seen by ip-api.com) so the supplier can sanity-check the region.
+export type CCMaxOAuthStart = {
+  auth_url: string
+  state: string
+  exit_ip: string
+  country: string
+  timezone: string
+}
+
+// Required portal fields for a claude 上号 besides the credential (filled
+// server-side from the OAuth result; account = the OAuth email). Dates are
+// YYYY-MM-DD.
+export type CCMaxSubmitForm = {
+  plan: string
+  password: string
+  register_location: string
+  register_time: string
+  plan_start_time: string
+  plan_end_time: string
+}
+
+// A portal claude account, trimmed server-side (credential/password stripped).
+// id is the portal account id (matches SupplierMetric.aid).
+export type CCMaxAccount = {
+  id: number
+  alias: string
+  account: string
+  status: string
+  plan: string
+  register_location: string
+  plan_end_time: string
+  created_at: string
+  // Uploader username; admin only.
+  username?: string
+}
+
+export type CCMaxSettings = {
+  username: string
+  password_set: boolean
+  openapi_token_set: boolean
+  openapi_token_last4: string
 }

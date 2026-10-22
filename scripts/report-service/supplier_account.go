@@ -38,6 +38,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -63,12 +64,6 @@ var (
 	// (group-balance alerts). The report_config override takes precedence.
 	supplierQuotaWebhook string
 )
-
-// supplierWebConfigured reports whether the WEB login flow can run (drives the
-// nav item + providers/models).
-func supplierWebConfigured() bool {
-	return supplierAccountBaseURL != "" && supplierAccountUsername != "" && supplierAccountPassword != ""
-}
 
 // report_config keys for admin-editable supplier settings. The OpenAPI token
 // and the supplier-visible provider allowlist are configured through the web
@@ -254,7 +249,7 @@ func supplierOpenAPIConfigured() bool {
 // supplierAccountEnabled gates the page/nav. The upload + metrics paths
 // additionally require supplierOpenAPIConfigured().
 func supplierAccountEnabled() bool {
-	return supplierWebConfigured()
+	return supplierWeb.configured()
 }
 
 // supplierHTTPClient talks to a portal that serves a self-signed cert (every
@@ -265,14 +260,6 @@ var supplierHTTPClient = &http.Client{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	},
 }
-
-// ---- WEB token cache + refresh ----
-
-var (
-	supplierWebMu     sync.Mutex
-	supplierWebToken  string
-	supplierWebExpiry time.Time
-)
 
 // supplierProxy issues a request to the portal, optionally with a Bearer
 // token, and returns the raw status code + body. jsonBody may be nil for GETs.
@@ -381,13 +368,37 @@ func supplierEncryptPassword(pubPEM, password string) (string, error) {
 	return base64.StdEncoding.EncodeToString(jsonBytes), nil
 }
 
-// supplierLogin runs the full WEB login flow and returns (token, expiresIn).
-func supplierLogin() (string, int, error) {
-	if !supplierWebConfigured() {
-		return "", 0, errors.New("supplier account username/password not configured")
+// portalWebSession is one WEB login against the portal. The 账号上号 lane
+// (supplierWeb) and the CC Max lane (ccmaxWeb) log in as different portal
+// users, so each keeps its own cached token.
+type portalWebSession struct {
+	name  string
+	creds func() (username, password string)
+
+	mu     sync.Mutex
+	token  string
+	expiry time.Time
+}
+
+// supplierWeb is the 账号上号 WEB login (SUPPLIER_ACCOUNT_USERNAME/PASSWORD).
+var supplierWeb = &portalWebSession{
+	name:  "supplier",
+	creds: func() (string, string) { return supplierAccountUsername, supplierAccountPassword },
+}
+
+func (s *portalWebSession) configured() bool {
+	user, pass := s.creds()
+	return supplierAccountBaseURL != "" && user != "" && pass != ""
+}
+
+// login runs the full WEB login flow and returns (token, expiresIn).
+func (s *portalWebSession) login() (string, int, error) {
+	if !s.configured() {
+		return "", 0, fmt.Errorf("%s portal username/password not configured", s.name)
 	}
+	username, password := s.creds()
 	// 1. Fetch the per-user RSA public key.
-	pkReq, _ := json.Marshal(map[string]string{"username": supplierAccountUsername})
+	pkReq, _ := json.Marshal(map[string]string{"username": username})
 	st, resp, err := supplierProxy(http.MethodPost, "/supplier-account/api/supplier/pubkey", "", pkReq)
 	if err != nil {
 		return "", 0, err
@@ -403,13 +414,13 @@ func supplierLogin() (string, int, error) {
 	}
 
 	// 2. Encrypt the password with the fetched key.
-	enc, err := supplierEncryptPassword(pk.PublicKey, supplierAccountPassword)
+	enc, err := supplierEncryptPassword(pk.PublicKey, password)
 	if err != nil {
 		return "", 0, err
 	}
 
 	// 3. Log in.
-	loginReq, _ := json.Marshal(map[string]string{"username": supplierAccountUsername, "enc_password": enc})
+	loginReq, _ := json.Marshal(map[string]string{"username": username, "enc_password": enc})
 	st2, resp2, err := supplierProxy(http.MethodPost, "/supplier-account/api/supplier/login", "", loginReq)
 	if err != nil {
 		return "", 0, err
@@ -430,47 +441,45 @@ func supplierLogin() (string, int, error) {
 	return lg.Token, lg.ExpiresIn, nil
 }
 
-// getSupplierWebToken returns a valid WEB token, refreshing via login when the
-// cached one is missing or within a minute of expiry.
-func getSupplierWebToken() (string, error) {
-	supplierWebMu.Lock()
-	defer supplierWebMu.Unlock()
-	if supplierWebToken != "" && time.Now().Before(supplierWebExpiry) {
-		return supplierWebToken, nil
+// getToken returns a valid WEB token, refreshing via login when the cached one
+// is missing or within a minute of expiry.
+func (s *portalWebSession) getToken() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.token != "" && time.Now().Before(s.expiry) {
+		return s.token, nil
 	}
-	tok, expiresIn, err := supplierLogin()
+	tok, expiresIn, err := s.login()
 	if err != nil {
 		return "", err
 	}
-	supplierWebToken = tok
+	s.token = tok
 	// Refresh a minute early; for very short TTLs fall back to half the TTL.
 	lead := 60
 	if expiresIn <= 120 {
 		lead = expiresIn / 2
 	}
-	supplierWebExpiry = time.Now().Add(time.Duration(expiresIn-lead) * time.Second)
+	s.expiry = time.Now().Add(time.Duration(expiresIn-lead) * time.Second)
 	return tok, nil
 }
 
-// invalidateSupplierWebToken drops the cached WEB token so the next
-// getSupplierWebToken performs a fresh login. Called when the portal rejects a
-// cached token: the portal enforces a single active session per user, so any
-// external login for the same account (a human logging into the portal UI, or
-// another instance) silently invalidates ours.
-func invalidateSupplierWebToken() {
-	supplierWebMu.Lock()
-	supplierWebToken = ""
-	supplierWebExpiry = time.Time{}
-	supplierWebMu.Unlock()
+// invalidate drops the cached WEB token so the next getToken performs a fresh
+// login. Called when the portal rejects a cached token (the portal enforces a
+// single active session per user, so any external login for the same account
+// silently invalidates ours) and when the login credentials are edited.
+func (s *portalWebSession) invalidate() {
+	s.mu.Lock()
+	s.token = ""
+	s.expiry = time.Time{}
+	s.mu.Unlock()
 }
 
-// supplierWebProxy issues a WEB-token portal request and, if the portal
-// rejects the cached token with 401, re-logs in once and retries. Without this
-// a token invalidated out-of-band stays broken until the next scheduled
-// refresh (up to the full TTL), surfacing as persistent 502s on the
-// providers / models / accounts / announcements endpoints.
-func supplierWebProxy(method, path string, jsonBody []byte) (int, []byte, error) {
-	tok, err := getSupplierWebToken()
+// proxy issues a WEB-token portal request and, if the portal rejects the
+// cached token with 401, re-logs in once and retries. Without this a token
+// invalidated out-of-band stays broken until the next scheduled refresh (up to
+// the full TTL), surfacing as persistent 502s.
+func (s *portalWebSession) proxy(method, path string, jsonBody []byte) (int, []byte, error) {
+	tok, err := s.getToken()
 	if err != nil {
 		return 0, nil, err
 	}
@@ -478,30 +487,32 @@ func supplierWebProxy(method, path string, jsonBody []byte) (int, []byte, error)
 	if err != nil || status != http.StatusUnauthorized {
 		return status, body, err
 	}
-	invalidateSupplierWebToken()
-	tok, err = getSupplierWebToken()
+	s.invalidate()
+	tok, err = s.getToken()
 	if err != nil {
 		return 0, nil, err
 	}
 	return supplierProxy(method, path, tok, jsonBody)
 }
 
-// startSupplierWebTokenRefresher logs in at startup and keeps the WEB token
-// fresh, re-logging in shortly before each expiry. No-op when not configured.
-func startSupplierWebTokenRefresher() {
-	if !supplierWebConfigured() {
-		return
-	}
+// startRefresher logs in at startup and keeps the WEB token fresh, re-logging
+// in shortly before each expiry. Idles while not configured (the CC Max login
+// can be configured later from the settings page).
+func (s *portalWebSession) startRefresher() {
 	go func() {
 		for {
-			if _, err := getSupplierWebToken(); err != nil {
-				log.Printf("[supplier] web token login failed: %v", err)
+			if !s.configured() {
 				time.Sleep(60 * time.Second)
 				continue
 			}
-			supplierWebMu.Lock()
-			sleep := time.Until(supplierWebExpiry)
-			supplierWebMu.Unlock()
+			if _, err := s.getToken(); err != nil {
+				log.Printf("[%s] web token login failed: %v", s.name, err)
+				time.Sleep(60 * time.Second)
+				continue
+			}
+			s.mu.Lock()
+			sleep := time.Until(s.expiry)
+			s.mu.Unlock()
 			if sleep < 30*time.Second {
 				sleep = 30 * time.Second
 			}
@@ -517,7 +528,7 @@ func handleSupplierProviders(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier account portal not configured"})
 		return
 	}
-	status, body, err := supplierWebProxy(http.MethodGet, "/supplier-account/api/providers", nil)
+	status, body, err := supplierWeb.proxy(http.MethodGet, "/supplier-account/api/providers", nil)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
@@ -558,7 +569,7 @@ func handleSupplierModels(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier account portal not configured"})
 		return
 	}
-	status, body, err := supplierWebProxy(http.MethodGet, "/supplier-account/api/models", nil)
+	status, body, err := supplierWeb.proxy(http.MethodGet, "/supplier-account/api/models", nil)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
@@ -778,18 +789,38 @@ type portalAccount struct {
 	CreatedAt    string `json:"created_at"`
 }
 
-// fetchSupplierPortalAccounts pages through the WEB `/supplier/accounts`
-// endpoint and returns the full roster the logged-in supplier can see.
+// fetchSupplierPortalAccounts returns the full 账号上号 roster the logged-in
+// supplier can see.
 func fetchSupplierPortalAccounts() ([]portalAccount, error) {
+	raws, err := fetchPortalAccountsRaw(supplierWeb, "")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]portalAccount, 0, len(raws))
+	for _, raw := range raws {
+		var a portalAccount
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return nil, fmt.Errorf("unexpected accounts response: %w", err)
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// fetchPortalAccountsRaw pages through the WEB `/supplier/accounts` endpoint
+// for a login session (optionally filtered by provider) and returns the raw
+// rows. Raw because claude rows carry extra cpa_* fields the 账号上号 shape
+// does not model.
+func fetchPortalAccountsRaw(s *portalWebSession, provider string) ([]json.RawMessage, error) {
 	const pageSize = 100
-	out := make([]portalAccount, 0, pageSize)
+	out := make([]json.RawMessage, 0, pageSize)
 	// Cap pages as a runaway guard (100 pages = 10k accounts).
 	for page := 1; page <= 100; page++ {
 		path := fmt.Sprintf(
-			"/supplier-account/api/supplier/accounts?status=all&keyword=&page=%d&page_size=%d&provider=&model=&account_type=",
-			page, pageSize,
+			"/supplier-account/api/supplier/accounts?status=all&keyword=&page=%d&page_size=%d&provider=%s&model=&account_type=",
+			page, pageSize, url.QueryEscape(provider),
 		)
-		status, body, err := supplierWebProxy(http.MethodGet, path, nil)
+		status, body, err := s.proxy(http.MethodGet, path, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -797,7 +828,7 @@ func fetchSupplierPortalAccounts() ([]portalAccount, error) {
 			return nil, errors.New(supplierErr(body))
 		}
 		var parsed struct {
-			List []portalAccount `json:"list"`
+			List []json.RawMessage `json:"list"`
 		}
 		if err := json.Unmarshal(body, &parsed); err != nil {
 			return nil, fmt.Errorf("unexpected accounts response: %w", err)
@@ -829,7 +860,7 @@ func parsePortalCreatedAt(s string, fallback int64) int64 {
 }
 
 func handleSupplierAccountSync(c *gin.Context) {
-	if !supplierWebConfigured() {
+	if !supplierWeb.configured() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier account portal not configured"})
 		return
 	}
@@ -921,15 +952,15 @@ func handleSupplierAccountSetQuota(c *gin.Context) {
 // ---- List local accounts (scoped by role) ----
 
 type supplierAccountRow struct {
-	ID              int64  `json:"id"`
-	RemoteAccountID int64  `json:"remote_account_id"`
-	Provider        string `json:"provider"`
-	Models          string `json:"models"`
-	Alias           string `json:"alias"`
-	AccountType     int    `json:"account_type"`
-	Remark          string `json:"remark"`
-	KeyLast8        string `json:"key_last8"`
-	Studio          string `json:"studio"`
+	ID              int64   `json:"id"`
+	RemoteAccountID int64   `json:"remote_account_id"`
+	Provider        string  `json:"provider"`
+	Models          string  `json:"models"`
+	Alias           string  `json:"alias"`
+	AccountType     int     `json:"account_type"`
+	Remark          string  `json:"remark"`
+	KeyLast8        string  `json:"key_last8"`
+	Studio          string  `json:"studio"`
 	UploadedBy      int64   `json:"uploaded_by"`
 	Username        string  `json:"username,omitempty"`
 	CreatedAt       int64   `json:"created_at"`
@@ -1063,7 +1094,7 @@ func supplierBillStartDate(startUnix int64) string {
 // supplierBillCostRMB sums each account's offline-billed cost (RMB) over
 // [startDs, endDs] (YYYY-MM-DD), batching the 100-id-per-query cap. Cost is
 // keyed by the portal account id (== remote_account_id).
-func supplierBillCostRMB(ids []int64, startDs, endDs string) (map[int64]float64, error) {
+func supplierBillCostRMB(token string, ids []int64, startDs, endDs string) (map[int64]float64, error) {
 	out := make(map[int64]float64, len(ids))
 	for start := 0; start < len(ids); start += 100 {
 		end := start + 100
@@ -1075,7 +1106,7 @@ func supplierBillCostRMB(ids []int64, startDs, endDs string) (map[int64]float64,
 			"start_ds":    startDs,
 			"end_ds":      endDs,
 		})
-		status, body, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/bill/query", effectiveOpenAPIToken(), reqBytes)
+		status, body, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/bill/query", token, reqBytes)
 		if err != nil {
 			return nil, err
 		}
@@ -1170,6 +1201,18 @@ func handleSupplierMetrics(c *gin.Context) {
 		return
 	}
 
+	merged, err := supplierQueryMetrics(effectiveOpenAPIToken(), ids, aliasToRemoteID, body.BeginTime, body.EndTime)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"accounts": merged})
+}
+
+// supplierQueryMetrics fetches realtime metrics for the given portal account
+// ids with an OpenAPI token, re-keys rows onto the queried ids (via alias) and
+// fills cost from the offline bill. Shared by 账号上号 and CC Max.
+func supplierQueryMetrics(token string, ids []int64, aliasToRemoteID map[string]int64, beginTime, endTime string) ([]supplierMetric, error) {
 	// The portal caps a query at 100 account ids; batch and merge.
 	merged := make([]supplierMetric, 0, len(ids))
 	for start := 0; start < len(ids); start += 100 {
@@ -1180,25 +1223,22 @@ func handleSupplierMetrics(c *gin.Context) {
 		chunk := ids[start:end]
 		reqBytes, _ := json.Marshal(map[string]any{
 			"account_ids": chunk,
-			"begin_time":  body.BeginTime,
-			"end_time":    body.EndTime,
+			"begin_time":  beginTime,
+			"end_time":    endTime,
 			"aggregate":   false,
 		})
-		status, respBody, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/metrics/query", effectiveOpenAPIToken(), reqBytes)
+		status, respBody, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/metrics/query", token, reqBytes)
 		if err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-			return
+			return nil, err
 		}
 		if status < 200 || status >= 300 {
-			c.JSON(http.StatusBadGateway, gin.H{"error": supplierErr(respBody)})
-			return
+			return nil, errors.New(supplierErr(respBody))
 		}
 		var parsed struct {
 			Accounts []supplierMetric `json:"accounts"`
 		}
 		if err := json.Unmarshal(respBody, &parsed); err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "unexpected upstream response"})
-			return
+			return nil, errors.New("unexpected upstream response")
 		}
 		merged = append(merged, parsed.Accounts...)
 	}
@@ -1218,9 +1258,9 @@ func handleSupplierMetrics(c *gin.Context) {
 	// line up exactly with the realtime request window — this is the intended
 	// tradeoff. Bill rows are keyed by remote_account_id, matching merged[i].AID.
 	// A bill failure only drops cost (nil), leaving the realtime stats intact.
-	startDs := supplierBillStartDate(parsePortalCreatedAt(body.BeginTime, time.Now().Unix()))
-	endDs := supplierBillDate(parsePortalCreatedAt(body.EndTime, time.Now().Unix()))
-	if billCost, err := supplierBillCostRMB(ids, startDs, endDs); err != nil {
+	startDs := supplierBillStartDate(parsePortalCreatedAt(beginTime, time.Now().Unix()))
+	endDs := supplierBillDate(parsePortalCreatedAt(endTime, time.Now().Unix()))
+	if billCost, err := supplierBillCostRMB(token, ids, startDs, endDs); err != nil {
 		log.Printf("[supplier] bill cost query failed, cost omitted: %v", err)
 		for i := range merged {
 			merged[i].Cost = nil
@@ -1236,7 +1276,7 @@ func handleSupplierMetrics(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{"accounts": merged})
+	return merged, nil
 }
 
 // ---- Admin settings: OpenAPI token + provider visibility ----
@@ -1479,7 +1519,7 @@ type supplierAnnouncement struct {
 // never sees the same announcement twice. Leader-gated; no-op when the portal WEB
 // credentials aren't configured.
 func startSupplierAnnouncementLoop() {
-	if supplierAccountBaseURL == "" || !supplierWebConfigured() {
+	if supplierAccountBaseURL == "" || !supplierWeb.configured() {
 		return
 	}
 	go func() {
@@ -1514,7 +1554,7 @@ func runSupplierAnnouncementPush() {
 	if webhook == "" {
 		return
 	}
-	status, body, err := supplierWebProxy(http.MethodGet, "/supplier-account/api/supplier/announcements", nil)
+	status, body, err := supplierWeb.proxy(http.MethodGet, "/supplier-account/api/supplier/announcements", nil)
 	if err != nil {
 		log.Printf("[supplier-announce] fetch: %v", err)
 		return
@@ -1647,5 +1687,5 @@ func runSupplierQuotaCheck() {
 func supplierLifetimeCostRMB(ids []int64, minCreated int64) (map[int64]float64, error) {
 	startDs := supplierBillStartDate(minCreated)
 	endDs := supplierBillDate(time.Now().Unix())
-	return supplierBillCostRMB(ids, startDs, endDs)
+	return supplierBillCostRMB(effectiveOpenAPIToken(), ids, startDs, endDs)
 }
