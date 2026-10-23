@@ -328,8 +328,8 @@ export default function CCMaxAccounts() {
                     '注册地',
                     '套餐结束',
                     ...(isAdmin ? ['号商'] : []),
-                    '5 小时用量',
-                    '周用量',
+                    '5 小时窗口已用',
+                    '7 天窗口已用',
                     '输入 / 输出 tokens',
                     '消耗 (USD)',
                     '上号时间',
@@ -353,8 +353,8 @@ export default function CCMaxAccounts() {
                       <td className="px-3 py-1.5">{r.register_location}</td>
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">{r.plan_end_time}</td>
                       {isAdmin && <td className="px-3 py-1.5">{r.username || '—'}</td>}
-                      <td className="px-3 py-1.5 tnum">{r.five_hour_used_percent}%</td>
-                      <td className="px-3 py-1.5 tnum">{r.week_used_percent}%</td>
+                      <td className="px-3 py-1.5 tnum">{(r.five_hour_used_percent * 100).toFixed(2)}%</td>
+                      <td className="px-3 py-1.5 tnum">{(r.week_used_percent * 100).toFixed(2)}%</td>
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">
                         {r.input_tokens.toLocaleString()} / {r.output_tokens.toLocaleString()}
                       </td>

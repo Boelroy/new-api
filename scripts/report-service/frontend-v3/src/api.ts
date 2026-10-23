@@ -2549,6 +2549,7 @@ export type CCMaxAccount = {
   // Uploader username; admin only.
   username?: string
   // Cumulative usage as the portal reports it on the roster. cost_rmb is RMB.
+  // The *_used_percent values are fractions (0.04 = 4%) despite the name.
   input_tokens: number
   output_tokens: number
   cost_rmb: number

@@ -623,7 +623,8 @@ type ccmaxAccountRow struct {
 	CreatedAt        string `json:"created_at"`
 	Username         string `json:"username,omitempty"`
 	// Usage as the portal reports it on the roster (extra.cpa_usage); the
-	// OpenAPI metrics endpoint does not cover claude accounts. Cost is RMB.
+	// OpenAPI metrics endpoint does not cover claude accounts. Cost is RMB; the
+	// utilization values are fractions (0.04 = 4%), passed through unscaled.
 	InputTokens         int64   `json:"input_tokens"`
 	OutputTokens        int64   `json:"output_tokens"`
 	CostRMB             float64 `json:"cost_rmb"`
