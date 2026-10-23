@@ -25,6 +25,7 @@ import { getCachedRole, loadRole } from '../auth'
 const EMPTY_PROXY: CCMaxProxyInput = { url: '', host: '', port: '', username: '', password: '' }
 const EMPTY_FORM: CCMaxSubmitForm = {
   plan: '',
+  account: '',
   password: '',
   register_location: '',
   register_time: '',
@@ -300,8 +301,12 @@ export default function CCMaxAccounts() {
               </Select>
             </label>
             <label className="space-y-1.5">
-              <span className="text-xs font-medium text-muted-foreground">账号密码（账号为授权邮箱）</span>
-              <Input type="password" autoComplete="new-password" {...field('password')} />
+              <span className="text-xs font-medium text-muted-foreground">账号（登录 ID / 邮箱，不能包含空格）</span>
+              <Input autoComplete="off" placeholder="请输入账号" {...field('account')} />
+            </label>
+            <label className="space-y-1.5">
+              <span className="text-xs font-medium text-muted-foreground">密码</span>
+              <Input type="password" autoComplete="new-password" placeholder="请输入密码" {...field('password')} />
             </label>
             <label className="space-y-1.5">
               <span className="text-xs font-medium text-muted-foreground">注册地</span>

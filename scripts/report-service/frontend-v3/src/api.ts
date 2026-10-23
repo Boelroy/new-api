@@ -2531,10 +2531,10 @@ export type CCMaxOAuthStart = {
 }
 
 // Required portal fields for a claude 上号 besides the credential (filled
-// server-side from the OAuth result; account = the OAuth email). Dates are
-// YYYY-MM-DD.
+// server-side from the OAuth result). Dates are YYYY-MM-DD.
 export type CCMaxSubmitForm = {
   plan: string
+  account: string
   password: string
   register_location: string
   register_time: string

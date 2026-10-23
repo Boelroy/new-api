@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
 )
@@ -303,9 +304,10 @@ type ccmaxCredential struct {
 
 // ccmaxSubmitForm is the portal's required claude 上号 fields besides the
 // credential (POST /openapi/claude/accounts). Optional portal fields are not
-// offered. account is always the OAuth email.
+// offered.
 type ccmaxSubmitForm struct {
 	Plan             string `json:"plan"`
+	Account          string `json:"account"`
 	Password         string `json:"password"`
 	RegisterLocation string `json:"register_location"`
 	RegisterTime     string `json:"register_time"`
@@ -317,9 +319,13 @@ type ccmaxSubmitForm struct {
 // is rejected before the single-use authorization code is spent.
 func (f *ccmaxSubmitForm) validate() error {
 	f.Plan = strings.TrimSpace(f.Plan)
+	f.Account = strings.TrimSpace(f.Account)
 	f.RegisterLocation = strings.TrimSpace(f.RegisterLocation)
-	if f.Plan == "" || f.Password == "" || f.RegisterLocation == "" {
-		return errors.New("套餐、密码、注册地均为必填")
+	if f.Plan == "" || f.Account == "" || f.Password == "" || f.RegisterLocation == "" {
+		return errors.New("套餐、账号、密码、注册地均为必填")
+	}
+	if strings.ContainsFunc(f.Account, unicode.IsSpace) {
+		return errors.New("账号不能包含空格")
 	}
 	for _, d := range []*string{&f.RegisterTime, &f.PlanStartTime, &f.PlanEndTime} {
 		*d = strings.TrimSpace(*d)
@@ -405,7 +411,7 @@ func handleCCMaxSubmit(c *gin.Context) {
 
 	reqBytes, _ := json.Marshal(map[string]any{
 		"plan":              body.Plan,
-		"account":           cred.Email,
+		"account":           body.Account,
 		"password":          body.Password,
 		"auth_json":         cred,
 		"register_location": body.RegisterLocation,
@@ -438,7 +444,7 @@ func handleCCMaxSubmit(c *gin.Context) {
 		`INSERT INTO rs_ccmax_account (uploaded_by, studio, remote_account_id, alias, account, plan, created_at)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7)
 		 ON CONFLICT (remote_account_id) DO NOTHING`,
-		uid, studio, upstream.ID, upstream.Alias, cred.Email, body.Plan, time.Now().Unix(),
+		uid, studio, upstream.ID, upstream.Alias, body.Account, body.Plan, time.Now().Unix(),
 	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record account: " + err.Error()})
 		return
