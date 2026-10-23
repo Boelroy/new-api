@@ -80,5 +80,5 @@ func TestParseCCMaxPortalRow(t *testing.T) {
 	assert.Equal(t, "US", row.RegisterLocation)
 	assert.Equal(t, "2026-11-22", row.PlanEndTime)
 	assert.Equal(t, "claude-长河理想-20261023001", row.rawAlias)
-	assert.NotContains(t, row.Alias, "长河理想")
+	assert.Equal(t, "claude-20261023001", row.Alias)
 }

@@ -449,7 +449,7 @@ func handleCCMaxSubmit(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record account: " + err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"id": upstream.ID, "alias": maskSupplierAlias(upstream.Alias), "email": cred.Email, "msg": cmp.Or(upstream.Msg, "提交成功")})
+	c.JSON(http.StatusOK, gin.H{"id": upstream.ID, "alias": ccmaxDisplayAlias(upstream.Alias), "email": cred.Email, "msg": cmp.Or(upstream.Msg, "提交成功")})
 }
 
 // ccmaxExchangeCode trades the pasted authorization code for tokens through
@@ -675,6 +675,17 @@ func ccmaxScopedAccounts(c *gin.Context) ([]ccmaxAccountRow, error) {
 	return out, nil
 }
 
+// ccmaxDisplayAlias drops the supplier/company segment from a portal alias
+// ("claude-<supplier>-<seq>" → "claude-<seq>") instead of masking it, so the
+// portal-side company name never shows on the CC Max page.
+func ccmaxDisplayAlias(alias string) string {
+	parts := strings.Split(alias, "-")
+	if len(parts) < 3 {
+		return alias
+	}
+	return parts[0] + "-" + parts[len(parts)-1]
+}
+
 // parseCCMaxPortalRow maps one WEB /supplier/accounts claude row onto the page
 // row. Claude rows keep the 上号 form in auth_config (a JSON string), the
 // lifecycle status in ext_status (status is a numeric enable flag), and the
@@ -704,7 +715,7 @@ func parseCCMaxPortalRow(raw json.RawMessage) (ccmaxAccountRow, error) {
 	}
 	return ccmaxAccountRow{
 		ID:               r.ID,
-		Alias:            maskSupplierAlias(r.AccountAlias),
+		Alias:            ccmaxDisplayAlias(r.AccountAlias),
 		Account:          cmp.Or(form.Account, r.ProjectID),
 		Status:           r.ExtStatus,
 		Plan:             cmp.Or(form.Plan, r.Model),
