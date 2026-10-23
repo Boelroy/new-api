@@ -39,6 +39,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// Upstream (portal / Anthropic / proxy) failures answer 424, not 502: the
+// site sits behind Cloudflare, which swaps origin 502 bodies for its own HTML
+// error page and would hide the portal's rejection reason from the supplier.
+
 // OAuth endpoints / client parameters of the Claude Code client.
 const (
 	ccmaxAuthURL     = "https://claude.ai/oauth/authorize"
@@ -231,7 +235,7 @@ func handleCCMaxOAuthStart(c *gin.Context) {
 	}
 	exit, err := ccmaxProbeProxy(client)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "socks5 代理不通: " + err.Error()})
+		c.JSON(http.StatusFailedDependency, gin.H{"error": "socks5 代理不通: " + err.Error()})
 		return
 	}
 
@@ -397,7 +401,7 @@ func handleCCMaxSubmit(c *gin.Context) {
 		if err != nil {
 			// The code is spent (or was never valid); this session is dead.
 			_, _ = db.Exec(`DELETE FROM rs_ccmax_oauth_session WHERE state=$1`, state)
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "session_gone": true})
+			c.JSON(http.StatusFailedDependency, gin.H{"error": err.Error(), "session_gone": true})
 			return
 		}
 		raw, _ := json.Marshal(cred)
@@ -421,11 +425,11 @@ func handleCCMaxSubmit(c *gin.Context) {
 	})
 	status, respBody, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/claude/accounts", ccmaxOpenAPIToken(), reqBytes)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "email": cred.Email})
+		c.JSON(http.StatusFailedDependency, gin.H{"error": err.Error(), "email": cred.Email})
 		return
 	}
 	if status < 200 || status >= 300 {
-		c.JSON(http.StatusBadGateway, gin.H{"error": supplierErr(respBody), "email": cred.Email})
+		c.JSON(http.StatusFailedDependency, gin.H{"error": supplierErr(respBody), "email": cred.Email})
 		return
 	}
 	var upstream struct {
@@ -434,7 +438,7 @@ func handleCCMaxSubmit(c *gin.Context) {
 		Msg   string `json:"msg"`
 	}
 	if err := json.Unmarshal(respBody, &upstream); err != nil || upstream.ID == 0 {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "unexpected upstream response: " + strings.TrimSpace(string(respBody))})
+		c.JSON(http.StatusFailedDependency, gin.H{"error": "unexpected upstream response: " + strings.TrimSpace(string(respBody))})
 		return
 	}
 	_, _ = db.Exec(`DELETE FROM rs_ccmax_oauth_session WHERE state=$1`, state)
@@ -570,7 +574,7 @@ func handleCCMaxOptions(c *gin.Context) {
 		err = errors.New(supplierErr(body))
 	}
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		c.JSON(http.StatusFailedDependency, gin.H{"error": err.Error()})
 		return
 	}
 	var models struct {
@@ -592,7 +596,7 @@ func handleCCMaxOptions(c *gin.Context) {
 		err = errors.New(supplierErr(body))
 	}
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		c.JSON(http.StatusFailedDependency, gin.H{"error": err.Error()})
 		return
 	}
 	var opts struct {
@@ -618,8 +622,13 @@ type ccmaxAccountRow struct {
 	PlanEndTime      string `json:"plan_end_time"`
 	CreatedAt        string `json:"created_at"`
 	Username         string `json:"username,omitempty"`
-
-	rawAlias string
+	// Usage as the portal reports it on the roster (extra.cpa_usage); the
+	// OpenAPI metrics endpoint does not cover claude accounts. Cost is RMB.
+	InputTokens         int64   `json:"input_tokens"`
+	OutputTokens        int64   `json:"output_tokens"`
+	CostRMB             float64 `json:"cost_rmb"`
+	FiveHourUsedPercent float64 `json:"five_hour_used_percent"`
+	WeekUsedPercent     float64 `json:"week_used_percent"`
 }
 
 // ccmaxScopedAccounts loads the CC Max login's claude roster from the portal
@@ -699,6 +708,7 @@ func parseCCMaxPortalRow(raw json.RawMessage) (ccmaxAccountRow, error) {
 		Model        string `json:"model"`
 		ProjectID    string `json:"project_id"`
 		AuthConfig   string `json:"auth_config"`
+		Extra        string `json:"extra"`
 		CreatedAt    string `json:"created_at"`
 	}
 	if err := json.Unmarshal(raw, &r); err != nil {
@@ -713,16 +723,35 @@ func parseCCMaxPortalRow(raw json.RawMessage) (ccmaxAccountRow, error) {
 	if r.AuthConfig != "" {
 		_ = json.Unmarshal([]byte(r.AuthConfig), &form)
 	}
+	var extra struct {
+		CpaUsage struct {
+			Cost         float64 `json:"cost"`
+			InputTokens  int64   `json:"input_tokens"`
+			OutputTokens int64   `json:"output_tokens"`
+			Utilization  struct {
+				WeekUsedPercent     float64 `json:"week_used_percent"`
+				FiveHourUsedPercent float64 `json:"five_hour_used_percent"`
+			} `json:"utilization"`
+		} `json:"cpa_usage"`
+	}
+	if r.Extra != "" {
+		_ = json.Unmarshal([]byte(r.Extra), &extra)
+	}
+	usage := extra.CpaUsage
 	return ccmaxAccountRow{
-		ID:               r.ID,
-		Alias:            ccmaxDisplayAlias(r.AccountAlias),
-		Account:          cmp.Or(form.Account, r.ProjectID),
-		Status:           r.ExtStatus,
-		Plan:             cmp.Or(form.Plan, r.Model),
-		RegisterLocation: form.RegisterLocation,
-		PlanEndTime:      form.PlanEndTime,
-		CreatedAt:        r.CreatedAt,
-		rawAlias:         r.AccountAlias,
+		InputTokens:         usage.InputTokens,
+		OutputTokens:        usage.OutputTokens,
+		CostRMB:             usage.Cost,
+		FiveHourUsedPercent: usage.Utilization.FiveHourUsedPercent,
+		WeekUsedPercent:     usage.Utilization.WeekUsedPercent,
+		ID:                  r.ID,
+		Alias:               ccmaxDisplayAlias(r.AccountAlias),
+		Account:             cmp.Or(form.Account, r.ProjectID),
+		Status:              r.ExtStatus,
+		Plan:                cmp.Or(form.Plan, r.Model),
+		RegisterLocation:    form.RegisterLocation,
+		PlanEndTime:         form.PlanEndTime,
+		CreatedAt:           r.CreatedAt,
 	}, nil
 }
 
@@ -733,51 +762,10 @@ func handleCCMaxAccountList(c *gin.Context) {
 	}
 	rows, err := ccmaxScopedAccounts(c)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		c.JSON(http.StatusFailedDependency, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"accounts": rows, "fx_rate": supplierFxRate()})
-}
-
-// handleCCMaxMetrics returns realtime usage + offline-bill cost for the
-// caller's visible CC Max accounts (same portal endpoints as 账号上号, with the
-// CC Max OpenAPI token).
-func handleCCMaxMetrics(c *gin.Context) {
-	if !ccmaxWeb.configured() || !ccmaxOpenAPIConfigured() {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "CC Max portal login / OpenAPI token not configured"})
-		return
-	}
-	var body struct {
-		BeginTime string `json:"begin_time"`
-		EndTime   string `json:"end_time"`
-	}
-	if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.BeginTime) == "" || strings.TrimSpace(body.EndTime) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "begin_time and end_time are required"})
-		return
-	}
-	rows, err := ccmaxScopedAccounts(c)
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-		return
-	}
-	if len(rows) == 0 {
-		c.JSON(http.StatusOK, gin.H{"accounts": []supplierMetric{}})
-		return
-	}
-	ids := make([]int64, 0, len(rows))
-	aliasToID := make(map[string]int64, len(rows))
-	for _, r := range rows {
-		ids = append(ids, r.ID)
-		if r.rawAlias != "" {
-			aliasToID[r.rawAlias] = r.ID
-		}
-	}
-	merged, err := supplierQueryMetrics(ccmaxOpenAPIToken(), ids, aliasToID, strings.TrimSpace(body.BeginTime), strings.TrimSpace(body.EndTime))
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"accounts": merged})
 }
 
 // ---- CC Max portal credentials: env bootstrap, report_config override ----

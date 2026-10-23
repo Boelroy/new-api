@@ -11,7 +11,6 @@ import {
   type CCMaxProxyInput,
   type CCMaxSettings,
   type CCMaxSubmitForm,
-  type SupplierMetric,
 } from '../api'
 import { getCachedRole, loadRole } from '../auth'
 
@@ -58,19 +57,6 @@ const STATUS_LABELS: Record<string, string> = {
   sync_failed: '同步失败',
 }
 
-// The portal metrics endpoint takes "YYYY-MM-DD HH:mm:ss" in local (UTC+8) time
-// and caps the span at 7 days.
-function fmtLocal(d: Date): string {
-  const p = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
-}
-
-const RANGES = [
-  { key: 'today', label: '今日', days: 0 },
-  { key: '3d', label: '近 3 天', days: 3 },
-  { key: '7d', label: '近 7 天', days: 7 },
-]
-
 export default function CCMaxAccounts() {
   const [proxy, setProxy] = useState<CCMaxProxyInput>(EMPTY_PROXY)
   const [session, setSession] = useState<CCMaxOAuthStart | null>(null)
@@ -83,9 +69,7 @@ export default function CCMaxAccounts() {
   const [rows, setRows] = useState<CCMaxAccount[]>([])
   const [fxRate, setFxRate] = useState(7.2)
   const [loaded, setLoaded] = useState(false)
-  const [range, setRange] = useState('today')
-  const [metrics, setMetrics] = useState<Record<number, SupplierMetric>>({})
-  const [loadingMetrics, setLoadingMetrics] = useState(false)
+  const [loading, setLoading] = useState(false)
   const [role, setRole] = useState<number | null>(getCachedRole())
 
   useEffect(() => {
@@ -95,6 +79,7 @@ export default function CCMaxAccounts() {
   const isAdmin = role != null && role >= ROLE_ADMIN
 
   const load = useCallback(async () => {
+    setLoading(true)
     try {
       const res = await api.ccmaxAccounts()
       setRows(res.accounts ?? [])
@@ -103,32 +88,12 @@ export default function CCMaxAccounts() {
       toast.error(e)
     } finally {
       setLoaded(true)
-    }
-  }, [])
-
-  const loadMetrics = useCallback(async (rangeKey: string) => {
-    const days = RANGES.find((r) => r.key === rangeKey)?.days ?? 0
-    const now = new Date()
-    const begin = new Date(now)
-    if (days === 0) begin.setHours(0, 0, 0, 0)
-    // Stay a minute inside the portal's 7-day cap.
-    else begin.setTime(now.getTime() - days * 86400_000 + 60_000)
-    setLoadingMetrics(true)
-    try {
-      const res = await api.ccmaxMetrics({ begin_time: fmtLocal(begin), end_time: fmtLocal(now) })
-      const map: Record<number, SupplierMetric> = {}
-      for (const m of res.accounts ?? []) map[m.aid] = m
-      setMetrics(map)
-    } catch (e) {
-      toast.error(e)
-    } finally {
-      setLoadingMetrics(false)
+      setLoading(false)
     }
   }, [])
 
   useEffect(() => {
     void load()
-    void loadMetrics('today')
     api
       .ccmaxOptions()
       .then((res) => {
@@ -136,7 +101,7 @@ export default function CCMaxAccounts() {
         setLocations(res.register_locations ?? [])
       })
       .catch((e) => toast.error(e))
-  }, [load, loadMetrics])
+  }, [load])
 
   async function start() {
     if (!proxy.url.trim() && (!proxy.host.trim() || !proxy.port.trim())) {
@@ -343,29 +308,8 @@ export default function CCMaxAccounts() {
           <div className="text-sm font-semibold">已上号账号</div>
           <div className="flex items-center gap-2 text-[11px] text-muted-foreground tnum">
             <span>共 {rows.length} 个</span>
-            <Select
-              value={range}
-              onChange={(e) => {
-                setRange(e.target.value)
-                void loadMetrics(e.target.value)
-              }}
-            >
-              {RANGES.map((r) => (
-                <option key={r.key} value={r.key}>
-                  用量：{r.label}
-                </option>
-              ))}
-            </Select>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={loadingMetrics}
-              onClick={() => {
-                void load()
-                void loadMetrics(range)
-              }}
-            >
-              {loadingMetrics ? '刷新中…' : '刷新'}
+            <Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>
+              {loading ? '刷新中…' : '刷新'}
             </Button>
           </div>
         </div>
@@ -384,9 +328,9 @@ export default function CCMaxAccounts() {
                     '注册地',
                     '套餐结束',
                     ...(isAdmin ? ['号商'] : []),
-                    '请求数',
+                    '5 小时用量',
+                    '周用量',
                     '输入 / 输出 tokens',
-                    '成功率',
                     '消耗 (USD)',
                     '上号时间',
                   ].map((h) => (
@@ -398,7 +342,6 @@ export default function CCMaxAccounts() {
               </thead>
               <tbody>
                 {rows.map((r) => {
-                  const m = metrics[r.id]
                   return (
                     <tr key={r.id} className="border-t border-border">
                       <td className="px-3 py-1.5 font-mono">{r.account}</td>
@@ -410,14 +353,12 @@ export default function CCMaxAccounts() {
                       <td className="px-3 py-1.5">{r.register_location}</td>
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">{r.plan_end_time}</td>
                       {isAdmin && <td className="px-3 py-1.5">{r.username || '—'}</td>}
-                      <td className="px-3 py-1.5 tnum">{m?.requests ?? '—'}</td>
+                      <td className="px-3 py-1.5 tnum">{r.five_hour_used_percent}%</td>
+                      <td className="px-3 py-1.5 tnum">{r.week_used_percent}%</td>
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">
-                        {m ? `${m.prompt_tokens ?? 0} / ${m.completion_tokens ?? 0}` : '—'}
+                        {r.input_tokens.toLocaleString()} / {r.output_tokens.toLocaleString()}
                       </td>
-                      <td className="px-3 py-1.5 tnum">
-                        {m?.success_rate != null ? `${m.success_rate}%` : '—'}
-                      </td>
-                      <td className="px-3 py-1.5 tnum">{m?.cost != null ? `$${(m.cost / fxRate).toFixed(2)}` : '—'}</td>
+                      <td className="px-3 py-1.5 tnum">${(r.cost_rmb / fxRate).toFixed(2)}</td>
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">{r.created_at}</td>
                     </tr>
                   )

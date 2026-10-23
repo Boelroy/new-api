@@ -2218,13 +2218,6 @@ export const api = {
 
   ccmaxAccounts: () => request<{ accounts: CCMaxAccount[]; fx_rate: number }>('/api/ccmax/accounts'),
 
-  ccmaxMetrics: (payload: { begin_time: string; end_time: string }) =>
-    request<{ accounts: SupplierMetric[] }>('/api/ccmax/metrics', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    }),
-
   getCCMaxSettings: () => request<CCMaxSettings>('/api/ccmax/settings'),
 
   setCCMaxSettings: (payload: { username?: string; password?: string; openapi_token?: string }) =>
@@ -2555,6 +2548,12 @@ export type CCMaxAccount = {
   created_at: string
   // Uploader username; admin only.
   username?: string
+  // Cumulative usage as the portal reports it on the roster. cost_rmb is RMB.
+  input_tokens: number
+  output_tokens: number
+  cost_rmb: number
+  five_hour_used_percent: number
+  week_used_percent: number
 }
 
 export type CCMaxSettings = {
