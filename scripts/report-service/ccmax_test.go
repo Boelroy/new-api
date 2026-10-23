@@ -69,7 +69,7 @@ func TestParseCCMaxPortalRow(t *testing.T) {
 	raw := []byte(`{"a1_id":10784,"a1_status":"using","account_alias":"claude-长河理想-20261023001","account_type":2,` +
 		`"auth_config":"{\"account\":\"leonhuwe@gmail.com\",\"password\":\"x\",\"plan\":\"claude/cc-max-20x\",\"plan_end_time\":\"2026-11-22\",\"plan_start_time\":\"2026-10-23\",\"register_location\":\"US\",\"register_time\":\"2026-10-19\"}",` +
 		`"created_at":"2026-10-23 12:02","ext_status":"using",` +
-		`"extra":"{\"cpa_usage\": {\"cost\": 1.5, \"utilization\": {\"week_reset_at\": 1793113200, \"week_used_percent\": 12, \"five_hour_reset_at\": 1792746000, \"five_hour_used_percent\": 40.5}, \"input_tokens\": 1200, \"output_tokens\": 300}}",` +
+		`"extra":"{\"cpa_usage\": {\"cost\": 303731485, \"utilization\": {\"week_reset_at\": 1793113200, \"week_used_percent\": 12, \"five_hour_reset_at\": 1792746000, \"five_hour_used_percent\": 40.5}, \"input_tokens\": 1200, \"output_tokens\": 300}}",` +
 		`"has_cpa_auth_json":true,"id":261817,"is_locked":0,` +
 		`"model":"claude/cc-max-20x","models":[{"name":"claude/cc-max-20x","usable":true}],"project_id":"leonhuwe@gmail.com",` +
 		`"provider":"claude","status":1,"supplier_id":221,"supplier_name":"长河理想"}`)
@@ -84,7 +84,7 @@ func TestParseCCMaxPortalRow(t *testing.T) {
 	assert.Equal(t, "claude-20261023001", row.Alias)
 	assert.Equal(t, int64(1200), row.InputTokens)
 	assert.Equal(t, int64(300), row.OutputTokens)
-	assert.Equal(t, 1.5, row.CostRMB)
+	assert.InDelta(t, 303.731485, row.CostRMB, 1e-9)
 	assert.Equal(t, 40.5, row.FiveHourUsedPercent)
 	assert.Equal(t, 12.0, row.WeekUsedPercent)
 }

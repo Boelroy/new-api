@@ -623,8 +623,9 @@ type ccmaxAccountRow struct {
 	CreatedAt        string `json:"created_at"`
 	Username         string `json:"username,omitempty"`
 	// Usage as the portal reports it on the roster (extra.cpa_usage); the
-	// OpenAPI metrics endpoint does not cover claude accounts. Cost is RMB; the
-	// utilization values are fractions (0.04 = 4%), passed through unscaled.
+	// OpenAPI metrics endpoint does not cover claude accounts. The portal sends
+	// cost in micro-yuan (303731485 = ¥303.73); CostRMB is converted to yuan.
+	// The utilization values are fractions (0.04 = 4%), passed through unscaled.
 	InputTokens         int64   `json:"input_tokens"`
 	OutputTokens        int64   `json:"output_tokens"`
 	CostRMB             float64 `json:"cost_rmb"`
@@ -742,7 +743,7 @@ func parseCCMaxPortalRow(raw json.RawMessage) (ccmaxAccountRow, error) {
 	return ccmaxAccountRow{
 		InputTokens:         usage.InputTokens,
 		OutputTokens:        usage.OutputTokens,
-		CostRMB:             usage.Cost,
+		CostRMB:             usage.Cost / 1e6,
 		FiveHourUsedPercent: usage.Utilization.FiveHourUsedPercent,
 		WeekUsedPercent:     usage.Utilization.WeekUsedPercent,
 		ID:                  r.ID,

@@ -331,7 +331,7 @@ export default function CCMaxAccounts() {
                     '5 小时窗口已用',
                     '7 天窗口已用',
                     '输入 / 输出 tokens',
-                    '消耗 (USD)',
+                    `累计花费 (¥ / $，汇率 ${fxRate})`,
                     '上号时间',
                   ].map((h) => (
                     <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
@@ -358,7 +358,9 @@ export default function CCMaxAccounts() {
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">
                         {r.input_tokens.toLocaleString()} / {r.output_tokens.toLocaleString()}
                       </td>
-                      <td className="px-3 py-1.5 tnum">${(r.cost_rmb / fxRate).toFixed(2)}</td>
+                      <td className="whitespace-nowrap px-3 py-1.5 tnum">
+                        ¥{r.cost_rmb.toFixed(2)} / ${(r.cost_rmb / fxRate).toFixed(2)}
+                      </td>
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">{r.created_at}</td>
                     </tr>
                   )
