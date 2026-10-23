@@ -658,36 +658,14 @@ func ccmaxScopedAccounts(c *gin.Context) ([]ccmaxAccountRow, error) {
 
 	out := make([]ccmaxAccountRow, 0, len(raws))
 	for _, raw := range raws {
-		var r struct {
-			ID                  int64  `json:"id"`
-			AccountAlias        string `json:"account_alias"`
-			Account             string `json:"account"`
-			Status              string `json:"status"`
-			Plan                string `json:"plan"`
-			CpaPlan             string `json:"cpa_plan"`
-			RegisterLocation    string `json:"register_location"`
-			CpaRegisterLocation string `json:"cpa_register_location"`
-			PlanEndTime         string `json:"plan_end_time"`
-			CpaPlanEndTime      string `json:"cpa_plan_end_time"`
-			CreatedAt           string `json:"created_at"`
-		}
-		if json.Unmarshal(raw, &r) != nil {
+		row, err := parseCCMaxPortalRow(raw)
+		if err != nil {
+			log.Printf("[ccmax] skip unparseable portal account row: %v", err)
 			continue
 		}
-		username, owned := owners[r.ID]
+		username, owned := owners[row.ID]
 		if !isAdmin && !owned {
 			continue
-		}
-		row := ccmaxAccountRow{
-			ID:               r.ID,
-			Alias:            maskSupplierAlias(r.AccountAlias),
-			Account:          r.Account,
-			Status:           r.Status,
-			Plan:             cmp.Or(r.CpaPlan, r.Plan),
-			RegisterLocation: cmp.Or(r.CpaRegisterLocation, r.RegisterLocation),
-			PlanEndTime:      cmp.Or(r.CpaPlanEndTime, r.PlanEndTime),
-			CreatedAt:        r.CreatedAt,
-			rawAlias:         r.AccountAlias,
 		}
 		if isAdmin {
 			row.Username = username
@@ -695,6 +673,46 @@ func ccmaxScopedAccounts(c *gin.Context) ([]ccmaxAccountRow, error) {
 		out = append(out, row)
 	}
 	return out, nil
+}
+
+// parseCCMaxPortalRow maps one WEB /supplier/accounts claude row onto the page
+// row. Claude rows keep the 上号 form in auth_config (a JSON string), the
+// lifecycle status in ext_status (status is a numeric enable flag), and the
+// login in project_id / plan in model as fallbacks. Credential fields are
+// never read.
+func parseCCMaxPortalRow(raw json.RawMessage) (ccmaxAccountRow, error) {
+	var r struct {
+		ID           int64  `json:"id"`
+		AccountAlias string `json:"account_alias"`
+		ExtStatus    string `json:"ext_status"`
+		Model        string `json:"model"`
+		ProjectID    string `json:"project_id"`
+		AuthConfig   string `json:"auth_config"`
+		CreatedAt    string `json:"created_at"`
+	}
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return ccmaxAccountRow{}, err
+	}
+	var form struct {
+		Account          string `json:"account"`
+		Plan             string `json:"plan"`
+		RegisterLocation string `json:"register_location"`
+		PlanEndTime      string `json:"plan_end_time"`
+	}
+	if r.AuthConfig != "" {
+		_ = json.Unmarshal([]byte(r.AuthConfig), &form)
+	}
+	return ccmaxAccountRow{
+		ID:               r.ID,
+		Alias:            maskSupplierAlias(r.AccountAlias),
+		Account:          cmp.Or(form.Account, r.ProjectID),
+		Status:           r.ExtStatus,
+		Plan:             cmp.Or(form.Plan, r.Model),
+		RegisterLocation: form.RegisterLocation,
+		PlanEndTime:      form.PlanEndTime,
+		CreatedAt:        r.CreatedAt,
+		rawAlias:         r.AccountAlias,
+	}, nil
 }
 
 func handleCCMaxAccountList(c *gin.Context) {
