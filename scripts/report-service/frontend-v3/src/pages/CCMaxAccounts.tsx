@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Copy, ExternalLink } from 'lucide-react'
 import Layout from '../components/Layout'
 import { Badge, Button, Card, Input, Select, Textarea } from '../components/ui'
@@ -57,6 +57,35 @@ const STATUS_LABELS: Record<string, string> = {
   sync_failed: '同步失败',
 }
 
+type StatusTone = 'neutral' | 'success' | 'warning' | 'danger'
+
+// Status → badge colour: green = serving, amber = in progress / needs a
+// retry, red = failed or dead, grey (default) = parked.
+const STATUS_TONES: Record<string, StatusTone> = {
+  online: 'success',
+  using: 'success',
+  bound: 'success',
+  ready: 'warning',
+  init: 'warning',
+  cooking: 'warning',
+  wait_check: 'warning',
+  re_login: 'warning',
+  pending_activation: 'warning',
+  suspended: 'warning',
+  check_fail: 'danger',
+  arrearage: 'danger',
+  fault: 'danger',
+  cooking_failed: 'danger',
+  login_failed: 'danger',
+  re_login_failed: 'danger',
+  bound_failed: 'danger',
+  ban: 'danger',
+  sync_failed: 'danger',
+}
+
+// Filter key for "every red status" — not a portal status itself.
+const FILTER_FAILED = '__failed__'
+
 export default function CCMaxAccounts() {
   const [proxy, setProxy] = useState<CCMaxProxyInput>(EMPTY_PROXY)
   const [session, setSession] = useState<CCMaxOAuthStart | null>(null)
@@ -71,6 +100,49 @@ export default function CCMaxAccounts() {
   const [loaded, setLoaded] = useState(false)
   const [loading, setLoading] = useState(false)
   const [role, setRole] = useState<number | null>(getCachedRole())
+  const [statusFilter, setStatusFilter] = useState('')
+
+  const statusCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const r of rows) counts.set(r.status, (counts.get(r.status) ?? 0) + 1)
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])
+  }, [rows])
+  const failedCount = statusCounts.reduce((n, [s, c]) => (STATUS_TONES[s] === 'danger' ? n + c : n), 0)
+
+  const visibleRows = useMemo(() => {
+    if (!statusFilter) return rows
+    if (statusFilter === FILTER_FAILED) return rows.filter((r) => STATUS_TONES[r.status] === 'danger')
+    return rows.filter((r) => r.status === statusFilter)
+  }, [rows, statusFilter])
+
+  // Totals follow the active filter; window usage averages only the accounts
+  // actually serving (using/online) so idle 0% rows don't drag it down.
+  const stats = useMemo(() => {
+    let cost = 0
+    let input = 0
+    let output = 0
+    let five = 0
+    let week = 0
+    let serving = 0
+    for (const r of visibleRows) {
+      cost += r.cost_rmb
+      input += r.input_tokens
+      output += r.output_tokens
+      if (STATUS_TONES[r.status] === 'success') {
+        five += r.five_hour_used_percent
+        week += r.week_used_percent
+        serving++
+      }
+    }
+    return {
+      cost,
+      input,
+      output,
+      serving,
+      fiveAvg: serving ? five / serving : 0,
+      weekAvg: serving ? week / serving : 0,
+    }
+  }, [visibleRows])
 
   useEffect(() => {
     if (role !== null) return
@@ -307,12 +379,61 @@ export default function CCMaxAccounts() {
         <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
           <div className="text-sm font-semibold">已上号账号</div>
           <div className="flex items-center gap-2 text-[11px] text-muted-foreground tnum">
-            <span>共 {rows.length} 个</span>
+            <span>
+              {statusFilter ? `${visibleRows.length} / ${rows.length}` : `共 ${rows.length}`} 个
+            </span>
             <Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>
               {loading ? '刷新中…' : '刷新'}
             </Button>
           </div>
         </div>
+        {rows.length > 0 && (
+          <div className="space-y-3 border-b border-border px-4 py-3">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              {[
+                ['账号数', visibleRows.length.toLocaleString()],
+                ['使用中', stats.serving.toLocaleString()],
+                ['累计花费', `¥${stats.cost.toFixed(2)} / $${(stats.cost / fxRate).toFixed(2)}`],
+                ['输入 / 输出 tokens', `${stats.input.toLocaleString()} / ${stats.output.toLocaleString()}`],
+                ['5 小时窗口均值', `${(stats.fiveAvg * 100).toFixed(2)}%`],
+                ['7 天窗口均值', `${(stats.weekAvg * 100).toFixed(2)}%`],
+              ].map(([label, value]) => (
+                <div key={label} className="space-y-0.5">
+                  <div className="text-[11px] text-muted-foreground">{label}</div>
+                  <div className="text-sm font-semibold tnum">{value}</div>
+                </div>
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {[
+                { key: '', label: '全部', count: rows.length, tone: 'neutral' as StatusTone },
+                ...(failedCount > 0
+                  ? [{ key: FILTER_FAILED, label: '全部失败', count: failedCount, tone: 'danger' as StatusTone }]
+                  : []),
+                ...statusCounts.map(([s, c]) => ({
+                  key: s,
+                  label: STATUS_LABELS[s] || s || '—',
+                  count: c,
+                  tone: STATUS_TONES[s] ?? 'neutral',
+                })),
+              ].map((f) => (
+                <button
+                  key={f.key || '__all__'}
+                  type="button"
+                  onClick={() => setStatusFilter(f.key)}
+                  className={
+                    'rounded-full ring-offset-1 ring-offset-background ' +
+                    (statusFilter === f.key ? 'ring-2 ring-primary' : 'opacity-80 hover:opacity-100')
+                  }
+                >
+                  <Badge tone={f.tone}>
+                    {f.label} <span className="tnum">{f.count}</span>
+                  </Badge>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {rows.length === 0 ? (
           <p className="px-4 py-8 text-center text-xs text-muted-foreground">{loaded ? '暂无账号。' : '加载中…'}</p>
         ) : (
@@ -341,13 +462,15 @@ export default function CCMaxAccounts() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => {
+                {visibleRows.map((r) => {
                   return (
                     <tr key={r.id} className="border-t border-border">
                       <td className="px-3 py-1.5 font-mono">{r.account}</td>
                       <td className="px-3 py-1.5 font-mono">{r.alias}</td>
                       <td className="px-3 py-1.5">
-                        <Badge>{STATUS_LABELS[r.status] || r.status || '—'}</Badge>
+                        <Badge tone={STATUS_TONES[r.status] ?? 'neutral'}>
+                          {STATUS_LABELS[r.status] || r.status || '—'}
+                        </Badge>
                       </td>
                       <td className="px-3 py-1.5">{r.plan}</td>
                       <td className="px-3 py-1.5">{r.register_location}</td>
