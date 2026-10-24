@@ -421,12 +421,12 @@ export default function CCMaxAccounts() {
                   key={f.key || '__all__'}
                   type="button"
                   onClick={() => setStatusFilter(f.key)}
-                  className={
-                    'rounded-full ring-offset-1 ring-offset-background ' +
-                    (statusFilter === f.key ? 'ring-2 ring-primary' : 'opacity-80 hover:opacity-100')
-                  }
+                  className="rounded-full"
                 >
-                  <Badge tone={f.tone}>
+                  <Badge
+                    tone={f.tone}
+                    className={statusFilter === f.key ? 'border-current' : 'opacity-60 hover:opacity-100'}
+                  >
                     {f.label} <span className="tnum">{f.count}</span>
                   </Badge>
                 </button>
