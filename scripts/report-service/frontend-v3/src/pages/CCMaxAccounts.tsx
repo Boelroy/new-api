@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Copy, ExternalLink, Pencil } from 'lucide-react'
+import { CircleAlert, Copy, ExternalLink, KeyRound, Pencil } from 'lucide-react'
 import Layout from '../components/Layout'
 import { Badge, Button, Card, Input, Select, Textarea } from '../components/ui'
 import { Modal, promptDialog, toast } from '../components/feedback'
@@ -652,15 +652,29 @@ export default function CCMaxAccounts() {
                       </td>
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">{r.created_at}</td>
                       <td className="whitespace-nowrap px-3 py-1.5 text-right">
-                        <div className="flex justify-end gap-1.5">
+                        <div className="flex justify-end gap-1">
                           {REASON_STATUSES.has(r.status) && (
-                            <Button size="sm" variant="outline" onClick={() => void showReason(r)}>
-                              查看原因
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="size-7 p-0 text-destructive hover:text-destructive"
+                              title="查看原因"
+                              aria-label="查看原因"
+                              onClick={() => void showReason(r)}
+                            >
+                              <CircleAlert className="size-4" />
                             </Button>
                           )}
                           {r.remark_editable && (
-                            <Button size="sm" variant="outline" onClick={() => setReauth(r)}>
-                              重新授权
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="size-7 p-0"
+                              title="重新授权"
+                              aria-label="重新授权"
+                              onClick={() => setReauth(r)}
+                            >
+                              <KeyRound className="size-4" />
                             </Button>
                           )}
                         </div>
