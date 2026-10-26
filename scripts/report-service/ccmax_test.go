@@ -88,3 +88,32 @@ func TestParseCCMaxPortalRow(t *testing.T) {
 	assert.Equal(t, 40.5, row.FiveHourUsedPercent)
 	assert.Equal(t, 12.0, row.WeekUsedPercent)
 }
+
+// The portal rejects auth_json unless every field but id_token is set, the
+// timestamps are RFC3339 and proxy_url is http(s)/socks5(h); check() must
+// catch the same cases before upload.
+func TestCCMaxCredentialCheck(t *testing.T) {
+	good := ccmaxCredential{
+		AccessToken: "a", RefreshToken: "r", LastRefresh: "2026-10-26T10:00:00-04:00",
+		Email: "u@example.com", AccountUUID: "acc", OrganizationUUID: "org", OrganizationName: "o",
+		ClaudeDeviceIDs: []string{"d"}, Type: "claude", Expired: "2026-10-26T18:00:00-04:00",
+		ProxyURL: "socks5://u:p@1.2.3.4:1080", VerificationStatus: "verified",
+	}
+	require.NoError(t, good.check())
+
+	noOrg := good
+	noOrg.OrganizationName, noOrg.OrganizationUUID = "", ""
+	assert.ErrorContains(t, noOrg.check(), "organization_name、organization_uuid")
+
+	noDevice := good
+	noDevice.ClaudeDeviceIDs = nil
+	assert.ErrorContains(t, noDevice.check(), "claude_device_ids")
+
+	badTime := good
+	badTime.Expired = "2026-10-26 18:00:00"
+	assert.ErrorContains(t, badTime.check(), "RFC3339")
+
+	badProxy := good
+	badProxy.ProxyURL = "ftp://1.2.3.4:21"
+	assert.ErrorContains(t, badProxy.check(), "proxy_url")
+}

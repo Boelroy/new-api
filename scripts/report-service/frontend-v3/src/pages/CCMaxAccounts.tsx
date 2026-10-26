@@ -105,6 +105,9 @@ const FILTER_FAILED = '__failed__'
 export default function CCMaxAccounts() {
   const [proxy, setProxy] = useState<CCMaxProxyInput>(EMPTY_PROXY)
   const [session, setSession] = useState<CCMaxOAuthStart | null>(null)
+  // Account being re-authorized (new tokens + proxy for an existing portal
+  // account); null = uploading a new account.
+  const [reauth, setReauth] = useState<CCMaxAccount | null>(null)
   const [code, setCode] = useState('')
   const [form, setForm] = useState<CCMaxSubmitForm>(EMPTY_FORM)
   const [plans, setPlans] = useState<string[]>([])
@@ -213,17 +216,24 @@ export default function CCMaxAccounts() {
       toast.error('请粘贴授权 code')
       return
     }
-    if (Object.values(form).some((v) => !v.trim())) {
+    // Re-authorizing may leave the password blank (unchanged).
+    if (Object.entries(form).some(([k, v]) => !v.trim() && !(reauth && k === 'password'))) {
       toast.error('请填写全部必填项')
       return
     }
     setSubmitting(true)
     try {
-      const res = await api.ccmaxSubmit({ ...form, state: session.state, code: code.trim() })
+      const res = await api.ccmaxSubmit({
+        ...form,
+        state: session.state,
+        code: code.trim(),
+        ...(reauth ? { account_id: reauth.id } : {}),
+      })
       toast.success(`${res.msg}：${res.email}`)
       setSession(null)
       setCode('')
       setForm(EMPTY_FORM)
+      setReauth(null)
       void load()
     } catch (e) {
       // When the authorization itself failed the session is gone and a new link
@@ -233,6 +243,31 @@ export default function CCMaxAccounts() {
     } finally {
       setSubmitting(false)
     }
+  }
+
+  // startReauth switches the flow above to re-authorizing row: fresh link via a
+  // (possibly new) proxy, form prefilled from the portal, password optional.
+  function startReauth(row: CCMaxAccount) {
+    setReauth(row)
+    setSession(null)
+    setCode('')
+    setForm({
+      plan: row.plan,
+      account: row.account,
+      password: '',
+      register_location: row.register_location,
+      register_time: row.register_time,
+      plan_start_time: row.plan_start_time,
+      plan_end_time: row.plan_end_time,
+    })
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  function cancelReauth() {
+    setReauth(null)
+    setSession(null)
+    setCode('')
+    setForm(EMPTY_FORM)
   }
 
   async function showReason(row: CCMaxAccount) {
@@ -271,6 +306,17 @@ export default function CCMaxAccounts() {
   return (
     <Layout title="CC Max 上号" subtitle="通过你自己的 socks5 代理完成 Claude 账号授权并上号">
       {isAdmin && <SettingsCard />}
+
+      {reauth && (
+        <div className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 px-4 py-2.5 text-sm">
+          <span>
+            正在重新授权：<span className="font-mono">{reauth.account}</span>（{reauth.alias}）。完成授权后会替换该账号的凭据和代理。
+          </span>
+          <Button size="sm" variant="outline" onClick={cancelReauth}>
+            取消
+          </Button>
+        </div>
+      )}
 
       <Card className="space-y-4 p-4">
         <div className="text-sm font-semibold">1. 填写 socks5 代理</div>
@@ -384,11 +430,16 @@ export default function CCMaxAccounts() {
             </label>
             <label className="space-y-1.5">
               <span className="text-xs font-medium text-muted-foreground">账号（登录 ID / 邮箱，不能包含空格）</span>
-              <Input autoComplete="off" placeholder="请输入账号" {...field('account')} />
+              <Input autoComplete="off" placeholder="请输入账号" readOnly={!!reauth} {...field('account')} />
             </label>
             <label className="space-y-1.5">
-              <span className="text-xs font-medium text-muted-foreground">密码</span>
-              <Input type="password" autoComplete="new-password" placeholder="请输入密码" {...field('password')} />
+              <span className="text-xs font-medium text-muted-foreground">密码{reauth ? '（留空则不修改）' : ''}</span>
+              <Input
+                type="password"
+                autoComplete="new-password"
+                placeholder={reauth ? '留空则不修改' : '请输入密码'}
+                {...field('password')}
+              />
             </label>
             <label className="space-y-1.5">
               <span className="text-xs font-medium text-muted-foreground">注册地</span>
@@ -415,7 +466,7 @@ export default function CCMaxAccounts() {
             </label>
           </div>
           <Button onClick={submit} disabled={submitting}>
-            {submitting ? '提交中…' : '提交上号'}
+            {submitting ? '提交中…' : reauth ? '提交重新授权' : '提交上号'}
           </Button>
         </Card>
       )}
@@ -557,11 +608,18 @@ export default function CCMaxAccounts() {
                       </td>
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">{r.created_at}</td>
                       <td className="whitespace-nowrap px-3 py-1.5 text-right">
-                        {REASON_STATUSES.has(r.status) && (
-                          <Button size="sm" variant="outline" onClick={() => void showReason(r)}>
-                            查看原因
-                          </Button>
-                        )}
+                        <div className="flex justify-end gap-1.5">
+                          {REASON_STATUSES.has(r.status) && (
+                            <Button size="sm" variant="outline" onClick={() => void showReason(r)}>
+                              查看原因
+                            </Button>
+                          )}
+                          {r.remark_editable && (
+                            <Button size="sm" variant="outline" onClick={() => startReauth(r)}>
+                              重新授权
+                            </Button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   )

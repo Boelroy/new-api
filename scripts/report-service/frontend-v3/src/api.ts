@@ -2206,7 +2206,9 @@ export const api = {
       body: JSON.stringify(proxy),
     }),
 
-  ccmaxSubmit: (payload: CCMaxSubmitForm & { state: string; code: string }) =>
+  // account_id (portal id) set ⇒ re-authorize that account (password may be
+  // blank = unchanged) instead of uploading a new one.
+  ccmaxSubmit: (payload: CCMaxSubmitForm & { state: string; code: string; account_id?: number }) =>
     request<{ id: number; alias: string; email: string; msg: string }>('/api/ccmax/oauth/submit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2557,6 +2559,8 @@ export type CCMaxAccount = {
   plan: string
   register_location: string
   plan_end_time: string
+  register_time: string
+  plan_start_time: string
   created_at: string
   // Uploader username; admin only.
   username?: string

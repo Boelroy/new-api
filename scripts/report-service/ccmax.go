@@ -31,6 +31,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -321,13 +322,17 @@ type ccmaxSubmitForm struct {
 }
 
 // validate trims the form and checks it the way the portal does, so a bad form
-// is rejected before the single-use authorization code is spent.
-func (f *ccmaxSubmitForm) validate() error {
+// is rejected before the single-use authorization code is spent. Re-authorizing
+// an existing account may leave the password blank (unchanged).
+func (f *ccmaxSubmitForm) validate(requirePassword bool) error {
 	f.Plan = strings.TrimSpace(f.Plan)
 	f.Account = strings.TrimSpace(f.Account)
 	f.RegisterLocation = strings.TrimSpace(f.RegisterLocation)
-	if f.Plan == "" || f.Account == "" || f.Password == "" || f.RegisterLocation == "" {
-		return errors.New("套餐、账号、密码、注册地均为必填")
+	if f.Plan == "" || f.Account == "" || f.RegisterLocation == "" {
+		return errors.New("套餐、账号、注册地均为必填")
+	}
+	if requirePassword && f.Password == "" {
+		return errors.New("密码为必填")
 	}
 	if strings.ContainsFunc(f.Account, unicode.IsSpace) {
 		return errors.New("账号不能包含空格")
@@ -346,6 +351,42 @@ func (f *ccmaxSubmitForm) validate() error {
 // The credential is parked on the session row between the two steps: codes are
 // single-use, so if the portal rejects the form the supplier can fix it and
 // resubmit without authorizing again.
+// check applies the portal's auth_json rules up front so a bad credential
+// fails with a clear message: every field non-empty except id_token,
+// RFC3339 last_refresh / expired, http(s) or socks5(h) proxy_url.
+func (cr ccmaxCredential) check() error {
+	missing := []string{}
+	for name, v := range map[string]string{
+		"access_token": cr.AccessToken, "refresh_token": cr.RefreshToken,
+		"last_refresh": cr.LastRefresh, "email": cr.Email,
+		"account_uuid": cr.AccountUUID, "organization_uuid": cr.OrganizationUUID,
+		"organization_name": cr.OrganizationName, "type": cr.Type,
+		"expired": cr.Expired, "proxy_url": cr.ProxyURL,
+		"verification_status": cr.VerificationStatus,
+	} {
+		if strings.TrimSpace(v) == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(cr.ClaudeDeviceIDs) == 0 {
+		missing = append(missing, "claude_device_ids")
+	}
+	if len(missing) > 0 {
+		slices.Sort(missing)
+		return fmt.Errorf("授权结果缺少字段：%s", strings.Join(missing, "、"))
+	}
+	for _, ts := range []string{cr.LastRefresh, cr.Expired} {
+		if _, err := time.Parse(time.RFC3339, ts); err != nil {
+			return fmt.Errorf("时间格式不是 RFC3339：%s", ts)
+		}
+	}
+	scheme, _, _ := strings.Cut(cr.ProxyURL, "://")
+	if !slices.Contains([]string{"http", "https", "socks5", "socks5h"}, scheme) {
+		return errors.New("proxy_url 须以 http://、https://、socks5:// 或 socks5h:// 开头")
+	}
+	return nil
+}
+
 func handleCCMaxSubmit(c *gin.Context) {
 	if !ccmaxOpenAPIConfigured() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "CC Max OpenAPI token not configured (set SUPPLIER_CCMAX_TOKEN)"})
@@ -354,14 +395,22 @@ func handleCCMaxSubmit(c *gin.Context) {
 	var body struct {
 		State string `json:"state"`
 		Code  string `json:"code"`
+		// AccountID (portal account id) set ⇒ re-authorize that existing
+		// account instead of uploading a new one.
+		AccountID int64 `json:"account_id"`
 		ccmaxSubmitForm
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-	if err := body.validate(); err != nil {
+	reauth := body.AccountID > 0
+	if err := body.validate(!reauth); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if reauth && !ccmaxCallerOwns(c, body.AccountID) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "账号不存在"})
 		return
 	}
 	uidAny, _ := c.Get("user_id")
@@ -412,6 +461,24 @@ func handleCCMaxSubmit(c *gin.Context) {
 			return
 		}
 		_, _ = db.Exec(`UPDATE rs_ccmax_oauth_session SET credential_enc=$1 WHERE state=$2`, enc, state)
+	}
+
+	if err := cred.check(); err != nil {
+		// Re-submitting can't fix a credential the authorization didn't fill.
+		_, _ = db.Exec(`DELETE FROM rs_ccmax_oauth_session WHERE state=$1`, state)
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "session_gone": true})
+		return
+	}
+
+	if reauth {
+		if err := ccmaxUpdatePortalAccount(body.AccountID, body.ccmaxSubmitForm, cred); err != nil {
+			c.JSON(http.StatusFailedDependency, gin.H{"error": err.Error(), "email": cred.Email})
+			return
+		}
+		_, _ = db.Exec(`DELETE FROM rs_ccmax_oauth_session WHERE state=$1`, state)
+		_, _ = db.Exec(`UPDATE rs_ccmax_account SET plan=$1, account=$2 WHERE remote_account_id=$3`, body.Plan, body.Account, body.AccountID)
+		c.JSON(http.StatusOK, gin.H{"id": body.AccountID, "email": cred.Email, "msg": "重新授权成功"})
+		return
 	}
 
 	reqBytes, _ := json.Marshal(map[string]any{
@@ -621,6 +688,8 @@ type ccmaxAccountRow struct {
 	Plan             string `json:"plan"`
 	RegisterLocation string `json:"register_location"`
 	PlanEndTime      string `json:"plan_end_time"`
+	RegisterTime     string `json:"register_time"`
+	PlanStartTime    string `json:"plan_start_time"`
 	CreatedAt        string `json:"created_at"`
 	Username         string `json:"username,omitempty"`
 	// Remark is the local note; RemarkEditable is false for portal rows that
@@ -728,6 +797,8 @@ func parseCCMaxPortalRow(raw json.RawMessage) (ccmaxAccountRow, error) {
 		Plan             string `json:"plan"`
 		RegisterLocation string `json:"register_location"`
 		PlanEndTime      string `json:"plan_end_time"`
+		RegisterTime     string `json:"register_time"`
+		PlanStartTime    string `json:"plan_start_time"`
 	}
 	if r.AuthConfig != "" {
 		_ = json.Unmarshal([]byte(r.AuthConfig), &form)
@@ -760,6 +831,8 @@ func parseCCMaxPortalRow(raw json.RawMessage) (ccmaxAccountRow, error) {
 		Plan:                cmp.Or(form.Plan, r.Model),
 		RegisterLocation:    form.RegisterLocation,
 		PlanEndTime:         form.PlanEndTime,
+		RegisterTime:        form.RegisterTime,
+		PlanStartTime:       form.PlanStartTime,
 		CreatedAt:           r.CreatedAt,
 	}, nil
 }
@@ -777,25 +850,120 @@ func handleCCMaxAccountList(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"accounts": rows, "fx_rate": supplierFxRate()})
 }
 
-// ccmaxOwnedAccountID parses :id (a portal account id) and checks the caller
-// may act on it: suppliers only on accounts they uploaded here, admins on any.
+// ccmaxCallerOwns reports whether the caller may act on portal account id:
+// suppliers only on accounts they uploaded here, admins on any.
+func ccmaxCallerOwns(c *gin.Context, id int64) bool {
+	if callerIsSupplierAdmin(c) {
+		return true
+	}
+	uidAny, _ := c.Get("user_id")
+	uid, _ := uidAny.(int64)
+	var one int
+	return db.QueryRow(`SELECT 1 FROM rs_ccmax_account WHERE remote_account_id=$1 AND uploaded_by=$2`, id, uid).Scan(&one) == nil
+}
+
+// ccmaxOwnedAccountID parses :id (a portal account id) and answers 400/404
+// unless the caller may act on it.
 func ccmaxOwnedAccountID(c *gin.Context) (int64, bool) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || id <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return 0, false
 	}
-	if callerIsSupplierAdmin(c) {
-		return id, true
-	}
-	uidAny, _ := c.Get("user_id")
-	uid, _ := uidAny.(int64)
-	var one int
-	if err := db.QueryRow(`SELECT 1 FROM rs_ccmax_account WHERE remote_account_id=$1 AND uploaded_by=$2`, id, uid).Scan(&one); err != nil {
+	if !ccmaxCallerOwns(c, id) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "账号不存在"})
 		return 0, false
 	}
 	return id, true
+}
+
+// ccmaxUpdatePortalAccount re-submits an existing claude account through the
+// portal's WEB edit endpoint with a fresh credential (new tokens + proxy_url),
+// mirroring the portal UI's edit form. Optional portal fields not offered here
+// (balance, payment method, warranty …), the model and the portal remark are
+// carried over from the current row so the edit doesn't clear them. A blank
+// password leaves it unchanged.
+func ccmaxUpdatePortalAccount(id int64, form ccmaxSubmitForm, cred ccmaxCredential) error {
+	raws, err := fetchPortalAccountsRaw(ccmaxWeb, "claude")
+	if err != nil {
+		return err
+	}
+	var cur struct {
+		ID         int64  `json:"id"`
+		Model      string `json:"model"`
+		Remark     string `json:"remark"`
+		AuthConfig string `json:"auth_config"`
+		IsLocked   int    `json:"is_locked"`
+	}
+	found := false
+	for _, raw := range raws {
+		if json.Unmarshal(raw, &cur) == nil && cur.ID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return errors.New("portal 中找不到该账号")
+	}
+	if cur.IsLocked == 1 {
+		return errors.New("该账号已被 portal 锁定，不可修改")
+	}
+	prev := map[string]any{}
+	_ = json.Unmarshal([]byte(cur.AuthConfig), &prev)
+	keep := func(key string) string {
+		if v, ok := prev[key]; ok && v != nil {
+			return strings.TrimSpace(fmt.Sprint(v))
+		}
+		return ""
+	}
+
+	credJSON, _ := json.Marshal(cred)
+	encADC, err := ccmaxWeb.encrypt("")
+	if err != nil {
+		return err
+	}
+	req := map[string]any{
+		"provider":              "claude",
+		"model":                 cmp.Or(cur.Model, form.Plan),
+		"adc_config":            "",
+		"api_key":               "",
+		"region":                "",
+		"aws_region":            "",
+		"aws_project_id":        "",
+		"aws_auth_type":         "arn",
+		"account_id":            form.Account,
+		"proxy_type":            "",
+		"account_type":          2,
+		"remark":                cur.Remark,
+		"cpa_plan":              form.Plan,
+		"cpa_register_time":     form.RegisterTime,
+		"cpa_plan_start_time":   form.PlanStartTime,
+		"cpa_plan_end_time":     form.PlanEndTime,
+		"cpa_register_location": form.RegisterLocation,
+		"cpa_balance":           keep("balance"),
+		"cpa_payment_method":    keep("payment_method"),
+		"cpa_register_device":   keep("register_device"),
+		"cpa_recharge_time":     keep("recharge_time"),
+		"cpa_warranty_period":   keep("warranty_period"),
+		"cpa_auth_json":         string(credJSON),
+		"enc_adc_config":        encADC,
+	}
+	if form.Password != "" {
+		encPwd, err := ccmaxWeb.encrypt(form.Password)
+		if err != nil {
+			return err
+		}
+		req["enc_api_key"] = encPwd
+	}
+	reqBytes, _ := json.Marshal(req)
+	status, body, err := ccmaxWeb.proxy(http.MethodPut, fmt.Sprintf("/supplier-account/api/supplier/accounts/%d", id), reqBytes)
+	if err != nil {
+		return err
+	}
+	if status < 200 || status >= 300 {
+		return errors.New(supplierErr(body))
+	}
+	return nil
 }
 
 // handleCCMaxAccountReason returns why a portal claude account failed, the

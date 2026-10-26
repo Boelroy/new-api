@@ -22,6 +22,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -378,6 +379,9 @@ type portalWebSession struct {
 	mu     sync.Mutex
 	token  string
 	expiry time.Time
+	// pubKey is the login's RSA public key; the portal's WEB account-edit
+	// endpoint expects secrets encrypted with it (see encrypt).
+	pubKey string
 }
 
 // supplierWeb is the 账号上号 WEB login (SUPPLIER_ACCOUNT_USERNAME/PASSWORD).
@@ -391,54 +395,56 @@ func (s *portalWebSession) configured() bool {
 	return supplierAccountBaseURL != "" && user != "" && pass != ""
 }
 
-// login runs the full WEB login flow and returns (token, expiresIn).
-func (s *portalWebSession) login() (string, int, error) {
+// login runs the full WEB login flow and returns (token, expiresIn, pubKey).
+func (s *portalWebSession) login() (string, int, string, error) {
 	if !s.configured() {
-		return "", 0, fmt.Errorf("%s portal username/password not configured", s.name)
+		return "", 0, "", fmt.Errorf("%s portal username/password not configured", s.name)
 	}
 	username, password := s.creds()
 	// 1. Fetch the per-user RSA public key.
 	pkReq, _ := json.Marshal(map[string]string{"username": username})
 	st, resp, err := supplierProxy(http.MethodPost, "/supplier-account/api/supplier/pubkey", "", pkReq)
 	if err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 	if st < 200 || st >= 300 {
-		return "", 0, fmt.Errorf("pubkey: %s", supplierErr(resp))
+		return "", 0, "", fmt.Errorf("pubkey: %s", supplierErr(resp))
 	}
 	var pk struct {
 		PublicKey string `json:"public_key"`
 	}
 	if err := json.Unmarshal(resp, &pk); err != nil || pk.PublicKey == "" {
-		return "", 0, errors.New("pubkey: unexpected response")
+		return "", 0, "", errors.New("pubkey: unexpected response")
 	}
 
 	// 2. Encrypt the password with the fetched key.
 	enc, err := supplierEncryptPassword(pk.PublicKey, password)
 	if err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 
 	// 3. Log in.
 	loginReq, _ := json.Marshal(map[string]string{"username": username, "enc_password": enc})
 	st2, resp2, err := supplierProxy(http.MethodPost, "/supplier-account/api/supplier/login", "", loginReq)
 	if err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 	if st2 < 200 || st2 >= 300 {
-		return "", 0, fmt.Errorf("login: %s", supplierErr(resp2))
+		return "", 0, "", fmt.Errorf("login: %s", supplierErr(resp2))
 	}
 	var lg struct {
 		Token     string `json:"token"`
 		ExpiresIn int    `json:"expires_in"`
+		PublicKey string `json:"public_key"`
 	}
 	if err := json.Unmarshal(resp2, &lg); err != nil || lg.Token == "" {
-		return "", 0, errors.New("login: unexpected response")
+		return "", 0, "", errors.New("login: unexpected response")
 	}
 	if lg.ExpiresIn <= 0 {
 		lg.ExpiresIn = 3600
 	}
-	return lg.Token, lg.ExpiresIn, nil
+	// Same fallback as the portal UI: login's key, else the pre-login one.
+	return lg.Token, lg.ExpiresIn, cmp.Or(lg.PublicKey, pk.PublicKey), nil
 }
 
 // getToken returns a valid WEB token, refreshing via login when the cached one
@@ -449,11 +455,11 @@ func (s *portalWebSession) getToken() (string, error) {
 	if s.token != "" && time.Now().Before(s.expiry) {
 		return s.token, nil
 	}
-	tok, expiresIn, err := s.login()
+	tok, expiresIn, pubKey, err := s.login()
 	if err != nil {
 		return "", err
 	}
-	s.token = tok
+	s.token, s.pubKey = tok, pubKey
 	// Refresh a minute early; for very short TTLs fall back to half the TTL.
 	lead := 60
 	if expiresIn <= 120 {
@@ -472,6 +478,21 @@ func (s *portalWebSession) invalidate() {
 	s.token = ""
 	s.expiry = time.Time{}
 	s.mu.Unlock()
+}
+
+// encrypt seals a secret with the login's public key, as the portal UI does
+// for enc_* fields on account edits. Logs in first if needed.
+func (s *portalWebSession) encrypt(plain string) (string, error) {
+	if _, err := s.getToken(); err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	pub := s.pubKey
+	s.mu.Unlock()
+	if pub == "" {
+		return "", errors.New("portal login returned no public key")
+	}
+	return supplierEncryptPassword(pub, plain)
 }
 
 // proxy issues a WEB-token portal request and, if the portal rejects the
