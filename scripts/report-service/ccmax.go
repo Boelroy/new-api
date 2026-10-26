@@ -477,6 +477,7 @@ func handleCCMaxSubmit(c *gin.Context) {
 		}
 		_, _ = db.Exec(`DELETE FROM rs_ccmax_oauth_session WHERE state=$1`, state)
 		_, _ = db.Exec(`UPDATE rs_ccmax_account SET plan=$1, account=$2 WHERE remote_account_id=$3`, body.Plan, body.Account, body.AccountID)
+		ccmaxRecordCredential(body.AccountID, cred)
 		c.JSON(http.StatusOK, gin.H{"id": body.AccountID, "email": cred.Email, "msg": "重新授权成功"})
 		return
 	}
@@ -521,7 +522,30 @@ func handleCCMaxSubmit(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record account: " + err.Error()})
 		return
 	}
+	ccmaxRecordCredential(upstream.ID, cred)
 	c.JSON(http.StatusOK, gin.H{"id": upstream.ID, "alias": ccmaxDisplayAlias(upstream.Alias), "email": cred.Email, "msg": cmp.Or(upstream.Msg, "提交成功")})
+}
+
+// ccmaxRecordCredential keeps an encrypted copy of the credential just
+// uploaded for a portal account (plus its proxy host:port). Best-effort: the
+// portal already holds the account, so a failure here is only logged.
+func ccmaxRecordCredential(id int64, cred ccmaxCredential) {
+	raw, _ := json.Marshal(cred)
+	enc, err := encryptRemoteToken(string(raw))
+	if err != nil {
+		log.Printf("[ccmax] encrypt credential for %d: %v", id, err)
+		return
+	}
+	proxyDisplay := ""
+	if u, err := url.Parse(cred.ProxyURL); err == nil {
+		proxyDisplay = u.Host
+	}
+	if _, err := db.Exec(
+		`UPDATE rs_ccmax_account SET credential_enc=$1, proxy_display=$2, credential_at=$3 WHERE remote_account_id=$4`,
+		enc, proxyDisplay, time.Now().Unix(), id,
+	); err != nil {
+		log.Printf("[ccmax] record credential for %d: %v", id, err)
+	}
 }
 
 // ccmaxExchangeCode trades the pasted authorization code for tokens through
@@ -705,6 +729,11 @@ type ccmaxAccountRow struct {
 	CostRMB             float64 `json:"cost_rmb"`
 	FiveHourUsedPercent float64 `json:"five_hour_used_percent"`
 	WeekUsedPercent     float64 `json:"week_used_percent"`
+	// Window reset times (unix seconds; 0 = unknown).
+	FiveHourResetAt int64 `json:"five_hour_reset_at"`
+	WeekResetAt     int64 `json:"week_reset_at"`
+	// Proxy host:port of the last credential uploaded through this page.
+	ProxyDisplay string `json:"proxy_display"`
 }
 
 // ccmaxScopedAccounts loads the CC Max login's claude roster from the portal
@@ -716,7 +745,7 @@ func ccmaxScopedAccounts(c *gin.Context) ([]ccmaxAccountRow, error) {
 		return nil, err
 	}
 	isAdmin := callerIsSupplierAdmin(c)
-	query := `SELECT a.remote_account_id, COALESCE(u.username, ''), a.remark FROM rs_ccmax_account a
+	query := `SELECT a.remote_account_id, COALESCE(u.username, ''), a.remark, a.proxy_display FROM rs_ccmax_account a
 	            LEFT JOIN rs_auth_user u ON u.id = a.uploaded_by`
 	args := []any{}
 	if !isAdmin {
@@ -729,12 +758,12 @@ func ccmaxScopedAccounts(c *gin.Context) ([]ccmaxAccountRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	type owner struct{ username, remark string }
+	type owner struct{ username, remark, proxy string }
 	owners := map[int64]owner{}
 	for rows.Next() {
 		var id int64
 		var o owner
-		if err := rows.Scan(&id, &o.username, &o.remark); err != nil {
+		if err := rows.Scan(&id, &o.username, &o.remark, &o.proxy); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -753,7 +782,7 @@ func ccmaxScopedAccounts(c *gin.Context) ([]ccmaxAccountRow, error) {
 		if !isAdmin && !owned {
 			continue
 		}
-		row.Remark, row.RemarkEditable = o.remark, owned
+		row.Remark, row.RemarkEditable, row.ProxyDisplay = o.remark, owned, o.proxy
 		if isAdmin {
 			row.Username = o.username
 		}
@@ -811,6 +840,8 @@ func parseCCMaxPortalRow(raw json.RawMessage) (ccmaxAccountRow, error) {
 			Utilization  struct {
 				WeekUsedPercent     float64 `json:"week_used_percent"`
 				FiveHourUsedPercent float64 `json:"five_hour_used_percent"`
+				WeekResetAt         int64   `json:"week_reset_at"`
+				FiveHourResetAt     int64   `json:"five_hour_reset_at"`
 			} `json:"utilization"`
 		} `json:"cpa_usage"`
 	}
@@ -824,6 +855,8 @@ func parseCCMaxPortalRow(raw json.RawMessage) (ccmaxAccountRow, error) {
 		CostRMB:             usage.Cost / 1e6,
 		FiveHourUsedPercent: usage.Utilization.FiveHourUsedPercent,
 		WeekUsedPercent:     usage.Utilization.WeekUsedPercent,
+		FiveHourResetAt:     usage.Utilization.FiveHourResetAt,
+		WeekResetAt:         usage.Utilization.WeekResetAt,
 		ID:                  r.ID,
 		Alias:               ccmaxDisplayAlias(r.AccountAlias),
 		Account:             cmp.Or(form.Account, r.ProjectID),

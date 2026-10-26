@@ -2574,6 +2574,11 @@ export type CCMaxAccount = {
   cost_rmb: number
   five_hour_used_percent: number
   week_used_percent: number
+  // Window reset times, unix seconds (0 = unknown).
+  five_hour_reset_at: number
+  week_reset_at: number
+  // Proxy host:port of the last credential uploaded through this page.
+  proxy_display: string
 }
 
 export type CCMaxSettings = {

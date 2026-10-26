@@ -87,6 +87,8 @@ func TestParseCCMaxPortalRow(t *testing.T) {
 	assert.InDelta(t, 303.731485, row.CostRMB, 1e-9)
 	assert.Equal(t, 40.5, row.FiveHourUsedPercent)
 	assert.Equal(t, 12.0, row.WeekUsedPercent)
+	assert.Equal(t, int64(1792746000), row.FiveHourResetAt)
+	assert.Equal(t, int64(1793113200), row.WeekResetAt)
 }
 
 // The portal rejects auth_json unless every field but id_token is set, the

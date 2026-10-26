@@ -102,12 +102,47 @@ const STATUS_TONES: Record<string, StatusTone> = {
 // Filter key for "every red status" — not a portal status itself.
 const FILTER_FAILED = '__failed__'
 
+// fmtUntil renders the time left until a window resets: "1d 0h" / "1h 59m".
+function fmtUntil(resetAt: number, nowSec: number): string {
+  const left = resetAt - nowSec
+  if (!resetAt || left <= 0) return '—'
+  const d = Math.floor(left / 86400)
+  const h = Math.floor((left % 86400) / 3600)
+  const m = Math.floor((left % 3600) / 60)
+  return d > 0 ? `${d}d ${h}h` : `${h}h ${m}m`
+}
+
+// UsageWindow is one rate-limit window row: label chip, fill bar, percent used
+// and time until reset. used is a fraction (0.06 = 6%).
+function UsageWindow(props: { label: string; chip: string; used: number; resetAt: number; nowSec: number }) {
+  const pct = Math.max(0, Math.min(100, props.used * 100))
+  const bar = pct >= 90 ? 'bg-destructive' : pct >= 70 ? 'bg-warning' : 'bg-success'
+  return (
+    <div className="flex items-center gap-2">
+      <span className={`w-8 rounded px-1 text-center text-[11px] font-medium ${props.chip}`}>{props.label}</span>
+      <span className="h-1.5 w-14 overflow-hidden rounded-full bg-muted">
+        <span className={`block h-full rounded-full ${bar}`} style={{ width: `${pct}%` }} />
+      </span>
+      <span className="w-9 text-right">{Math.round(pct)}%</span>
+      <span className="text-muted-foreground" title={props.resetAt ? new Date(props.resetAt * 1000).toLocaleString() : ''}>
+        {fmtUntil(props.resetAt, props.nowSec)}
+      </span>
+    </div>
+  )
+}
+
 export default function CCMaxAccounts() {
   const [proxy, setProxy] = useState<CCMaxProxyInput>(EMPTY_PROXY)
   const [session, setSession] = useState<CCMaxOAuthStart | null>(null)
   // Account being re-authorized (new tokens + proxy for an existing portal
   // account); null = uploading a new account.
   const [reauth, setReauth] = useState<CCMaxAccount | null>(null)
+  // Ticks every minute so the reset countdowns stay current between reloads.
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+  useEffect(() => {
+    const t = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 60_000)
+    return () => clearInterval(t)
+  }, [])
   const [code, setCode] = useState('')
   const [form, setForm] = useState<CCMaxSubmitForm>(EMPTY_FORM)
   const [plans, setPlans] = useState<string[]>([])
@@ -560,7 +595,14 @@ export default function CCMaxAccounts() {
                 {visibleRows.map((r) => {
                   return (
                     <tr key={r.id} className="border-t border-border">
-                      <td className="px-3 py-1.5 font-mono">{r.account}</td>
+                      <td className="px-3 py-1.5">
+                        <div className="font-mono">{r.account}</div>
+                        {r.proxy_display && (
+                          <div className="font-mono text-[11px] text-muted-foreground" title="当前代理">
+                            {r.proxy_display}
+                          </div>
+                        )}
+                      </td>
                       <td className="px-3 py-1.5 font-mono">{r.alias}</td>
                       <td className="px-3 py-1.5">
                         <Badge tone={STATUS_TONES[r.status] ?? 'neutral'} className="whitespace-nowrap">
@@ -591,19 +633,27 @@ export default function CCMaxAccounts() {
                         </div>
                       </td>
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">
-                        <div className="grid grid-cols-[auto_auto] gap-x-2 gap-y-0.5">
-                          <span className="text-muted-foreground">5 小时</span>
-                          <span>{(r.five_hour_used_percent * 100).toFixed(2)}%</span>
-                          <span className="text-muted-foreground">7 天</span>
-                          <span>{(r.week_used_percent * 100).toFixed(2)}%</span>
-                          <span className="text-muted-foreground">输入/输出</span>
-                          <span>
-                            {r.input_tokens.toLocaleString()} / {r.output_tokens.toLocaleString()}
-                          </span>
-                          <span className="text-muted-foreground">花费</span>
-                          <span title={`汇率 ${fxRate}`}>
-                            ¥{r.cost_rmb.toFixed(2)} / ${(r.cost_rmb / fxRate).toFixed(2)}
-                          </span>
+                        <div className="space-y-1">
+                          <UsageWindow
+                            label="5h"
+                            chip="bg-primary/10 text-primary"
+                            used={r.five_hour_used_percent}
+                            resetAt={r.five_hour_reset_at}
+                            nowSec={nowSec}
+                          />
+                          <UsageWindow
+                            label="7d"
+                            chip="bg-success/10 text-success"
+                            used={r.week_used_percent}
+                            resetAt={r.week_reset_at}
+                            nowSec={nowSec}
+                          />
+                          <div className="text-[11px] text-muted-foreground">
+                            输入/输出 {r.input_tokens.toLocaleString()} / {r.output_tokens.toLocaleString()}
+                          </div>
+                          <div className="text-[11px] text-muted-foreground" title={`汇率 ${fxRate}`}>
+                            花费 ¥{r.cost_rmb.toFixed(2)} / ${(r.cost_rmb / fxRate).toFixed(2)}
+                          </div>
                         </div>
                       </td>
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">{r.created_at}</td>

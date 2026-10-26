@@ -132,6 +132,13 @@ var v2SchemaStatements = []string{
 	// Supplier-editable note, kept locally (the portal's own edit re-submits
 	// the whole account incl. credential, too heavy for a note).
 	`ALTER TABLE rs_ccmax_account ADD COLUMN IF NOT EXISTS remark TEXT NOT NULL DEFAULT ''`,
+	// Last credential uploaded for the account (AES-GCM encrypted JSON incl.
+	// proxy_url) and its proxy host:port for display. A record/backup only:
+	// never used to call Anthropic, since refreshing would rotate the token the
+	// portal is serving with.
+	`ALTER TABLE rs_ccmax_account ADD COLUMN IF NOT EXISTS credential_enc TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE rs_ccmax_account ADD COLUMN IF NOT EXISTS proxy_display TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE rs_ccmax_account ADD COLUMN IF NOT EXISTS credential_at BIGINT NOT NULL DEFAULT 0`,
 	`CREATE INDEX IF NOT EXISTS idx_ccmax_account_uploaded_by ON rs_ccmax_account(uploaded_by)`,
 
 	// -- Model auto-cleanup ------------------------------------------------
