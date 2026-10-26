@@ -495,10 +495,7 @@ export default function CCMaxAccounts() {
                     '套餐结束',
                     ...(isAdmin ? ['号商'] : []),
                     '备注',
-                    '5 小时窗口已用',
-                    '7 天窗口已用',
-                    '输入 / 输出 tokens',
-                    `累计花费 (¥ / $，汇率 ${fxRate})`,
+                    '用量',
                     '上号时间',
                     '',
                   ].map((h) => (
@@ -515,7 +512,7 @@ export default function CCMaxAccounts() {
                       <td className="px-3 py-1.5 font-mono">{r.account}</td>
                       <td className="px-3 py-1.5 font-mono">{r.alias}</td>
                       <td className="px-3 py-1.5">
-                        <Badge tone={STATUS_TONES[r.status] ?? 'neutral'}>
+                        <Badge tone={STATUS_TONES[r.status] ?? 'neutral'} className="whitespace-nowrap">
                           {STATUS_LABELS[r.status] || r.status || '—'}
                         </Badge>
                       </td>
@@ -542,13 +539,21 @@ export default function CCMaxAccounts() {
                           )}
                         </div>
                       </td>
-                      <td className="px-3 py-1.5 tnum">{(r.five_hour_used_percent * 100).toFixed(2)}%</td>
-                      <td className="px-3 py-1.5 tnum">{(r.week_used_percent * 100).toFixed(2)}%</td>
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">
-                        {r.input_tokens.toLocaleString()} / {r.output_tokens.toLocaleString()}
-                      </td>
-                      <td className="whitespace-nowrap px-3 py-1.5 tnum">
-                        ¥{r.cost_rmb.toFixed(2)} / ${(r.cost_rmb / fxRate).toFixed(2)}
+                        <div className="grid grid-cols-[auto_auto] gap-x-2 gap-y-0.5">
+                          <span className="text-muted-foreground">5 小时</span>
+                          <span>{(r.five_hour_used_percent * 100).toFixed(2)}%</span>
+                          <span className="text-muted-foreground">7 天</span>
+                          <span>{(r.week_used_percent * 100).toFixed(2)}%</span>
+                          <span className="text-muted-foreground">输入/输出</span>
+                          <span>
+                            {r.input_tokens.toLocaleString()} / {r.output_tokens.toLocaleString()}
+                          </span>
+                          <span className="text-muted-foreground">花费</span>
+                          <span title={`汇率 ${fxRate}`}>
+                            ¥{r.cost_rmb.toFixed(2)} / ${(r.cost_rmb / fxRate).toFixed(2)}
+                          </span>
+                        </div>
                       </td>
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">{r.created_at}</td>
                       <td className="whitespace-nowrap px-3 py-1.5 text-right">
