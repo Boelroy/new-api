@@ -628,6 +628,16 @@ export default function CCMaxAccounts() {
                       </td>
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">
                         <div className="space-y-1">
+                          <div
+                            className={
+                              'flex items-baseline gap-1.5 ' +
+                              (r.cost_rmb > 0 ? 'text-foreground' : 'text-muted-foreground')
+                            }
+                            title={`累计花费，汇率 ${fxRate}`}
+                          >
+                            <span className="text-base font-semibold">¥{r.cost_rmb.toFixed(2)}</span>
+                            <span className="text-[11px] text-muted-foreground">${(r.cost_rmb / fxRate).toFixed(2)}</span>
+                          </div>
                           <UsageWindow
                             label="5h"
                             chip="bg-primary/10 text-primary"
@@ -644,9 +654,6 @@ export default function CCMaxAccounts() {
                           />
                           <div className="text-[11px] text-muted-foreground">
                             输入/输出 {r.input_tokens.toLocaleString()} / {r.output_tokens.toLocaleString()}
-                          </div>
-                          <div className="text-[11px] text-muted-foreground" title={`汇率 ${fxRate}`}>
-                            花费 ¥{r.cost_rmb.toFixed(2)} / ${(r.cost_rmb / fxRate).toFixed(2)}
                           </div>
                         </div>
                       </td>
