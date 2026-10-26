@@ -635,8 +635,8 @@ export default function CCMaxAccounts() {
                             }
                             title={`累计花费，汇率 ${fxRate}`}
                           >
-                            <span className="text-base font-semibold">¥{r.cost_rmb.toFixed(2)}</span>
-                            <span className="text-sm font-semibold">${(r.cost_rmb / fxRate).toFixed(2)}</span>
+                            <span className="text-base font-semibold">${(r.cost_rmb / fxRate).toFixed(2)}</span>
+                            <span className="text-[11px] text-muted-foreground">¥{r.cost_rmb.toFixed(2)}</span>
                           </div>
                           <UsageWindow
                             label="5h"
