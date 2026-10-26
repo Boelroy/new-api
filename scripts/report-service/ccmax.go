@@ -35,6 +35,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 )
@@ -622,6 +623,10 @@ type ccmaxAccountRow struct {
 	PlanEndTime      string `json:"plan_end_time"`
 	CreatedAt        string `json:"created_at"`
 	Username         string `json:"username,omitempty"`
+	// Remark is the local note; RemarkEditable is false for portal rows that
+	// were not uploaded through this page (no local record to hold a note).
+	Remark         string `json:"remark"`
+	RemarkEditable bool   `json:"remark_editable"`
 	// Usage as the portal reports it on the roster (extra.cpa_usage); the
 	// OpenAPI metrics endpoint does not cover claude accounts. The portal sends
 	// cost in micro-yuan (303731485 = ¥303.73); CostRMB is converted to yuan.
@@ -642,7 +647,7 @@ func ccmaxScopedAccounts(c *gin.Context) ([]ccmaxAccountRow, error) {
 		return nil, err
 	}
 	isAdmin := callerIsSupplierAdmin(c)
-	query := `SELECT a.remote_account_id, COALESCE(u.username, '') FROM rs_ccmax_account a
+	query := `SELECT a.remote_account_id, COALESCE(u.username, ''), a.remark FROM rs_ccmax_account a
 	            LEFT JOIN rs_auth_user u ON u.id = a.uploaded_by`
 	args := []any{}
 	if !isAdmin {
@@ -655,15 +660,16 @@ func ccmaxScopedAccounts(c *gin.Context) ([]ccmaxAccountRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	owners := map[int64]string{}
+	type owner struct{ username, remark string }
+	owners := map[int64]owner{}
 	for rows.Next() {
 		var id int64
-		var username string
-		if err := rows.Scan(&id, &username); err != nil {
+		var o owner
+		if err := rows.Scan(&id, &o.username, &o.remark); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		owners[id] = username
+		owners[id] = o
 	}
 	rows.Close()
 
@@ -674,12 +680,13 @@ func ccmaxScopedAccounts(c *gin.Context) ([]ccmaxAccountRow, error) {
 			log.Printf("[ccmax] skip unparseable portal account row: %v", err)
 			continue
 		}
-		username, owned := owners[row.ID]
+		o, owned := owners[row.ID]
 		if !isAdmin && !owned {
 			continue
 		}
+		row.Remark, row.RemarkEditable = o.remark, owned
 		if isAdmin {
-			row.Username = username
+			row.Username = o.username
 		}
 		out = append(out, row)
 	}
@@ -768,6 +775,88 @@ func handleCCMaxAccountList(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"accounts": rows, "fx_rate": supplierFxRate()})
+}
+
+// ccmaxOwnedAccountID parses :id (a portal account id) and checks the caller
+// may act on it: suppliers only on accounts they uploaded here, admins on any.
+func ccmaxOwnedAccountID(c *gin.Context) (int64, bool) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return 0, false
+	}
+	if callerIsSupplierAdmin(c) {
+		return id, true
+	}
+	uidAny, _ := c.Get("user_id")
+	uid, _ := uidAny.(int64)
+	var one int
+	if err := db.QueryRow(`SELECT 1 FROM rs_ccmax_account WHERE remote_account_id=$1 AND uploaded_by=$2`, id, uid).Scan(&one); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "账号不存在"})
+		return 0, false
+	}
+	return id, true
+}
+
+// handleCCMaxAccountReason returns why a portal claude account failed, the
+// same text the portal's 查看失败原因 shows. Sync / check failures and
+// Claude-side states (封号, token 撤销 …) live behind two portal endpoints, so
+// try both and return the first recorded reason.
+func handleCCMaxAccountReason(c *gin.Context) {
+	id, ok := ccmaxOwnedAccountID(c)
+	if !ok {
+		return
+	}
+	for _, kind := range []string{"check-fail-reason", "claude-status-reason"} {
+		status, body, err := ccmaxWeb.proxy(http.MethodGet, fmt.Sprintf("/supplier-account/api/supplier/accounts/%d/%s", id, kind), nil)
+		if err == nil && status != http.StatusOK {
+			err = errors.New(supplierErr(body))
+		}
+		if err != nil {
+			c.JSON(http.StatusFailedDependency, gin.H{"error": err.Error()})
+			return
+		}
+		var r struct {
+			Content string `json:"content"`
+			Found   bool   `json:"found"`
+		}
+		if json.Unmarshal(body, &r) == nil && r.Found && strings.TrimSpace(r.Content) != "" {
+			c.JSON(http.StatusOK, gin.H{"found": true, "content": r.Content})
+			return
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"found": false, "content": ""})
+}
+
+// handleCCMaxAccountRemark updates the local note on an account uploaded
+// through this page.
+func handleCCMaxAccountRemark(c *gin.Context) {
+	id, ok := ccmaxOwnedAccountID(c)
+	if !ok {
+		return
+	}
+	var body struct {
+		Remark string `json:"remark"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	remark := strings.TrimSpace(body.Remark)
+	if utf8.RuneCountInString(remark) > 200 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "备注最多 200 字"})
+		return
+	}
+	res, err := db.Exec(`UPDATE rs_ccmax_account SET remark=$1 WHERE remote_account_id=$2`, remark, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "该账号不是通过本页面上号的，无法添加备注"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"remark": remark})
 }
 
 // ---- CC Max portal credentials: env bootstrap, report_config override ----

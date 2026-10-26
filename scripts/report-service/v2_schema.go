@@ -129,6 +129,9 @@ var v2SchemaStatements = []string{
 		created_at        BIGINT NOT NULL
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS ux_ccmax_account_remote_id ON rs_ccmax_account(remote_account_id)`,
+	// Supplier-editable note, kept locally (the portal's own edit re-submits
+	// the whole account incl. credential, too heavy for a note).
+	`ALTER TABLE rs_ccmax_account ADD COLUMN IF NOT EXISTS remark TEXT NOT NULL DEFAULT ''`,
 	`CREATE INDEX IF NOT EXISTS idx_ccmax_account_uploaded_by ON rs_ccmax_account(uploaded_by)`,
 
 	// -- Model auto-cleanup ------------------------------------------------

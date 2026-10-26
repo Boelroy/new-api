@@ -2218,6 +2218,18 @@ export const api = {
 
   ccmaxAccounts: () => request<{ accounts: CCMaxAccount[]; fx_rate: number }>('/api/ccmax/accounts'),
 
+  // Failure reason as the portal records it (sync / check failure or the
+  // Claude-side state such as 封号 / token 撤销).
+  ccmaxAccountReason: (id: number) =>
+    request<{ found: boolean; content: string }>(`/api/ccmax/accounts/${id}/reason`),
+
+  ccmaxSetRemark: (id: number, remark: string) =>
+    request<{ remark: string }>(`/api/ccmax/accounts/${id}/remark`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ remark }),
+    }),
+
   getCCMaxSettings: () => request<CCMaxSettings>('/api/ccmax/settings'),
 
   setCCMaxSettings: (payload: { username?: string; password?: string; openapi_token?: string }) =>
@@ -2548,6 +2560,9 @@ export type CCMaxAccount = {
   created_at: string
   // Uploader username; admin only.
   username?: string
+  // Local note; editable only for accounts uploaded through this page.
+  remark: string
+  remark_editable: boolean
   // Cumulative usage as the portal reports it on the roster. cost_rmb is yuan.
   // The *_used_percent values are fractions (0.04 = 4%) despite the name.
   input_tokens: number

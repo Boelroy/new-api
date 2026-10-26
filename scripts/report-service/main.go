@@ -5031,6 +5031,8 @@ func main() {
 	ccmaxAPI.POST("/oauth/submit", handleCCMaxSubmit)
 	ccmaxAPI.GET("/options", handleCCMaxOptions)
 	ccmaxAPI.GET("/accounts", handleCCMaxAccountList)
+	ccmaxAPI.GET("/accounts/:id/reason", handleCCMaxAccountReason)
+	ccmaxAPI.PUT("/accounts/:id/remark", handleCCMaxAccountRemark)
 	// CC Max portal login + OpenAPI token are admin-only.
 	ccmaxAPI.GET("/settings", requireRole(minAdminRole), handleCCMaxSettingsGet)
 	ccmaxAPI.PUT("/settings", requireRole(minAdminRole), handleCCMaxSettingsSet)

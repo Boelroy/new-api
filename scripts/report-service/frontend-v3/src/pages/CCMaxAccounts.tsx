@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Copy, ExternalLink } from 'lucide-react'
+import { Copy, ExternalLink, Pencil } from 'lucide-react'
 import Layout from '../components/Layout'
 import { Badge, Button, Card, Input, Select, Textarea } from '../components/ui'
-import { toast } from '../components/feedback'
+import { Modal, promptDialog, toast } from '../components/feedback'
 import {
   api,
   ROLE_ADMIN,
@@ -33,6 +33,22 @@ const EMPTY_FORM: CCMaxSubmitForm = {
 }
 
 // Portal account status → label (account statuses + the claude/CPA lifecycle).
+// Statuses that carry a portal-recorded reason (sync / check failure, or a
+// Claude-side state like 封号 / token 撤销) worth a 查看原因 button.
+const REASON_STATUSES = new Set([
+  'check_fail',
+  'sync_failed',
+  'bound_failed',
+  'cooking_failed',
+  'login_failed',
+  're_login',
+  're_login_failed',
+  'offline',
+  'ban',
+  'fault',
+  'suspended',
+])
+
 const STATUS_LABELS: Record<string, string> = {
   online: '线上',
   store: '储备',
@@ -99,6 +115,7 @@ export default function CCMaxAccounts() {
   const [fxRate, setFxRate] = useState(7.2)
   const [loaded, setLoaded] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [reason, setReason] = useState<{ account: string; text: string } | null>(null)
   const [role, setRole] = useState<number | null>(getCachedRole())
   const [statusFilter, setStatusFilter] = useState('')
 
@@ -215,6 +232,34 @@ export default function CCMaxAccounts() {
       toast.error(e)
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  async function showReason(row: CCMaxAccount) {
+    setReason({ account: row.account, text: '加载中…' })
+    try {
+      const res = await api.ccmaxAccountReason(row.id)
+      setReason({ account: row.account, text: res.found ? res.content : '暂无原因记录' })
+    } catch (e) {
+      setReason({ account: row.account, text: e instanceof Error ? e.message : String(e) })
+    }
+  }
+
+  async function editRemark(row: CCMaxAccount) {
+    const value = await promptDialog({
+      title: '修改备注',
+      message: row.account,
+      defaultValue: row.remark,
+      placeholder: '最多 200 字',
+      confirmText: '保存',
+    })
+    if (value === null) return
+    try {
+      const res = await api.ccmaxSetRemark(row.id, value)
+      setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, remark: res.remark } : r)))
+      toast.success('备注已保存')
+    } catch (e) {
+      toast.error(e)
     }
   }
 
@@ -449,11 +494,13 @@ export default function CCMaxAccounts() {
                     '注册地',
                     '套餐结束',
                     ...(isAdmin ? ['号商'] : []),
+                    '备注',
                     '5 小时窗口已用',
                     '7 天窗口已用',
                     '输入 / 输出 tokens',
                     `累计花费 (¥ / $，汇率 ${fxRate})`,
                     '上号时间',
+                    '',
                   ].map((h) => (
                     <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
                       {h}
@@ -476,6 +523,25 @@ export default function CCMaxAccounts() {
                       <td className="px-3 py-1.5">{r.register_location}</td>
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">{r.plan_end_time}</td>
                       {isAdmin && <td className="px-3 py-1.5">{r.username || '—'}</td>}
+                      <td className="px-3 py-1.5">
+                        <div className="flex max-w-[220px] items-center gap-1">
+                          <span className="truncate" title={r.remark}>
+                            {r.remark || '—'}
+                          </span>
+                          {r.remark_editable && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="size-6 p-0"
+                              title="修改备注"
+                              aria-label="修改备注"
+                              onClick={() => void editRemark(r)}
+                            >
+                              <Pencil className="size-3" />
+                            </Button>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-3 py-1.5 tnum">{(r.five_hour_used_percent * 100).toFixed(2)}%</td>
                       <td className="px-3 py-1.5 tnum">{(r.week_used_percent * 100).toFixed(2)}%</td>
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">
@@ -485,6 +551,13 @@ export default function CCMaxAccounts() {
                         ¥{r.cost_rmb.toFixed(2)} / ${(r.cost_rmb / fxRate).toFixed(2)}
                       </td>
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">{r.created_at}</td>
+                      <td className="whitespace-nowrap px-3 py-1.5 text-right">
+                        {REASON_STATUSES.has(r.status) && (
+                          <Button size="sm" variant="outline" onClick={() => void showReason(r)}>
+                            查看原因
+                          </Button>
+                        )}
+                      </td>
                     </tr>
                   )
                 })}
@@ -493,6 +566,12 @@ export default function CCMaxAccounts() {
           </div>
         )}
       </Card>
+
+      <Modal open={reason !== null} onClose={() => setReason(null)} title={`失败原因 · ${reason?.account ?? ''}`}>
+        <pre className="whitespace-pre-wrap break-words rounded-lg bg-muted p-4 text-sm leading-relaxed">
+          {reason?.text}
+        </pre>
+      </Modal>
     </Layout>
   )
 }
