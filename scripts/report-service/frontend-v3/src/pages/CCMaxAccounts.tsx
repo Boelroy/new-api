@@ -131,104 +131,34 @@ function UsageWindow(props: { label: string; chip: string; used: number; resetAt
   )
 }
 
-export default function CCMaxAccounts() {
+// OAuthFlow is the socks5 → authorize link → paste code → form flow. Inline it
+// uploads a new account; with reauth (rendered in a modal) it replaces that
+// account's credential and proxy, prefilled from the portal, password optional.
+function OAuthFlow(props: {
+  plans: string[]
+  locations: { value: string; label: string }[]
+  reauth?: CCMaxAccount
+  onDone: () => void
+}) {
+  const { plans, locations, reauth } = props
   const [proxy, setProxy] = useState<CCMaxProxyInput>(EMPTY_PROXY)
   const [session, setSession] = useState<CCMaxOAuthStart | null>(null)
-  // Account being re-authorized (new tokens + proxy for an existing portal
-  // account); null = uploading a new account.
-  const [reauth, setReauth] = useState<CCMaxAccount | null>(null)
-  // Ticks every minute so the reset countdowns stay current between reloads.
-  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
-  useEffect(() => {
-    const t = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 60_000)
-    return () => clearInterval(t)
-  }, [])
   const [code, setCode] = useState('')
-  const [form, setForm] = useState<CCMaxSubmitForm>(EMPTY_FORM)
-  const [plans, setPlans] = useState<string[]>([])
-  const [locations, setLocations] = useState<{ value: string; label: string }[]>([])
+  const [form, setForm] = useState<CCMaxSubmitForm>(() =>
+    reauth
+      ? {
+          plan: reauth.plan,
+          account: reauth.account,
+          password: '',
+          register_location: reauth.register_location,
+          register_time: reauth.register_time,
+          plan_start_time: reauth.plan_start_time,
+          plan_end_time: reauth.plan_end_time,
+        }
+      : EMPTY_FORM,
+  )
   const [starting, setStarting] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [rows, setRows] = useState<CCMaxAccount[]>([])
-  const [fxRate, setFxRate] = useState(7.2)
-  const [loaded, setLoaded] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [reason, setReason] = useState<{ account: string; text: string } | null>(null)
-  const [role, setRole] = useState<number | null>(getCachedRole())
-  const [statusFilter, setStatusFilter] = useState('')
-
-  const statusCounts = useMemo(() => {
-    const counts = new Map<string, number>()
-    for (const r of rows) counts.set(r.status, (counts.get(r.status) ?? 0) + 1)
-    return [...counts.entries()].sort((a, b) => b[1] - a[1])
-  }, [rows])
-  const failedCount = statusCounts.reduce((n, [s, c]) => (STATUS_TONES[s] === 'danger' ? n + c : n), 0)
-
-  const visibleRows = useMemo(() => {
-    if (!statusFilter) return rows
-    if (statusFilter === FILTER_FAILED) return rows.filter((r) => STATUS_TONES[r.status] === 'danger')
-    return rows.filter((r) => r.status === statusFilter)
-  }, [rows, statusFilter])
-
-  // Totals follow the active filter; window usage averages only the accounts
-  // actually serving (using/online) so idle 0% rows don't drag it down.
-  const stats = useMemo(() => {
-    let cost = 0
-    let input = 0
-    let output = 0
-    let five = 0
-    let week = 0
-    let serving = 0
-    for (const r of visibleRows) {
-      cost += r.cost_rmb
-      input += r.input_tokens
-      output += r.output_tokens
-      if (STATUS_TONES[r.status] === 'success') {
-        five += r.five_hour_used_percent
-        week += r.week_used_percent
-        serving++
-      }
-    }
-    return {
-      cost,
-      input,
-      output,
-      serving,
-      fiveAvg: serving ? five / serving : 0,
-      weekAvg: serving ? week / serving : 0,
-    }
-  }, [visibleRows])
-
-  useEffect(() => {
-    if (role !== null) return
-    void loadRole().then(setRole)
-  }, [role])
-  const isAdmin = role != null && role >= ROLE_ADMIN
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    try {
-      const res = await api.ccmaxAccounts()
-      setRows(res.accounts ?? [])
-      if (res.fx_rate > 0) setFxRate(res.fx_rate)
-    } catch (e) {
-      toast.error(e)
-    } finally {
-      setLoaded(true)
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    void load()
-    api
-      .ccmaxOptions()
-      .then((res) => {
-        setPlans(res.plans ?? [])
-        setLocations(res.register_locations ?? [])
-      })
-      .catch((e) => toast.error(e))
-  }, [load])
 
   async function start() {
     if (!proxy.url.trim() && (!proxy.host.trim() || !proxy.port.trim())) {
@@ -268,8 +198,7 @@ export default function CCMaxAccounts() {
       setSession(null)
       setCode('')
       setForm(EMPTY_FORM)
-      setReauth(null)
-      void load()
+      props.onDone()
     } catch (e) {
       // When the authorization itself failed the session is gone and a new link
       // is needed; a portal-side rejection keeps it so the form can be fixed.
@@ -280,79 +209,18 @@ export default function CCMaxAccounts() {
     }
   }
 
-  // startReauth switches the flow above to re-authorizing row: fresh link via a
-  // (possibly new) proxy, form prefilled from the portal, password optional.
-  function startReauth(row: CCMaxAccount) {
-    setReauth(row)
-    setSession(null)
-    setCode('')
-    setForm({
-      plan: row.plan,
-      account: row.account,
-      password: '',
-      register_location: row.register_location,
-      register_time: row.register_time,
-      plan_start_time: row.plan_start_time,
-      plan_end_time: row.plan_end_time,
-    })
-    window.scrollTo({ top: 0, behavior: 'smooth' })
-  }
-
-  function cancelReauth() {
-    setReauth(null)
-    setSession(null)
-    setCode('')
-    setForm(EMPTY_FORM)
-  }
-
-  async function showReason(row: CCMaxAccount) {
-    setReason({ account: row.account, text: '加载中…' })
-    try {
-      const res = await api.ccmaxAccountReason(row.id)
-      setReason({ account: row.account, text: res.found ? res.content : '暂无原因记录' })
-    } catch (e) {
-      setReason({ account: row.account, text: e instanceof Error ? e.message : String(e) })
-    }
-  }
-
-  async function editRemark(row: CCMaxAccount) {
-    const value = await promptDialog({
-      title: '修改备注',
-      message: row.account,
-      defaultValue: row.remark,
-      placeholder: '最多 200 字',
-      confirmText: '保存',
-    })
-    if (value === null) return
-    try {
-      const res = await api.ccmaxSetRemark(row.id, value)
-      setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, remark: res.remark } : r)))
-      toast.success('备注已保存')
-    } catch (e) {
-      toast.error(e)
-    }
-  }
-
   const field = (key: keyof CCMaxSubmitForm) => ({
     value: form[key],
     onChange: (e: { target: { value: string } }) => setForm({ ...form, [key]: e.target.value }),
   })
 
   return (
-    <Layout title="CC Max 上号" subtitle="通过你自己的 socks5 代理完成 Claude 账号授权并上号">
-      {isAdmin && <SettingsCard />}
-
+    <>
       {reauth && (
-        <div className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 px-4 py-2.5 text-sm">
-          <span>
-            正在重新授权：<span className="font-mono">{reauth.account}</span>（{reauth.alias}）。完成授权后会替换该账号的凭据和代理。
-          </span>
-          <Button size="sm" variant="outline" onClick={cancelReauth}>
-            取消
-          </Button>
-        </div>
+        <p className="mb-3 text-xs text-muted-foreground">
+          用新的（或原来的）socks5 重新完成授权，提交后会替换该账号在号池中的凭据和代理。
+        </p>
       )}
-
       <Card className="space-y-4 p-4">
         <div className="text-sm font-semibold">1. 填写 socks5 代理</div>
         <label className="block space-y-1.5">
@@ -505,6 +373,135 @@ export default function CCMaxAccounts() {
           </Button>
         </Card>
       )}
+    </>
+  )
+}
+
+export default function CCMaxAccounts() {
+  // Account being re-authorized in the modal; null = modal closed.
+  const [reauth, setReauth] = useState<CCMaxAccount | null>(null)
+  // Ticks every minute so the reset countdowns stay current between reloads.
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+  useEffect(() => {
+    const t = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 60_000)
+    return () => clearInterval(t)
+  }, [])
+  const [plans, setPlans] = useState<string[]>([])
+  const [locations, setLocations] = useState<{ value: string; label: string }[]>([])
+  const [rows, setRows] = useState<CCMaxAccount[]>([])
+  const [fxRate, setFxRate] = useState(7.2)
+  const [loaded, setLoaded] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [reason, setReason] = useState<{ account: string; text: string } | null>(null)
+  const [role, setRole] = useState<number | null>(getCachedRole())
+  const [statusFilter, setStatusFilter] = useState('')
+
+  const statusCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const r of rows) counts.set(r.status, (counts.get(r.status) ?? 0) + 1)
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])
+  }, [rows])
+  const failedCount = statusCounts.reduce((n, [s, c]) => (STATUS_TONES[s] === 'danger' ? n + c : n), 0)
+
+  const visibleRows = useMemo(() => {
+    if (!statusFilter) return rows
+    if (statusFilter === FILTER_FAILED) return rows.filter((r) => STATUS_TONES[r.status] === 'danger')
+    return rows.filter((r) => r.status === statusFilter)
+  }, [rows, statusFilter])
+
+  // Totals follow the active filter; window usage averages only the accounts
+  // actually serving (using/online) so idle 0% rows don't drag it down.
+  const stats = useMemo(() => {
+    let cost = 0
+    let input = 0
+    let output = 0
+    let five = 0
+    let week = 0
+    let serving = 0
+    for (const r of visibleRows) {
+      cost += r.cost_rmb
+      input += r.input_tokens
+      output += r.output_tokens
+      if (STATUS_TONES[r.status] === 'success') {
+        five += r.five_hour_used_percent
+        week += r.week_used_percent
+        serving++
+      }
+    }
+    return {
+      cost,
+      input,
+      output,
+      serving,
+      fiveAvg: serving ? five / serving : 0,
+      weekAvg: serving ? week / serving : 0,
+    }
+  }, [visibleRows])
+
+  useEffect(() => {
+    if (role !== null) return
+    void loadRole().then(setRole)
+  }, [role])
+  const isAdmin = role != null && role >= ROLE_ADMIN
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await api.ccmaxAccounts()
+      setRows(res.accounts ?? [])
+      if (res.fx_rate > 0) setFxRate(res.fx_rate)
+    } catch (e) {
+      toast.error(e)
+    } finally {
+      setLoaded(true)
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void load()
+    api
+      .ccmaxOptions()
+      .then((res) => {
+        setPlans(res.plans ?? [])
+        setLocations(res.register_locations ?? [])
+      })
+      .catch((e) => toast.error(e))
+  }, [load])
+
+  async function showReason(row: CCMaxAccount) {
+    setReason({ account: row.account, text: '加载中…' })
+    try {
+      const res = await api.ccmaxAccountReason(row.id)
+      setReason({ account: row.account, text: res.found ? res.content : '暂无原因记录' })
+    } catch (e) {
+      setReason({ account: row.account, text: e instanceof Error ? e.message : String(e) })
+    }
+  }
+
+  async function editRemark(row: CCMaxAccount) {
+    const value = await promptDialog({
+      title: '修改备注',
+      message: row.account,
+      defaultValue: row.remark,
+      placeholder: '最多 200 字',
+      confirmText: '保存',
+    })
+    if (value === null) return
+    try {
+      const res = await api.ccmaxSetRemark(row.id, value)
+      setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, remark: res.remark } : r)))
+      toast.success('备注已保存')
+    } catch (e) {
+      toast.error(e)
+    }
+  }
+
+  return (
+    <Layout title="CC Max 上号" subtitle="通过你自己的 socks5 代理完成 Claude 账号授权并上号">
+      {isAdmin && <SettingsCard />}
+
+      <OAuthFlow plans={plans} locations={locations} onDone={() => void load()} />
 
       <Card className="mt-4 overflow-hidden p-0">
         <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
@@ -574,7 +571,6 @@ export default function CCMaxAccounts() {
                 <tr>
                   {[
                     '账号',
-                    '别名',
                     '状态',
                     '套餐',
                     '注册地',
@@ -597,13 +593,11 @@ export default function CCMaxAccounts() {
                     <tr key={r.id} className="border-t border-border">
                       <td className="px-3 py-1.5">
                         <div className="font-mono">{r.account}</div>
-                        {r.proxy_display && (
-                          <div className="font-mono text-[11px] text-muted-foreground" title="当前代理">
-                            {r.proxy_display}
-                          </div>
-                        )}
+                        <div className="font-mono text-[11px] text-muted-foreground">
+                          <span title="别名">{r.alias}</span>
+                          {r.proxy_display && <span title="当前代理"> · {r.proxy_display}</span>}
+                        </div>
                       </td>
-                      <td className="px-3 py-1.5 font-mono">{r.alias}</td>
                       <td className="px-3 py-1.5">
                         <Badge tone={STATUS_TONES[r.status] ?? 'neutral'} className="whitespace-nowrap">
                           {STATUS_LABELS[r.status] || r.status || '—'}
@@ -665,7 +659,7 @@ export default function CCMaxAccounts() {
                             </Button>
                           )}
                           {r.remark_editable && (
-                            <Button size="sm" variant="outline" onClick={() => startReauth(r)}>
+                            <Button size="sm" variant="outline" onClick={() => setReauth(r)}>
                               重新授权
                             </Button>
                           )}
@@ -679,6 +673,26 @@ export default function CCMaxAccounts() {
           </div>
         )}
       </Card>
+
+      <Modal
+        open={reauth !== null}
+        onClose={() => setReauth(null)}
+        title={`重新授权 · ${reauth?.account ?? ''}`}
+        className="max-w-3xl"
+      >
+        {reauth && (
+          <OAuthFlow
+            key={reauth.id}
+            plans={plans}
+            locations={locations}
+            reauth={reauth}
+            onDone={() => {
+              setReauth(null)
+              void load()
+            }}
+          />
+        )}
+      </Modal>
 
       <Modal open={reason !== null} onClose={() => setReason(null)} title={`失败原因 · ${reason?.account ?? ''}`}>
         <pre className="whitespace-pre-wrap break-words rounded-lg bg-muted p-4 text-sm leading-relaxed">
