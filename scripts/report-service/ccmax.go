@@ -344,8 +344,10 @@ func (f *ccmaxSubmitForm) validate(requirePassword bool) error {
 	f.Plan = strings.TrimSpace(f.Plan)
 	f.Account = strings.TrimSpace(f.Account)
 	f.RegisterLocation = strings.TrimSpace(f.RegisterLocation)
-	if f.Plan == "" || f.Account == "" || f.RegisterLocation == "" {
-		return errors.New("套餐、账号、注册地均为必填")
+	// 账号 may be left blank: it then defaults to the authorized credential's
+	// email once the code is exchanged (handleCCMaxSubmit).
+	if f.Plan == "" || f.RegisterLocation == "" {
+		return errors.New("套餐、注册地均为必填")
 	}
 	if requirePassword && f.Password == "" {
 		return errors.New("密码为必填")
@@ -495,10 +497,12 @@ func handleCCMaxSubmit(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "session_gone": true})
 		return
 	}
-	// Keep the session: the credential is parked, so fixing 账号 resubmits
-	// without authorizing again.
+	// A blank 账号 defaults to the credential's email. On a mismatch keep the
+	// session: the credential is parked, so the page fills in email and the
+	// supplier resubmits without authorizing again.
+	body.Account = cmp.Or(body.Account, strings.TrimSpace(cred.Email))
 	if err := cred.matchesAccount(body.Account); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "email": cred.Email})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "email": cred.Email, "account_mismatch": true})
 		return
 	}
 

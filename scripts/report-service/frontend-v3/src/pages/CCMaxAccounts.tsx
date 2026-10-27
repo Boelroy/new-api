@@ -184,8 +184,9 @@ function OAuthFlow(props: {
       toast.error('请粘贴授权 code')
       return
     }
-    // Re-authorizing may leave the password blank (unchanged).
-    if (Object.entries(form).some(([k, v]) => !v.trim() && !(reauth && k === 'password'))) {
+    // Re-authorizing may leave the password blank (unchanged); a blank 账号
+    // defaults to the authorized email server-side.
+    if (Object.entries(form).some(([k, v]) => !v.trim() && k !== 'account' && !(reauth && k === 'password'))) {
       toast.error('请填写全部必填项')
       return
     }
@@ -205,7 +206,23 @@ function OAuthFlow(props: {
     } catch (e) {
       // When the authorization itself failed the session is gone and a new link
       // is needed; a portal-side rejection keeps it so the form can be fixed.
-      if (String(e instanceof Error ? e.message : e).includes('session_gone')) setSession(null)
+      const msg = String(e instanceof Error ? e.message : e)
+      if (msg.includes('session_gone')) setSession(null)
+      // 账号 ≠ authorized email: the credential stays parked, so fill in the
+      // authorized email and let the supplier resubmit (new uploads only — a
+      // re-authorized account keeps its 账号 and needs the matching login).
+      if (!reauth && msg.includes('account_mismatch')) {
+        try {
+          const email = (JSON.parse(msg) as { email?: string }).email
+          if (email) {
+            setForm((f) => ({ ...f, account: email }))
+            toast.error(`账号已改为授权邮箱 ${email}，确认后再次提交即可`)
+            return
+          }
+        } catch {
+          // fall through to the raw error
+        }
+      }
       toast.error(e)
     } finally {
       setSubmitting(false)
@@ -335,8 +352,13 @@ function OAuthFlow(props: {
               </Select>
             </label>
             <label className="space-y-1.5">
-              <span className="text-xs font-medium text-muted-foreground">账号（登录 ID / 邮箱，不能包含空格）</span>
-              <Input autoComplete="off" placeholder="请输入账号" readOnly={!!reauth} {...field('account')} />
+              <span className="text-xs font-medium text-muted-foreground">账号（须与授权的 Claude 邮箱一致）</span>
+              <Input
+                autoComplete="off"
+                placeholder="留空则自动使用授权的 Claude 邮箱"
+                readOnly={!!reauth}
+                {...field('account')}
+              />
             </label>
             <label className="space-y-1.5">
               <span className="text-xs font-medium text-muted-foreground">密码{reauth ? '（留空则不修改）' : ''}</span>
