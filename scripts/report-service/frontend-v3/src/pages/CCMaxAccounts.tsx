@@ -475,6 +475,73 @@ export default function CCMaxAccounts() {
       .catch((e) => toast.error(e))
   }, [load])
 
+  // exportCSV downloads the table as currently filtered (visibleRows).
+  function exportCSV() {
+    if (visibleRows.length === 0) return
+    const resetTime = (at: number) => (at ? new Date(at * 1000).toLocaleString() : '')
+    const header = [
+      '账号',
+      '别名',
+      '代理',
+      '状态',
+      '套餐',
+      '注册地',
+      '注册时间',
+      '套餐开始',
+      '套餐结束',
+      ...(showUploader ? ['号商'] : []),
+      '备注',
+      '花费 USD',
+      '花费 CNY',
+      '5h 用量 %',
+      '5h 重置时间',
+      '7d 用量 %',
+      '7d 重置时间',
+      '输入 Tokens',
+      '输出 Tokens',
+      '上号时间',
+    ]
+    const escape = (v: unknown) => {
+      const s = v == null ? '' : String(v)
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
+    }
+    const lines = visibleRows.map((r) =>
+      [
+        r.account,
+        r.alias,
+        r.proxy_display,
+        STATUS_LABELS[r.status] || r.status,
+        r.plan,
+        r.register_location,
+        r.register_time,
+        r.plan_start_time,
+        r.plan_end_time,
+        ...(showUploader ? [r.username ?? ''] : []),
+        r.remark,
+        (r.cost_rmb / fxRate).toFixed(2),
+        r.cost_rmb.toFixed(2),
+        (r.five_hour_used_percent * 100).toFixed(1),
+        resetTime(r.five_hour_reset_at),
+        (r.week_used_percent * 100).toFixed(1),
+        resetTime(r.week_reset_at),
+        r.input_tokens,
+        r.output_tokens,
+        r.created_at,
+      ]
+        .map(escape)
+        .join(','),
+    )
+    const csv = [header.join(','), ...lines].join('\n')
+    // BOM so Excel opens it as UTF-8 without garbling.
+    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `ccmax-accounts_${new Date().toISOString().slice(0, 10)}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   async function showReason(row: CCMaxAccount) {
     setReason({ account: row.account, text: '加载中…' })
     try {
@@ -520,6 +587,9 @@ export default function CCMaxAccounts() {
             <span>
               {statusFilter ? `${visibleRows.length} / ${rows.length}` : `共 ${rows.length}`} 个
             </span>
+            <Button size="sm" variant="outline" disabled={visibleRows.length === 0} onClick={exportCSV}>
+              导出 CSV
+            </Button>
             <Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>
               {loading ? '刷新中…' : '刷新'}
             </Button>
