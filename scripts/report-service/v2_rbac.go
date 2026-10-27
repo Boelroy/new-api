@@ -40,6 +40,7 @@ const (
 	RoleSupplier01           = "supplier_01"
 	RoleSupplier02           = "supplier_02"
 	RoleSupplierCCMax        = "supplier_ccmax"
+	RoleCCMaxManager         = "ccmax_manager"
 	RoleTester               = "tester"
 	RoleUser                 = "user"
 )
@@ -52,6 +53,7 @@ const (
 	LevelAdmin                = 50
 	LevelProjectAdmin         = 25
 	LevelRemoteStudioOperator = 22
+	LevelCCMaxManager         = 26
 	LevelSupplierCCMax        = 24
 	LevelSupplier02           = 23
 	LevelSupplier01           = 21
@@ -704,6 +706,8 @@ func legacyLevelForRole(v1Role int) int {
 		return LevelSupplier02
 	case minSupplierCCMaxRole:
 		return LevelSupplierCCMax
+	case minCCMaxManagerRole:
+		return LevelCCMaxManager
 	case minStudioOperatorRole:
 		return LevelStudioOperator
 	case minTesterRole:

@@ -564,6 +564,8 @@ export const ROLE_SUPPLIER_02 = 6
 export const ROLE_PROJECT_ADMIN = 7
 // supplier_ccmax: CC Max (Claude OAuth) 上号 + own usage only (v3 /ccmax).
 export const ROLE_SUPPLIER_CCMAX = 8
+// ccmax_manager: read-only view of assigned supplier_ccmax users' CC Max accounts (v3 /ccmax).
+export const ROLE_CCMAX_MANAGER = 9
 export const ROLE_ADMIN = 10
 export const ROLE_SUPER_ADMIN = 100
 
@@ -2241,6 +2243,15 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  ccmaxManagers: () => request<CCMaxManagers>('/api/ccmax/managers'),
+
+  setCCMaxManagerMembers: (managerId: number, memberIds: number[]) =>
+    request<{ id: number; member_ids: number[] }>(`/api/ccmax/managers/${managerId}/members`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ member_ids: memberIds }),
+    }),
+
   keyhubCategories: () =>
     request<KeyhubEnvelope<KeyhubCategory[]>>('/api/keyhub/categories'),
 
@@ -2579,6 +2590,13 @@ export type CCMaxAccount = {
   week_reset_at: number
   // Proxy host:port of the last credential uploaded through this page.
   proxy_display: string
+}
+
+// GET /api/ccmax/managers: each ccmax_manager with the supplier_ccmax users
+// they may see, plus every supplier_ccmax user to pick from.
+export type CCMaxManagers = {
+  managers: { id: number; username: string; member_ids: number[] }[]
+  suppliers: { id: number; username: string }[]
 }
 
 export type CCMaxSettings = {

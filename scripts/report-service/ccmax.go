@@ -39,6 +39,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 )
 
 // Upstream (portal / Anthropic / proxy) failures answer 424, not 502: the
@@ -66,6 +67,21 @@ func requireRoleOrSupplierCCMax(min int) gin.HandlerFunc {
 		roleAny, _ := c.Get("role")
 		role, _ := roleAny.(int)
 		if role >= min || role == minSupplierCCMaxRole {
+			c.Next()
+			return
+		}
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		c.Abort()
+	}
+}
+
+// requireRoleOrCCMaxRoles is requireRoleOrSupplierCCMax that also lets the
+// ccmax_manager role (role=9) in, for the read-only CC Max surfaces.
+func requireRoleOrCCMaxRoles(min int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		roleAny, _ := c.Get("role")
+		role, _ := roleAny.(int)
+		if role >= min || role == minSupplierCCMaxRole || role == minCCMaxManagerRole {
 			c.Next()
 			return
 		}
@@ -736,34 +752,70 @@ type ccmaxAccountRow struct {
 	ProxyDisplay string `json:"proxy_display"`
 }
 
+// ccmaxVisibleUploaders returns whose CC Max uploads the caller may see:
+// all=true for admins; otherwise the caller's own uid plus, for a
+// ccmax_manager, the members an admin assigned to them.
+func ccmaxVisibleUploaders(c *gin.Context) (all bool, uids []int64, err error) {
+	if callerIsSupplierAdmin(c) {
+		return true, nil, nil
+	}
+	uidAny, _ := c.Get("user_id")
+	uid, _ := uidAny.(int64)
+	uids = []int64{uid}
+	roleAny, _ := c.Get("role")
+	if role, _ := roleAny.(int); role != minCCMaxManagerRole {
+		return false, uids, nil
+	}
+	rows, err := db.Query(`SELECT member_id FROM rs_ccmax_manager_member WHERE manager_id=$1`, uid)
+	if err != nil {
+		return false, nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return false, nil, err
+		}
+		uids = append(uids, id)
+	}
+	return false, uids, rows.Err()
+}
+
 // ccmaxScopedAccounts loads the CC Max login's claude roster from the portal
-// and keeps the rows the caller may see: admins see all, suppliers only the
-// accounts they uploaded through report-service.
+// and keeps the rows the caller may see (ccmaxVisibleUploaders). Remark and
+// re-authorize stay with the uploader (admins: any locally recorded row), so
+// a manager's view of members' rows is read-only.
 func ccmaxScopedAccounts(c *gin.Context) ([]ccmaxAccountRow, error) {
 	raws, err := fetchPortalAccountsRaw(ccmaxWeb, "claude")
 	if err != nil {
 		return nil, err
 	}
-	isAdmin := callerIsSupplierAdmin(c)
-	query := `SELECT a.remote_account_id, COALESCE(u.username, ''), a.remark, a.proxy_display FROM rs_ccmax_account a
+	all, uids, err := ccmaxVisibleUploaders(c)
+	if err != nil {
+		return nil, err
+	}
+	uidAny, _ := c.Get("user_id")
+	callerID, _ := uidAny.(int64)
+	query := `SELECT a.remote_account_id, a.uploaded_by, COALESCE(u.username, ''), a.remark, a.proxy_display FROM rs_ccmax_account a
 	            LEFT JOIN rs_auth_user u ON u.id = a.uploaded_by`
 	args := []any{}
-	if !isAdmin {
-		uidAny, _ := c.Get("user_id")
-		uid, _ := uidAny.(int64)
-		query += ` WHERE a.uploaded_by=$1`
-		args = append(args, uid)
+	if !all {
+		query += ` WHERE a.uploaded_by = ANY($1)`
+		args = append(args, pq.Array(uids))
 	}
 	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
-	type owner struct{ username, remark, proxy string }
+	type owner struct {
+		uploadedBy              int64
+		username, remark, proxy string
+	}
 	owners := map[int64]owner{}
 	for rows.Next() {
 		var id int64
 		var o owner
-		if err := rows.Scan(&id, &o.username, &o.remark, &o.proxy); err != nil {
+		if err := rows.Scan(&id, &o.uploadedBy, &o.username, &o.remark, &o.proxy); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -771,6 +823,7 @@ func ccmaxScopedAccounts(c *gin.Context) ([]ccmaxAccountRow, error) {
 	}
 	rows.Close()
 
+	showUploader := all || len(uids) > 1
 	out := make([]ccmaxAccountRow, 0, len(raws))
 	for _, raw := range raws {
 		row, err := parseCCMaxPortalRow(raw)
@@ -779,11 +832,12 @@ func ccmaxScopedAccounts(c *gin.Context) ([]ccmaxAccountRow, error) {
 			continue
 		}
 		o, owned := owners[row.ID]
-		if !isAdmin && !owned {
+		if !all && !owned {
 			continue
 		}
-		row.Remark, row.RemarkEditable, row.ProxyDisplay = o.remark, owned, o.proxy
-		if isAdmin {
+		row.Remark, row.ProxyDisplay = o.remark, o.proxy
+		row.RemarkEditable = owned && (all || o.uploadedBy == callerID)
+		if showUploader {
 			row.Username = o.username
 		}
 		out = append(out, row)
@@ -895,15 +949,29 @@ func ccmaxCallerOwns(c *gin.Context, id int64) bool {
 	return db.QueryRow(`SELECT 1 FROM rs_ccmax_account WHERE remote_account_id=$1 AND uploaded_by=$2`, id, uid).Scan(&one) == nil
 }
 
-// ccmaxOwnedAccountID parses :id (a portal account id) and answers 400/404
-// unless the caller may act on it.
-func ccmaxOwnedAccountID(c *gin.Context) (int64, bool) {
+// ccmaxCallerCanView reports whether the caller may view portal account id:
+// ccmaxCallerOwns plus a ccmax_manager's assigned members' accounts.
+func ccmaxCallerCanView(c *gin.Context, id int64) bool {
+	all, uids, err := ccmaxVisibleUploaders(c)
+	if err != nil {
+		return false
+	}
+	if all {
+		return true
+	}
+	var one int
+	return db.QueryRow(`SELECT 1 FROM rs_ccmax_account WHERE remote_account_id=$1 AND uploaded_by = ANY($2)`, id, pq.Array(uids)).Scan(&one) == nil
+}
+
+// ccmaxAccountIDParam parses :id (a portal account id) and answers 400/404
+// unless allowed reports the caller may use it.
+func ccmaxAccountIDParam(c *gin.Context, allowed func(*gin.Context, int64) bool) (int64, bool) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || id <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return 0, false
 	}
-	if !ccmaxCallerOwns(c, id) {
+	if !allowed(c, id) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "账号不存在"})
 		return 0, false
 	}
@@ -1004,7 +1072,7 @@ func ccmaxUpdatePortalAccount(id int64, form ccmaxSubmitForm, cred ccmaxCredenti
 // Claude-side states (封号, token 撤销 …) live behind two portal endpoints, so
 // try both and return the first recorded reason.
 func handleCCMaxAccountReason(c *gin.Context) {
-	id, ok := ccmaxOwnedAccountID(c)
+	id, ok := ccmaxAccountIDParam(c, ccmaxCallerCanView)
 	if !ok {
 		return
 	}
@@ -1032,7 +1100,7 @@ func handleCCMaxAccountReason(c *gin.Context) {
 // handleCCMaxAccountRemark updates the local note on an account uploaded
 // through this page.
 func handleCCMaxAccountRemark(c *gin.Context) {
-	id, ok := ccmaxOwnedAccountID(c)
+	id, ok := ccmaxAccountIDParam(c, ccmaxCallerOwns)
 	if !ok {
 		return
 	}
@@ -1137,4 +1205,123 @@ func handleCCMaxSettingsSet(c *gin.Context) {
 	// New credentials ⇒ the cached WEB token belongs to the old login.
 	ccmaxWeb.invalidate()
 	handleCCMaxSettingsGet(c)
+}
+
+// ---- ccmax_manager ↔ supplier_ccmax assignment (admin) ----
+
+type ccmaxUserRef struct {
+	ID       int64  `json:"id"`
+	Username string `json:"username"`
+}
+
+// handleCCMaxManagersList returns every ccmax_manager with the supplier_ccmax
+// users assigned to them, plus all supplier_ccmax users to pick from.
+func handleCCMaxManagersList(c *gin.Context) {
+	rows, err := db.Query(`SELECT id, username, role FROM rs_auth_user WHERE role IN ($1, $2) ORDER BY username`,
+		minCCMaxManagerRole, minSupplierCCMaxRole)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	type manager struct {
+		ccmaxUserRef
+		MemberIDs []int64 `json:"member_ids"`
+	}
+	managers := []*manager{}
+	byID := map[int64]*manager{}
+	suppliers := []ccmaxUserRef{}
+	for rows.Next() {
+		var u ccmaxUserRef
+		var role int
+		if err := rows.Scan(&u.ID, &u.Username, &role); err != nil {
+			rows.Close()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if role == minSupplierCCMaxRole {
+			suppliers = append(suppliers, u)
+			continue
+		}
+		m := &manager{ccmaxUserRef: u, MemberIDs: []int64{}}
+		managers = append(managers, m)
+		byID[u.ID] = m
+	}
+	rows.Close()
+
+	rows, err = db.Query(`SELECT manager_id, member_id FROM rs_ccmax_manager_member ORDER BY member_id`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var managerID, memberID int64
+		if err := rows.Scan(&managerID, &memberID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if m := byID[managerID]; m != nil {
+			m.MemberIDs = append(m.MemberIDs, memberID)
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"managers": managers, "suppliers": suppliers})
+}
+
+// handleCCMaxManagerMembersSet replaces the supplier_ccmax users a
+// ccmax_manager may see.
+func handleCCMaxManagerMembersSet(c *gin.Context) {
+	managerID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || managerID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	var body struct {
+		MemberIDs []int64 `json:"member_ids"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	target, err := authUserByID(managerID)
+	if err != nil || target.Role != minCCMaxManagerRole {
+		c.JSON(http.StatusNotFound, gin.H{"error": "CC Max manager not found"})
+		return
+	}
+	slices.Sort(body.MemberIDs)
+	body.MemberIDs = slices.Compact(body.MemberIDs)
+	if len(body.MemberIDs) > 0 {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM rs_auth_user WHERE id = ANY($1) AND role=$2`,
+			pq.Array(body.MemberIDs), minSupplierCCMaxRole).Scan(&n); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if n != len(body.MemberIDs) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "members must be supplier_ccmax users"})
+			return
+		}
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM rs_ccmax_manager_member WHERE manager_id=$1`, managerID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	now := time.Now().Unix()
+	for _, memberID := range body.MemberIDs {
+		if _, err := tx.Exec(`INSERT INTO rs_ccmax_manager_member (manager_id, member_id, created_at) VALUES ($1, $2, $3)`,
+			managerID, memberID, now); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"id": managerID, "member_ids": body.MemberIDs})
 }

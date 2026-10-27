@@ -144,6 +144,17 @@ var builtinRoleSeeds = []builtinRoleSeed{
 		},
 	},
 	{
+		// CC Max Manager: read-only view of the CC Max accounts + usage of
+		// the supplier_ccmax users an admin assigned to them. The ccmax routes
+		// gate on the V1 numeric tier (minCCMaxManagerRole).
+		Name:        RoleCCMaxManager,
+		DisplayName: "CC Max Manager",
+		Level:       LevelCCMaxManager,
+		Permissions: []Permission{
+			{ActionCCMaxManage, ScopeOwnStudio},
+		},
+	},
+	{
 		Name:        RoleTester,
 		DisplayName: "Tester",
 		Level:       LevelTester,
@@ -299,6 +310,8 @@ func builtinRoleNameForLegacy(v1Role int) string {
 		return RoleSupplier02
 	case minSupplierCCMaxRole:
 		return RoleSupplierCCMax
+	case minCCMaxManagerRole:
+		return RoleCCMaxManager
 	case minStudioOperatorRole:
 		return RoleStudioOperator
 	case minTesterRole:

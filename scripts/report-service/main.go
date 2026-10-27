@@ -75,6 +75,7 @@ const (
 	minSupplierRole02           = 6   // supplier_02: KHub (pd-maas) key upload + usage, own scope only
 	minProjectAdminRole         = 7   // Key Capacity + Key Tester only
 	minSupplierCCMaxRole        = 8   // supplier_ccmax: CC Max (Claude OAuth) 上号 + own usage only
+	minCCMaxManagerRole         = 9   // ccmax_manager: views the CC Max accounts of assigned supplier_ccmax users
 	minAdminRole                = 10  // common.RoleAdminUser
 	minSuperAdminRole           = 100 // common.RoleRootUser
 )
@@ -1990,7 +1991,7 @@ func handleLogout(c *gin.Context) {
 func isValidRoleTier(role int) bool {
 	switch role {
 	case minUserRole, minStudioOperatorRole, minRemoteStudioOperatorRole,
-		minSupplierRole, minSupplierRole02, minSupplierCCMaxRole, minTesterRole, minProjectAdminRole, minAdminRole, minSuperAdminRole:
+		minSupplierRole, minSupplierRole02, minSupplierCCMaxRole, minCCMaxManagerRole, minTesterRole, minProjectAdminRole, minAdminRole, minSuperAdminRole:
 		return true
 	}
 	return false
@@ -2036,7 +2037,7 @@ func handleUserCreate(c *gin.Context) {
 		return
 	}
 	if !isValidRoleTier(body.Role) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 4, 5, 6, 7, 10, or 100"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, or 100"})
 		return
 	}
 	// Anti-escalation on create: an admin (non-super) can only mint accounts
@@ -2101,7 +2102,7 @@ func handleUserUpdate(c *gin.Context) {
 	// out, and cannot demote the last remaining super admin via this handler.
 	if body.Role != nil {
 		if !isValidRoleTier(*body.Role) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 4, 5, 6, 7, 10, or 100"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, or 100"})
 			return
 		}
 		if target.Role >= minSuperAdminRole && *body.Role < minSuperAdminRole {
@@ -5024,11 +5025,12 @@ func main() {
 
 	// CC Max (Claude subscription) onboarding — suppliers authorize their own
 	// Claude accounts through their own socks5 and upload them to the portal's
-	// claude lane (see ccmax.go). Handlers scope rows to the uploader; admin+
+	// claude lane (see ccmax.go). Handlers scope rows to the uploader; a
+	// ccmax_manager also sees their assigned members' rows (read-only); admin+
 	// see all.
-	ccmaxAPI := api.Group("/ccmax", requireRoleOrSupplierCCMax(minAdminRole))
-	ccmaxAPI.POST("/oauth/start", handleCCMaxOAuthStart)
-	ccmaxAPI.POST("/oauth/submit", handleCCMaxSubmit)
+	ccmaxAPI := api.Group("/ccmax", requireRoleOrCCMaxRoles(minAdminRole))
+	ccmaxAPI.POST("/oauth/start", requireRoleOrSupplierCCMax(minAdminRole), handleCCMaxOAuthStart)
+	ccmaxAPI.POST("/oauth/submit", requireRoleOrSupplierCCMax(minAdminRole), handleCCMaxSubmit)
 	ccmaxAPI.GET("/options", handleCCMaxOptions)
 	ccmaxAPI.GET("/accounts", handleCCMaxAccountList)
 	ccmaxAPI.GET("/accounts/:id/reason", handleCCMaxAccountReason)
@@ -5036,6 +5038,9 @@ func main() {
 	// CC Max portal login + OpenAPI token are admin-only.
 	ccmaxAPI.GET("/settings", requireRole(minAdminRole), handleCCMaxSettingsGet)
 	ccmaxAPI.PUT("/settings", requireRole(minAdminRole), handleCCMaxSettingsSet)
+	// Which supplier_ccmax users each ccmax_manager may see — admin-only.
+	ccmaxAPI.GET("/managers", requireRole(minAdminRole), handleCCMaxManagersList)
+	ccmaxAPI.PUT("/managers/:id/members", requireRole(minAdminRole), handleCCMaxManagerMembersSet)
 
 	// Per-role sidebar visibility config — super admin only. GET is also
 	// used by the settings page to prefill; the live Sidebar reads the same

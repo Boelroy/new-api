@@ -6,7 +6,9 @@ import { Modal, promptDialog, toast } from '../components/feedback'
 import {
   api,
   ROLE_ADMIN,
+  ROLE_CCMAX_MANAGER,
   type CCMaxAccount,
+  type CCMaxManagers,
   type CCMaxOAuthStart,
   type CCMaxProxyInput,
   type CCMaxSettings,
@@ -443,6 +445,10 @@ export default function CCMaxAccounts() {
     void loadRole().then(setRole)
   }, [role])
   const isAdmin = role != null && role >= ROLE_ADMIN
+  // A ccmax_manager only views their assigned suppliers' accounts: no upload
+  // form, but the 号商 column so the rows can be told apart.
+  const isManager = role === ROLE_CCMAX_MANAGER
+  const showUploader = isAdmin || isManager
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -498,10 +504,14 @@ export default function CCMaxAccounts() {
   }
 
   return (
-    <Layout title="CC Max 上号" subtitle="通过你自己的 socks5 代理完成 Claude 账号授权并上号">
+    <Layout
+      title="CC Max 上号"
+      subtitle={isManager ? '查看分配给你的号商的 CC Max 账号与用量' : '通过你自己的 socks5 代理完成 Claude 账号授权并上号'}
+    >
       {isAdmin && <SettingsCard />}
+      {isAdmin && <ManagersCard />}
 
-      <OAuthFlow plans={plans} locations={locations} onDone={() => void load()} />
+      {!isManager && <OAuthFlow plans={plans} locations={locations} onDone={() => void load()} />}
 
       <Card className="mt-4 overflow-hidden p-0">
         <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
@@ -575,7 +585,7 @@ export default function CCMaxAccounts() {
                     '套餐',
                     '注册地',
                     '套餐结束',
-                    ...(isAdmin ? ['号商'] : []),
+                    ...(showUploader ? ['号商'] : []),
                     '备注',
                     '用量',
                     '上号时间',
@@ -606,7 +616,7 @@ export default function CCMaxAccounts() {
                       <td className="px-3 py-1.5">{r.plan}</td>
                       <td className="px-3 py-1.5">{r.register_location}</td>
                       <td className="whitespace-nowrap px-3 py-1.5 tnum">{r.plan_end_time}</td>
-                      {isAdmin && <td className="px-3 py-1.5">{r.username || '—'}</td>}
+                      {showUploader && <td className="px-3 py-1.5">{r.username || '—'}</td>}
                       <td className="px-3 py-1.5">
                         <div className="flex max-w-[220px] items-center gap-1">
                           <span className="truncate" title={r.remark}>
@@ -800,6 +810,71 @@ function SettingsCard() {
           </Button>
         </div>
       </div>
+    </Card>
+  )
+}
+
+// ManagersCard — admin-only: which supplier_ccmax users each ccmax_manager
+// may see on this page (read-only for the manager).
+function ManagersCard() {
+  const [data, setData] = useState<CCMaxManagers | null>(null)
+  const [savingId, setSavingId] = useState<number | null>(null)
+
+  useEffect(() => {
+    api
+      .ccmaxManagers()
+      .then(setData)
+      .catch((e) => toast.error(e))
+  }, [])
+
+  async function toggle(managerId: number, memberId: number, checked: boolean) {
+    if (!data) return
+    const manager = data.managers.find((m) => m.id === managerId)
+    if (!manager) return
+    const next = checked
+      ? [...manager.member_ids, memberId]
+      : manager.member_ids.filter((id) => id !== memberId)
+    setSavingId(managerId)
+    try {
+      const res = await api.setCCMaxManagerMembers(managerId, next)
+      setData({
+        ...data,
+        managers: data.managers.map((m) => (m.id === managerId ? { ...m, member_ids: res.member_ids } : m)),
+      })
+    } catch (e) {
+      toast.error(e)
+    } finally {
+      setSavingId(null)
+    }
+  }
+
+  if (!data || data.managers.length === 0) return null
+  return (
+    <Card className="mb-4 space-y-3 p-4">
+      <div className="text-sm font-semibold">CC Max 汇总账号（管理员）</div>
+      <p className="text-xs text-muted-foreground">勾选每个 CC Max Manager 可以查看哪些号商的账号。</p>
+      {data.managers.map((m) => (
+        <div key={m.id} className="space-y-1.5">
+          <div className="text-xs font-medium">
+            {m.username}
+            <span className="ml-2 text-muted-foreground tnum">已选 {m.member_ids.length}</span>
+          </div>
+          <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-xs">
+            {data.suppliers.map((s) => (
+              <label key={s.id} className="flex cursor-pointer items-center gap-1.5">
+                <Input
+                  type="checkbox"
+                  checked={m.member_ids.includes(s.id)}
+                  disabled={savingId === m.id}
+                  onChange={(e) => void toggle(m.id, s.id, e.target.checked)}
+                  className="rounded border-border"
+                />
+                <span>{s.username}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      ))}
     </Card>
   )
 }

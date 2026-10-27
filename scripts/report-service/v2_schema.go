@@ -140,6 +140,14 @@ var v2SchemaStatements = []string{
 	`ALTER TABLE rs_ccmax_account ADD COLUMN IF NOT EXISTS proxy_display TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE rs_ccmax_account ADD COLUMN IF NOT EXISTS credential_at BIGINT NOT NULL DEFAULT 0`,
 	`CREATE INDEX IF NOT EXISTS idx_ccmax_account_uploaded_by ON rs_ccmax_account(uploaded_by)`,
+	// ccmax_manager → supplier_ccmax users whose CC Max accounts the manager
+	// may see (read-only). Assigned by admins on the CC Max page.
+	`CREATE TABLE IF NOT EXISTS rs_ccmax_manager_member (
+		manager_id BIGINT NOT NULL,
+		member_id  BIGINT NOT NULL,
+		created_at BIGINT NOT NULL,
+		PRIMARY KEY (manager_id, member_id)
+	)`,
 
 	// -- Model auto-cleanup ------------------------------------------------
 	// Append-only audit of the log-driven model auto-cleanup loop
