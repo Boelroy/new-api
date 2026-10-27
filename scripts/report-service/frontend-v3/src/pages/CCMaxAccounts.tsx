@@ -9,6 +9,7 @@ import {
   ROLE_CCMAX_MANAGER,
   type CCMaxAccount,
   type CCMaxManagers,
+  type CCMaxReportSettings,
   type CCMaxOAuthStart,
   type CCMaxProxyInput,
   type CCMaxSettings,
@@ -577,6 +578,7 @@ export default function CCMaxAccounts() {
     >
       {isAdmin && <SettingsCard />}
       {isAdmin && <ManagersCard />}
+      {isAdmin && <ReportCard />}
 
       {!isManager && <OAuthFlow plans={plans} locations={locations} onDone={() => void load()} />}
 
@@ -945,6 +947,84 @@ function ManagersCard() {
           </div>
         </div>
       ))}
+    </Card>
+  )
+}
+
+// ReportCard — admin-only Lark push of CC Max totals (account count, running
+// accounts, average 5h / 7d window, month-to-date cost) at the given hours.
+function ReportCard() {
+  const [form, setForm] = useState<CCMaxReportSettings>({ webhook: '', hours: '' })
+  const [saving, setSaving] = useState(false)
+  const [pushing, setPushing] = useState(false)
+  const [preview, setPreview] = useState('')
+
+  useEffect(() => {
+    api
+      .getCCMaxReportSettings()
+      .then(setForm)
+      .catch((e) => toast.error(e))
+  }, [])
+
+  async function save() {
+    setSaving(true)
+    try {
+      setForm(await api.setCCMaxReportSettings(form))
+      toast.success('已保存')
+    } catch (e) {
+      toast.error(e)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function pushNow() {
+    setPushing(true)
+    try {
+      const res = await api.pushCCMaxReport()
+      setPreview(res.text)
+      toast.success('已推送')
+    } catch (e) {
+      toast.error(e)
+    } finally {
+      setPushing(false)
+    }
+  }
+
+  return (
+    <Card className="mb-4 space-y-3 p-4">
+      <div className="text-sm font-semibold">Lark 推送（管理员）</div>
+      <p className="text-xs text-muted-foreground">
+        按设定时间（UTC+8）推送账号总数、正在跑的账号数、5h / 7d 平均窗口和本月消耗。Webhook 留空即关闭推送。
+      </p>
+      <div className="grid gap-4 sm:grid-cols-[1fr_12rem_auto_auto]">
+        <label className="space-y-1.5">
+          <span className="text-xs font-medium text-muted-foreground">Lark Webhook</span>
+          <Input
+            value={form.webhook}
+            autoComplete="off"
+            placeholder="https://open.larksuite.com/open-apis/bot/v2/hook/..."
+            onChange={(e) => setForm({ ...form, webhook: e.target.value })}
+          />
+        </label>
+        <label className="space-y-1.5">
+          <span className="text-xs font-medium text-muted-foreground">推送时间（时，逗号分隔）</span>
+          <Input value={form.hours} placeholder="10,22" onChange={(e) => setForm({ ...form, hours: e.target.value })} />
+        </label>
+        <div className="flex items-end">
+          <Button onClick={save} disabled={saving}>
+            {saving ? '保存中…' : '保存'}
+          </Button>
+        </div>
+        <div className="flex items-end">
+          <Button variant="outline" onClick={pushNow} disabled={pushing || !form.webhook}>
+            {pushing ? '推送中…' : '立即推送'}
+          </Button>
+        </div>
+      </div>
+      {preview && (
+        <pre className="whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-xs leading-relaxed">{preview}</pre>
+      )}
     </Card>
   )
 }

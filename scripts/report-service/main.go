@@ -8,6 +8,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"math"
@@ -512,16 +513,36 @@ func sendLarkTo(webhook, msg string) {
 	if webhook == "" {
 		return
 	}
+	if err := postLark(webhook, msg); err != nil {
+		log.Printf("lark notify error: %v", err)
+	}
+}
+
+// postLark posts a Lark text message and reports transport errors, non-2xx
+// statuses and Lark's own non-zero error codes, for callers that surface the
+// result (e.g. a "push now" button).
+func postLark(webhook, msg string) error {
 	body, _ := json.Marshal(map[string]any{
 		"msg_type": "text",
 		"content":  map[string]string{"text": msg},
 	})
 	resp, err := http.Post(webhook, "application/json", bytes.NewReader(body))
 	if err != nil {
-		log.Printf("lark notify error: %v", err)
-		return
+		return err
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("lark HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var r struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if json.Unmarshal(raw, &r) == nil && r.Code != 0 {
+		return fmt.Errorf("lark error %d: %s", r.Code, r.Msg)
+	}
+	return nil
 }
 
 func fmtHours(h float64) string {
@@ -5041,6 +5062,10 @@ func main() {
 	// Which supplier_ccmax users each ccmax_manager may see — admin-only.
 	ccmaxAPI.GET("/managers", requireRole(minAdminRole), handleCCMaxManagersList)
 	ccmaxAPI.PUT("/managers/:id/members", requireRole(minAdminRole), handleCCMaxManagerMembersSet)
+	// Lark push of CC Max totals (webhook + push hours) — admin-only.
+	ccmaxAPI.GET("/report/settings", requireRole(minAdminRole), handleCCMaxReportSettingsGet)
+	ccmaxAPI.PUT("/report/settings", requireRole(minAdminRole), handleCCMaxReportSettingsSet)
+	ccmaxAPI.POST("/report/push", requireRole(minAdminRole), handleCCMaxReportPush)
 
 	// Per-role sidebar visibility config — super admin only. GET is also
 	// used by the settings page to prefill; the live Sidebar reads the same
@@ -5323,6 +5348,7 @@ func main() {
 	// idles until its username / password are configured.
 	supplierWeb.startRefresher()
 	ccmaxWeb.startRefresher()
+	startCCMaxReportLoop()
 
 	// SPA — serve for all non-API routes
 	r.NoRoute(spaHandler())

@@ -2252,6 +2252,17 @@ export const api = {
       body: JSON.stringify({ member_ids: memberIds }),
     }),
 
+  getCCMaxReportSettings: () => request<CCMaxReportSettings>('/api/ccmax/report/settings'),
+
+  setCCMaxReportSettings: (payload: Partial<CCMaxReportSettings>) =>
+    request<CCMaxReportSettings>('/api/ccmax/report/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  pushCCMaxReport: () => request<{ text: string }>('/api/ccmax/report/push', { method: 'POST' }),
+
   keyhubCategories: () =>
     request<KeyhubEnvelope<KeyhubCategory[]>>('/api/keyhub/categories'),
 
@@ -2597,6 +2608,12 @@ export type CCMaxAccount = {
 export type CCMaxManagers = {
   managers: { id: number; username: string; member_ids: number[] }[]
   suppliers: { id: number; username: string }[]
+}
+
+// Lark push of CC Max totals: webhook ('' = off) + push hours (UTC+8, "10,22").
+export type CCMaxReportSettings = {
+  webhook: string
+  hours: string
 }
 
 export type CCMaxSettings = {

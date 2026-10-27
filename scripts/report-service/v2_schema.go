@@ -148,6 +148,17 @@ var v2SchemaStatements = []string{
 		created_at BIGINT NOT NULL,
 		PRIMARY KEY (manager_id, member_id)
 	)`,
+	// Daily snapshot of each CC Max account's cumulative portal cost
+	// (cpa_usage.cost, micro-yuan; the portal has no date-ranged cost for
+	// claude accounts). Month-to-date cost = latest − last snapshot before the
+	// 1st (ccmax_report.go). ds is the UTC+8 date.
+	`CREATE TABLE IF NOT EXISTS rs_ccmax_cost_snapshot (
+		remote_account_id BIGINT NOT NULL,
+		ds                DATE   NOT NULL,
+		cost_micro        BIGINT NOT NULL,
+		updated_at        BIGINT NOT NULL,
+		PRIMARY KEY (remote_account_id, ds)
+	)`,
 
 	// -- Model auto-cleanup ------------------------------------------------
 	// Append-only audit of the log-driven model auto-cleanup loop

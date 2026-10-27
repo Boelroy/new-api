@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -129,4 +130,41 @@ func TestCCMaxCredentialMatchesAccount(t *testing.T) {
 	relay := ccmaxCredential{Email: "n74wgpzf6s@privaterelay.appleid.com"}
 	assert.Error(t, relay.matchesAccount("diva00727@gmail.com"))
 	assert.Error(t, cred.matchesAccount(""))
+}
+
+// Month-to-date cost: current cumulative minus the last pre-month snapshot;
+// accounts new this month count in full, accounts gone from the roster count
+// through their last in-month snapshot, and a counter reset never subtracts.
+func TestCCMaxMonthCostMicro(t *testing.T) {
+	current := map[int64]int64{1: 500, 2: 300, 4: 100}
+	inMonth := map[int64]int64{1: 450, 3: 80}
+	baseline := map[int64]int64{1: 200, 3: 50, 4: 900}
+	// 1: 500-200, 2: 300 (new), 3: 80-50 (dropped off roster), 4: reset → 0
+	assert.Equal(t, int64(300+300+30), ccmaxMonthCostMicro(current, inMonth, baseline))
+}
+
+func TestCCMaxParseReportHours(t *testing.T) {
+	hours, err := ccmaxParseReportHours(" 22, 10,,10 ")
+	require.NoError(t, err)
+	assert.Equal(t, []int{10, 22}, hours)
+	_, err = ccmaxParseReportHours("24")
+	assert.Error(t, err)
+	_, err = ccmaxParseReportHours("ten")
+	assert.Error(t, err)
+}
+
+// The push names the exact month range in UTC+8.
+func TestCCMaxReportText(t *testing.T) {
+	to := time.Date(2026, 10, 27, 15, 0, 0, 0, supplierPortalLoc)
+	text := ccmaxReportText(ccmaxReport{
+		Total: 85, Serving: 40, FiveHourAvg: 0.352, WeekAvg: 0.61,
+		MonthCostRMB: 720, FxRate: 7.2,
+		From: time.Date(2026, 10, 1, 0, 0, 0, 0, supplierPortalLoc), To: to,
+	})
+	assert.Contains(t, text, "账号总数：85")
+	assert.Contains(t, text, "正在跑：40")
+	assert.Contains(t, text, "5 小时窗口平均：35.2%")
+	assert.Contains(t, text, "7 天窗口平均：61.0%")
+	assert.Contains(t, text, "本月消耗：$100.00（¥720.00")
+	assert.Contains(t, text, "统计区间：2026-10-01 00:00 ~ 2026-10-27 15:00（UTC+8）")
 }
