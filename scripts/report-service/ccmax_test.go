@@ -119,3 +119,14 @@ func TestCCMaxCredentialCheck(t *testing.T) {
 	badProxy.ProxyURL = "ftp://1.2.3.4:21"
 	assert.ErrorContains(t, badProxy.check(), "proxy_url")
 }
+
+// The uploaded 账号 must be the Claude login the credential belongs to;
+// case and surrounding spaces don't matter.
+func TestCCMaxCredentialMatchesAccount(t *testing.T) {
+	cred := ccmaxCredential{Email: "Diva00727@gmail.com"}
+	assert.NoError(t, cred.matchesAccount("diva00727@gmail.com"))
+	assert.NoError(t, cred.matchesAccount(" DIVA00727@GMAIL.COM "))
+	relay := ccmaxCredential{Email: "n74wgpzf6s@privaterelay.appleid.com"}
+	assert.Error(t, relay.matchesAccount("diva00727@gmail.com"))
+	assert.Error(t, cred.matchesAccount(""))
+}

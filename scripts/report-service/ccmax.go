@@ -403,6 +403,16 @@ func (cr ccmaxCredential) check() error {
 	return nil
 }
 
+// matchesAccount requires the form's 账号 to be the Claude login the
+// credential was issued for, so an account can't be uploaded under one email
+// while serving another (e.g. an Apple private-relay login).
+func (cr ccmaxCredential) matchesAccount(account string) error {
+	if strings.EqualFold(strings.TrimSpace(account), strings.TrimSpace(cr.Email)) {
+		return nil
+	}
+	return fmt.Errorf("账号与授权邮箱不一致：授权的 Claude 账号是 %s，请把账号改成该邮箱，或用 %s 重新授权", cr.Email, account)
+}
+
 func handleCCMaxSubmit(c *gin.Context) {
 	if !ccmaxOpenAPIConfigured() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "CC Max OpenAPI token not configured (set SUPPLIER_CCMAX_TOKEN)"})
@@ -483,6 +493,12 @@ func handleCCMaxSubmit(c *gin.Context) {
 		// Re-submitting can't fix a credential the authorization didn't fill.
 		_, _ = db.Exec(`DELETE FROM rs_ccmax_oauth_session WHERE state=$1`, state)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "session_gone": true})
+		return
+	}
+	// Keep the session: the credential is parked, so fixing 账号 resubmits
+	// without authorizing again.
+	if err := cred.matchesAccount(body.Account); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "email": cred.Email})
 		return
 	}
 
