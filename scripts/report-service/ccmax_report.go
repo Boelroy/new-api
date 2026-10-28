@@ -13,6 +13,7 @@ package main
 // roster keep counting through their last snapshot.
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"log"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 )
 
 const (
@@ -104,10 +106,26 @@ func ccmaxMonthStart(now time.Time) time.Time {
 // ccmaxSnapshotMonthCosts records today's cumulative cost snapshot for the
 // current roster (account id → micro-yuan) and returns every account's
 // month-to-date cost in micro-yuan, including accounts no longer on the roster.
+//
+// The first snapshot after midnight also closes yesterday: an account's
+// yesterday row is overwritten with the current value while it was last
+// written before midnight, so each day's row is its cost at the next 00:00
+// (the hourly loop runs at 00:00) and the daily table splits on whole UTC+8
+// days. Only existing rows are closed, so an account first seen today never
+// gains a yesterday row.
 func ccmaxSnapshotMonthCosts(current map[int64]int64, now time.Time) (map[int64]int64, error) {
 	now = now.In(supplierPortalLoc)
 	today := now.Format("2006-01-02")
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, supplierPortalLoc)
+	yesterday := midnight.AddDate(0, 0, -1).Format("2006-01-02")
 	for id, cost := range current {
+		if _, err := db.Exec(
+			`UPDATE rs_ccmax_cost_snapshot SET cost_micro=$1, updated_at=$2
+			  WHERE remote_account_id=$3 AND ds=$4 AND updated_at < $5`,
+			cost, now.Unix(), id, yesterday, midnight.Unix(),
+		); err != nil {
+			return nil, fmt.Errorf("close yesterday snapshot: %w", err)
+		}
 		if _, err := db.Exec(
 			`INSERT INTO rs_ccmax_cost_snapshot (remote_account_id, ds, cost_micro, updated_at) VALUES ($1, $2, $3, $4)
 			 ON CONFLICT (remote_account_id, ds) DO UPDATE SET cost_micro=EXCLUDED.cost_micro, updated_at=EXCLUDED.updated_at`,
@@ -436,5 +454,200 @@ func handleCCMaxUsersStats(c *gin.Context) {
 		"fx_rate":    supplierFxRate(),
 		"month_from": ccmaxMonthStart(now).Format("2006-01-02 15:04"),
 		"month_to":   now.Format("2006-01-02 15:04"),
+	})
+}
+
+// ---- Daily usage (日结算) ----
+
+// ccmaxSnapshot is one account's day-close cumulative cost (micro-yuan).
+type ccmaxSnapshot struct {
+	DS    string
+	Micro int64
+}
+
+// ccmaxDailyUsage turns one account's snapshots (ascending ds) into usage per
+// UTC+8 day: that day's close minus the previous close, never negative (a
+// counter reset counts 0). The first snapshot has no baseline: it counts in
+// full when the account was created that day (createdDS), otherwise that day's
+// usage is unknown and returned as missingDS instead.
+func ccmaxDailyUsage(snaps []ccmaxSnapshot, createdDS string) (usage map[string]int64, missingDS string) {
+	usage = map[string]int64{}
+	for i, s := range snaps {
+		if i > 0 {
+			usage[s.DS] = max(0, s.Micro-snaps[i-1].Micro)
+			continue
+		}
+		if s.DS != createdDS {
+			missingDS = s.DS
+			continue
+		}
+		usage[s.DS] = s.Micro
+	}
+	return usage, missingDS
+}
+
+type ccmaxDailyRow struct {
+	DS        string  `json:"ds"`
+	UserID    int64   `json:"user_id"`
+	AccountID int64   `json:"account_id"`
+	Account   string  `json:"account"`
+	Alias     string  `json:"alias"`
+	CostRMB   float64 `json:"cost_rmb"`
+}
+
+// ccmaxDailyMaxDays bounds one /daily query.
+const ccmaxDailyMaxDays = 92
+
+// handleCCMaxDaily returns per-account usage for each UTC+8 day in
+// [from, to] (default: this month), scoped like the account list: admins see
+// every uploader, a ccmax_manager their members, a supplier_ccmax only
+// themselves. Today's row is live (the roster is re-snapshotted first) and
+// grows until midnight. Days whose usage can't be derived (an account's first
+// snapshot when it was created earlier) are listed in missing.
+func handleCCMaxDaily(c *gin.Context) {
+	now := time.Now().In(supplierPortalLoc)
+	today := now.Format("2006-01-02")
+	fromDS := cmp.Or(c.Query("from"), ccmaxMonthStart(now).Format("2006-01-02"))
+	toDS := cmp.Or(c.Query("to"), today)
+	from, errFrom := time.ParseInLocation("2006-01-02", fromDS, supplierPortalLoc)
+	to, errTo := time.ParseInLocation("2006-01-02", toDS, supplierPortalLoc)
+	if errFrom != nil || errTo != nil || to.Before(from) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "日期格式须为 YYYY-MM-DD，且开始不晚于结束"})
+		return
+	}
+	if to.Sub(from) >= ccmaxDailyMaxDays*24*time.Hour {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("一次最多查询 %d 天", ccmaxDailyMaxDays)})
+		return
+	}
+
+	// Refresh today's snapshot; when the portal is unreachable the stored
+	// snapshots still answer, only today's row is stale.
+	if ccmaxWeb.configured() {
+		if raws, err := fetchPortalAccountsRaw(ccmaxWeb, "claude"); err != nil {
+			log.Printf("[ccmax-daily] roster: %v", err)
+		} else {
+			current := map[int64]int64{}
+			for _, raw := range raws {
+				if row, err := parseCCMaxPortalRow(raw); err == nil {
+					current[row.ID] = int64(math.Round(row.CostRMB * 1e6))
+				}
+			}
+			if _, err := ccmaxSnapshotMonthCosts(current, now); err != nil {
+				log.Printf("[ccmax-daily] snapshot: %v", err)
+			}
+		}
+	}
+
+	all, uids, err := ccmaxVisibleUploaders(c)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	scope, args := "", []any{minSupplierCCMaxRole}
+	if !all {
+		scope, args = ` AND u.id = ANY($2)`, append(args, pq.Array(uids))
+	}
+	// Every supplier_ccmax user in scope (so idle ones show 0) plus anyone
+	// else in scope who uploaded accounts (e.g. an admin).
+	rows, err := db.Query(
+		`SELECT u.id, u.username FROM rs_auth_user u
+		  WHERE (u.role = $1 OR EXISTS (SELECT 1 FROM rs_ccmax_account a WHERE a.uploaded_by = u.id))`+scope+`
+		  ORDER BY u.username`, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	users := []ccmaxUserRef{}
+	visible := []int64{}
+	for rows.Next() {
+		var u ccmaxUserRef
+		if err := rows.Scan(&u.ID, &u.Username); err != nil {
+			rows.Close()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		users = append(users, u)
+		visible = append(visible, u.ID)
+	}
+	rows.Close()
+
+	type account struct {
+		uploadedBy              int64
+		account, alias, created string
+	}
+	accounts := map[int64]account{}
+	rows, err = db.Query(
+		`SELECT remote_account_id, uploaded_by, account, alias, created_at FROM rs_ccmax_account
+		  WHERE uploaded_by = ANY($1)`, pq.Array(visible))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	ids := []int64{}
+	for rows.Next() {
+		var id, createdAt int64
+		var a account
+		if err := rows.Scan(&id, &a.uploadedBy, &a.account, &a.alias, &createdAt); err != nil {
+			rows.Close()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		a.alias = ccmaxDisplayAlias(a.alias)
+		a.created = time.Unix(createdAt, 0).In(supplierPortalLoc).Format("2006-01-02")
+		accounts[id] = a
+		ids = append(ids, id)
+	}
+	rows.Close()
+
+	snaps := map[int64][]ccmaxSnapshot{}
+	rows, err = db.Query(
+		`SELECT remote_account_id, to_char(ds, 'YYYY-MM-DD'), cost_micro FROM rs_ccmax_cost_snapshot
+		  WHERE remote_account_id = ANY($1) AND ds <= $2 ORDER BY remote_account_id, ds`,
+		pq.Array(ids), toDS)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var s ccmaxSnapshot
+		if err := rows.Scan(&id, &s.DS, &s.Micro); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		snaps[id] = append(snaps[id], s)
+	}
+
+	out := []ccmaxDailyRow{}
+	missing := []ccmaxDailyRow{}
+	for id, list := range snaps {
+		a := accounts[id]
+		usage, missingDS := ccmaxDailyUsage(list, a.created)
+		if missingDS >= fromDS {
+			missing = append(missing, ccmaxDailyRow{DS: missingDS, UserID: a.uploadedBy, AccountID: id, Account: a.account, Alias: a.alias})
+		}
+		for ds, micro := range usage {
+			if ds < fromDS || micro == 0 {
+				continue
+			}
+			out = append(out, ccmaxDailyRow{
+				DS: ds, UserID: a.uploadedBy, AccountID: id, Account: a.account, Alias: a.alias,
+				CostRMB: float64(micro) / 1e6,
+			})
+		}
+	}
+	slices.SortFunc(out, func(x, y ccmaxDailyRow) int {
+		return cmp.Or(strings.Compare(y.DS, x.DS), cmp.Compare(x.UserID, y.UserID), cmp.Compare(x.AccountID, y.AccountID))
+	})
+
+	c.JSON(http.StatusOK, gin.H{
+		"from":    fromDS,
+		"to":      toDS,
+		"today":   today,
+		"fx_rate": supplierFxRate(),
+		"users":   users,
+		"rows":    out,
+		"missing": missing,
 	})
 }

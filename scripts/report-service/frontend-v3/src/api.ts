@@ -2266,6 +2266,14 @@ export const api = {
 
   ccmaxUsers: () => request<CCMaxUsersStats>('/api/ccmax/users'),
 
+  // from/to: UTC+8 dates (YYYY-MM-DD); omitted = this month.
+  ccmaxDaily: (from?: string, to?: string) => {
+    const q = new URLSearchParams()
+    if (from) q.set('from', from)
+    if (to) q.set('to', to)
+    return request<CCMaxDaily>(`/api/ccmax/daily?${q}`)
+  },
+
   getCCMaxReportSettings: () => request<CCMaxReportSettings>('/api/ccmax/report/settings'),
 
   setCCMaxReportSettings: (payload: Partial<CCMaxReportSettings>) =>
@@ -2645,6 +2653,29 @@ export type CCMaxUsersStats = {
   fx_rate: number
   month_from: string
   month_to: string
+}
+
+// GET /api/ccmax/daily: per-account usage per UTC+8 day (day close − previous
+// close). rows only holds non-zero usage; users lists everyone in scope so idle
+// suppliers show 0. missing = an account's first in-range day with no baseline
+// (it existed before snapshots began), so that day's usage is unknown.
+export type CCMaxDailyRow = {
+  ds: string
+  user_id: number
+  account_id: number
+  account: string
+  alias: string
+  cost_rmb: number
+}
+
+export type CCMaxDaily = {
+  from: string
+  to: string
+  today: string
+  fx_rate: number
+  users: { id: number; username: string }[]
+  rows: CCMaxDailyRow[]
+  missing: CCMaxDailyRow[]
 }
 
 // Lark push of CC Max totals: webhook ('' = off) + push hours (UTC+8, "10,22").

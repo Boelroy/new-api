@@ -5068,6 +5068,8 @@ func main() {
 	ccmaxAPI.POST("/members", requireRoleOrCCMaxManager(minAdminRole), handleCCMaxMemberCreate)
 	// Every supplier_ccmax user with their accounts' usage — super admin only.
 	ccmaxAPI.GET("/users", requireRole(minSuperAdminRole), handleCCMaxUsersStats)
+	// Per-day usage (日结算), scoped like /accounts.
+	ccmaxAPI.GET("/daily", handleCCMaxDaily)
 	// Lark push of CC Max totals (webhook + push hours) — admin-only.
 	ccmaxAPI.GET("/report/settings", requireRole(minAdminRole), handleCCMaxReportSettingsGet)
 	ccmaxAPI.PUT("/report/settings", requireRole(minAdminRole), handleCCMaxReportSettingsSet)
