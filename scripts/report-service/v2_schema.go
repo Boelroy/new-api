@@ -158,6 +158,17 @@ var v2SchemaStatements = []string{
 		updated_at        BIGINT NOT NULL,
 		PRIMARY KEY (remote_account_id, ds)
 	)`,
+	// Which days of a CC Max settlement party are settled. A party is a
+	// ccmax_manager (settles for all its members) or a supplier_ccmax user with
+	// no manager (ccmax_settlement.go). amount_micro is the bill when marked.
+	`CREATE TABLE IF NOT EXISTS rs_ccmax_settlement (
+		party_id     BIGINT NOT NULL,
+		ds           DATE   NOT NULL,
+		amount_micro BIGINT NOT NULL,
+		settled_at   BIGINT NOT NULL,
+		settled_by   BIGINT NOT NULL,
+		PRIMARY KEY (party_id, ds)
+	)`,
 	// Daily snapshot of each CC Max account's cumulative portal cost
 	// (cpa_usage.cost, micro-yuan; the portal has no date-ranged cost for
 	// claude accounts). Month-to-date cost = latest − last snapshot before the

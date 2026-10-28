@@ -8,7 +8,7 @@ import KeyhubUsageOverview from './pages/KeyhubUsageOverview'
 import KeyhubUsageLogs from './pages/KeyhubUsageLogs'
 import CCMaxAccounts from './pages/CCMaxAccounts'
 import CCMaxUsers from './pages/CCMaxUsers'
-import CCMaxDaily from './pages/CCMaxDaily'
+import CCMaxSettlement from './pages/CCMaxSettlement'
 import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_CCMAX_MANAGER, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_02, ROLE_SUPPLIER_CCMAX } from './api'
 import { getCachedRole, loadRole } from './auth'
 import { APP_BASE } from './basePath'
@@ -117,10 +117,10 @@ export default function App() {
           }
         />
         <Route
-          path="/ccmax-daily"
+          path="/ccmax-settlement"
           element={
             <RoleGate allow={(r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_CCMAX || r === ROLE_CCMAX_MANAGER}>
-              <CCMaxDaily />
+              <CCMaxSettlement />
             </RoleGate>
           }
         />

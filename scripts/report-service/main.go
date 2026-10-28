@@ -5068,8 +5068,10 @@ func main() {
 	ccmaxAPI.POST("/members", requireRoleOrCCMaxManager(minAdminRole), handleCCMaxMemberCreate)
 	// Every supplier_ccmax user with their accounts' usage — super admin only.
 	ccmaxAPI.GET("/users", requireRole(minSuperAdminRole), handleCCMaxUsersStats)
-	// Per-day bill (日结算), scoped like /accounts; admins re-pull a range.
-	ccmaxAPI.GET("/daily", handleCCMaxDaily)
+	// 结算: stored daily bills per settlement party, scoped like /accounts;
+	// admins mark days settled and re-pull bills.
+	ccmaxAPI.GET("/settlement", handleCCMaxSettlement)
+	ccmaxAPI.POST("/settlement/mark", requireRole(minAdminRole), handleCCMaxSettlementMark)
 	ccmaxAPI.POST("/daily/sync", requireRole(minAdminRole), handleCCMaxDailySync)
 	// Lark push of CC Max totals (webhook + push hours) — admin-only.
 	ccmaxAPI.GET("/report/settings", requireRole(minAdminRole), handleCCMaxReportSettingsGet)

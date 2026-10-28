@@ -13,7 +13,6 @@ package main
 // roster keep counting through their last snapshot.
 
 import (
-	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,7 +25,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/lib/pq"
 )
 
 const (
@@ -592,97 +590,6 @@ func ccmaxParseDayRange(fromDS, toDS string) (from, to time.Time, err error) {
 		return from, to, fmt.Errorf("一次最多 %d 天", ccmaxBillMaxDays)
 	}
 	return from, to, nil
-}
-
-type ccmaxDailyRow struct {
-	DS        string  `json:"ds"`
-	UserID    int64   `json:"user_id"`
-	AccountID int64   `json:"account_id"`
-	Account   string  `json:"account"`
-	Alias     string  `json:"alias"`
-	CostRMB   float64 `json:"cost_rmb"`
-}
-
-// handleCCMaxDaily returns the stored per-account bill for each UTC+8 day in
-// [from, to] (default: this month), scoped like the account list: admins see
-// every uploader, a ccmax_manager their members, a supplier_ccmax only
-// themselves. synced_through is the last day pulled; later days are not
-// generated yet.
-func handleCCMaxDaily(c *gin.Context) {
-	now := time.Now().In(supplierPortalLoc)
-	fromDS := cmp.Or(c.Query("from"), ccmaxMonthStart(now).Format("2006-01-02"))
-	toDS := cmp.Or(c.Query("to"), now.Format("2006-01-02"))
-	if _, _, err := ccmaxParseDayRange(fromDS, toDS); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	all, uids, err := ccmaxVisibleUploaders(c)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	scope, args := "", []any{minSupplierCCMaxRole}
-	if !all {
-		scope, args = ` AND u.id = ANY($2)`, append(args, pq.Array(uids))
-	}
-	// Every supplier_ccmax user in scope (so idle ones show 0) plus anyone
-	// else in scope who uploaded accounts (e.g. an admin).
-	rows, err := db.Query(
-		`SELECT u.id, u.username FROM rs_auth_user u
-		  WHERE (u.role = $1 OR EXISTS (SELECT 1 FROM rs_ccmax_account a WHERE a.uploaded_by = u.id))`+scope+`
-		  ORDER BY u.username`, args...)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	users := []ccmaxUserRef{}
-	visible := []int64{}
-	for rows.Next() {
-		var u ccmaxUserRef
-		if err := rows.Scan(&u.ID, &u.Username); err != nil {
-			rows.Close()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		users = append(users, u)
-		visible = append(visible, u.ID)
-	}
-	rows.Close()
-
-	rows, err = db.Query(
-		`SELECT to_char(b.ds, 'YYYY-MM-DD'), a.uploaded_by, b.remote_account_id, a.account, a.alias, b.cost_micro
-		   FROM rs_ccmax_daily_bill b JOIN rs_ccmax_account a ON a.remote_account_id = b.remote_account_id
-		  WHERE a.uploaded_by = ANY($1) AND b.ds BETWEEN $2 AND $3 AND b.cost_micro <> 0
-		  ORDER BY b.ds DESC, a.uploaded_by, b.cost_micro DESC`,
-		pq.Array(visible), fromDS, toDS)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	defer rows.Close()
-	out := []ccmaxDailyRow{}
-	for rows.Next() {
-		var r ccmaxDailyRow
-		var micro int64
-		if err := rows.Scan(&r.DS, &r.UserID, &r.AccountID, &r.Account, &r.Alias, &micro); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		r.Alias = ccmaxDisplayAlias(r.Alias)
-		r.CostRMB = float64(micro) / 1e6
-		out = append(out, r)
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"from":           fromDS,
-		"to":             toDS,
-		"synced_through": supplierConfigGet(cfgCCMaxBillSyncedThrough),
-		"bill_hour":      ccmaxBillHour,
-		"fx_rate":        supplierFxRate(),
-		"users":          users,
-		"rows":           out,
-	})
 }
 
 // handleCCMaxDailySync re-pulls the bill for [from, to] (admin): backfill or

@@ -69,8 +69,8 @@ const GROUPS: NavGroup[] = [
         allow: (r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_CCMAX || r === ROLE_CCMAX_MANAGER,
       },
       {
-        to: '/ccmax-daily',
-        label: 'CC Max 日结算',
+        to: '/ccmax-settlement',
+        label: 'CC Max 结算',
         icon: CalendarDays,
         allow: (r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_CCMAX || r === ROLE_CCMAX_MANAGER,
       },

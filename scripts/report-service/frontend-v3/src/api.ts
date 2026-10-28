@@ -2267,12 +2267,19 @@ export const api = {
   ccmaxUsers: () => request<CCMaxUsersStats>('/api/ccmax/users'),
 
   // from/to: UTC+8 dates (YYYY-MM-DD); omitted = this month.
-  ccmaxDaily: (from?: string, to?: string) => {
+  ccmaxSettlement: (from?: string, to?: string) => {
     const q = new URLSearchParams()
     if (from) q.set('from', from)
     if (to) q.set('to', to)
-    return request<CCMaxDaily>(`/api/ccmax/daily?${q}`)
+    return request<CCMaxSettlement>(`/api/ccmax/settlement?${q}`)
   },
+  // Admin: mark (settled=true) or unmark a party's days.
+  ccmaxSettlementMark: (partyId: number, days: string[], settled: boolean) =>
+    request<{ ok: boolean }>('/api/ccmax/settlement/mark', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ party_id: partyId, days, settled }),
+    }),
   // Admin: re-pull the portal bill for [from, to] (days before today).
   ccmaxDailySync: (from: string, to: string) =>
     request<{ synced_through: string }>('/api/ccmax/daily/sync', {
@@ -2662,27 +2669,34 @@ export type CCMaxUsersStats = {
   month_to: string
 }
 
-// GET /api/ccmax/daily: each account's portal bill per UTC+8 day (original
-// price). rows only holds non-zero bills; users lists everyone in scope so idle
-// suppliers show 0. Days after synced_through are not generated yet (yesterday
-// is pulled daily at bill_hour, UTC+8).
-export type CCMaxDailyRow = {
-  ds: string
-  user_id: number
-  account_id: number
-  account: string
-  alias: string
+// GET /api/ccmax/settlement: portal daily bills (original price, ¥) summed
+// over from~to per settlement party — a ccmax_manager (all its 号商) or a 号商
+// with no manager. days lists each day with a non-zero bill and whether it is
+// settled (settled_rmb = the bill when marked). Days after synced_through have
+// no bill yet (yesterday is pulled daily at bill_hour, UTC+8).
+export type CCMaxSettlementParty = {
+  id: number
+  username: string
+  kind: 'manager' | 'user'
   cost_rmb: number
+  settled_rmb: number
+  unsettled_rmb: number
+  days: { ds: string; cost_rmb: number; settled: boolean; settled_rmb: number; settled_at: number }[]
+  members: {
+    id: number
+    username: string
+    cost_rmb: number
+    accounts: { id: number; account: string; alias: string; cost_rmb: number }[]
+  }[]
 }
 
-export type CCMaxDaily = {
+export type CCMaxSettlement = {
   from: string
   to: string
   synced_through: string
   bill_hour: number
   fx_rate: number
-  users: { id: number; username: string }[]
-  rows: CCMaxDailyRow[]
+  parties: CCMaxSettlementParty[]
 }
 
 // Lark push of CC Max totals: webhook ('' = off) + push hours (UTC+8, "10,22").

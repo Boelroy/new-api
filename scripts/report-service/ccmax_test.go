@@ -205,3 +205,42 @@ func TestCCMaxParseDayRange(t *testing.T) {
 		assert.Equal(t, tc.ok, err == nil, tc.from+"~"+tc.to)
 	}
 }
+
+// Members with a manager settle through it; uploaders without one settle
+// alone. Zero bills don't count, and settled / unsettled split by marked days.
+func TestCCMaxBuildSettlement(t *testing.T) {
+	bills := []ccmaxBillRow{
+		{DS: "2026-10-27", UploadedBy: 11, AccountID: 1, Micro: 100e6},
+		{DS: "2026-10-28", UploadedBy: 11, AccountID: 1, Micro: 50e6},
+		{DS: "2026-10-27", UploadedBy: 12, AccountID: 2, Micro: 30e6},
+		{DS: "2026-10-27", UploadedBy: 20, AccountID: 3, Micro: 70e6},
+		{DS: "2026-10-28", UploadedBy: 20, AccountID: 4, Micro: 0},
+	}
+	managerOf := map[int64]int64{11: 9, 12: 9}
+	names := map[int64]string{9: "mgr", 11: "a", 12: "b", 20: "solo"}
+	marks := map[ccmaxPartyDay]ccmaxSettlementMark{{9, "2026-10-27"}: {Micro: 130e6, SettledAt: 1}}
+
+	parties := ccmaxBuildSettlement(bills, managerOf, names, marks)
+	require.Len(t, parties, 2)
+
+	mgr := parties[0]
+	assert.Equal(t, "mgr", mgr.Username)
+	assert.Equal(t, ccmaxPartyManager, mgr.Kind)
+	assert.InDelta(t, 180, mgr.CostRMB, 1e-9)
+	assert.InDelta(t, 130, mgr.SettledRMB, 1e-9)
+	assert.InDelta(t, 50, mgr.UnsettledRMB, 1e-9)
+	require.Len(t, mgr.Days, 2)
+	assert.Equal(t, "2026-10-27", mgr.Days[0].DS)
+	assert.True(t, mgr.Days[0].Settled)
+	assert.False(t, mgr.Days[1].Settled)
+	require.Len(t, mgr.Members, 2)
+	assert.Equal(t, "a", mgr.Members[0].Username)
+	assert.InDelta(t, 150, mgr.Members[0].CostRMB, 1e-9)
+
+	solo := parties[1]
+	assert.Equal(t, ccmaxPartyUser, solo.Kind)
+	assert.InDelta(t, 70, solo.UnsettledRMB, 1e-9)
+	require.Len(t, solo.Days, 1)
+	require.Len(t, solo.Members, 1)
+	assert.Len(t, solo.Members[0].Accounts, 1)
+}
