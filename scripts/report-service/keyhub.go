@@ -48,7 +48,33 @@ const (
 	cfgKeyhubBaseURL  = "keyhub_base_url"
 	cfgKeyhubUsername = "keyhub_username"
 	cfgKeyhubPassword = "keyhub_password"
+	// cfgKeyhubDefaultModels holds a JSON {category_code: "m1,m2"} map that
+	// pre-fills the models field on the upload page.
+	cfgKeyhubDefaultModels = "keyhub_default_models"
 )
+
+// keyhubBuiltinDefaultModels applies until an admin saves the default-models
+// setting for the first time.
+var keyhubBuiltinDefaultModels = map[string]string{
+	"openai":       "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,gpt-6-astra,gpt-6-sol,gpt-6-luna",
+	"azure_openai": "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,gpt-6-astra,gpt-6-sol,gpt-6-luna",
+}
+
+// effectiveKeyhubDefaultModels returns the per-category default model lists.
+// An unset or unparsable setting falls back to the built-in map; a saved empty
+// map ("{}") means no defaults at all.
+func effectiveKeyhubDefaultModels() map[string]string {
+	raw := strings.TrimSpace(supplierConfigGet(cfgKeyhubDefaultModels))
+	if raw == "" {
+		return keyhubBuiltinDefaultModels
+	}
+	out := map[string]string{}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		log.Printf("[keyhub] invalid %s, using built-in defaults: %v", cfgKeyhubDefaultModels, err)
+		return keyhubBuiltinDefaultModels
+	}
+	return out
+}
 
 // effectiveKeyhubBaseURL / Username / Password prefer the web-configured value,
 // falling back to the env bootstrap. Base URL is normalised without a trailing
@@ -650,11 +676,18 @@ func handleKeyhubUsageLogStat(c *gin.Context) {
 func handleKeyhubSettingsGet(c *gin.Context) {
 	pw := effectiveKeyhubPassword()
 	c.JSON(http.StatusOK, gin.H{
-		"base_url":     effectiveKeyhubBaseURL(),
-		"username":     effectiveKeyhubUsername(),
-		"password_set": strings.TrimSpace(pw) != "",
-		"configured":   keyhubConfigured(),
+		"base_url":       effectiveKeyhubBaseURL(),
+		"username":       effectiveKeyhubUsername(),
+		"password_set":   strings.TrimSpace(pw) != "",
+		"configured":     keyhubConfigured(),
+		"default_models": effectiveKeyhubDefaultModels(),
 	})
+}
+
+// handleKeyhubDefaultModels exposes only the per-category default models, so
+// the upload page can pre-fill them for supplier_02 users too.
+func handleKeyhubDefaultModels(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"default_models": effectiveKeyhubDefaultModels()})
 }
 
 func handleKeyhubSettingsSet(c *gin.Context) {
@@ -663,6 +696,8 @@ func handleKeyhubSettingsSet(c *gin.Context) {
 		BaseURL  *string `json:"base_url"`
 		Username *string `json:"username"`
 		Password *string `json:"password"`
+		// Replaces the whole map; categories with an empty list are dropped.
+		DefaultModels *map[string]string `json:"default_models"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
@@ -692,6 +727,26 @@ func handleKeyhubSettingsSet(c *gin.Context) {
 	// an omitted field keeps the current password.
 	if !set(cfgKeyhubPassword, body.Password, false) {
 		return
+	}
+	if body.DefaultModels != nil {
+		clean := map[string]string{}
+		for code, models := range *body.DefaultModels {
+			code = strings.TrimSpace(code)
+			var list []string
+			for m := range strings.SplitSeq(models, ",") {
+				if m = strings.TrimSpace(m); m != "" {
+					list = append(list, m)
+				}
+			}
+			if code != "" && len(list) > 0 {
+				clean[code] = strings.Join(list, ",")
+			}
+		}
+		raw, _ := json.Marshal(clean)
+		if err := supplierConfigSet(cfgKeyhubDefaultModels, string(raw)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
 	// Any credential change invalidates the cached token.
 	forceKeyhubRelogin()

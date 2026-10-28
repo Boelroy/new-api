@@ -5040,6 +5040,7 @@ func main() {
 	keyhubAPI.GET("/usage/logs/filter-options", handleKeyhubUsageFilterOptions)
 	keyhubAPI.GET("/usage/logs", handleKeyhubUsageLogs)
 	keyhubAPI.GET("/usage/logs/stat", handleKeyhubUsageLogStat)
+	keyhubAPI.GET("/default-models", handleKeyhubDefaultModels)
 	// KHub connection settings (base_url/username/password) are admin-only.
 	keyhubAPI.GET("/settings", requireRole(minAdminRole), handleKeyhubSettingsGet)
 	keyhubAPI.PUT("/settings", requireRole(minAdminRole), handleKeyhubSettingsSet)

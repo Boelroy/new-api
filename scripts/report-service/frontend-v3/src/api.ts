@@ -957,6 +957,8 @@ export type KeyhubSettings = {
   username: string
   password_set: boolean
   configured: boolean
+  // category_code → comma-separated models pre-filled on the upload page.
+  default_models: Record<string, string>
 }
 
 function keyhubLogQueryString(q: KeyhubLogQuery): string {
@@ -2342,10 +2344,19 @@ export const api = {
     return request<KeyhubEnvelope<unknown>>(`/api/keyhub/usage/logs/stat${suffix ? '?' + suffix : ''}`)
   },
 
+  // Per-category default models, readable by supplier_02 too.
+  keyhubDefaultModels: () =>
+    request<{ default_models: Record<string, string> }>('/api/keyhub/default-models'),
+
   // Admin-only connection settings.
   getKeyhubSettings: () => request<KeyhubSettings>('/api/keyhub/settings'),
 
-  setKeyhubSettings: (payload: { base_url?: string; username?: string; password?: string }) =>
+  setKeyhubSettings: (payload: {
+    base_url?: string
+    username?: string
+    password?: string
+    default_models?: Record<string, string>
+  }) =>
     request<KeyhubSettings>('/api/keyhub/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },

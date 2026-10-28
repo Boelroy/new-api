@@ -3,7 +3,14 @@ import { Plus, Trash2 } from 'lucide-react'
 import Layout from '../components/Layout'
 import { Button, Card, Input, Select, Textarea } from '../components/ui'
 import { toast } from '../components/feedback'
-import { api, ROLE_SUPPLIER_02, type KeyhubCategory, type KeyhubCategoryField } from '../api'
+import {
+  api,
+  ROLE_ADMIN,
+  ROLE_SUPPLIER_02,
+  type KeyhubCategory,
+  type KeyhubCategoryField,
+  type KeyhubSettings,
+} from '../api'
 import { getCachedRole, loadRole } from '../auth'
 
 // 上传 Key — imports credentials into KHub (pd-maas) via the report-service
@@ -13,12 +20,8 @@ import { getCachedRole, loadRole } from '../auth'
 // per-field table (default) and a raw-text area for bulk paste — and they
 // round-trip when you toggle between them.
 
-// Categories whose models field should be pre-populated with our standard
-// OpenAI-compatible model set. Applied whenever the category is selected.
-const DEFAULT_MODELS: Record<string, string> = {
-  openai: 'gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,gpt-6-astra,gpt-6-sol,gpt-6-luna',
-  azure_openai: 'gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,gpt-6-astra,gpt-6-sol,gpt-6-luna',
-}
+// The models field is pre-filled from the per-category default models that
+// admins edit in the KHub settings card below (stored server-side).
 
 function profileOf(cat: KeyhubCategory | undefined) {
   return cat?.import_profile_json
@@ -91,6 +94,7 @@ export default function KeyhubUpload() {
   const [rows, setRows] = useState<string[][]>([['']])
   const [rawText, setRawText] = useState('')
   const [models, setModels] = useState('')
+  const [defaultModels, setDefaultModels] = useState<Record<string, string>>({})
   const [groupName, setGroupName] = useState('default')
   const [tag, setTag] = useState('')
   const [note, setNote] = useState('')
@@ -105,6 +109,7 @@ export default function KeyhubUpload() {
     void loadRole().then(setRole)
   }, [role])
   const isSupplier = role === ROLE_SUPPLIER_02
+  const isAdmin = role !== null && role >= ROLE_ADMIN
 
   useEffect(() => {
     let alive = true
@@ -118,6 +123,10 @@ export default function KeyhubUpload() {
       })
       .catch((e) => toast.error(e))
       .finally(() => alive && setLoadingCats(false))
+    api
+      .keyhubDefaultModels()
+      .then((res) => alive && setDefaultModels(res?.default_models ?? {}))
+      .catch((e) => toast.error(e))
     return () => {
       alive = false
     }
@@ -134,12 +143,17 @@ export default function KeyhubUpload() {
   const hint = fieldHint(currentCat)
 
   // On category change: reset the per-field rows to a single empty row of the
-  // new width, and apply that category's default models (empty for others).
+  // new width.
   useEffect(() => {
     setRows([emptyRow(fields.length)])
-    setModels(DEFAULT_MODELS[categoryCode] ?? '')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [categoryCode])
+
+  // Apply the category's default models (empty for others) on category change
+  // and whenever the defaults load or are re-saved.
+  useEffect(() => {
+    setModels(defaultModels[categoryCode] ?? '')
+  }, [categoryCode, defaultModels])
 
   const filledRows = useMemo(
     () => rows.filter((r) => r.some((v) => v.trim() !== '')).length,
@@ -210,6 +224,7 @@ export default function KeyhubUpload() {
 
   return (
     <Layout title="上传 Key" subtitle="导入 Key 到 KHub（pd-maas）">
+      {isAdmin && <SettingsCard categories={categories} onSaved={setDefaultModels} />}
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
         <Card className="space-y-4 p-4">
           <div className="grid gap-4 sm:grid-cols-2">
@@ -386,5 +401,109 @@ export default function KeyhubUpload() {
         </Card>
       </div>
     </Layout>
+  )
+}
+
+// SettingsCard — admin-only KHub login + per-category default models. Blank
+// password leaves the stored one unchanged; a blank models input removes that
+// category's default.
+function SettingsCard(props: {
+  categories: KeyhubCategory[]
+  onSaved: (defaults: Record<string, string>) => void
+}) {
+  const [settings, setSettings] = useState<KeyhubSettings | null>(null)
+  const [baseURL, setBaseURL] = useState('')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [defaults, setDefaults] = useState<Record<string, string>>({})
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    api
+      .getKeyhubSettings()
+      .then((s) => {
+        setSettings(s)
+        setBaseURL(s.base_url)
+        setUsername(s.username)
+        setDefaults(s.default_models ?? {})
+      })
+      .catch((e) => toast.error(e))
+  }, [])
+
+  async function save() {
+    setSaving(true)
+    try {
+      const s = await api.setKeyhubSettings({
+        base_url: baseURL,
+        username,
+        ...(password ? { password } : {}),
+        default_models: defaults,
+      })
+      setSettings(s)
+      setDefaults(s.default_models ?? {})
+      setPassword('')
+      props.onSaved(s.default_models ?? {})
+      toast.success('已保存')
+    } catch (e) {
+      toast.error(e)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Card className="mb-4 space-y-3 p-4">
+      <div className="text-sm font-semibold">KHub 配置（管理员）</div>
+      <div className="grid gap-4 sm:grid-cols-3">
+        <label className="space-y-1.5">
+          <span className="text-xs font-medium text-muted-foreground">KHub 地址 (base_url)</span>
+          <Input
+            value={baseURL}
+            placeholder="https://khub.modelink.ai/pd-maas"
+            onChange={(e) => setBaseURL(e.target.value)}
+          />
+        </label>
+        <label className="space-y-1.5">
+          <span className="text-xs font-medium text-muted-foreground">登录账号</span>
+          <Input value={username} autoComplete="off" onChange={(e) => setUsername(e.target.value)} />
+        </label>
+        <label className="space-y-1.5">
+          <span className="text-xs font-medium text-muted-foreground">
+            登录密码{settings?.password_set ? '（已设置）' : ''}
+          </span>
+          <Input
+            type="password"
+            value={password}
+            autoComplete="new-password"
+            placeholder={settings?.password_set ? '留空不修改' : ''}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </label>
+      </div>
+      <div className="space-y-2">
+        <span className="text-xs font-medium text-muted-foreground">各类别默认模型（逗号分隔，留空则无默认）</span>
+        {props.categories.length === 0 && <p className="text-xs text-muted-foreground">暂无类别</p>}
+        <div className="grid gap-3 sm:grid-cols-2">
+          {props.categories.map((c) => (
+            <label key={c.code} className="space-y-1">
+              <span className="text-[11px] text-muted-foreground">
+                {c.label || c.code} ({c.code})
+              </span>
+              <Input
+                value={defaults[c.code] ?? ''}
+                className="font-mono text-xs"
+                spellCheck={false}
+                onChange={(e) => setDefaults((d) => ({ ...d, [c.code]: e.target.value }))}
+              />
+            </label>
+          ))}
+        </div>
+      </div>
+      <div className="flex items-center justify-end">
+        <Button onClick={save} disabled={saving || !settings}>
+          {saving ? '保存中…' : '保存'}
+        </Button>
+      </div>
+    </Card>
   )
 }
