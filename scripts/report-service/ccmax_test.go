@@ -168,3 +168,23 @@ func TestCCMaxReportText(t *testing.T) {
 	assert.Contains(t, text, "本月消耗：$100.00（¥720.00")
 	assert.Contains(t, text, "统计区间：2026-10-01 00:00 ~ 2026-10-27 15:00（UTC+8）")
 }
+
+// Manager-created users get a 20-char alphanumeric password, distinct per call.
+func TestCCMaxGeneratePassword(t *testing.T) {
+	a, err := ccmaxGeneratePassword()
+	require.NoError(t, err)
+	b, err := ccmaxGeneratePassword()
+	require.NoError(t, err)
+	assert.Regexp(t, `^[A-Za-z0-9]{20}$`, a)
+	assert.NotEqual(t, a, b)
+}
+
+func TestCCMaxValidUsername(t *testing.T) {
+	for name, ok := range map[string]bool{
+		"ccmaxpipi11": true, "alice_ccmax": true, "a.b-c": true,
+		"ab": false, "has space": false, "中文名字": false, "x/y": false,
+		"abcdefghijklmnopqrstuvwxyz0123456": false,
+	} {
+		assert.Equal(t, ok, ccmaxValidUsername(name), name)
+	}
+}

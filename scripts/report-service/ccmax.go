@@ -40,6 +40,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/lib/pq"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Upstream (portal / Anthropic / proxy) failures answer 424, not 502: the
@@ -1344,4 +1345,159 @@ func handleCCMaxManagerMembersSet(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"id": managerID, "member_ids": body.MemberIDs})
+}
+
+// ---- ccmax_manager: own supplier_ccmax members ----
+
+const ccmaxPasswordAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+// ccmaxGeneratePassword returns a 20-char alphanumeric password from
+// crypto/rand (~119 bits), e.g. kzXn4iGpfVeJtHbHAAsC.
+func ccmaxGeneratePassword() (string, error) {
+	buf := make([]byte, 20)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	// 256 is not a multiple of 62; re-draw bytes ≥ 248 to avoid modulo bias.
+	for i := range buf {
+		for buf[i] >= 248 {
+			var one [1]byte
+			if _, err := rand.Read(one[:]); err != nil {
+				return "", err
+			}
+			buf[i] = one[0]
+		}
+		buf[i] = ccmaxPasswordAlphabet[int(buf[i])%len(ccmaxPasswordAlphabet)]
+	}
+	return string(buf), nil
+}
+
+// ccmaxValidUsername allows 3-32 chars of letters, digits, '_', '-', '.'.
+func ccmaxValidUsername(name string) bool {
+	if len(name) < 3 || len(name) > 32 {
+		return false
+	}
+	for _, r := range name {
+		if !(r < unicode.MaxASCII && (unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.')) {
+			return false
+		}
+	}
+	return true
+}
+
+// ccmaxCallerManagerID returns the caller's uid when they are a
+// ccmax_manager; otherwise it answers 403.
+func ccmaxCallerManagerID(c *gin.Context) (int64, bool) {
+	roleAny, _ := c.Get("role")
+	if role, _ := roleAny.(int); role != minCCMaxManagerRole {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		return 0, false
+	}
+	uidAny, _ := c.Get("user_id")
+	uid, _ := uidAny.(int64)
+	if uid <= 0 {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		return 0, false
+	}
+	return uid, true
+}
+
+// handleCCMaxMembersList lists the supplier_ccmax users assigned to the
+// calling manager.
+func handleCCMaxMembersList(c *gin.Context) {
+	managerID, ok := ccmaxCallerManagerID(c)
+	if !ok {
+		return
+	}
+	rows, err := db.Query(
+		`SELECT u.id, u.username, u.status, u.created_at FROM rs_ccmax_manager_member m
+		   JOIN rs_auth_user u ON u.id = m.member_id
+		  WHERE m.manager_id=$1 ORDER BY u.username`, managerID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	type member struct {
+		ID        int64  `json:"id"`
+		Username  string `json:"username"`
+		Status    int    `json:"status"`
+		CreatedAt int64  `json:"created_at"`
+	}
+	out := []member{}
+	for rows.Next() {
+		var m member
+		if err := rows.Scan(&m.ID, &m.Username, &m.Status, &m.CreatedAt); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		out = append(out, m)
+	}
+	c.JSON(http.StatusOK, gin.H{"members": out})
+}
+
+// handleCCMaxMemberCreate lets a ccmax_manager create a supplier_ccmax user
+// from just a username (studio = username). The server generates the
+// password and returns it once; only its bcrypt hash is stored. The new user
+// is assigned to the creating manager in the same transaction.
+func handleCCMaxMemberCreate(c *gin.Context) {
+	managerID, ok := ccmaxCallerManagerID(c)
+	if !ok {
+		return
+	}
+	var body struct {
+		Username string `json:"username"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	username := strings.TrimSpace(body.Username)
+	if !ccmaxValidUsername(username) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "用户名须为 3-32 位字母、数字、_ - ."})
+		return
+	}
+	password, err := ccmaxGeneratePassword()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "password generation failed"})
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "hash error"})
+		return
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+	now := time.Now().Unix()
+	var id int64
+	if err := tx.QueryRow(
+		`INSERT INTO rs_auth_user (username, password_hash, role, studio, created_at, updated_at)
+		 VALUES ($1, $2, $3, $1, $4, $4) RETURNING id`,
+		username, string(hash), minSupplierCCMaxRole, now,
+	).Scan(&id); err != nil {
+		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
+			c.JSON(http.StatusConflict, gin.H{"error": "用户名已存在"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO rs_ccmax_manager_member (manager_id, member_id, created_at) VALUES ($1, $2, $3)`,
+		managerID, id, now,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	log.Printf("[ccmax] manager %d created supplier_ccmax user %d (%s)", managerID, id, username)
+	c.JSON(http.StatusOK, gin.H{"id": id, "username": username, "password": password})
 }

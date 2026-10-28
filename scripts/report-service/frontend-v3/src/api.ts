@@ -2252,6 +2252,16 @@ export const api = {
       body: JSON.stringify({ member_ids: memberIds }),
     }),
 
+  ccmaxMembers: () =>
+    request<{ members: { id: number; username: string; status: number; created_at: number }[] }>('/api/ccmax/members'),
+
+  createCCMaxMember: (username: string) =>
+    request<{ id: number; username: string; password: string }>('/api/ccmax/members', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username }),
+    }),
+
   getCCMaxReportSettings: () => request<CCMaxReportSettings>('/api/ccmax/report/settings'),
 
   setCCMaxReportSettings: (payload: Partial<CCMaxReportSettings>) =>

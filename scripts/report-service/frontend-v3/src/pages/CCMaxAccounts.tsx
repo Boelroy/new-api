@@ -602,6 +602,7 @@ export default function CCMaxAccounts() {
       {isAdmin && <ManagersCard />}
       {isAdmin && <ReportCard />}
 
+      {isManager && <MembersCard onCreated={() => void load()} />}
       {!isManager && <OAuthFlow plans={plans} locations={locations} onDone={() => void load()} />}
 
       <Card className="mt-4 overflow-hidden p-0">
@@ -1047,6 +1048,102 @@ function ReportCard() {
       {preview && (
         <pre className="whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-xs leading-relaxed">{preview}</pre>
       )}
+    </Card>
+  )
+}
+
+// MembersCard — a ccmax_manager's own supplier_ccmax users, plus creating one
+// from just a username. The server generates the password and returns it
+// once, so it is shown here until dismissed.
+function MembersCard(props: { onCreated: () => void }) {
+  const [members, setMembers] = useState<{ id: number; username: string; status: number }[]>([])
+  const [username, setUsername] = useState('')
+  const [creating, setCreating] = useState(false)
+  const [created, setCreated] = useState<{ username: string; password: string } | null>(null)
+
+  const loadMembers = useCallback(() => {
+    api
+      .ccmaxMembers()
+      .then((res) => setMembers(res.members ?? []))
+      .catch((e) => toast.error(e))
+  }, [])
+  useEffect(loadMembers, [loadMembers])
+
+  async function create() {
+    const name = username.trim()
+    if (!name) {
+      toast.error('请输入用户名')
+      return
+    }
+    setCreating(true)
+    try {
+      const res = await api.createCCMaxMember(name)
+      setCreated({ username: res.username, password: res.password })
+      setUsername('')
+      loadMembers()
+      props.onCreated()
+    } catch (e) {
+      toast.error(e)
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  function copyCreated() {
+    if (!created) return
+    navigator.clipboard.writeText(`用户名：${created.username}\n密码：${created.password}`).then(
+      () => toast.success('已复制'),
+      () => toast.error('复制失败'),
+    )
+  }
+
+  return (
+    <Card className="mb-4 space-y-3 p-4">
+      <div className="text-sm font-semibold">我的号商</div>
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="space-y-1.5">
+          <span className="text-xs font-medium text-muted-foreground">新建号商（密码自动生成）</span>
+          <Input
+            value={username}
+            autoComplete="off"
+            placeholder="用户名，3-32 位字母数字 _ - ."
+            onChange={(e) => setUsername(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void create()
+            }}
+          />
+        </label>
+        <Button onClick={() => void create()} disabled={creating}>
+          {creating ? '创建中…' : '新建'}
+        </Button>
+      </div>
+      {created && (
+        <div className="space-y-2 rounded-lg border border-border bg-muted p-3 text-xs">
+          <div>
+            已创建号商 <span className="font-mono font-semibold">{created.username}</span>，密码只显示这一次，请立即保存：
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <code className="rounded bg-background px-2 py-1 font-mono text-sm">{created.password}</code>
+            <Button size="sm" variant="outline" onClick={copyCreated}>
+              <Copy className="size-3.5" /> 复制账号密码
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setCreated(null)}>
+              我已保存
+            </Button>
+          </div>
+        </div>
+      )}
+      <div className="flex flex-wrap gap-1.5 text-xs">
+        {members.length === 0 ? (
+          <span className="text-muted-foreground">暂无号商。</span>
+        ) : (
+          members.map((m) => (
+            <Badge key={m.id} tone={m.status === 1 ? 'neutral' : 'danger'} className="font-mono">
+              {m.username}
+            </Badge>
+          ))
+        )}
+      </div>
     </Card>
   )
 }
