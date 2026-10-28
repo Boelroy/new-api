@@ -5062,9 +5062,10 @@ func main() {
 	// Which supplier_ccmax users each ccmax_manager may see — admin-only.
 	ccmaxAPI.GET("/managers", requireRole(minAdminRole), handleCCMaxManagersList)
 	ccmaxAPI.PUT("/managers/:id/members", requireRole(minAdminRole), handleCCMaxManagerMembersSet)
-	// A ccmax_manager lists / creates their own supplier_ccmax users.
+	// A ccmax_manager lists / creates their own supplier_ccmax users; admin+
+	// may create too, optionally assigning a manager.
 	ccmaxAPI.GET("/members", handleCCMaxMembersList)
-	ccmaxAPI.POST("/members", handleCCMaxMemberCreate)
+	ccmaxAPI.POST("/members", requireRoleOrCCMaxManager(minAdminRole), handleCCMaxMemberCreate)
 	// Lark push of CC Max totals (webhook + push hours) — admin-only.
 	ccmaxAPI.GET("/report/settings", requireRole(minAdminRole), handleCCMaxReportSettingsGet)
 	ccmaxAPI.PUT("/report/settings", requireRole(minAdminRole), handleCCMaxReportSettingsSet)

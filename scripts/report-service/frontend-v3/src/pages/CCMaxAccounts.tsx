@@ -599,7 +599,7 @@ export default function CCMaxAccounts() {
       subtitle={isManager ? '查看分配给你的号商的 CC Max 账号与用量' : '通过你自己的 socks5 代理完成 Claude 账号授权并上号'}
     >
       {isAdmin && <SettingsCard />}
-      {isAdmin && <ManagersCard />}
+      {isAdmin && <ManagersCard onCreated={() => void load()} />}
       {isAdmin && <ReportCard />}
 
       {isManager && <MembersCard onCreated={() => void load()} />}
@@ -911,16 +911,41 @@ function SettingsCard() {
 
 // ManagersCard — admin-only: which supplier_ccmax users each ccmax_manager
 // may see on this page (read-only for the manager).
-function ManagersCard() {
+function ManagersCard(props: { onCreated: () => void }) {
   const [data, setData] = useState<CCMaxManagers | null>(null)
   const [savingId, setSavingId] = useState<number | null>(null)
+  const [username, setUsername] = useState('')
+  const [managerId, setManagerId] = useState(0)
+  const [creating, setCreating] = useState(false)
+  const [created, setCreated] = useState<{ username: string; password: string } | null>(null)
 
-  useEffect(() => {
+  const loadManagers = useCallback(() => {
     api
       .ccmaxManagers()
       .then(setData)
       .catch((e) => toast.error(e))
   }, [])
+  useEffect(loadManagers, [loadManagers])
+
+  async function create() {
+    const name = username.trim()
+    if (!name) {
+      toast.error('请输入用户名')
+      return
+    }
+    setCreating(true)
+    try {
+      const res = await api.createCCMaxMember(name, managerId)
+      setCreated({ username: res.username, password: res.password })
+      setUsername('')
+      loadManagers()
+      props.onCreated()
+    } catch (e) {
+      toast.error(e)
+    } finally {
+      setCreating(false)
+    }
+  }
 
   async function toggle(managerId: number, memberId: number, checked: boolean) {
     if (!data) return
@@ -943,11 +968,42 @@ function ManagersCard() {
     }
   }
 
-  if (!data || data.managers.length === 0) return null
+  if (!data) return null
   return (
     <Card className="mb-4 space-y-3 p-4">
       <div className="text-sm font-semibold">CC Max 汇总账号（管理员）</div>
-      <p className="text-xs text-muted-foreground">勾选每个 CC Max Manager 可以查看哪些号商的账号。</p>
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="space-y-1.5">
+          <span className="text-xs font-medium text-muted-foreground">新建号商（密码自动生成）</span>
+          <Input
+            value={username}
+            autoComplete="off"
+            placeholder="用户名，3-32 位字母数字 _ - ."
+            onChange={(e) => setUsername(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void create()
+            }}
+          />
+        </label>
+        <label className="space-y-1.5">
+          <span className="text-xs font-medium text-muted-foreground">分配给</span>
+          <Select value={String(managerId)} onChange={(e) => setManagerId(Number(e.target.value))}>
+            <option value="0">不分配</option>
+            {data.managers.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.username}
+              </option>
+            ))}
+          </Select>
+        </label>
+        <Button onClick={() => void create()} disabled={creating}>
+          {creating ? '创建中…' : '新建'}
+        </Button>
+      </div>
+      {created && <CreatedCredential {...created} onDismiss={() => setCreated(null)} />}
+      {data.managers.length > 0 && (
+        <p className="text-xs text-muted-foreground">勾选每个 CC Max Manager 可以查看哪些号商的账号。</p>
+      )}
       {data.managers.map((m) => (
         <div key={m.id} className="space-y-1.5">
           <div className="text-xs font-medium">
@@ -1089,14 +1145,6 @@ function MembersCard(props: { onCreated: () => void }) {
     }
   }
 
-  function copyCreated() {
-    if (!created) return
-    navigator.clipboard.writeText(`用户名：${created.username}\n密码：${created.password}`).then(
-      () => toast.success('已复制'),
-      () => toast.error('复制失败'),
-    )
-  }
-
   return (
     <Card className="mb-4 space-y-3 p-4">
       <div className="text-sm font-semibold">我的号商</div>
@@ -1117,22 +1165,7 @@ function MembersCard(props: { onCreated: () => void }) {
           {creating ? '创建中…' : '新建'}
         </Button>
       </div>
-      {created && (
-        <div className="space-y-2 rounded-lg border border-border bg-muted p-3 text-xs">
-          <div>
-            已创建号商 <span className="font-mono font-semibold">{created.username}</span>，密码只显示这一次，请立即保存：
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <code className="rounded bg-background px-2 py-1 font-mono text-sm">{created.password}</code>
-            <Button size="sm" variant="outline" onClick={copyCreated}>
-              <Copy className="size-3.5" /> 复制账号密码
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => setCreated(null)}>
-              我已保存
-            </Button>
-          </div>
-        </div>
-      )}
+      {created && <CreatedCredential {...created} onDismiss={() => setCreated(null)} />}
       <div className="flex flex-wrap gap-1.5 text-xs">
         {members.length === 0 ? (
           <span className="text-muted-foreground">暂无号商。</span>
@@ -1145,5 +1178,32 @@ function MembersCard(props: { onCreated: () => void }) {
         )}
       </div>
     </Card>
+  )
+}
+
+// CreatedCredential shows a just-created user's generated password, which the
+// server returns only once.
+function CreatedCredential(props: { username: string; password: string; onDismiss: () => void }) {
+  function copy() {
+    navigator.clipboard.writeText(`用户名：${props.username}\n密码：${props.password}`).then(
+      () => toast.success('已复制'),
+      () => toast.error('复制失败'),
+    )
+  }
+  return (
+    <div className="space-y-2 rounded-lg border border-border bg-muted p-3 text-xs">
+      <div>
+        已创建号商 <span className="font-mono font-semibold">{props.username}</span>，密码只显示这一次，请立即保存：
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <code className="rounded bg-background px-2 py-1 font-mono text-sm">{props.password}</code>
+        <Button size="sm" variant="outline" onClick={copy}>
+          <Copy className="size-3.5" /> 复制账号密码
+        </Button>
+        <Button size="sm" variant="ghost" onClick={props.onDismiss}>
+          我已保存
+        </Button>
+      </div>
+    </div>
   )
 }

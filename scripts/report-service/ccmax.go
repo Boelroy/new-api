@@ -91,6 +91,21 @@ func requireRoleOrCCMaxRoles(min int) gin.HandlerFunc {
 	}
 }
 
+// requireRoleOrCCMaxManager grants access to callers at min tier OR the
+// ccmax_manager role (role=9).
+func requireRoleOrCCMaxManager(min int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		roleAny, _ := c.Get("role")
+		role, _ := roleAny.(int)
+		if role >= min || role == minCCMaxManagerRole {
+			c.Next()
+			return
+		}
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		c.Abort()
+	}
+}
+
 // ccmaxProxyClient builds a one-off client routed through the supplier's
 // proxy. Not cached: every supplier brings their own proxy and the flow makes
 // only a handful of calls.
@@ -1436,21 +1451,34 @@ func handleCCMaxMembersList(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"members": out})
 }
 
-// handleCCMaxMemberCreate lets a ccmax_manager create a supplier_ccmax user
-// from just a username (studio = username). The server generates the
-// password and returns it once; only its bcrypt hash is stored. The new user
-// is assigned to the creating manager in the same transaction.
+// handleCCMaxMemberCreate creates a supplier_ccmax user from just a username
+// (studio = username). The server generates the password and returns it once;
+// only its bcrypt hash is stored. A ccmax_manager's new user is assigned to
+// them; an admin may pass manager_id to assign it to a ccmax_manager, or 0 to
+// leave it unassigned. User + assignment are written in one transaction.
 func handleCCMaxMemberCreate(c *gin.Context) {
-	managerID, ok := ccmaxCallerManagerID(c)
-	if !ok {
-		return
-	}
 	var body struct {
-		Username string `json:"username"`
+		Username  string `json:"username"`
+		ManagerID int64  `json:"manager_id"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
+	}
+	var managerID int64
+	if callerIsSupplierAdmin(c) {
+		managerID = body.ManagerID
+		if managerID > 0 {
+			if m, err := authUserByID(managerID); err != nil || m.Role != minCCMaxManagerRole {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "CC Max manager not found"})
+				return
+			}
+		}
+	} else {
+		var ok bool
+		if managerID, ok = ccmaxCallerManagerID(c); !ok {
+			return
+		}
 	}
 	username := strings.TrimSpace(body.Username)
 	if !ccmaxValidUsername(username) {
@@ -1487,17 +1515,20 @@ func handleCCMaxMemberCreate(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if _, err := tx.Exec(
-		`INSERT INTO rs_ccmax_manager_member (manager_id, member_id, created_at) VALUES ($1, $2, $3)`,
-		managerID, id, now,
-	); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+	if managerID > 0 {
+		if _, err := tx.Exec(
+			`INSERT INTO rs_ccmax_manager_member (manager_id, member_id, created_at) VALUES ($1, $2, $3)`,
+			managerID, id, now,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	log.Printf("[ccmax] manager %d created supplier_ccmax user %d (%s)", managerID, id, username)
+	callerAny, _ := c.Get("user_id")
+	log.Printf("[ccmax] user %v created supplier_ccmax user %d (%s), manager %d", callerAny, id, username, managerID)
 	c.JSON(http.StatusOK, gin.H{"id": id, "username": username, "password": password})
 }

@@ -2255,11 +2255,13 @@ export const api = {
   ccmaxMembers: () =>
     request<{ members: { id: number; username: string; status: number; created_at: number }[] }>('/api/ccmax/members'),
 
-  createCCMaxMember: (username: string) =>
+  // managerId: admin-only, assigns the new user to that ccmax_manager (0 = none);
+  // a manager's new user is always assigned to them.
+  createCCMaxMember: (username: string, managerId = 0) =>
     request<{ id: number; username: string; password: string }>('/api/ccmax/members', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username }),
+      body: JSON.stringify({ username, manager_id: managerId }),
     }),
 
   getCCMaxReportSettings: () => request<CCMaxReportSettings>('/api/ccmax/report/settings'),
