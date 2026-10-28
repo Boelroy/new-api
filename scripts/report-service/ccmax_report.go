@@ -78,23 +78,54 @@ func ccmaxReportHours() []int {
 	return hours
 }
 
-// ccmaxMonthCostMicro sums month-to-date cost: per account, its latest
-// cumulative cost (current roster value, else its latest snapshot this month)
-// minus the last snapshot before the month (0 when there is none). A counter
-// that went backwards contributes 0.
-func ccmaxMonthCostMicro(current, inMonthLatest, baseline map[int64]int64) int64 {
-	var total int64
-	seen := map[int64]bool{}
+// ccmaxMonthCostByAccount returns each account's month-to-date cost: its
+// latest cumulative cost (current roster value, else its latest snapshot this
+// month) minus the last snapshot before the month (0 when there is none). A
+// counter that went backwards counts 0.
+func ccmaxMonthCostByAccount(current, inMonthLatest, baseline map[int64]int64) map[int64]int64 {
+	out := map[int64]int64{}
 	for _, latest := range []map[int64]int64{current, inMonthLatest} {
 		for id, cost := range latest {
-			if seen[id] {
+			if _, seen := out[id]; seen {
 				continue
 			}
-			seen[id] = true
-			total += max(0, cost-baseline[id])
+			out[id] = max(0, cost-baseline[id])
 		}
 	}
-	return total
+	return out
+}
+
+// ccmaxMonthStart is the first instant of now's month in UTC+8.
+func ccmaxMonthStart(now time.Time) time.Time {
+	now = now.In(supplierPortalLoc)
+	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, supplierPortalLoc)
+}
+
+// ccmaxSnapshotMonthCosts records today's cumulative cost snapshot for the
+// current roster (account id → micro-yuan) and returns every account's
+// month-to-date cost in micro-yuan, including accounts no longer on the roster.
+func ccmaxSnapshotMonthCosts(current map[int64]int64, now time.Time) (map[int64]int64, error) {
+	now = now.In(supplierPortalLoc)
+	today := now.Format("2006-01-02")
+	for id, cost := range current {
+		if _, err := db.Exec(
+			`INSERT INTO rs_ccmax_cost_snapshot (remote_account_id, ds, cost_micro, updated_at) VALUES ($1, $2, $3, $4)
+			 ON CONFLICT (remote_account_id, ds) DO UPDATE SET cost_micro=EXCLUDED.cost_micro, updated_at=EXCLUDED.updated_at`,
+			id, today, cost, now.Unix(),
+		); err != nil {
+			return nil, fmt.Errorf("record cost snapshot: %w", err)
+		}
+	}
+	monthDS := ccmaxMonthStart(now).Format("2006-01-02")
+	baseline, err := ccmaxLatestSnapshots(`ds < $1`, monthDS)
+	if err != nil {
+		return nil, err
+	}
+	inMonth, err := ccmaxLatestSnapshots(`ds >= $1`, monthDS)
+	if err != nil {
+		return nil, err
+	}
+	return ccmaxMonthCostByAccount(current, inMonth, baseline), nil
 }
 
 // ccmaxReportText renders the Lark message.
@@ -126,8 +157,7 @@ func ccmaxBuildReport(now time.Time) (ccmaxReport, error) {
 		return ccmaxReport{}, err
 	}
 	now = now.In(supplierPortalLoc)
-	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, supplierPortalLoc)
-	r := ccmaxReport{From: monthStart, To: now, FxRate: supplierFxRate()}
+	r := ccmaxReport{From: ccmaxMonthStart(now), To: now, FxRate: supplierFxRate()}
 
 	current := map[int64]int64{}
 	var fiveSum, weekSum float64
@@ -149,27 +179,15 @@ func ccmaxBuildReport(now time.Time) (ccmaxReport, error) {
 		r.WeekAvg = weekSum / float64(r.Serving)
 	}
 
-	today := now.Format("2006-01-02")
-	for id, cost := range current {
-		if _, err := db.Exec(
-			`INSERT INTO rs_ccmax_cost_snapshot (remote_account_id, ds, cost_micro, updated_at) VALUES ($1, $2, $3, $4)
-			 ON CONFLICT (remote_account_id, ds) DO UPDATE SET cost_micro=EXCLUDED.cost_micro, updated_at=EXCLUDED.updated_at`,
-			id, today, cost, now.Unix(),
-		); err != nil {
-			return ccmaxReport{}, fmt.Errorf("record cost snapshot: %w", err)
-		}
-	}
-
-	monthDS := monthStart.Format("2006-01-02")
-	baseline, err := ccmaxLatestSnapshots(`ds < $1`, monthDS)
+	monthCosts, err := ccmaxSnapshotMonthCosts(current, now)
 	if err != nil {
 		return ccmaxReport{}, err
 	}
-	inMonth, err := ccmaxLatestSnapshots(`ds >= $1`, monthDS)
-	if err != nil {
-		return ccmaxReport{}, err
+	var monthMicro int64
+	for _, cost := range monthCosts {
+		monthMicro += cost
 	}
-	r.MonthCostRMB = float64(ccmaxMonthCostMicro(current, inMonth, baseline)) / 1e6
+	r.MonthCostRMB = float64(monthMicro) / 1e6
 	return r, nil
 }
 
@@ -294,4 +312,129 @@ func handleCCMaxReportPush(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"text": text})
+}
+
+// ccmaxUserStats is one supplier_ccmax user's row on the CC Max users page:
+// totals over the accounts they uploaded through report-service.
+type ccmaxUserStats struct {
+	ID           int64          `json:"id"`
+	Username     string         `json:"username"`
+	Status       int            `json:"status"`
+	CreatedAt    int64          `json:"created_at"`
+	Managers     []ccmaxUserRef `json:"managers"`
+	Accounts     int            `json:"accounts"`
+	Serving      int            `json:"serving"`
+	InputTokens  int64          `json:"input_tokens"`
+	OutputTokens int64          `json:"output_tokens"`
+	CostRMB      float64        `json:"cost_rmb"`
+	MonthCostRMB float64        `json:"month_cost_rmb"`
+}
+
+// handleCCMaxUsersStats lists every supplier_ccmax user with their managers
+// and how much their accounts have run: account / running counts, tokens,
+// cumulative cost and month-to-date cost (UTC+8 month, via the cost snapshots;
+// accounts gone from the roster still count toward the month).
+func handleCCMaxUsersStats(c *gin.Context) {
+	if !ccmaxWeb.configured() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "CC Max portal login not configured"})
+		return
+	}
+	raws, err := fetchPortalAccountsRaw(ccmaxWeb, "claude")
+	if err != nil {
+		c.JSON(http.StatusFailedDependency, gin.H{"error": err.Error()})
+		return
+	}
+	roster := map[int64]ccmaxAccountRow{}
+	current := map[int64]int64{}
+	for _, raw := range raws {
+		row, err := parseCCMaxPortalRow(raw)
+		if err != nil {
+			continue
+		}
+		roster[row.ID] = row
+		current[row.ID] = int64(math.Round(row.CostRMB * 1e6))
+	}
+	now := time.Now().In(supplierPortalLoc)
+	monthCosts, err := ccmaxSnapshotMonthCosts(current, now)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	rows, err := db.Query(`SELECT id, username, status, created_at FROM rs_auth_user WHERE role=$1 ORDER BY username`, minSupplierCCMaxRole)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	users := []*ccmaxUserStats{}
+	byID := map[int64]*ccmaxUserStats{}
+	for rows.Next() {
+		u := &ccmaxUserStats{Managers: []ccmaxUserRef{}}
+		if err := rows.Scan(&u.ID, &u.Username, &u.Status, &u.CreatedAt); err != nil {
+			rows.Close()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		users = append(users, u)
+		byID[u.ID] = u
+	}
+	rows.Close()
+
+	rows, err = db.Query(
+		`SELECT m.member_id, u.id, u.username FROM rs_ccmax_manager_member m
+		   JOIN rs_auth_user u ON u.id = m.manager_id ORDER BY u.username`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	for rows.Next() {
+		var memberID int64
+		var m ccmaxUserRef
+		if err := rows.Scan(&memberID, &m.ID, &m.Username); err != nil {
+			rows.Close()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if u := byID[memberID]; u != nil {
+			u.Managers = append(u.Managers, m)
+		}
+	}
+	rows.Close()
+
+	rows, err = db.Query(`SELECT remote_account_id, uploaded_by FROM rs_ccmax_account`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var accountID, uploadedBy int64
+		if err := rows.Scan(&accountID, &uploadedBy); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		u := byID[uploadedBy]
+		if u == nil {
+			continue
+		}
+		u.MonthCostRMB += float64(monthCosts[accountID]) / 1e6
+		row, onRoster := roster[accountID]
+		if !onRoster {
+			continue
+		}
+		u.Accounts++
+		if slices.Contains(ccmaxServingStatuses, row.Status) {
+			u.Serving++
+		}
+		u.InputTokens += row.InputTokens
+		u.OutputTokens += row.OutputTokens
+		u.CostRMB += row.CostRMB
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"users":      users,
+		"fx_rate":    supplierFxRate(),
+		"month_from": ccmaxMonthStart(now).Format("2006-01-02 15:04"),
+		"month_to":   now.Format("2006-01-02 15:04"),
+	})
 }

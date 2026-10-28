@@ -2264,6 +2264,8 @@ export const api = {
       body: JSON.stringify({ username, manager_id: managerId }),
     }),
 
+  ccmaxUsers: () => request<CCMaxUsersStats>('/api/ccmax/users'),
+
   getCCMaxReportSettings: () => request<CCMaxReportSettings>('/api/ccmax/report/settings'),
 
   setCCMaxReportSettings: (payload: Partial<CCMaxReportSettings>) =>
@@ -2620,6 +2622,29 @@ export type CCMaxAccount = {
 export type CCMaxManagers = {
   managers: { id: number; username: string; member_ids: number[] }[]
   suppliers: { id: number; username: string }[]
+}
+
+// GET /api/ccmax/users: every supplier_ccmax user with their accounts' usage.
+// month_cost_rmb covers month_from ~ month_to (UTC+8).
+export type CCMaxUserStats = {
+  id: number
+  username: string
+  status: number
+  created_at: number
+  managers: { id: number; username: string }[]
+  accounts: number
+  serving: number
+  input_tokens: number
+  output_tokens: number
+  cost_rmb: number
+  month_cost_rmb: number
+}
+
+export type CCMaxUsersStats = {
+  users: CCMaxUserStats[]
+  fx_rate: number
+  month_from: string
+  month_to: string
 }
 
 // Lark push of CC Max totals: webhook ('' = off) + push hours (UTC+8, "10,22").

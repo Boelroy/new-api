@@ -135,12 +135,12 @@ func TestCCMaxCredentialMatchesAccount(t *testing.T) {
 // Month-to-date cost: current cumulative minus the last pre-month snapshot;
 // accounts new this month count in full, accounts gone from the roster count
 // through their last in-month snapshot, and a counter reset never subtracts.
-func TestCCMaxMonthCostMicro(t *testing.T) {
+func TestCCMaxMonthCostByAccount(t *testing.T) {
 	current := map[int64]int64{1: 500, 2: 300, 4: 100}
 	inMonth := map[int64]int64{1: 450, 3: 80}
 	baseline := map[int64]int64{1: 200, 3: 50, 4: 900}
 	// 1: 500-200, 2: 300 (new), 3: 80-50 (dropped off roster), 4: reset → 0
-	assert.Equal(t, int64(300+300+30), ccmaxMonthCostMicro(current, inMonth, baseline))
+	assert.Equal(t, map[int64]int64{1: 300, 2: 300, 3: 30, 4: 0}, ccmaxMonthCostByAccount(current, inMonth, baseline))
 }
 
 func TestCCMaxParseReportHours(t *testing.T) {

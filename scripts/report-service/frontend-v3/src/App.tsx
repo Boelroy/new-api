@@ -7,7 +7,8 @@ import KeyhubKeys from './pages/KeyhubKeys'
 import KeyhubUsageOverview from './pages/KeyhubUsageOverview'
 import KeyhubUsageLogs from './pages/KeyhubUsageLogs'
 import CCMaxAccounts from './pages/CCMaxAccounts'
-import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_CCMAX_MANAGER, ROLE_SUPPLIER_02, ROLE_SUPPLIER_CCMAX } from './api'
+import CCMaxUsers from './pages/CCMaxUsers'
+import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_CCMAX_MANAGER, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_02, ROLE_SUPPLIER_CCMAX } from './api'
 import { getCachedRole, loadRole } from './auth'
 import { APP_BASE } from './basePath'
 import { Toaster, ConfirmHost, PromptHost } from './components/feedback'
@@ -111,6 +112,14 @@ export default function App() {
           element={
             <RoleGate allow={(r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_CCMAX || r === ROLE_CCMAX_MANAGER}>
               <CCMaxAccounts />
+            </RoleGate>
+          }
+        />
+        <Route
+          path="/ccmax-users"
+          element={
+            <RoleGate allow={(r) => r >= ROLE_SUPER_ADMIN}>
+              <CCMaxUsers />
             </RoleGate>
           }
         />
