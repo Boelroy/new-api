@@ -12,6 +12,7 @@ import (
 	"cmp"
 	"net/http"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -64,6 +65,40 @@ type ccmaxSettlementParty struct {
 	UnsettledRMB float64                 `json:"unsettled_rmb"`
 	Days         []ccmaxSettlementDay    `json:"days"`
 	Members      []ccmaxSettlementMember `json:"members"`
+}
+
+// ccmaxSettlementDetail is one account's bill on one day inside a party.
+type ccmaxSettlementDetail struct {
+	DS        string  `json:"ds"`
+	UserID    int64   `json:"user_id"`
+	Username  string  `json:"username"`
+	AccountID int64   `json:"account_id"`
+	Account   string  `json:"account"`
+	Alias     string  `json:"alias"`
+	CostRMB   float64 `json:"cost_rmb"`
+}
+
+// ccmaxSettlementDetails lists the non-zero bills settled through partyID,
+// by day, then 号商, then cost (largest first).
+func ccmaxSettlementDetails(bills []ccmaxBillRow, managerOf map[int64]int64, names map[int64]string, partyID int64) []ccmaxSettlementDetail {
+	out := []ccmaxSettlementDetail{}
+	for _, b := range bills {
+		party, ok := managerOf[b.UploadedBy]
+		if !ok {
+			party = b.UploadedBy
+		}
+		if party != partyID || b.Micro == 0 {
+			continue
+		}
+		out = append(out, ccmaxSettlementDetail{
+			DS: b.DS, UserID: b.UploadedBy, Username: names[b.UploadedBy],
+			AccountID: b.AccountID, Account: b.Account, Alias: b.Alias, CostRMB: float64(b.Micro) / 1e6,
+		})
+	}
+	slices.SortFunc(out, func(a, b ccmaxSettlementDetail) int {
+		return cmp.Or(cmp.Compare(a.DS, b.DS), cmp.Compare(a.Username, b.Username), cmp.Compare(b.CostRMB, a.CostRMB))
+	})
+	return out
 }
 
 // ccmaxSettlementMark is a stored settled day of a party.
@@ -174,7 +209,8 @@ func ccmaxManagerOf() (map[int64]int64, error) {
 // handleCCMaxSettlement returns the settlement parties for [from, to]
 // (default: this month), scoped like the account list: admins see every
 // party, a ccmax_manager its own, a supplier_ccmax only its own bills (inside
-// whichever party settles them).
+// whichever party settles them). With party=<id> it also returns that party's
+// per-day, per-account bills as detail.
 func handleCCMaxSettlement(c *gin.Context) {
 	now := time.Now().In(supplierPortalLoc)
 	fromDS := cmp.Or(c.Query("from"), ccmaxMonthStart(now).Format("2006-01-02"))
@@ -257,14 +293,18 @@ func handleCCMaxSettlement(c *gin.Context) {
 		marks[k] = m
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"from":           fromDS,
 		"to":             toDS,
 		"synced_through": supplierConfigGet(cfgCCMaxBillSyncedThrough),
 		"bill_hour":      ccmaxBillHour,
 		"fx_rate":        supplierFxRate(),
 		"parties":        ccmaxBuildSettlement(bills, managerOf, names, marks),
-	})
+	}
+	if partyID, err := strconv.ParseInt(c.Query("party"), 10, 64); err == nil {
+		resp["detail"] = ccmaxSettlementDetails(bills, managerOf, names, partyID)
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // handleCCMaxSettlementMark marks (settled=true) or unmarks a party's days

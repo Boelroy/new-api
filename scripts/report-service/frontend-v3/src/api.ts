@@ -2267,10 +2267,12 @@ export const api = {
   ccmaxUsers: () => request<CCMaxUsersStats>('/api/ccmax/users'),
 
   // from/to: UTC+8 dates (YYYY-MM-DD); omitted = this month.
-  ccmaxSettlement: (from?: string, to?: string) => {
+  // party: also return that party's per-day, per-account detail.
+  ccmaxSettlement: (from?: string, to?: string, party?: number) => {
     const q = new URLSearchParams()
     if (from) q.set('from', from)
     if (to) q.set('to', to)
+    if (party) q.set('party', String(party))
     return request<CCMaxSettlement>(`/api/ccmax/settlement?${q}`)
   },
   // Admin: mark (settled=true) or unmark a party's days.
@@ -2690,6 +2692,16 @@ export type CCMaxSettlementParty = {
   }[]
 }
 
+export type CCMaxSettlementDetail = {
+  ds: string
+  user_id: number
+  username: string
+  account_id: number
+  account: string
+  alias: string
+  cost_rmb: number
+}
+
 export type CCMaxSettlement = {
   from: string
   to: string
@@ -2697,6 +2709,7 @@ export type CCMaxSettlement = {
   bill_hour: number
   fx_rate: number
   parties: CCMaxSettlementParty[]
+  detail?: CCMaxSettlementDetail[]
 }
 
 // Lark push of CC Max totals: webhook ('' = off) + push hours (UTC+8, "10,22").

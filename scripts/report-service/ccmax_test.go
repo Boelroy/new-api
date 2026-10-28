@@ -244,3 +244,25 @@ func TestCCMaxBuildSettlement(t *testing.T) {
 	require.Len(t, solo.Members, 1)
 	assert.Len(t, solo.Members[0].Accounts, 1)
 }
+
+// A party's detail holds only bills settled through it, ordered by day.
+func TestCCMaxSettlementDetails(t *testing.T) {
+	bills := []ccmaxBillRow{
+		{DS: "2026-10-28", UploadedBy: 11, AccountID: 1, Micro: 50e6},
+		{DS: "2026-10-27", UploadedBy: 11, AccountID: 1, Micro: 100e6},
+		{DS: "2026-10-27", UploadedBy: 20, AccountID: 3, Micro: 70e6},
+		{DS: "2026-10-27", UploadedBy: 12, AccountID: 2, Micro: 0},
+	}
+	managerOf := map[int64]int64{11: 9, 12: 9}
+	names := map[int64]string{11: "a", 20: "solo"}
+
+	detail := ccmaxSettlementDetails(bills, managerOf, names, 9)
+	require.Len(t, detail, 2)
+	assert.Equal(t, "2026-10-27", detail[0].DS)
+	assert.Equal(t, "a", detail[0].Username)
+	assert.InDelta(t, 100, detail[0].CostRMB, 1e-9)
+
+	solo := ccmaxSettlementDetails(bills, managerOf, names, 20)
+	require.Len(t, solo, 1)
+	assert.Equal(t, int64(3), solo[0].AccountID)
+}

@@ -1,14 +1,21 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import Layout from '../components/Layout'
-import { Button, Card, Input, cx } from '../components/ui'
+import { Button, Card, Input, Select, cx } from '../components/ui'
 import { confirmDialog, toast } from '../components/feedback'
-import { api, ROLE_ADMIN, type CCMaxSettlement as SettlementData, type CCMaxSettlementParty } from '../api'
+import {
+  api,
+  ROLE_ADMIN,
+  type CCMaxSettlement as SettlementData,
+  type CCMaxSettlementDetail,
+  type CCMaxSettlementParty,
+} from '../api'
 import { getCachedRole } from '../auth'
 
 // CC Max 结算 — the portal daily bills summed over a date range per
 // settlement party: a ccmax_manager (for all its 号商) or a 号商 with no
 // manager. Each party's days with a bill are marked settled or not; admins
-// toggle them. Zero bills never show.
+// toggle them. Zero bills never show. Picking a party shows its per-day totals
+// and, below, each day's bills per account. Amounts lead with U (USD).
 
 export default function CCMaxSettlement() {
   const [data, setData] = useState<SettlementData | null>(null)
@@ -17,12 +24,13 @@ export default function CCMaxSettlement() {
   const [to, setTo] = useState('')
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const [busy, setBusy] = useState(false)
+  const [party, setParty] = useState(0)
   const isAdmin = (getCachedRole() ?? 0) >= ROLE_ADMIN
 
-  const load = useCallback(async (f?: string, t?: string) => {
+  const load = useCallback(async (f?: string, t?: string, p?: number) => {
     setLoading(true)
     try {
-      const res = await api.ccmaxSettlement(f, t)
+      const res = await api.ccmaxSettlement(f, t, p || undefined)
       setData(res)
       setFrom(res.from)
       setTo(res.to)
@@ -39,6 +47,15 @@ export default function CCMaxSettlement() {
   const fx = data && data.fx_rate > 0 ? data.fx_rate : 7.2
   const managers = useMemo(() => (data?.parties ?? []).filter((p) => p.kind === 'manager'), [data])
   const solos = useMemo(() => (data?.parties ?? []).filter((p) => p.kind === 'user'), [data])
+  const selected = data?.parties.find((p) => p.id === party)
+
+  // The selected party's bills grouped by day (ascending).
+  const detailDays = useMemo(() => {
+    const byDay = new Map<string, CCMaxSettlementDetail[]>()
+    for (const r of data?.detail ?? []) byDay.set(r.ds, [...(byDay.get(r.ds) ?? []), r])
+    return [...byDay.entries()].map(([ds, rows]) => ({ ds, rows, cost: rows.reduce((s, r) => s + r.cost_rmb, 0) }))
+  }, [data])
+
   const totals = useMemo(() => {
     const t = { cost: 0, settled: 0, unsettled: 0 }
     for (const p of data?.parties ?? []) {
@@ -56,20 +73,20 @@ export default function CCMaxSettlement() {
       return next
     })
 
-  async function mark(party: CCMaxSettlementParty, days: string[], settled: boolean) {
+  async function mark(target: CCMaxSettlementParty, days: string[], settled: boolean) {
     if (days.length === 0) return
     const ok = await confirmDialog({
       title: settled ? '标记已结算' : '取消结算',
-      message: `${party.username}：${days.join('、')} 共 ${days.length} 天${settled ? '标记为已结算' : '改回未结算'}？`,
+      message: `${target.username}：${days.join('、')} 共 ${days.length} 天${settled ? '标记为已结算' : '改回未结算'}？`,
       confirmText: settled ? '标记已结算' : '改回未结算',
       danger: !settled,
     })
     if (!ok) return
     setBusy(true)
     try {
-      await api.ccmaxSettlementMark(party.id, days, settled)
+      await api.ccmaxSettlementMark(target.id, days, settled)
       toast.success(settled ? '已标记结算' : '已改回未结算')
-      await load(from, to)
+      await load(from, to, party)
     } catch (e) {
       toast.error(e)
     } finally {
@@ -82,7 +99,7 @@ export default function CCMaxSettlement() {
     try {
       await api.ccmaxDailySync(from, to)
       toast.success('账单已重新拉取')
-      await load(from, to)
+      await load(from, to, party)
     } catch (e) {
       toast.error(e)
     } finally {
@@ -91,12 +108,15 @@ export default function CCMaxSettlement() {
   }
 
   function exportCSV() {
-    const header = ['类型', '结算对象', '号商 / 账号', '合计 CNY', '已结算 CNY', '未结算 CNY', '未结算日期']
+    const header = ['类型', '结算对象', '号商 / 账号', '合计 USD', '已结算 USD', '未结算 USD', '合计 CNY', '已结算 CNY', '未结算 CNY', '未结算日期']
     const lines = (data?.parties ?? []).map((p) =>
       [
         p.kind === 'manager' ? 'Manager' : '号商',
         p.username,
         p.kind === 'manager' ? p.members.map((m) => m.username).join(' ') : p.members[0]?.accounts.length ?? 0,
+        (p.cost_rmb / fx).toFixed(2),
+        (p.settled_rmb / fx).toFixed(2),
+        (p.unsettled_rmb / fx).toFixed(2),
         p.cost_rmb.toFixed(2),
         p.settled_rmb.toFixed(2),
         p.unsettled_rmb.toFixed(2),
@@ -118,10 +138,46 @@ export default function CCMaxSettlement() {
 
   const money = (rmb: number, className?: string) => (
     <span className={className}>
-      <span className="font-semibold">¥{rmb.toFixed(2)}</span>
-      <span className="ml-1.5 text-[11px] text-muted-foreground">${(rmb / fx).toFixed(2)}</span>
+      <span className="font-semibold">${(rmb / fx).toFixed(2)}</span>
+      <span className="ml-1.5 text-[11px] text-muted-foreground">¥{rmb.toFixed(2)}</span>
     </span>
   )
+
+  const pick = (id: number) => {
+    setParty(id)
+    void load(from, to, id)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  // One day's settled mark; admins click to toggle.
+  const dayChip = (p: CCMaxSettlementParty, d: CCMaxSettlementParty['days'][number], label: string) => {
+    const changed = d.settled && Math.abs(d.settled_rmb - d.cost_rmb) >= 0.01
+    return (
+      <button
+        key={d.ds}
+        type="button"
+        disabled={!isAdmin || busy}
+        title={
+          `${d.ds} $${(d.cost_rmb / fx).toFixed(2)}（¥${d.cost_rmb.toFixed(2)}）` +
+          (d.settled
+            ? `\n已结算（${new Date(d.settled_at * 1000).toLocaleString()}，结算时 $${(d.settled_rmb / fx).toFixed(2)}）`
+            : '\n未结算') +
+          (changed ? '\n结算后账单有变动' : '')
+        }
+        onClick={() => void mark(p, [d.ds], !d.settled)}
+        className={cx(
+          'whitespace-nowrap rounded border px-1.5 py-0.5 text-[11px] tnum',
+          d.settled
+            ? 'border-success/30 bg-success/10 text-success'
+            : 'border-destructive/30 bg-destructive/10 text-destructive',
+          changed && 'ring-1 ring-warning',
+          isAdmin && 'cursor-pointer hover:opacity-80',
+        )}
+      >
+        {label} {d.settled ? '✓' : '✗'}
+      </button>
+    )
+  }
 
   function partyTable(title: string, hint: string, parties: CCMaxSettlementParty[]) {
     const isManager = parties[0]?.kind === 'manager'
@@ -167,37 +223,13 @@ export default function CCMaxSettlement() {
                         </td>
                         <td className="px-3 py-2">
                           <div className="flex max-w-xl flex-wrap gap-1">
-                            {p.days.map((d) => {
-                              const changed = d.settled && Math.abs(d.settled_rmb - d.cost_rmb) >= 0.01
-                              return (
-                                <button
-                                  key={d.ds}
-                                  type="button"
-                                  disabled={!isAdmin || busy}
-                                  title={
-                                    `${d.ds} ¥${d.cost_rmb.toFixed(2)}` +
-                                    (d.settled
-                                      ? `\n已结算（${new Date(d.settled_at * 1000).toLocaleString()}，结算时 ¥${d.settled_rmb.toFixed(2)}）`
-                                      : '\n未结算') +
-                                    (changed ? '\n结算后账单有变动' : '')
-                                  }
-                                  onClick={() => void mark(p, [d.ds], !d.settled)}
-                                  className={cx(
-                                    'rounded border px-1.5 py-0.5 text-[11px] tnum',
-                                    d.settled
-                                      ? 'border-success/30 bg-success/10 text-success'
-                                      : 'border-destructive/30 bg-destructive/10 text-destructive',
-                                    changed && 'ring-1 ring-warning',
-                                    isAdmin && 'cursor-pointer hover:opacity-80',
-                                  )}
-                                >
-                                  {d.ds.slice(5)} {d.settled ? '✓' : '✗'}
-                                </button>
-                              )
-                            })}
+                            {p.days.map((d) => dayChip(p, d, d.ds.slice(5)))}
                           </div>
                         </td>
-                        <td className="whitespace-nowrap px-3 py-2">
+                        <td className="space-x-1.5 whitespace-nowrap px-3 py-2">
+                          <Button size="sm" variant="outline" onClick={() => pick(p.id)}>
+                            明细
+                          </Button>
                           {isAdmin && unsettledDays.length > 0 && (
                             <Button size="sm" variant="outline" disabled={busy} onClick={() => void mark(p, unsettledDays, true)}>
                               全部标记已结算
@@ -245,12 +277,33 @@ export default function CCMaxSettlement() {
               <Input className="w-40" type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
               <span className="text-xs text-muted-foreground">至</span>
               <Input className="w-40" type="date" value={to} onChange={(e) => setTo(e.target.value)} />
-              <Button size="sm" disabled={loading || !from || !to} onClick={() => void load(from, to)}>
+              <Button size="sm" disabled={loading || !from || !to} onClick={() => void load(from, to, party)}>
                 查询
               </Button>
-              <Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>
+              <Button size="sm" variant="outline" disabled={loading} onClick={() => void load(undefined, undefined, party)}>
                 本月
               </Button>
+              <Select value={String(party)} onChange={(e) => pick(Number(e.target.value))}>
+                <option value="0">查看明细：选择 manager / 号商</option>
+                {managers.length > 0 && (
+                  <optgroup label="Manager">
+                    {managers.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.username}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {solos.length > 0 && (
+                  <optgroup label="号商（未分配 Manager）">
+                    {solos.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.username}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+              </Select>
             </div>
             <div className="flex items-center gap-2">
               {isAdmin && (
@@ -267,7 +320,7 @@ export default function CCMaxSettlement() {
               <Button size="sm" variant="outline" disabled={!data?.parties.length} onClick={exportCSV}>
                 导出 CSV
               </Button>
-              <Button size="sm" variant="outline" disabled={loading} onClick={() => void load(from, to)}>
+              <Button size="sm" variant="outline" disabled={loading} onClick={() => void load(from, to, party)}>
                 {loading ? '刷新中…' : '刷新'}
               </Button>
             </div>
@@ -289,6 +342,108 @@ export default function CCMaxSettlement() {
             </p>
           </div>
         </Card>
+
+        {selected && (
+          <Card className="overflow-hidden p-0">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
+              <div className="flex items-baseline gap-2">
+                <span className="text-sm font-semibold">{selected.username} 每日明细</span>
+                <span className="text-[11px] text-muted-foreground">
+                  {selected.kind === 'manager' ? 'Manager，含名下所有号商' : '号商'} · {data?.from} ~ {data?.to}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                {isAdmin && selected.days.some((d) => !d.settled) && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() =>
+                      void mark(
+                        selected,
+                        selected.days.filter((d) => !d.settled).map((d) => d.ds),
+                        true,
+                      )
+                    }
+                  >
+                    全部标记已结算
+                  </Button>
+                )}
+                <Button size="sm" variant="outline" onClick={() => setParty(0)}>
+                  关闭
+                </Button>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-muted/50 text-muted-foreground">
+                  <tr>
+                    {['日期', '总量', '结算状态（点击切换）'].map((h) => (
+                      <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {selected.days.map((d) => (
+                    <tr key={d.ds} className="border-t border-border">
+                      <td className="whitespace-nowrap px-3 py-1.5 tnum">{d.ds}</td>
+                      <td className="whitespace-nowrap px-3 py-1.5 tnum">{money(d.cost_rmb)}</td>
+                      <td className="px-3 py-1.5">{dayChip(selected, d, d.settled ? '已结算' : '未结算')}</td>
+                    </tr>
+                  ))}
+                  <tr className="border-t border-border bg-muted/40 font-medium">
+                    <td className="px-3 py-1.5">合计</td>
+                    <td className="whitespace-nowrap px-3 py-1.5 tnum">{money(selected.cost_rmb)}</td>
+                    <td className="whitespace-nowrap px-3 py-1.5 tnum">
+                      已结算 {money(selected.settled_rmb, 'text-success')}
+                      <span className="mx-2 text-muted-foreground">/</span>
+                      未结算 {money(selected.unsettled_rmb, selected.unsettled_rmb > 0 ? 'text-destructive' : undefined)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div className="border-t border-border px-4 py-2.5 text-sm font-semibold">明细</div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-muted/50 text-muted-foreground">
+                  <tr>
+                    {['日期', ...(selected.kind === 'manager' ? ['号商'] : []), '账号', '别名', '金额'].map((h) => (
+                      <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {detailDays.map((day) => (
+                    <Fragment key={day.ds}>
+                      {day.rows.map((r, i) => (
+                        <tr key={r.account_id} className="border-t border-border">
+                          <td className="whitespace-nowrap px-3 py-1.5 tnum">{i === 0 ? day.ds : ''}</td>
+                          {selected.kind === 'manager' && <td className="px-3 py-1.5 font-mono">{r.username}</td>}
+                          <td className="px-3 py-1.5 font-mono">{r.account || '—'}</td>
+                          <td className="px-3 py-1.5 text-muted-foreground">{r.alias}</td>
+                          <td className="whitespace-nowrap px-3 py-1.5 tnum">{money(r.cost_rmb)}</td>
+                        </tr>
+                      ))}
+                      <tr className="border-t border-border bg-muted/40 font-medium">
+                        <td className="px-3 py-1.5" colSpan={selected.kind === 'manager' ? 4 : 3}>
+                          {day.ds} 小计（{day.rows.length} 个账号）
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-1.5 tnum">{money(day.cost)}</td>
+                      </tr>
+                    </Fragment>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        )}
 
         {data &&
           (data.parties.length === 0 ? (
