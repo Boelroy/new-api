@@ -2273,6 +2273,13 @@ export const api = {
     if (to) q.set('to', to)
     return request<CCMaxDaily>(`/api/ccmax/daily?${q}`)
   },
+  // Admin: re-pull the portal bill for [from, to] (days before today).
+  ccmaxDailySync: (from: string, to: string) =>
+    request<{ synced_through: string }>('/api/ccmax/daily/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, to }),
+    }),
 
   getCCMaxReportSettings: () => request<CCMaxReportSettings>('/api/ccmax/report/settings'),
 
@@ -2655,10 +2662,10 @@ export type CCMaxUsersStats = {
   month_to: string
 }
 
-// GET /api/ccmax/daily: per-account usage per UTC+8 day (day close − previous
-// close). rows only holds non-zero usage; users lists everyone in scope so idle
-// suppliers show 0. missing = an account's first in-range day with no baseline
-// (it existed before snapshots began), so that day's usage is unknown.
+// GET /api/ccmax/daily: each account's portal bill per UTC+8 day (original
+// price). rows only holds non-zero bills; users lists everyone in scope so idle
+// suppliers show 0. Days after synced_through are not generated yet (yesterday
+// is pulled daily at bill_hour, UTC+8).
 export type CCMaxDailyRow = {
   ds: string
   user_id: number
@@ -2671,11 +2678,11 @@ export type CCMaxDailyRow = {
 export type CCMaxDaily = {
   from: string
   to: string
-  today: string
+  synced_through: string
+  bill_hour: number
   fx_rate: number
   users: { id: number; username: string }[]
   rows: CCMaxDailyRow[]
-  missing: CCMaxDailyRow[]
 }
 
 // Lark push of CC Max totals: webhook ('' = off) + push hours (UTC+8, "10,22").

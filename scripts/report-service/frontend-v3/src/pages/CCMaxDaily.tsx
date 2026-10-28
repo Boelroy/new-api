@@ -1,21 +1,18 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import Layout from '../components/Layout'
-import { Badge, Button, Card, Input, Select } from '../components/ui'
+import { Button, Card, Input, Select } from '../components/ui'
 import { toast } from '../components/feedback'
-import { api, type CCMaxDaily as CCMaxDailyData, type CCMaxDailyRow } from '../api'
+import { api, ROLE_ADMIN, type CCMaxDaily as CCMaxDailyData, type CCMaxDailyRow } from '../api'
+import { getCachedRole } from '../auth'
 
-// CC Max 日结算 — each UTC+8 day's usage per 号商 at original price (day close
-// − previous close of every account's cumulative portal cost). Admins see every
-// 号商, a ccmax_manager their members, a supplier only themselves.
+// CC Max 日结算 — each UTC+8 day's portal bill per 号商 at original price,
+// pulled every morning for the previous day. Admins see every 号商 (and can
+// re-pull a range), a ccmax_manager their members, a supplier only themselves.
 
 const FILTER_ALL = 'all'
 
 type UserDay = { userId: number; username: string; cost: number; accounts: CCMaxDailyRow[] }
 type Day = { ds: string; users: UserDay[]; cost: number }
-
-function monthStart(today: string): string {
-  return today.slice(0, 8) + '01'
-}
 
 export default function CCMaxDaily() {
   const [data, setData] = useState<CCMaxDailyData | null>(null)
@@ -25,6 +22,8 @@ export default function CCMaxDaily() {
   const [user, setUser] = useState(FILTER_ALL)
   const [hideIdle, setHideIdle] = useState(false)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [syncing, setSyncing] = useState(false)
+  const isAdmin = (getCachedRole() ?? 0) >= ROLE_ADMIN
 
   const load = useCallback(async (f?: string, t?: string) => {
     setLoading(true)
@@ -45,9 +44,10 @@ export default function CCMaxDaily() {
 
   const fx = data && data.fx_rate > 0 ? data.fx_rate : 7.2
 
-  // Every day of the range (newest first) × every 号商 in scope, 0 when idle.
+  // Every generated day of the range (newest first) × every 号商 in scope, 0
+  // when idle. Days after synced_through have no bill yet.
   const days = useMemo<Day[]>(() => {
-    if (!data) return []
+    if (!data?.synced_through) return []
     const users = data.users.filter((u) => user === FILTER_ALL || String(u.id) === user)
     const byKey = new Map<string, CCMaxDailyRow[]>()
     for (const r of data.rows) {
@@ -55,7 +55,7 @@ export default function CCMaxDaily() {
       byKey.set(key, [...(byKey.get(key) ?? []), r])
     }
     const out: Day[] = []
-    const end = data.to < data.today ? data.to : data.today
+    const end = data.to < data.synced_through ? data.to : data.synced_through
     for (let d = new Date(end + 'T00:00:00Z'); d.toISOString().slice(0, 10) >= data.from; d.setUTCDate(d.getUTCDate() - 1)) {
       const ds = d.toISOString().slice(0, 10)
       const rows = users
@@ -71,22 +71,25 @@ export default function CCMaxDaily() {
 
   const total = days.reduce((s, d) => s + d.cost, 0)
 
-  // Days in range where some accounts lack a baseline, with how many.
-  const missing = useMemo(() => {
-    const byDay = new Map<string, number>()
-    for (const m of data?.missing ?? []) {
-      if (user !== FILTER_ALL && String(m.user_id) !== user) continue
-      byDay.set(m.ds, (byDay.get(m.ds) ?? 0) + 1)
-    }
-    return [...byDay.entries()].sort()
-  }, [data, user])
-
   const toggle = (key: string) =>
     setExpanded((prev) => {
       const next = new Set(prev)
       if (!next.delete(key)) next.add(key)
       return next
     })
+
+  async function resync() {
+    setSyncing(true)
+    try {
+      await api.ccmaxDailySync(from, to)
+      toast.success('账单已重新拉取')
+      await load(from, to)
+    } catch (e) {
+      toast.error(e)
+    } finally {
+      setSyncing(false)
+    }
+  }
 
   function exportCSV() {
     const header = ['日期', '号商', '有用量账号数', '用量 USD', '用量 CNY']
@@ -115,7 +118,7 @@ export default function CCMaxDaily() {
   )
 
   return (
-    <Layout title="CC Max 日结算" subtitle="按北京时间自然日统计每个号商上的号跑了多少（原价）">
+    <Layout title="CC Max 日结算" subtitle="按北京时间自然日，每个号商上的号在 portal 账单里的消费（原价）">
       <Card className="overflow-hidden p-0">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-2.5">
           <div className="flex flex-wrap items-center gap-2">
@@ -130,7 +133,7 @@ export default function CCMaxDaily() {
                 size="sm"
                 variant="outline"
                 disabled={loading}
-                onClick={() => void load(monthStart(data.today), data.today)}
+                onClick={() => void load()}
               >
                 本月
               </Button>
@@ -154,6 +157,17 @@ export default function CCMaxDaily() {
             <Button size="sm" variant="outline" disabled={days.length === 0} onClick={exportCSV}>
               导出 CSV
             </Button>
+            {isAdmin && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={syncing || !from || !to}
+                title="按当前日期范围重新从 portal 拉取账单（只能拉今天之前的）"
+                onClick={() => void resync()}
+              >
+                {syncing ? '拉取中…' : '重新拉取账单'}
+              </Button>
+            )}
             <Button size="sm" variant="outline" disabled={loading} onClick={() => void load(from, to)}>
               {loading ? '刷新中…' : '刷新'}
             </Button>
@@ -166,18 +180,13 @@ export default function CCMaxDaily() {
             <div className="text-sm tnum">{money(total)}</div>
           </div>
           <p className="text-[11px] text-muted-foreground">
-            每天 = 当天 24:00 的累计消耗 − 前一天 24:00 的累计消耗（UTC+8）；今天的数据会持续增长到 24:00。
+            数据来自 portal 账单，每天 {String(data?.bill_hour ?? 8).padStart(2, '0')}:00（UTC+8）生成前一天的账单
+            {data && (data.synced_through ? `，已生成至 ${data.synced_through}` : '，尚未生成')}。
           </p>
-          {missing.length > 0 && (
-            <p className="text-[11px] text-warning">
-              {missing.map(([ds, n]) => `${ds}（${n} 个账号）`).join('、')}
-              ：这些账号在统计开始前就已上号，当天缺少起点数据，用量未计入。
-            </p>
-          )}
         </div>
 
         {days.length === 0 ? (
-          <p className="px-4 py-8 text-center text-xs text-muted-foreground">{data ? '没有数据。' : '加载中…'}</p>
+          <p className="px-4 py-8 text-center text-xs text-muted-foreground">{data ? '该日期范围内还没有生成的账单。' : '加载中…'}</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
@@ -203,16 +212,7 @@ export default function CCMaxDaily() {
                             onClick={() => u.accounts.length && toggle(key)}
                           >
                             <td className="whitespace-nowrap px-3 py-1.5 tnum">
-                              {i === 0 && (
-                                <>
-                                  {d.ds}
-                                  {d.ds === data?.today && (
-                                    <Badge tone="warning" className="ml-1.5">
-                                      进行中
-                                    </Badge>
-                                  )}
-                                </>
-                              )}
+                              {i === 0 && d.ds}
                             </td>
                             <td className="px-3 py-1.5 font-mono">
                               {u.accounts.length > 0 && (

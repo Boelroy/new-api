@@ -148,6 +148,16 @@ var v2SchemaStatements = []string{
 		created_at BIGINT NOT NULL,
 		PRIMARY KEY (manager_id, member_id)
 	)`,
+	// Each CC Max account's portal bill per UTC+8 day (sum over models,
+	// micro-yuan at original price), pulled from the portal WEB bill/query
+	// every morning for the previous day (ccmax_report.go).
+	`CREATE TABLE IF NOT EXISTS rs_ccmax_daily_bill (
+		remote_account_id BIGINT NOT NULL,
+		ds                DATE   NOT NULL,
+		cost_micro        BIGINT NOT NULL,
+		updated_at        BIGINT NOT NULL,
+		PRIMARY KEY (remote_account_id, ds)
+	)`,
 	// Daily snapshot of each CC Max account's cumulative portal cost
 	// (cpa_usage.cost, micro-yuan; the portal has no date-ranged cost for
 	// claude accounts). Month-to-date cost = latest − last snapshot before the

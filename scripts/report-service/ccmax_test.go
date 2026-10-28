@@ -189,16 +189,19 @@ func TestCCMaxValidUsername(t *testing.T) {
 	}
 }
 
-// Daily usage = day close − previous close. An account's first snapshot counts
-// in full only on its creation day; otherwise that day is unknown. A counter
-// reset never goes negative.
-func TestCCMaxDailyUsage(t *testing.T) {
-	snaps := []ccmaxSnapshot{{"2026-10-27", 500}, {"2026-10-28", 800}, {"2026-10-30", 700}, {"2026-10-31", 750}}
-	usage, missing := ccmaxDailyUsage(snaps, "2026-10-27")
-	assert.Equal(t, map[string]int64{"2026-10-27": 500, "2026-10-28": 300, "2026-10-30": 0, "2026-10-31": 50}, usage)
-	assert.Empty(t, missing)
-
-	usage, missing = ccmaxDailyUsage(snaps[:2], "2026-10-24")
-	assert.Equal(t, map[string]int64{"2026-10-28": 300}, usage)
-	assert.Equal(t, "2026-10-27", missing)
+// /daily and /daily/sync take UTC+8 day ranges of at most 90 days.
+func TestCCMaxParseDayRange(t *testing.T) {
+	for _, tc := range []struct {
+		from, to string
+		ok       bool
+	}{
+		{"2026-10-27", "2026-10-27", true},
+		{"2026-08-01", "2026-10-29", true},
+		{"2026-08-01", "2026-10-30", false},
+		{"2026-10-28", "2026-10-27", false},
+		{"20261027", "2026-10-28", false},
+	} {
+		_, _, err := ccmaxParseDayRange(tc.from, tc.to)
+		assert.Equal(t, tc.ok, err == nil, tc.from+"~"+tc.to)
+	}
 }
