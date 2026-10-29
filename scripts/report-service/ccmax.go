@@ -60,6 +60,15 @@ const (
 	ccmaxSessionTTL = 30 * time.Minute
 )
 
+// ccmaxCallerIsSuperAdmin reports whether the caller sees every CC Max
+// account. CC Max is super-admin-only on the admin side; plain admins are
+// kept out by the route gates and never get the unscoped view.
+func ccmaxCallerIsSuperAdmin(c *gin.Context) bool {
+	roleAny, _ := c.Get("role")
+	role, _ := roleAny.(int)
+	return role >= minSuperAdminRole
+}
+
 // requireRoleOrSupplierCCMax grants access to callers at min tier OR the
 // supplier_ccmax role (role=8), a horizontal specialization that only does CC
 // Max 上号. The CC Max handlers enforce the per-uploader scoping internally.
@@ -789,10 +798,10 @@ type ccmaxAccountRow struct {
 }
 
 // ccmaxVisibleUploaders returns whose CC Max uploads the caller may see:
-// all=true for admins; otherwise the caller's own uid plus, for a
+// all=true for super admins; otherwise the caller's own uid plus, for a
 // ccmax_manager, the members an admin assigned to them.
 func ccmaxVisibleUploaders(c *gin.Context) (all bool, uids []int64, err error) {
-	if callerIsSupplierAdmin(c) {
+	if ccmaxCallerIsSuperAdmin(c) {
 		return true, nil, nil
 	}
 	uidAny, _ := c.Get("user_id")
@@ -974,9 +983,9 @@ func handleCCMaxAccountList(c *gin.Context) {
 }
 
 // ccmaxCallerOwns reports whether the caller may act on portal account id:
-// suppliers only on accounts they uploaded here, admins on any.
+// suppliers only on accounts they uploaded here, super admins on any.
 func ccmaxCallerOwns(c *gin.Context, id int64) bool {
-	if callerIsSupplierAdmin(c) {
+	if ccmaxCallerIsSuperAdmin(c) {
 		return true
 	}
 	uidAny, _ := c.Get("user_id")
@@ -1466,7 +1475,7 @@ func handleCCMaxMemberCreate(c *gin.Context) {
 		return
 	}
 	var managerID int64
-	if callerIsSupplierAdmin(c) {
+	if ccmaxCallerIsSuperAdmin(c) {
 		managerID = body.ManagerID
 		if managerID > 0 {
 			if m, err := authUserByID(managerID); err != nil || m.Role != minCCMaxManagerRole {

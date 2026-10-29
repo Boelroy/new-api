@@ -5048,36 +5048,36 @@ func main() {
 	// CC Max (Claude subscription) onboarding — suppliers authorize their own
 	// Claude accounts through their own socks5 and upload them to the portal's
 	// claude lane (see ccmax.go). Handlers scope rows to the uploader; a
-	// ccmax_manager also sees their assigned members' rows (read-only); admin+
-	// see all.
-	ccmaxAPI := api.Group("/ccmax", requireRoleOrCCMaxRoles(minAdminRole))
-	ccmaxAPI.POST("/oauth/start", requireRoleOrSupplierCCMax(minAdminRole), handleCCMaxOAuthStart)
-	ccmaxAPI.POST("/oauth/submit", requireRoleOrSupplierCCMax(minAdminRole), handleCCMaxSubmit)
+	// ccmax_manager also sees their assigned members' rows (read-only); only
+	// super admins see all — plain admins have no CC Max access.
+	ccmaxAPI := api.Group("/ccmax", requireRoleOrCCMaxRoles(minSuperAdminRole))
+	ccmaxAPI.POST("/oauth/start", requireRoleOrSupplierCCMax(minSuperAdminRole), handleCCMaxOAuthStart)
+	ccmaxAPI.POST("/oauth/submit", requireRoleOrSupplierCCMax(minSuperAdminRole), handleCCMaxSubmit)
 	ccmaxAPI.GET("/options", handleCCMaxOptions)
 	ccmaxAPI.GET("/accounts", handleCCMaxAccountList)
 	ccmaxAPI.GET("/accounts/:id/reason", handleCCMaxAccountReason)
 	ccmaxAPI.PUT("/accounts/:id/remark", handleCCMaxAccountRemark)
-	// CC Max portal login + OpenAPI token are admin-only.
-	ccmaxAPI.GET("/settings", requireRole(minAdminRole), handleCCMaxSettingsGet)
-	ccmaxAPI.PUT("/settings", requireRole(minAdminRole), handleCCMaxSettingsSet)
-	// Which supplier_ccmax users each ccmax_manager may see — admin-only.
-	ccmaxAPI.GET("/managers", requireRole(minAdminRole), handleCCMaxManagersList)
-	ccmaxAPI.PUT("/managers/:id/members", requireRole(minAdminRole), handleCCMaxManagerMembersSet)
-	// A ccmax_manager lists / creates their own supplier_ccmax users; admin+
-	// may create too, optionally assigning a manager.
+	// CC Max portal login + OpenAPI token are super-admin-only.
+	ccmaxAPI.GET("/settings", requireRole(minSuperAdminRole), handleCCMaxSettingsGet)
+	ccmaxAPI.PUT("/settings", requireRole(minSuperAdminRole), handleCCMaxSettingsSet)
+	// Which supplier_ccmax users each ccmax_manager may see — super-admin-only.
+	ccmaxAPI.GET("/managers", requireRole(minSuperAdminRole), handleCCMaxManagersList)
+	ccmaxAPI.PUT("/managers/:id/members", requireRole(minSuperAdminRole), handleCCMaxManagerMembersSet)
+	// A ccmax_manager lists / creates their own supplier_ccmax users; super
+	// admins may create too, optionally assigning a manager.
 	ccmaxAPI.GET("/members", handleCCMaxMembersList)
-	ccmaxAPI.POST("/members", requireRoleOrCCMaxManager(minAdminRole), handleCCMaxMemberCreate)
+	ccmaxAPI.POST("/members", requireRoleOrCCMaxManager(minSuperAdminRole), handleCCMaxMemberCreate)
 	// Every supplier_ccmax user with their accounts' usage — super admin only.
 	ccmaxAPI.GET("/users", requireRole(minSuperAdminRole), handleCCMaxUsersStats)
 	// 结算: stored daily bills per settlement party, scoped like /accounts;
-	// admins mark days settled and re-pull bills.
+	// super admins mark days settled and re-pull bills.
 	ccmaxAPI.GET("/settlement", handleCCMaxSettlement)
-	ccmaxAPI.POST("/settlement/mark", requireRole(minAdminRole), handleCCMaxSettlementMark)
-	ccmaxAPI.POST("/daily/sync", requireRole(minAdminRole), handleCCMaxDailySync)
-	// Lark push of CC Max totals (webhook + push hours) — admin-only.
-	ccmaxAPI.GET("/report/settings", requireRole(minAdminRole), handleCCMaxReportSettingsGet)
-	ccmaxAPI.PUT("/report/settings", requireRole(minAdminRole), handleCCMaxReportSettingsSet)
-	ccmaxAPI.POST("/report/push", requireRole(minAdminRole), handleCCMaxReportPush)
+	ccmaxAPI.POST("/settlement/mark", requireRole(minSuperAdminRole), handleCCMaxSettlementMark)
+	ccmaxAPI.POST("/daily/sync", requireRole(minSuperAdminRole), handleCCMaxDailySync)
+	// Lark push of CC Max totals (webhook + push hours) — super-admin-only.
+	ccmaxAPI.GET("/report/settings", requireRole(minSuperAdminRole), handleCCMaxReportSettingsGet)
+	ccmaxAPI.PUT("/report/settings", requireRole(minSuperAdminRole), handleCCMaxReportSettingsSet)
+	ccmaxAPI.POST("/report/push", requireRole(minSuperAdminRole), handleCCMaxReportPush)
 
 	// Per-role sidebar visibility config — super admin only. GET is also
 	// used by the settings page to prefill; the live Sidebar reads the same

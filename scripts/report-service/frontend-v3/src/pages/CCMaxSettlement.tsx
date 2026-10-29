@@ -4,7 +4,7 @@ import { Button, Card, Input, Select, cx } from '../components/ui'
 import { confirmDialog, toast } from '../components/feedback'
 import {
   api,
-  ROLE_ADMIN,
+  ROLE_SUPER_ADMIN,
   type CCMaxSettlement as SettlementData,
   type CCMaxSettlementDetail,
   type CCMaxSettlementParty,
@@ -41,7 +41,7 @@ export default function CCMaxSettlement() {
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const [busy, setBusy] = useState(false)
   const [party, setParty] = useState(0)
-  const isAdmin = (getCachedRole() ?? 0) >= ROLE_ADMIN
+  const isAdmin = (getCachedRole() ?? 0) >= ROLE_SUPER_ADMIN
 
   const load = useCallback(async (f?: string, t?: string, p?: number) => {
     setLoading(true)

@@ -111,7 +111,7 @@ export default function App() {
         <Route
           path="/ccmax"
           element={
-            <RoleGate allow={(r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_CCMAX || r === ROLE_CCMAX_MANAGER}>
+            <RoleGate allow={(r) => r >= ROLE_SUPER_ADMIN || r === ROLE_SUPPLIER_CCMAX || r === ROLE_CCMAX_MANAGER}>
               <CCMaxAccounts />
             </RoleGate>
           }
@@ -119,7 +119,7 @@ export default function App() {
         <Route
           path="/ccmax-settlement"
           element={
-            <RoleGate allow={(r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_CCMAX || r === ROLE_CCMAX_MANAGER}>
+            <RoleGate allow={(r) => r >= ROLE_SUPER_ADMIN || r === ROLE_SUPPLIER_CCMAX || r === ROLE_CCMAX_MANAGER}>
               <CCMaxSettlement />
             </RoleGate>
           }

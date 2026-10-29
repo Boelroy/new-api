@@ -5,7 +5,7 @@ import { Badge, Button, Card, Input, Select, Textarea } from '../components/ui'
 import { Modal, promptDialog, toast } from '../components/feedback'
 import {
   api,
-  ROLE_ADMIN,
+  ROLE_SUPER_ADMIN,
   ROLE_CCMAX_MANAGER,
   type CCMaxAccount,
   type CCMaxManagers,
@@ -467,7 +467,7 @@ export default function CCMaxAccounts() {
     if (role !== null) return
     void loadRole().then(setRole)
   }, [role])
-  const isAdmin = role != null && role >= ROLE_ADMIN
+  const isAdmin = role != null && role >= ROLE_SUPER_ADMIN
   // A ccmax_manager only views their assigned suppliers' accounts: no upload
   // form, but the 号商 column so the rows can be told apart.
   const isManager = role === ROLE_CCMAX_MANAGER
