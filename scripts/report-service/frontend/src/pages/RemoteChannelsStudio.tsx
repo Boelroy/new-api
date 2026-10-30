@@ -614,6 +614,9 @@ export default function RemoteChannelsStudio() {
   const [usageLoading, setUsageLoading] = useState(false)
   const [usageErr, setUsageErr] = useState<string | null>(null)
   const [usageFetchedAt, setUsageFetchedAt] = useState<number>(0)
+  // 「我的远程渠道」按创建时间筛选（本地日期，默认当天）。清空任一端 = 该端不限。
+  const [chStart, setChStart] = useState<string>(todayLocalYMD())
+  const [chEnd, setChEnd] = useState<string>(todayLocalYMD())
 
   // Read a FileList → VertexFile[]. On parse failure we skip the bad
   // file and surface a message; partial success is fine and matches how
@@ -1242,6 +1245,21 @@ export default function RemoteChannelsStudio() {
 
   const selectedProfile = profiles.find(p => p.id === selectedID)
 
+  const chFrom = ymdToLocalEpoch(chStart, false)
+  const chTo = ymdToLocalEpoch(chEnd, true)
+  const filteredChannels = channels.filter(ch =>
+    (chFrom == null || ch.created_time >= chFrom) && (chTo == null || ch.created_time < chTo),
+  )
+  const chStats = { used: 0, quota: 0, remain: 0, byStatus: new Map<number, number>() }
+  for (const ch of filteredChannels) {
+    const usedUSD = ch.used_quota / 500000
+    const quotaUSD = ch.quota_usd ?? 0
+    chStats.used += usedUSD
+    chStats.quota += quotaUSD
+    if (quotaUSD > 0) chStats.remain += Math.max(0, quotaUSD - usedUSD)
+    chStats.byStatus.set(ch.status, (chStats.byStatus.get(ch.status) ?? 0) + 1)
+  }
+
   return (
     <Layout
       title="Other Newapi Key"
@@ -1291,14 +1309,51 @@ export default function RemoteChannelsStudio() {
         </div>
 
         <div className="bg-white border border-gray-200 rounded-xl">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 gap-3 flex-wrap">
             <div>
               <div className="text-sm font-medium text-gray-900">我的远程渠道</div>
               <div className="text-[11px] text-gray-400 mt-0.5">
                 每 30 秒从本地镜像刷新一次；远端用量每 15 分钟同步一次，需要立即拉取请按「获取用量」。
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <label className="flex items-center gap-1 text-[11px] text-gray-500">
+                创建 起
+                <input
+                  type="date"
+                  value={chStart}
+                  onChange={e => setChStart(e.target.value)}
+                  className="border border-gray-300 rounded-md px-2 py-1 text-xs focus:outline-none focus:border-gray-900"
+                />
+              </label>
+              <label className="flex items-center gap-1 text-[11px] text-gray-500">
+                止
+                <input
+                  type="date"
+                  value={chEnd}
+                  onChange={e => setChEnd(e.target.value)}
+                  className="border border-gray-300 rounded-md px-2 py-1 text-xs focus:outline-none focus:border-gray-900"
+                />
+              </label>
+              <button
+                onClick={() => {
+                  const t = todayLocalYMD()
+                  setChStart(t)
+                  setChEnd(t)
+                }}
+                className="text-[11px] text-gray-600 border border-gray-300 rounded-md px-2 py-1 hover:bg-gray-50"
+              >
+                今天
+              </button>
+              <button
+                onClick={() => {
+                  setChStart('')
+                  setChEnd('')
+                }}
+                className="text-[11px] text-gray-600 border border-gray-300 rounded-md px-2 py-1 hover:bg-gray-50"
+              >
+                全部
+              </button>
               <button
                 onClick={() => void refreshRemoteUsage()}
                 disabled={refreshingRemote || !selectedID}
@@ -1315,6 +1370,43 @@ export default function RemoteChannelsStudio() {
               </button>
             </div>
           </div>
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3 border-b border-gray-100 bg-gray-50/60">
+            <div>
+              <div className="text-[11px] text-gray-500">渠道数</div>
+              <div className="text-sm font-medium tabular-nums">
+                {filteredChannels.length}
+                {filteredChannels.length !== channels.length && (
+                  <span className="text-[11px] text-gray-400 font-normal"> / {channels.length}</span>
+                )}
+              </div>
+            </div>
+            <div>
+              <div className="text-[11px] text-gray-500">状态</div>
+              <div className="flex items-center gap-1 mt-0.5">
+                {chStats.byStatus.size === 0 ? (
+                  <span className="text-[11px] text-gray-300">—</span>
+                ) : (
+                  [...chStats.byStatus.entries()].sort((a, b) => a[0] - b[0]).map(([status, n]) => (
+                    <span key={status} className={`inline-block px-1.5 py-0.5 rounded text-[10px] ${channelStatusCls(status)}`}>
+                      {channelStatusLabel(status)} {n}
+                    </span>
+                  ))
+                )}
+              </div>
+            </div>
+            <div>
+              <div className="text-[11px] text-gray-500">已用</div>
+              <div className="text-sm font-medium tabular-nums">${chStats.used.toFixed(4)}</div>
+            </div>
+            <div>
+              <div className="text-[11px] text-gray-500">额度</div>
+              <div className="text-sm font-medium tabular-nums">${chStats.quota.toFixed(2)}</div>
+            </div>
+            <div>
+              <div className="text-[11px] text-gray-500" title="仅统计设置了额度的渠道">剩余</div>
+              <div className="text-sm font-medium tabular-nums">${chStats.remain.toFixed(2)}</div>
+            </div>
+          </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead className="bg-gray-50 mono-label">
@@ -1329,14 +1421,14 @@ export default function RemoteChannelsStudio() {
                 </tr>
               </thead>
               <tbody>
-                {channels.length === 0 ? (
+                {filteredChannels.length === 0 ? (
                   <tr>
                     <td colSpan={7} className="px-4 py-6 text-center text-xs text-gray-400">
-                      暂无渠道，先在下方队列上传 Key
+                      {channels.length === 0 ? '暂无渠道，先在下方队列上传 Key' : '所选创建时间内没有渠道'}
                     </td>
                   </tr>
                 ) : (
-                  channels.map(ch => {
+                  filteredChannels.map(ch => {
                     const usedUSD = ch.used_quota / 500000
                     const quotaUSD = ch.quota_usd ?? 0
                     return (
