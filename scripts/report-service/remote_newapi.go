@@ -1205,6 +1205,45 @@ func remoteDoRaw(ctx context.Context, method, host, path, token string, userID i
 	return raw, nil
 }
 
+// remotePutChannel writes back a channel previously fetched with
+// GET /api/channel/:id. `status` is always dropped: newer new-api rejects a
+// PUT body carrying it ("Invalid parameters") and moved status changes to
+// POST /api/channel/:id/status, while older versions leave status untouched
+// when the field is absent. Change status with remoteSetChannelStatus.
+func remotePutChannel(ctx context.Context, host, token string, userID int64, current map[string]any) error {
+	delete(current, "status")
+	_, err := remoteDoJSON(ctx, http.MethodPut, host, "/api/channel/", token, userID, nil, current)
+	return err
+}
+
+// remoteSetChannelStatus flips a channel's status through the dedicated
+// endpoint newer new-api requires, falling back to the legacy full-channel
+// PUT carrying `status` on remotes that predate the endpoint.
+func remoteSetChannelStatus(ctx context.Context, host, token string, userID int64, channelID int64, status int) error {
+	path := "/api/channel/" + strconv.FormatInt(channelID, 10)
+	_, err := remoteDoJSON(ctx, http.MethodPost, host, path+"/status", token, userID, nil, map[string]any{"status": status})
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	legacy := strings.HasPrefix(msg, "remote returned 404") || strings.HasPrefix(msg, "remote returned 405") ||
+		strings.HasPrefix(msg, "decode envelope")
+	if !legacy {
+		return err
+	}
+	data, err := remoteDoJSON(ctx, http.MethodGet, host, path, token, userID, nil, nil)
+	if err != nil {
+		return fmt.Errorf("fetch current: %w", err)
+	}
+	var current map[string]any
+	if err := json.Unmarshal(data, &current); err != nil {
+		return fmt.Errorf("decode current: %w", err)
+	}
+	current["status"] = status
+	_, err = remoteDoJSON(ctx, http.MethodPut, host, "/api/channel/", token, userID, nil, current)
+	return err
+}
+
 // loadRemoteProfileByID hydrates saved credentials for a profile row. Never
 // returns the ciphertext, only the plaintext token.
 func loadRemoteProfileByID(profileID int64) (host string, userID int64, token string, err error) {
@@ -4320,15 +4359,15 @@ func handleRemoteChannelUpdate(c *gin.Context) {
 	}
 
 	// Any remote-side change? Only call PUT if at least one channel-level
-	// field was provided.
-	remoteChanged := body.Name != nil || body.Tag != nil || body.Status != nil ||
+	// field was provided. Status goes through its own endpoint.
+	remoteChanged := body.Name != nil || body.Tag != nil ||
 		body.Priority != nil || body.Group != nil || body.Models != nil
 
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
+	defer cancel()
 	if remoteChanged {
 		// PUT /api/channel/ expects the full Channel struct. Fetch first so
 		// we can preserve fields we're not editing (avoids blanking type/key/etc).
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
-		defer cancel()
 		data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/channel/"+strconv.FormatInt(body.ChannelID, 10), token, userID, nil, nil)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "fetch current: " + err.Error()})
@@ -4347,9 +4386,6 @@ func handleRemoteChannelUpdate(c *gin.Context) {
 		if body.Tag != nil {
 			current["tag"] = *body.Tag
 		}
-		if body.Status != nil {
-			current["status"] = *body.Status
-		}
 		if body.Priority != nil {
 			current["priority"] = *body.Priority
 		}
@@ -4359,8 +4395,14 @@ func handleRemoteChannelUpdate(c *gin.Context) {
 		if body.Models != nil {
 			current["models"] = *body.Models
 		}
-		if _, err := remoteDoJSON(ctx, http.MethodPut, host, "/api/channel/", token, userID, nil, current); err != nil {
+		if err := remotePutChannel(ctx, host, token, userID, current); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "update: " + err.Error()})
+			return
+		}
+	}
+	if body.Status != nil {
+		if err := remoteSetChannelStatus(ctx, host, token, userID, body.ChannelID, *body.Status); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "update status: " + err.Error()})
 			return
 		}
 	}
@@ -5063,10 +5105,10 @@ func handleRemoteChannelUpdateOperator(c *gin.Context) {
 		return
 	}
 
-	if body.Name != nil || body.Status != nil || body.Group != nil ||
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
+	defer cancel()
+	if body.Name != nil || body.Group != nil ||
 		body.Models != nil || body.BaseURL != nil || body.APIVersion != nil {
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
-		defer cancel()
 		data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/channel/"+strconv.FormatInt(body.ChannelID, 10), token, userID, nil, nil)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "fetch current: " + err.Error()})
@@ -5079,9 +5121,6 @@ func handleRemoteChannelUpdateOperator(c *gin.Context) {
 		}
 		if body.Name != nil {
 			current["name"] = *body.Name
-		}
-		if body.Status != nil {
-			current["status"] = *body.Status
 		}
 		if body.Group != nil {
 			current["group"] = *body.Group
@@ -5096,8 +5135,14 @@ func handleRemoteChannelUpdateOperator(c *gin.Context) {
 			// Azure api-version lives in channel.other.
 			current["other"] = *body.APIVersion
 		}
-		if _, err := remoteDoJSON(ctx, http.MethodPut, host, "/api/channel/", token, userID, nil, current); err != nil {
+		if err := remotePutChannel(ctx, host, token, userID, current); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "update: " + err.Error()})
+			return
+		}
+	}
+	if body.Status != nil {
+		if err := remoteSetChannelStatus(ctx, host, token, userID, body.ChannelID, *body.Status); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "update status: " + err.Error()})
 			return
 		}
 	}
@@ -6100,6 +6145,9 @@ func syncAllProfilesErrorLogs() {
 	for _, pid := range ids {
 		syncOneProfileErrorLogs(pid)
 	}
+	// Fresh 429s just landed; let the model cooldown loop act on them now
+	// instead of waiting for its own tick.
+	nudgeRemoteModelCooldown()
 }
 
 func syncOneProfileErrorLogs(profileID int64) {
@@ -6153,6 +6201,7 @@ func syncOneProfileErrorLogs(profileID int64) {
 			Items []struct {
 				ID        int64  `json:"id"`
 				ChannelId int64  `json:"channel_id"`
+				Channel   int64  `json:"channel"` // newer new-api names it `channel`
 				CreatedAt int64  `json:"created_at"`
 				ModelName string `json:"model_name"`
 				TokenName string `json:"token_name"`
@@ -6176,6 +6225,9 @@ func syncOneProfileErrorLogs(profileID int64) {
 		for _, it := range resp.Items {
 			if it.CreatedAt > maxCreated {
 				maxCreated = it.CreatedAt
+			}
+			if it.ChannelId == 0 {
+				it.ChannelId = it.Channel
 			}
 			et, sc, ec, rp := parseErrorLogOther(it.Other)
 			snippet := it.Content
@@ -6452,9 +6504,7 @@ func startRemoteAutoDisableLoop() {
 }
 
 // runRemoteAutoDisableOnce reads qualifying rows out of the local mirror
-// and flips each remote channel to status=2. Uses the same GET-then-PUT
-// dance as handleRemoteChannelUpdate so unknown remote fields survive the
-// round trip.
+// and flips each remote channel to status=2 via remoteSetChannelStatus.
 func runRemoteAutoDisableOnce() {
 	// The `used_quota` on remote_channel_current is raw units. Compare
 	// against (quota_usd - reserve_usd) * 500000 so the math stays in
@@ -6526,19 +6576,5 @@ func runRemoteAutoDisableOnce() {
 func autoDisableRemoteChannel(host string, userID int64, token string, cand autoDisableCandidate) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	data, err := remoteDoJSON(ctx, http.MethodGet, host,
-		"/api/channel/"+strconv.FormatInt(cand.ChannelID, 10),
-		token, userID, nil, nil)
-	if err != nil {
-		return fmt.Errorf("fetch current: %w", err)
-	}
-	var current map[string]any
-	if err := json.Unmarshal(data, &current); err != nil {
-		return fmt.Errorf("decode current: %w", err)
-	}
-	current["status"] = 2
-	if _, err := remoteDoJSON(ctx, http.MethodPut, host, "/api/channel/", token, userID, nil, current); err != nil {
-		return fmt.Errorf("put: %w", err)
-	}
-	return nil
+	return remoteSetChannelStatus(ctx, host, token, userID, cand.ChannelID, 2)
 }

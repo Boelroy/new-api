@@ -502,6 +502,64 @@ export type ModelCleanupStat = {
   enabled_channels: number
 }
 
+// ---- Remote model cooldown ----
+
+export type RemoteCooldownConfig = {
+  enabled: boolean
+  profile_ids: number[]
+  models: string[]
+  tick_sec: number
+  window_sec: number
+  min_hits: number
+  min_cooldown_sec: number
+  max_cooldown_sec: number
+  escalate_window_sec: number
+  min_keep: number
+  max_actions: number
+  dry_run: boolean
+}
+
+export type RemoteCooldownActive = {
+  profile_id: number
+  profile_name: string
+  channel_id: number
+  channel_name: string
+  model: string
+  group: string
+  trips: number
+  cooldown_sec: number
+  removed_at: number
+  restore_at: number
+  limit_unit: string
+  limit_value: number
+  hits: number
+  detail: string
+  dry_run: boolean
+}
+
+export type RemoteCooldownEvent = {
+  id: number
+  profile_id: number
+  channel_id: number
+  channel_name: string
+  model: string
+  action: string
+  cooldown_sec: number
+  trips: number
+  hits: number
+  detail: string
+  dry_run: boolean
+  created_at: number
+}
+
+export type RemoteCooldownSummary = {
+  candidates: number
+  stripped: number
+  restored: number
+  skipped: number
+  errors: number
+}
+
 // ---- Channel priority auto-tuning ----
 export type ChanPrioConfig = {
   enabled: boolean
@@ -1853,6 +1911,41 @@ export const api = {
 
   modelCleanupRunNow: () =>
     request<{ summary: ModelCleanupSummary; dry_run: boolean }>('/api/model-cleanup/run', { method: 'POST' }),
+
+  // ---- Remote model cooldown (Remote Cooldown page) ----
+  // Strips a model from a remote channel on upstream rate-limit 429s and
+  // re-adds it after a cooldown derived from the reported limit.
+
+  remoteCooldownGetConfig: () => request<RemoteCooldownConfig>('/api/remote-model-cooldown/config'),
+
+  remoteCooldownSetConfig: (payload: Partial<RemoteCooldownConfig>) =>
+    request<RemoteCooldownConfig>('/api/remote-model-cooldown/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  remoteCooldownActive: () =>
+    request<{ items: RemoteCooldownActive[]; now: number }>('/api/remote-model-cooldown/active'),
+
+  remoteCooldownEvents: (params?: { profile_id?: number; action?: string; limit?: number }) => {
+    const qs = new URLSearchParams()
+    if (params?.profile_id != null) qs.set('profile_id', String(params.profile_id))
+    if (params?.action) qs.set('action', params.action)
+    if (params?.limit != null) qs.set('limit', String(params.limit))
+    const suffix = qs.toString()
+    return request<{ events: RemoteCooldownEvent[] }>(`/api/remote-model-cooldown/events${suffix ? '?' + suffix : ''}`)
+  },
+
+  remoteCooldownRunNow: () =>
+    request<{ summary: RemoteCooldownSummary; dry_run: boolean }>('/api/remote-model-cooldown/run', { method: 'POST' }),
+
+  remoteCooldownRestore: (payload: { profile_id: number; channel_id: number; model: string }) =>
+    request<{ ok: boolean }>('/api/remote-model-cooldown/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
 
   // ---- Channel priority auto-tuning (Channel Priority page) ----
 

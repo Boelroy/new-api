@@ -233,6 +233,50 @@ var v2SchemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_channel_priority_event_channel
 	   ON rs_channel_priority_event(channel_id, id DESC)`,
 
+	// -- Remote model cooldown (remote_model_cooldown.go) --------------------
+	// One row per (profile, remote channel, model) the loop has acted on.
+	// state: cooling (stripped, restore at restore_at) | restored | gone
+	// (channel deleted) | skipped (floor / last model, parked until
+	// restore_at). trips + restored_at drive cooldown escalation.
+	`CREATE TABLE IF NOT EXISTS rs_remote_model_cooldown (
+		profile_id   BIGINT NOT NULL,
+		channel_id   BIGINT NOT NULL,
+		model        TEXT   NOT NULL,
+		channel_name TEXT   NOT NULL DEFAULT '',
+		grp          TEXT   NOT NULL DEFAULT '',
+		state        TEXT   NOT NULL,
+		trips        INT    NOT NULL DEFAULT 0,
+		cooldown_sec INT    NOT NULL DEFAULT 0,
+		removed_at   BIGINT NOT NULL DEFAULT 0,
+		restore_at   BIGINT NOT NULL DEFAULT 0,
+		restored_at  BIGINT NOT NULL DEFAULT 0,
+		limit_unit   TEXT   NOT NULL DEFAULT '',
+		limit_value  BIGINT NOT NULL DEFAULT 0,
+		hits         INT    NOT NULL DEFAULT 0,
+		detail       TEXT   NOT NULL DEFAULT '',
+		dry_run      BOOLEAN NOT NULL DEFAULT FALSE,
+		PRIMARY KEY (profile_id, channel_id, model)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_remote_model_cooldown_due
+	   ON rs_remote_model_cooldown(state, restore_at)`,
+	// Append-only audit of every strip / restore / skip the loop performs.
+	`CREATE TABLE IF NOT EXISTS rs_remote_model_cooldown_event (
+		id           BIGSERIAL PRIMARY KEY,
+		profile_id   BIGINT NOT NULL DEFAULT 0,
+		channel_id   BIGINT NOT NULL DEFAULT 0,
+		channel_name TEXT   NOT NULL DEFAULT '',
+		model        TEXT   NOT NULL DEFAULT '',
+		action       TEXT   NOT NULL,
+		cooldown_sec INT    NOT NULL DEFAULT 0,
+		trips        INT    NOT NULL DEFAULT 0,
+		hits         INT    NOT NULL DEFAULT 0,
+		detail       TEXT   NOT NULL DEFAULT '',
+		dry_run      BOOLEAN NOT NULL DEFAULT FALSE,
+		created_at   BIGINT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_remote_model_cooldown_event_time
+	   ON rs_remote_model_cooldown_event(created_at DESC)`,
+
 	// -- Local → remote channel sync ----------------------------------------
 	// Maps a LOCAL new-api channel (a studio-uploaded key) to the remote
 	// channel it was pushed up to, so re-syncing is idempotent and the studio

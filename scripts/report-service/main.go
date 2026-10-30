@@ -4897,6 +4897,7 @@ func main() {
 	startLocalHealthLoop()
 	startModelCleanupLoop()
 	startChannelPriorityLoop()
+	startRemoteModelCooldownLoop()
 	startRemoteErrorLogSync()
 	startRemoteAutoDisableLoop()
 	startSupplierQuotaAlertLoop()
@@ -5139,6 +5140,12 @@ func main() {
 	adminAPI.GET("/model-cleanup/events", handleModelCleanupEvents)
 	adminAPI.GET("/model-cleanup/stats", handleModelCleanupStats)
 	adminAPI.POST("/model-cleanup/run", handleModelCleanupRunNow)
+	adminAPI.GET("/remote-model-cooldown/config", handleRMCConfigGet)
+	adminAPI.POST("/remote-model-cooldown/config", handleRMCConfigSet)
+	adminAPI.GET("/remote-model-cooldown/active", handleRMCActive)
+	adminAPI.GET("/remote-model-cooldown/events", handleRMCEvents)
+	adminAPI.POST("/remote-model-cooldown/run", handleRMCRunNow)
+	adminAPI.POST("/remote-model-cooldown/restore", handleRMCRestore)
 	// Channel priority auto-tuning (channel_priority.go). Demotes throttled
 	// channels out of rotation and restores them once 429s stop. Admin-only:
 	// it edits channel + ability priority.
