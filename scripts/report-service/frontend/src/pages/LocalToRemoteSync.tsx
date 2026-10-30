@@ -285,9 +285,15 @@ export default function LocalToRemoteSync() {
                         </span>
                       </td>
                       <td className="px-3 py-2 font-mono text-[10px] text-gray-500">{it.key_masked || '—'}</td>
-                      <td className="px-3 py-2 max-w-[300px]">
+                      <td className="px-3 py-2">
                         <div className="text-gray-700">{it.group}</div>
-                        <div className="text-[10px] text-gray-400 break-words">{it.models || '（无模型）'}</div>
+                        {/* Model lists can be dozens of comma-joined ids with no spaces; keep the
+                            cell to one truncated line (full list on hover) so it can't widen the table. */}
+                        <div className="max-w-[240px] truncate text-[10px] text-gray-400" title={it.models}>
+                          {it.models
+                            ? `${it.models.split(',').filter(m => m.trim()).length} 个模型 · ${it.models}`
+                            : '（无模型）'}
+                        </div>
                       </td>
                       <td className="px-3 py-2 text-right tabular-nums text-gray-600">
                         <div>{it.quota_usd != null ? `$${it.quota_usd.toFixed(2)}` : '—'}</div>
