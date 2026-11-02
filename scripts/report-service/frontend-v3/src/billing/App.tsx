@@ -17,7 +17,6 @@ import {
   request,
   setSession,
   setUnauthorizedHandler,
-  type DailySummary,
   type Overview,
   type Vendor,
   type Session,
@@ -34,7 +33,6 @@ import {
   Loading,
   type Page,
 } from './components'
-import DailyOverview from './DailyOverview'
 import EntryForm, { type FormTarget } from './EntryForm'
 import Login from './Login'
 import { SettlementOverview, SettlementSheet } from './SettlementView'
@@ -133,7 +131,7 @@ export default function App() {
   )
 }
 
-const pages: Page[] = ['statement', 'settlement', 'sources', 'suppliers']
+const pages: Page[] = ['settlement', 'sources', 'suppliers']
 const datePattern = /^\d{4}-\d{2}-\d{2}$/
 
 function Workspace(props: {
@@ -147,7 +145,11 @@ function Workspace(props: {
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const routed = location.pathname.replace(/^\/+/, '').split('/')[0] as Page
-  const page: Page = pages.includes(routed) ? routed : 'statement'
+  const page: Page =
+    pages.includes(routed) &&
+    (props.session.user.role === 'billing_manager' || routed === 'settlement')
+      ? routed
+      : 'settlement'
   const selected = Number(params.get('supplier')) || 0
   const routedStart = params.get('start') ?? ''
   const routedEnd = params.get('end') ?? ''
@@ -183,19 +185,8 @@ function Workspace(props: {
   const supplier = available.find((item) => item.id === headID)
   const scopedHeads =
     headID > 0 ? available.filter((item) => item.id === headID) : available
-  const dailyQuery = new URLSearchParams({ start, end })
-  if (headID > 0) dailyQuery.set('supplier_id', String(headID))
-  const daily = useResource<DailySummary>(
-    page === 'statement' && start && end
-      ? `/daily-summary?${dailyQuery}`
-      : null,
-    version
-  )
   const statement = useResource<Statement>(
-    ((page === 'statement' && financeOpen) || page === 'settlement') &&
-      supplier &&
-      start &&
-      end
+    page === 'settlement' && supplier && start && end
       ? `/statement?${new URLSearchParams({ supplier_id: String(supplier.id), start, end })}`
       : null,
     version
@@ -226,7 +217,6 @@ function Workspace(props: {
     (item) => item.supplier_id === supplier?.id
   )
   const title = {
-    statement: 'Daily usage',
     settlement: 'Settlement',
     sources: 'Supplier relationships',
     suppliers: 'Supplier heads and accounts',
@@ -269,7 +259,7 @@ function Workspace(props: {
             <RefreshCw className='size-3.5' aria-hidden='true' />
             {t('Refresh')}
           </Button>
-          {(page === 'statement' || page === 'settlement') && supplier && (
+          {page === 'settlement' && supplier && (
             <>
               <Button onClick={() => setTarget({ kind: 'usage' })}>
                 <Plus className='size-3.5' aria-hidden='true' />
@@ -329,7 +319,7 @@ function Workspace(props: {
               ))}
             </Select>
           </label>
-          {(page === 'statement' || page === 'settlement') && (
+          {page === 'settlement' && (
             <>
               <label className='text-muted-foreground flex flex-col gap-1.5 text-xs'>
                 {t('Start date')}
@@ -365,56 +355,6 @@ function Workspace(props: {
             )}
           </Empty>
         </Card>
-      )}
-      {page === 'statement' && (
-        <>
-          {daily.loading && <Loading />}
-          {daily.error && (
-            <ErrorNotice message={daily.error} onRetry={refresh} />
-          )}
-          {daily.data && (
-            <DailyOverview
-              key={`${headID}-${start}-${end}`}
-              summary={daily.data}
-            />
-          )}
-          {supplier && (
-            <Collapsible.Root
-              className='border-border mt-6 rounded-xl border'
-              open={financeOpen}
-              onOpenChange={setFinanceOpen}
-            >
-              <Collapsible.Trigger
-                render={
-                  <Button
-                    variant='ghost'
-                    className='w-full justify-start p-4'
-                  />
-                }
-              >
-                {t('Balance and payment details')}
-              </Collapsible.Trigger>
-              <Collapsible.Panel className='border-border border-t p-4'>
-                {statement.loading && <Loading />}
-                {statement.error && (
-                  <ErrorNotice message={statement.error} onRetry={refresh} />
-                )}
-                {statement.data && (
-                  <StatementView
-                    key={`${supplier.id}-${start}-${end}`}
-                    showDailyTotals={false}
-                    statement={statement.data}
-                    onReverse={
-                      manager
-                        ? (recharge) => setTarget({ kind: 'reverse', recharge })
-                        : undefined
-                    }
-                  />
-                )}
-              </Collapsible.Panel>
-            </Collapsible.Root>
-          )}
-        </>
       )}
       {page === 'settlement' && (
         <>
@@ -471,6 +411,42 @@ function Workspace(props: {
                   : undefined
               }
             />
+          )}
+          {supplier && (
+            <Collapsible.Root
+              className='border-border mt-6 rounded-xl border'
+              open={financeOpen}
+              onOpenChange={setFinanceOpen}
+            >
+              <Collapsible.Trigger
+                render={
+                  <Button
+                    variant='ghost'
+                    className='w-full justify-start p-4'
+                  />
+                }
+              >
+                {t('Balance and payment details')}
+              </Collapsible.Trigger>
+              <Collapsible.Panel className='border-border border-t p-4'>
+                {statement.loading && <Loading />}
+                {statement.error && (
+                  <ErrorNotice message={statement.error} onRetry={refresh} />
+                )}
+                {statement.data && (
+                  <StatementView
+                    key={`${supplier.id}-${start}-${end}`}
+                    showDailyTotals={false}
+                    statement={statement.data}
+                    onReverse={
+                      manager
+                        ? (recharge) => setTarget({ kind: 'reverse', recharge })
+                        : undefined
+                    }
+                  />
+                )}
+              </Collapsible.Panel>
+            </Collapsible.Root>
           )}
         </>
       )}

@@ -415,3 +415,16 @@ vs the sheet's same lines (289,752.04 U): system is **+705.11 U**:
 - Unit price and exchange rate are edited directly in the settlement sheet; the side-panel price form was removed.
   - Saving happens on Enter or when focus leaves the row; moving between the row's two inputs does not save twice.
   - Discount updates live; errors show in the row.
+- Deployed **rc.331** billing to dev (healthy; deep link `/settlement?supplier=1&…` returns 200). Images kept: billing rc.331 + rc.330; report rc.330 + rc.327.
+- "Awaiting sync" on 皮皮 10/05–11/01 was caused by source 14 (补充渠道). It had coverage only to 10/04 because
+  the full-range sync hit the 32 MB cap. Synced 10/05–11/02 in 7-day chunks (0 rows; coverage recorded).
+  10/05–11/01 now show synced. 11/02 stays pending: 七牛 and 腾讯 ccmax only complete through yesterday.
+  Lesson: any source on gw.nexroute.cc must sync in ≤7-day chunks until the report API filters server-side.
+
+## 2026-11-02 — rc.332: settlement-only navigation
+
+- Removed the 每日用量 (daily usage) page; the backend `/api/daily-summary` is left unused.
+- Supplier logins see only 结算. Any other path (`/sources`, `/suppliers`, the old `/statement`) falls back to it.
+- Managers keep 结算, 供应商关系 and 供应商负责人与账号; the default page is 结算.
+- The 余额与付款明细 panel (recharge history with reversal, ledger, raw usage) moved under the single-supplier
+  settlement sheet.

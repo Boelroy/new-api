@@ -1,5 +1,4 @@
 import {
-  CalendarDays,
   Database,
   LogOut,
   Moon,
@@ -20,7 +19,7 @@ import { Button, Card, Select, cx } from '../components/ui'
 import { useTheme } from '../context/theme-provider'
 import type { Session } from './api'
 
-export type Page = 'statement' | 'settlement' | 'sources' | 'suppliers'
+export type Page = 'settlement' | 'sources' | 'suppliers'
 
 export function LanguagePicker() {
   const { t, i18n } = useTranslation()
@@ -61,24 +60,20 @@ export function BillingShell(props: {
   const [collapsed, setCollapsed] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
   const manager = props.session.user.role === 'billing_manager'
+  // Suppliers only settle; relationships and accounts are manager tools.
   const items = [
-    {
-      key: 'statement' as const,
-      label: t('Daily usage'),
-      icon: CalendarDays,
-    },
     {
       key: 'settlement' as const,
       label: t('Settlement'),
       icon: Scale,
     },
-    {
-      key: 'sources' as const,
-      label: t('Supplier relationships'),
-      icon: Database,
-    },
     ...(manager
       ? [
+          {
+            key: 'sources' as const,
+            label: t('Supplier relationships'),
+            icon: Database,
+          },
           {
             key: 'suppliers' as const,
             label: t('Supplier heads and accounts'),

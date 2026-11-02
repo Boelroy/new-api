@@ -151,6 +151,38 @@ afterEach(() => {
 })
 
 describe('supplier billing workspace', () => {
+  it('gives a supplier login only its own settlement page', async () => {
+    window.history.replaceState(null, '', '/sources')
+    const urls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        urls.push(url)
+        if (url === '/api/session') return response(session)
+        if (url === '/api/suppliers') return response([supplier])
+        if (url.startsWith('/api/statement?')) return response(statement())
+        throw new Error(`Unexpected URL: ${url}`)
+      })
+    )
+    app()
+    expect(
+      await screen.findByRole('heading', { name: 'Settlement' })
+    ).toBeInTheDocument()
+    for (const name of [
+      'Daily usage',
+      'Supplier relationships',
+      'Supplier heads and accounts',
+    ]) {
+      expect(screen.queryByRole('button', { name })).not.toBeInTheDocument()
+    }
+    await waitFor(() =>
+      expect(
+        urls.some((url) => url.startsWith('/api/statement?supplier_id=11&'))
+      ).toBe(true)
+    )
+    expect(urls.some((url) => url.startsWith('/api/overview'))).toBe(false)
+    expect(urls.some((url) => url.startsWith('/api/vendors'))).toBe(false)
+  })
   it('restores page, supplier head and dates from the URL after a refresh', async () => {
     window.history.replaceState(
       null,
@@ -170,9 +202,7 @@ describe('supplier billing workspace', () => {
         }
         if (url === '/api/suppliers') return response([supplier])
         if (url.startsWith('/api/statement?')) return response(statement())
-        if (url.startsWith('/api/daily-summary?')) {
-          return response(dailySummary(supplier, '1.000000'))
-        }
+        if (url.startsWith('/api/vendors')) return response([])
         throw new Error(`Unexpected URL: ${url}`)
       })
     )
@@ -187,8 +217,10 @@ describe('supplier billing workspace', () => {
       )
     )
     expect(screen.getByLabelText('Start date')).toHaveValue('2026-10-01')
-    await user.click(screen.getByRole('button', { name: 'Daily usage' }))
-    expect(window.location.pathname).toBe('/statement')
+    await user.click(
+      screen.getByRole('button', { name: 'Supplier relationships' })
+    )
+    expect(window.location.pathname).toBe('/sources')
     expect(window.location.search).toBe(
       '?supplier=11&start=2026-10-01&end=2026-10-02'
     )
@@ -531,74 +563,6 @@ describe('supplier billing workspace', () => {
       expect(onSavePrice).toHaveBeenCalledWith(sheet.lines?.[0], '3.9', '6.71')
     )
   })
-  it('defaults to all heads and opens a day into head and supplier usage without financial tables', async () => {
-    const second: Supplier = { id: 12, name: 'Supplier Beta', currency: 'USD' }
-    const data = dailySummary(supplier, '100.000000')
-    const beta = dailySummary(second, '200.000000')
-    data.heads.push(second)
-    data.totals.push(beta.totals[0])
-    data.days[0].heads.push(beta.days[0].heads[0])
-    data.days[0].gateway_usage = '300.000000'
-    data.days[0].request_count = '24'
-    data.days[0].heads[1].sources_synced = false
-    const fetcher = vi.fn(async (url: string) => {
-      if (url === '/api/session') {
-        return response({
-          ...session,
-          user: { ...session.user, role: 'billing_manager', supplier_id: 0 },
-        })
-      }
-      if (url === '/api/suppliers') return response([supplier, second])
-      if (url.startsWith('/api/daily-summary?')) return response(data)
-      throw new Error(`Unexpected URL: ${url}`)
-    })
-    vi.stubGlobal('fetch', fetcher)
-    const user = userEvent.setup()
-    app()
-    const row = await screen.findByRole('row', { name: /2026-10-01/ })
-    expect(screen.getByRole('combobox', { name: 'Supplier head' })).toHaveValue(
-      '0'
-    )
-    expect(
-      screen.getByRole('columnheader', { name: 'Supplier Alpha (USD)' })
-    ).toBeInTheDocument()
-    expect(
-      screen.getByRole('columnheader', { name: 'Supplier Beta (USD)' })
-    ).toBeInTheDocument()
-    expect(within(row).getByText('$300.00')).toBeInTheDocument()
-    expect(within(row).getByText('Awaiting sync')).toBeInTheDocument()
-    expect(screen.getAllByRole('table')).toHaveLength(1)
-    expect(
-      fetcher.mock.calls.some(
-        ([url]) =>
-          url.includes('supplier_id=') || url.startsWith('/api/statement')
-      )
-    ).toBe(false)
-    const expand = within(row).getByRole('button', {
-      name: 'View supplier breakdown for 2026-10-01',
-    })
-    await user.click(expand)
-    expect(expand).toHaveAttribute('aria-expanded', 'true')
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-    expect(
-      screen.getByRole('heading', { name: 'Supplier Alpha' })
-    ).toBeInTheDocument()
-    expect(
-      screen.getByRole('heading', { name: 'Supplier Beta' })
-    ).toBeInTheDocument()
-    expect(
-      screen.getByRole('row', { name: /^Supplier Alpha studio/ })
-    ).toHaveTextContent('$100.00')
-    expect(
-      screen.getByRole('row', { name: /^Supplier Beta studio/ })
-    ).toHaveTextContent('$200.00')
-    await user.click(expand)
-    expect(
-      screen.queryByRole('heading', { name: 'Supplier Alpha' })
-    ).not.toBeInTheDocument()
-    expect(expand).toHaveAttribute('aria-expanded', 'false')
-  })
-
   it('groups supplier relationships by head while leaving technical source data unloaded', async () => {
     const second: Supplier = { id: 12, name: 'Supplier Beta', currency: 'USD' }
     const fetcher = vi.fn(async (url: string) => {
@@ -656,71 +620,6 @@ describe('supplier billing workspace', () => {
     expect(fetcher.mock.calls.some(([url]) => url === '/api/sources')).toBe(
       false
     )
-  })
-
-  it('scopes a supplier head login to its own daily usage and relationships', async () => {
-    const fetcher = vi.fn(async (url: string) => {
-      if (url === '/api/session') return response(session)
-      if (url === '/api/suppliers') return response([supplier])
-      if (
-        url.startsWith('/api/daily-summary?') &&
-        url.includes('supplier_id=11')
-      ) {
-        return response(dailySummary())
-      }
-      if (url === '/api/vendors?supplier_id=11') {
-        return response([
-          {
-            id: 43,
-            supplier_id: 11,
-            name: 'Own studio',
-            source_studio: 'own-binding',
-            key_count: 2,
-          },
-        ])
-      }
-      if (url.startsWith('/api/statement?') && url.includes('supplier_id=11')) {
-        return response(statement())
-      }
-      throw new Error(`Unexpected URL: ${url}`)
-    })
-    vi.stubGlobal('fetch', fetcher)
-    const user = userEvent.setup()
-    app()
-    await screen.findByRole('row', { name: /2026-10-01/ })
-    const select = screen.getByRole('combobox', { name: 'Supplier head' })
-    expect(select).toBeDisabled()
-    expect(within(select).getAllByRole('option')).toHaveLength(1)
-    expect(
-      screen.queryByRole('option', { name: 'All supplier heads' })
-    ).not.toBeInTheDocument()
-    const finance = screen.getByRole('button', {
-      name: 'Balance and payment details',
-    })
-    expect(finance).toHaveAttribute('aria-expanded', 'false')
-    expect(
-      fetcher.mock.calls.some(([url]) => url.startsWith('/api/statement'))
-    ).toBe(false)
-    await user.click(finance)
-    await screen.findByRole('button', { name: 'Usage details' })
-    expect(
-      screen.queryByRole('button', { name: 'Daily totals' })
-    ).not.toBeInTheDocument()
-    await user.click(
-      screen.getByRole('button', { name: 'Supplier relationships' })
-    )
-    await screen.findByRole('row', { name: /Own studio/ })
-    expect(
-      screen.queryByRole('button', { name: 'Connection settings' })
-    ).not.toBeInTheDocument()
-    expect(
-      screen.queryByRole('button', { name: 'Supplier heads and accounts' })
-    ).not.toBeInTheDocument()
-    expect(
-      fetcher.mock.calls.some(
-        ([url]) => url === '/api/vendors' || url === '/api/sources'
-      )
-    ).toBe(false)
   })
 
   it('switches a source to usage only without sending fallback prices', async () => {
@@ -1076,46 +975,6 @@ describe('supplier billing workspace', () => {
       fx_rate: '1',
     })
     expect(new Headers(headers[0]).get('X-CSRF-Token')).toBe('billing-csrf')
-  })
-
-  it('clears the previous daily summary while another supplier head is loading', async () => {
-    const second: Supplier = { id: 12, name: 'Supplier Beta', currency: 'USD' }
-    let finish: ((value: Response) => void) | undefined
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: string) => {
-        if (url === '/api/session') {
-          return response({
-            ...session,
-            user: { ...session.user, role: 'billing_manager', supplier_id: 0 },
-          })
-        }
-        if (url === '/api/suppliers') return response([supplier, second])
-        if (
-          url.startsWith('/api/daily-summary?') &&
-          !url.includes('supplier_id=')
-        ) {
-          return response(dailySummary(supplier, '123.456789'))
-        }
-        if (url.includes('supplier_id=12')) {
-          return new Promise<Response>((resolve) => {
-            finish = resolve
-          })
-        }
-        throw new Error(`Unexpected URL: ${url}`)
-      })
-    )
-    const user = userEvent.setup()
-    app()
-    await screen.findAllByText(/123\.46/)
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Supplier head' }),
-      '12'
-    )
-    expect(screen.queryAllByText(/123\.46/)).toHaveLength(0)
-    expect(screen.getByRole('status')).toHaveTextContent('Loading…')
-    await act(async () => finish?.(response(dailySummary(second, '42.000000'))))
-    await screen.findAllByText('$42.00')
   })
 
   it('treats session service failure as a retryable failure instead of showing a login form', async () => {
