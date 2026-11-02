@@ -283,11 +283,11 @@ func TestServiceDatabaseMatrix(t *testing.T) {
 				overlap := sourceBody
 				overlap.SupplierID = supplier.ID
 				assert.Equal(t, 409, manager.request(t, "POST", "/api/sources", overlap, nil).Code)
-				// A user filter must not make an already assigned channel billable twice.
-				for _, gatewayUserID := range []int64{0, 2} {
-					overlap.GatewayUserID = gatewayUserID
-					assert.Equal(t, 409, manager.request(t, "POST", "/api/sources", overlap, nil).Code)
-				}
+				// An all-users scope must not make an already assigned channel billable
+				// twice; distinct user scopes are covered by the purchase block below.
+				overlap.GatewayUserID = 0
+				assert.Equal(t, 409, manager.request(t, "POST", "/api/sources", overlap, nil).Code)
+				overlap.GatewayUserID = 1
 				overlap.BaseURL = upstream.URL + "/r%65port"
 				assert.Equal(t, 409, manager.request(t, "POST", "/api/sources", overlap, nil).Code)
 				overlap.BaseURL = upstream.URL + "/report?"
@@ -514,7 +514,7 @@ func TestServiceDatabaseMatrix(t *testing.T) {
 				assert.Equal(t, 403, vendor.request(t, "PUT", initialURL, initial, nil).Code)
 
 				price := map[string]any{"supplier_id": sheetSupplier.ID, "date": "2024-01-02", "usage_type": "openai 号池", "unit_price": "3.9", "currency": "CNY", "fx_rate": "6.7"}
-				assert.Equal(t, 403, vendor.request(t, "POST", "/api/usage/price", price, nil).Code)
+				assert.Equal(t, 403, vendor.request(t, "POST", "/api/usage/price", price, nil).Code, "A supplier cannot price another supplier's usage")
 				priced := billingResponse[map[string]any](t, manager.request(t, "POST", "/api/usage/price", price, nil), 200)
 				assert.Equal(t, float64(2), priced["priced"])
 				repeat := billingResponse[map[string]any](t, manager.request(t, "POST", "/api/usage/price", price, nil), 200)
@@ -565,8 +565,14 @@ func TestServiceDatabaseMatrix(t *testing.T) {
 				assert.Equal(t, sheet.Balance, sheet.Lines[3].Balance)
 				assert.Equal(t, sheet.Balance, sheet.Days[0].ClosingBalance)
 
+				sheetUser := User{Username: "sheet-supplier", PasswordHash: hash, Role: RoleSupplier, SupplierID: sheetSupplier.ID}
+				require.NoError(t, db.Create(&sheetUser).Error)
+				sheetClient := billingSessionClient(t, s, sheetUser)
 				price["usage_type"], price["unit_price"] = "openai 号池", "4"
-				assert.Equal(t, 200, manager.request(t, "POST", "/api/usage/price", price, nil).Code)
+				assert.Equal(t, 200, sheetClient.request(t, "POST", "/api/usage/price", price, nil).Code, "A supplier prices its own line")
+				var supplierPosting LedgerEntry
+				require.NoError(t, db.Where("supplier_id = ? AND note = ?", sheetSupplier.ID, "Price correction").Order("id DESC").First(&supplierPosting).Error)
+				assert.Equal(t, sheetUser.ID, supplierPosting.CreatedBy, "The ledger records who changed the price")
 				repriced := billingResponse[sheetStatement](t, manager.request(t, "GET", statementURL, nil, nil), 200)
 				assert.Equal(t, "-73.079165", repriced.Lines[2].Change)
 				assert.Equal(t, repriced.Balance, repriced.Lines[len(repriced.Lines)-1].Balance)
@@ -609,8 +615,8 @@ func TestServiceDatabaseMatrix(t *testing.T) {
 					{"date": "2024-01-03", "tag": "promi1", "usd": "4", "channels": 1},
 				}
 				ccmaxRows := []map[string]any{
-					{"date": "2024-01-02", "user_id": 163, "username": "rongshan1", "accounts": 1, "cny": "1475.85"},
-					{"date": "2024-01-02", "user_id": 99, "username": "migos", "accounts": 82, "cny": "138555.68"},
+					{"date": "2024-01-02", "user_id": 163, "username": "rongshan1", "accounts": 1, "cny": "1475.85", "usd": "202.171233"},
+					{"date": "2024-01-02", "user_id": 99, "username": "migos", "accounts": 82, "cny": "138555.68", "usd": "18980.230137"},
 				}
 				groupRows := []any{reportUsageFixture("2024-01-02 03:00", "100", 41), reportUsageFixture("2024-01-02 04:00", "50", 42), reportUsageFixture("2024-01-02 05:00", "7", 43)}
 				groupRows[0].(map[string]any)["group"] = "AWS_Bedrock"
@@ -694,8 +700,9 @@ func TestServiceDatabaseMatrix(t *testing.T) {
 				var ccmaxUsage []Usage
 				require.NoError(t, db.Where("source_id = ?", ccmaxSource.ID).Find(&ccmaxUsage).Error)
 				require.Len(t, ccmaxUsage, 1)
-				assert.Equal(t, "1475.85", ccmaxUsage[0].Quantity)
-				assert.Equal(t, "cny_list", ccmaxUsage[0].Unit)
+				assert.Equal(t, "202.171233", ccmaxUsage[0].Quantity)
+				assert.Equal(t, "list_usd", ccmaxUsage[0].Unit)
+				assert.Equal(t, "rongshan1 · 1 accounts · ¥1475.85", ccmaxUsage[0].Description)
 				assert.Equal(t, "CNY", ccmaxUsage[0].Currency)
 				ccmax.Name, ccmax.Selector = "Duplicate uploader", "rongshan1"
 				assert.Equal(t, 409, manager.request(t, "POST", "/api/sources", ccmax, nil).Code)
@@ -710,6 +717,56 @@ func TestServiceDatabaseMatrix(t *testing.T) {
 				assert.Equal(t, int64(2), groupUsage[0].RequestCount)
 				channelMode := Source{Kind: "report", SupplierID: alice.ID, Name: "channels", UsageType: "aws", BaseURL: upstream.URL + "/report82", CredentialEnv: "SUPPLIER_BILLING_SOURCE_MAPPING", ChannelIDs: "43", GatewayUserID: 1, Currency: "USD", SettlementMode: "usage_only"}
 				assert.Equal(t, 409, manager.request(t, "POST", "/api/sources", channelMode, nil).Code, "Channel and group sources cannot share an upstream")
+			}
+
+			// Purchase direction: another gateway user's usage on a head's
+			// channels is bought by a different supplier and credits its balance.
+			{
+				t.Setenv("SUPPLIER_BILLING_SOURCE_PURCHASE", "test-purchase-token")
+				rows := []map[string]any{reportUsageFixture("2024-01-02 03:00", "100", 61), reportUsageFixture("2024-01-02 04:00", "6.7", 61)}
+				rows[1]["user_id"] = 3
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					data, err := common.Marshal(rows)
+					require.NoError(t, err)
+					_, _ = w.Write(data)
+				}))
+				defer upstream.Close()
+				s.SourceOrigins = append(s.SourceOrigins, upstream.URL)
+				seller := Supplier{Name: "Alice purchase test", Currency: "USD"}
+				buyer := Supplier{Name: "皮皮 purchase test", Currency: "USD"}
+				require.NoError(t, db.Create(&seller).Error)
+				require.NoError(t, db.Create(&buyer).Error)
+				sold := Source{Kind: "report", SupplierID: seller.ID, Name: "Alice keys", UsageType: "openai 号池", BaseURL: upstream.URL, CredentialEnv: "SUPPLIER_BILLING_SOURCE_PURCHASE", ChannelIDs: "61", GatewayUserID: 1, Currency: "USD", SettlementMode: "usage_only"}
+				billingResponse[Source](t, manager.request(t, "POST", "/api/sources", sold, nil), 201)
+				bought := sold
+				bought.SupplierID, bought.Name, bought.UsageType, bought.GatewayUserID, bought.Direction = buyer.ID, "yfqh on Alice keys", "yfqh 采购", 3, "purchase"
+				boughtSource := billingResponse[Source](t, manager.request(t, "POST", "/api/sources", bought, nil), 201)
+				assert.Equal(t, "purchase", boughtSource.Direction)
+				for _, user := range []int64{0, 3} {
+					again := bought
+					again.Name, again.GatewayUserID = "overlap", user
+					assert.Equal(t, 409, manager.request(t, "POST", "/api/sources", again, nil).Code, "All-users or same-user scopes still overlap")
+				}
+				bought.Direction = "expense"
+				assert.Equal(t, 400, manager.request(t, "PUT", fmt.Sprintf("/api/sources/%d", boughtSource.ID), bought, nil).Code, "Direction is fixed after creation")
+				assert.Equal(t, float64(1), billingResponse[map[string]any](t, manager.request(t, "POST", fmt.Sprintf("/api/sources/%d/sync", boughtSource.ID), map[string]string{"start": "2024-01-02", "end": "2024-01-02"}, nil), 200)["created"])
+				price := map[string]any{"supplier_id": buyer.ID, "date": "2024-01-02", "usage_type": "yfqh 采购", "unit_price": "3.9", "currency": "CNY", "fx_rate": "6.7"}
+				assert.Equal(t, 200, manager.request(t, "POST", "/api/usage/price", price, nil).Code)
+				type sheetStatement struct {
+					billingTestStatement
+					Lines []StatementLine `json:"lines"`
+				}
+				sheet := billingResponse[sheetStatement](t, manager.request(t, "GET", fmt.Sprintf("/api/statement?supplier_id=%d&start=2024-01-02&end=2024-01-02", buyer.ID), nil, nil), 200)
+				assert.Equal(t, "3.900000", sheet.Balance, "6.7 USD × 3.9 ÷ 6.7 credits the buyer's balance")
+				require.Len(t, sheet.Lines, 1)
+				assert.Equal(t, "purchase", sheet.Lines[0].Direction)
+				assert.Equal(t, "3.900000", sheet.Lines[0].Change)
+				assert.Equal(t, "-26.130000", sheet.Lines[0].OriginalAmount)
+				assert.Equal(t, "-3.900000", sheet.Days[0].Products[0].Amount)
+				price["unit_price"] = "4"
+				assert.Equal(t, 200, manager.request(t, "POST", "/api/usage/price", price, nil).Code)
+				repriced := billingResponse[billingTestStatement](t, manager.request(t, "GET", fmt.Sprintf("/api/statement?supplier_id=%d&start=2024-01-02&end=2024-01-02", buyer.ID), nil, nil), 200)
+				assert.Equal(t, "4.000000", repriced.Balance, "Re-pricing a purchase corrects the credit")
 			}
 
 			// Re-run startup against the populated service and preserve uniqueness.

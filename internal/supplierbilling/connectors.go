@@ -112,8 +112,13 @@ func FetchSourceUsage(ctx context.Context, source Source, start, end time.Time) 
 	for _, row := range payload.Rows {
 		value, amount, unit, description := row.Tag, row.USD, "gateway_usd", row.Tag
 		if source.Kind == "ccmax" {
-			value, amount, unit = row.Username, row.CNY, "cny_list"
+			// List price converted to USD by the Report Service FX rate; the
+			// original CNY stays in the description for reconciliation.
+			value, amount, unit = row.Username, row.USD, "list_usd"
 			description = row.Username + " · " + strconv.FormatInt(row.Accounts, 10) + " accounts"
+			if row.CNY != nil {
+				description += " · ¥" + *row.CNY
+			}
 		}
 		if !validDate(row.Date) || strings.TrimSpace(value) == "" || len(value) > 120 || amount == nil {
 			return nil, "", errors.New("Report source returned incomplete usage data")

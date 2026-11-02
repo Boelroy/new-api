@@ -408,11 +408,7 @@ function Workspace(props: {
                       })
                   : undefined
               }
-              onPrice={
-                manager
-                  ? (line) => setTarget({ kind: 'price', line })
-                  : undefined
-              }
+              onPrice={(line) => setTarget({ kind: 'price', line })}
               onClaim={
                 manager
                   ? (line) => setTarget({ kind: 'claim', line })

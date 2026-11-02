@@ -216,21 +216,43 @@ export function BillingShell(props: {
   )
 }
 
-export function Money(props: { value: string; currency: string }) {
+// Money shows cents by default and keeps the exact six-decimal value in the
+// tooltip; exact shows every stored decimal. Values are decimal strings, so
+// rounding is done on digits, never through binary floating point.
+export function Money(props: {
+  value: string
+  currency: string
+  exact?: boolean
+}) {
   const { i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   // Main-console currency helpers use global gateway settings and can convert
   // USD again. Statements are already settled in each supplier's own currency.
-  const [integer, fraction = ''] = props.value.split('.')
-  const decimals = fraction.replace(/0+$/, '').padEnd(2, '0')
+  const negative = props.value.startsWith('-')
+  const [integerText, fraction = ''] = props.value.replace(/^-/, '').split('.')
+  let integer = BigInt(integerText)
+  let decimals = fraction.replace(/0+$/, '').padEnd(2, '0')
+  if (!props.exact) {
+    let cents = integer * 100n + BigInt(fraction.padEnd(2, '0').slice(0, 2))
+    if ((fraction[2] ?? '0') >= '5') cents += 1n
+    integer = cents / 100n
+    decimals = (cents % 100n).toString().padStart(2, '0')
+  }
+  const isZero = integer === 0n && /^0*$/.test(decimals)
+  const signed =
+    negative && !isZero ? (integer === 0n ? -0 : -integer) : integer
   const parts = new Intl.NumberFormat(locale, {
     style: 'currency',
     currency: props.currency,
+    currencyDisplay: 'narrowSymbol',
     minimumFractionDigits: 2,
     maximumFractionDigits: 6,
-  }).formatToParts(integer === '-0' ? -0 : BigInt(integer))
+  }).formatToParts(signed)
   return (
-    <span className='tnum whitespace-nowrap'>
+    <span
+      className='tnum whitespace-nowrap'
+      title={props.exact ? undefined : props.value}
+    >
       {parts
         .map((part) => (part.type === 'fraction' ? decimals : part.value))
         .join('')}

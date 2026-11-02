@@ -30,6 +30,7 @@ type StatementLine struct {
 	FxRate           string `json:"fx_rate"`
 	RateMode         string `json:"rate_mode"`
 	SettlementStatus string `json:"settlement_status"`
+	Direction        string `json:"direction"`
 	OriginalAmount   string `json:"original_amount"`
 	Change           string `json:"change"`
 	Balance          string `json:"balance"`
@@ -57,8 +58,8 @@ type SupplierStatement struct {
 }
 
 type statementLineKey struct {
-	date, usageType, unit, unitPrice, currency, discount, fxRate, rateMode, status string
-	manualID                                                                       int64
+	date, usageType, unit, unitPrice, currency, discount, fxRate, rateMode, status, direction string
+	manualID                                                                                  int64
 }
 
 var lineKindOrder = map[string]int{"initial_balance": 0, "initial_balance_reversal": 0, "usage": 1, "claim": 1}
@@ -234,7 +235,7 @@ func settlementLines(usage []Usage, entries []LedgerEntry, claims []Claim, openi
 	totals := []lineTotals{}
 	index := map[statementLineKey]int{}
 	for _, item := range usage {
-		key := statementLineKey{date: item.Date, usageType: item.UsageType, unit: item.Unit, unitPrice: item.UnitPrice, currency: item.Currency, discount: item.Discount, fxRate: item.FxRate, rateMode: item.RateMode, status: item.SettlementStatus}
+		key := statementLineKey{direction: item.Direction, date: item.Date, usageType: item.UsageType, unit: item.Unit, unitPrice: item.UnitPrice, currency: item.Currency, discount: item.Discount, fxRate: item.FxRate, rateMode: item.RateMode, status: item.SettlementStatus}
 		if item.Origin != "sync" {
 			key.manualID = item.ID
 		}
@@ -242,7 +243,7 @@ func settlementLines(usage []Usage, entries []LedgerEntry, claims []Claim, openi
 		if !exists {
 			position = len(lines)
 			index[key] = position
-			lines = append(lines, StatementLine{Date: item.Date, Kind: "usage", UsageType: item.UsageType, Origin: item.Origin, Unit: item.Unit, UnitPrice: item.UnitPrice, Currency: item.Currency, Discount: item.Discount, FxRate: item.FxRate, RateMode: item.RateMode, SettlementStatus: item.SettlementStatus})
+			lines = append(lines, StatementLine{Direction: item.Direction, Date: item.Date, Kind: "usage", UsageType: item.UsageType, Origin: item.Origin, Unit: item.Unit, UnitPrice: item.UnitPrice, Currency: item.Currency, Discount: item.Discount, FxRate: item.FxRate, RateMode: item.RateMode, SettlementStatus: item.SettlementStatus})
 			if item.Origin != "sync" {
 				lines[position].Description = item.Description
 			}
@@ -264,7 +265,11 @@ func settlementLines(usage []Usage, entries []LedgerEntry, claims []Claim, openi
 			if priceErr != nil || discountErr != nil {
 				return nil, errors.New("Invalid usage item")
 			}
-			totals[position].original = totals[position].original.Add(quantity.Mul(price).Mul(discount).Round(6))
+			original := quantity.Mul(price).Mul(discount).Round(6)
+			if item.Direction == "purchase" {
+				original = original.Neg()
+			}
+			totals[position].original = totals[position].original.Add(original)
 		}
 	}
 	for i := range lines {
@@ -320,6 +325,15 @@ func settlementLines(usage []Usage, entries []LedgerEntry, claims []Claim, openi
 		lines[i].Balance = running.StringFixed(6)
 	}
 	return lines, nil
+}
+
+// directedCharge turns a non-negative charge into the stored usage amount:
+// usage a supplier buys from us is a negative charge, i.e. a credit.
+func directedCharge(charge, direction string) string {
+	if direction != "purchase" {
+		return charge
+	}
+	return decimal.RequireFromString(charge).Neg().StringFixed(6)
 }
 
 func (s *Server) statement(w http.ResponseWriter, r *http.Request) {
@@ -494,7 +508,8 @@ func (s *Server) saveClaim(w http.ResponseWriter, r *http.Request) {
 }
 
 // priceUsage applies one sheet price to every imported row of a product line
-// and day. Re-pricing settled rows appends the difference as a correction.
+// and day. Suppliers may price their own lines; every posting records the
+// actor, and re-pricing settled rows appends the difference as a correction.
 func (s *Server) priceUsage(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		SupplierID int64  `json:"supplier_id"`
@@ -552,6 +567,7 @@ func (s *Server) priceUsage(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return err
 			}
+			amount = directedCharge(amount, row.Direction)
 			previous, err := decimal.NewFromString(row.Amount)
 			if err != nil {
 				return err

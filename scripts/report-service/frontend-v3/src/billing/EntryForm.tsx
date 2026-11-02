@@ -97,10 +97,21 @@ export default function EntryForm(props: {
   const [mapped, setMapped] = useState<string[]>(() =>
     (props.target.source?.selector ?? '').split(',').filter(Boolean)
   )
+  const [direction, setDirection] = useState<'expense' | 'purchase'>(
+    props.target.source?.direction ?? 'expense'
+  )
   const [excludeMapped, setExcludeMapped] = useState(
     props.target.source?.exclude_selector ?? false
   )
   const formRef = useRef<HTMLFormElement>(null)
+  // The supplier sheet quotes a discount as unit price ÷ exchange rate.
+  const [priceDiscount, setPriceDiscount] = useState(() => {
+    const line = props.target.line
+    if (line?.settlement_status !== 'settled' || line.rate_mode !== 'divide') {
+      return ''
+    }
+    return ((Number(line.unit_price) / Number(line.fx_rate)) * 100).toFixed(2)
+  })
   const kind = props.target.kind
   const source = props.target.source
   let sourceDiscount = '100'
@@ -422,6 +433,7 @@ export default function EntryForm(props: {
       data.supplier_id = source?.supplier_id ?? props.supplier?.id ?? 0
       data.gateway_user_id = Number(data.gateway_user_id || 0)
       data.kind = sourceKind
+      data.direction = direction
       data.currency = sourceKind === 'ccmax' ? 'CNY' : 'USD'
       data.profile_id = Number(data.profile_id || 0)
       data.selector = mapped.join(',')
@@ -507,6 +519,15 @@ export default function EntryForm(props: {
         id='billing-entry'
         ref={formRef}
         onSubmit={submit}
+        onChange={(event) => {
+          if (kind !== 'price') return
+          const values = new FormData(event.currentTarget)
+          const price = Number(values.get('unit_price'))
+          const rate = Number(values.get('fx_rate'))
+          setPriceDiscount(
+            price > 0 && rate > 0 ? ((price / rate) * 100).toFixed(2) : ''
+          )
+        }}
         className='space-y-5'
       >
         {props.supplier &&
@@ -539,6 +560,11 @@ export default function EntryForm(props: {
         {line && (kind === 'price' || kind === 'claim') && (
           <p className='text-sm'>
             {line.date} · <strong>{line.usage_type}</strong>
+          </p>
+        )}
+        {kind === 'price' && (
+          <p className='text-sm' role='status'>
+            {t('Discount')}: {priceDiscount ? `${priceDiscount}%` : '—'}
           </p>
         )}
         {kind === 'price' && (
@@ -591,6 +617,29 @@ export default function EntryForm(props: {
                 <option value='remote_tag'>{t('Remote channel tags')}</option>
                 <option value='ccmax'>{t('CC Max users')}</option>
               </Select>
+            </label>
+          )}
+          {kind === 'source' && (
+            <label className='block space-y-1.5'>
+              <span>{t('Direction')}</span>
+              <Select
+                className='w-full'
+                value={direction}
+                disabled={Boolean(source)}
+                onChange={(event) =>
+                  setDirection(event.target.value as 'expense' | 'purchase')
+                }
+              >
+                <option value='expense'>{t('Supplier sells to us')}</option>
+                <option value='purchase'>{t('Supplier buys from us')}</option>
+              </Select>
+              {direction === 'purchase' && (
+                <span className='text-muted-foreground block text-xs'>
+                  {t(
+                    'Purchased usage credits the supplier balance. Use a gateway user ID to separate it from the channel owner.'
+                  )}
+                </span>
+              )}
             </label>
           )}
           {kind === 'source' && (

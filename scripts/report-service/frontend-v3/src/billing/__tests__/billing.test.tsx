@@ -47,6 +47,7 @@ function reportSource(): Source {
     gateway_user_id: 1,
     usage_type: 'OpenAI',
     settlement_mode: 'settlement',
+    direction: 'expense',
     discount: '1.000000',
     fx_rate: '7.000000',
     currency: 'USD',
@@ -148,6 +149,52 @@ afterEach(() => {
 })
 
 describe('supplier billing workspace', () => {
+  it('lets a supplier set its own price without manager-only claim actions', async () => {
+    const usd: Supplier = { id: 21, name: '皮皮', currency: 'USD' }
+    const onPrice = vi.fn()
+    render(
+      <I18nextProvider i18n={i18n}>
+        <SettlementSheet
+          statement={{
+            ...statement(usd, '0.000000'),
+            lines: [
+              {
+                date: '2026-10-30',
+                kind: 'usage',
+                usage_type: 'aws',
+                description: '',
+                origin: 'sync',
+                quantity: '100.000000',
+                unit: 'gateway_usd',
+                unit_price: '',
+                currency: 'USD',
+                discount: '',
+                fx_rate: '',
+                rate_mode: 'multiply',
+                settlement_status: 'unpriced',
+                direction: 'expense',
+                original_amount: '0.000000',
+                change: '0.000000',
+                balance: '0.000000',
+                note: '',
+                recharge_id: 0,
+                claim: null,
+              },
+            ],
+          }}
+          onPrice={onPrice}
+        />
+      </I18nextProvider>
+    )
+    const row = screen.getByRole('row', { name: /aws/ })
+    expect(
+      within(row).queryByRole('button', { name: 'Supplier claim' })
+    ).not.toBeInTheDocument()
+    await userEvent
+      .setup()
+      .click(within(row).getByRole('button', { name: 'Set price' }))
+    expect(onPrice).toHaveBeenCalled()
+  })
   it('breaks each supplier day into product lines in the settlement overview', () => {
     const usd: Supplier = { id: 21, name: '皮皮', currency: 'USD' }
     const day = statement(usd, '-310.000000').days[0]
@@ -192,7 +239,7 @@ describe('supplier billing workspace', () => {
     const aws = screen.getByRole('row', { name: /aws/ })
     expect(within(aws).getByText('$300.00')).toBeInTheDocument()
     const ccmax = screen.getByRole('row', { name: /ccmax/ })
-    expect(within(ccmax).getByText('CN¥3,058.35')).toBeInTheDocument()
+    expect(within(ccmax).getByText('¥3,058.35')).toBeInTheDocument()
     expect(within(ccmax).getByText('Unpriced')).toBeInTheDocument()
   })
   it('maps remote channel tags with recent values, owners and an all-except option', async () => {
@@ -295,6 +342,7 @@ describe('supplier billing workspace', () => {
       profile_id: 1,
       selector: 'alice',
       exclude_selector: true,
+      direction: 'expense',
       currency: 'USD',
       settlement_mode: 'usage_only',
     })
@@ -316,6 +364,7 @@ describe('supplier billing workspace', () => {
       fx_rate: '6.7',
       rate_mode: 'divide',
       settlement_status: 'settled',
+      direction: 'expense',
       original_amount: '477.389640',
       change: '-71.252185',
       balance: '39162.967815',
@@ -392,14 +441,15 @@ describe('supplier billing workspace', () => {
     )
     const pool = screen.getByRole('row', { name: /openai 号池/ })
     expect(within(pool).getByText('÷ 6.7')).toBeInTheDocument()
+    expect(within(pool).getByText(/58\.21/)).toBeInTheDocument()
     expect(within(pool).getByText('Matched')).toBeInTheDocument()
-    expect(within(pool).getByText('$71.252185')).toBeInTheDocument()
+    expect(within(pool).getAllByText('$71.25').length).toBeGreaterThan(0)
     expect(
       within(screen.getByRole('row', { name: /aws/ })).getByText('Unpriced')
     ).toBeInTheDocument()
     expect(
       within(screen.getByRole('row', { name: /Recharge/ })).getAllByText(
-        '$99,162.967815'
+        '$99,162.97'
       )
     ).not.toHaveLength(0)
     expect(screen.getByText('Not set')).toBeInTheDocument()
@@ -447,6 +497,7 @@ describe('supplier billing workspace', () => {
       screen.getByRole('spinbutton', { name: /Exchange rate/ }),
       '6.7'
     )
+    expect(screen.getByRole('status')).toHaveTextContent('58.21%')
     await user.click(screen.getByRole('button', { name: 'Submit' }))
     await waitFor(() => expect(onSaved).toHaveBeenCalled())
     expect(submitted[0]).toEqual({
@@ -505,23 +556,24 @@ describe('supplier billing workspace', () => {
       name: 'View supplier breakdown for 2026-10-01',
     })
     await user.click(expand)
-    const dialog = screen.getByRole('dialog')
+    expect(expand).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(
-      within(dialog).getByRole('heading', { name: 'Supplier Alpha' })
+      screen.getByRole('heading', { name: 'Supplier Alpha' })
     ).toBeInTheDocument()
     expect(
-      within(dialog).getByRole('heading', { name: 'Supplier Beta' })
+      screen.getByRole('heading', { name: 'Supplier Beta' })
     ).toBeInTheDocument()
     expect(
-      within(dialog).getByRole('row', { name: /Supplier Alpha studio/ })
+      screen.getByRole('row', { name: /^Supplier Alpha studio/ })
     ).toHaveTextContent('$100.00')
     expect(
-      within(dialog).getByRole('row', { name: /Supplier Beta studio/ })
+      screen.getByRole('row', { name: /^Supplier Beta studio/ })
     ).toHaveTextContent('$200.00')
-    await user.keyboard('{Escape}')
-    await waitFor(() =>
-      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-    )
+    await user.click(expand)
+    expect(
+      screen.queryByRole('heading', { name: 'Supplier Alpha' })
+    ).not.toBeInTheDocument()
     expect(expand).toHaveAttribute('aria-expanded', 'false')
   })
 
@@ -1033,12 +1085,12 @@ describe('supplier billing workspace', () => {
     )
     const user = userEvent.setup()
     app()
-    await screen.findAllByText(/123\.456789/)
+    await screen.findAllByText(/123\.46/)
     await user.selectOptions(
       screen.getByRole('combobox', { name: 'Supplier head' }),
       '12'
     )
-    expect(screen.queryAllByText(/123\.456789/)).toHaveLength(0)
+    expect(screen.queryAllByText(/123\.46/)).toHaveLength(0)
     expect(screen.getByRole('status')).toHaveTextContent('Loading…')
     await act(async () => finish?.(response(dailySummary(second, '42.000000'))))
     await screen.findAllByText('$42.00')
@@ -1123,10 +1175,15 @@ describe('supplier billing workspace', () => {
   it('preserves all six monetary decimals for large balances and responds to language changes', async () => {
     const view = render(
       <I18nextProvider i18n={i18n}>
-        <Money value='9007199254740991.123456' currency='USD' />
-        <Money value='-0.000001' currency='USD' />
+        <Money value='9007199254740991.123456' currency='USD' exact />
+        <Money value='-0.000001' currency='USD' exact />
+        <Money value='53024.050128' currency='USD' />
+        <Money value='-0.004' currency='USD' />
       </I18nextProvider>
     )
+    expect(view.container).toHaveTextContent('$53,024.05')
+    expect(screen.getByTitle('53024.050128')).toHaveTextContent('$53,024.05')
+    expect(screen.getByTitle('-0.004')).toHaveTextContent(/^\$0\.00$/)
     expect(view.container).toHaveTextContent('$9,007,199,254,740,991.123456')
     expect(view.container).toHaveTextContent('-$0.000001')
     await act(async () => {

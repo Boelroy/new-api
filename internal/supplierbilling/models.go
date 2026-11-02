@@ -72,11 +72,14 @@ type Source struct {
 	UsageType      string `json:"usage_type" gorm:"size:120;not null"`
 	Currency       string `json:"currency" gorm:"size:3;not null"`
 	SettlementMode string `json:"settlement_mode" gorm:"size:16;not null;default:settlement"`
-	Discount       string `json:"discount" gorm:"size:32;not null"`
-	FxRate         string `json:"fx_rate" gorm:"size:32;not null"`
-	Version        int64  `json:"-"`
-	LastSyncAt     int64  `json:"last_sync_at"`
-	LastError      string `json:"last_error" gorm:"type:text"`
+	// Direction "expense" is usage the supplier sells to us; "purchase" is
+	// usage the supplier buys from us, which credits its balance instead.
+	Direction  string `json:"direction" gorm:"size:16;not null;default:expense"`
+	Discount   string `json:"discount" gorm:"size:32;not null"`
+	FxRate     string `json:"fx_rate" gorm:"size:32;not null"`
+	Version    int64  `json:"-"`
+	LastSyncAt int64  `json:"last_sync_at"`
+	LastError  string `json:"last_error" gorm:"type:text"`
 }
 
 func (Source) TableName() string { return "sb_sources" }
@@ -128,6 +131,9 @@ type Usage struct {
 	RateMode         string `json:"rate_mode" gorm:"size:16;not null;default:multiply"`
 	Amount           string `json:"amount" gorm:"size:32;not null"`
 	SettlementStatus string `json:"settlement_status" gorm:"size:16;not null;default:settled"`
+	// Direction is copied from the source; "purchase" rows store a negative
+	// Amount, so every charge, correction and re-price credits the balance.
+	Direction        string `json:"direction" gorm:"size:16;not null;default:expense"`
 	Origin           string `json:"origin" gorm:"size:16;not null"`
 	RequestCount     int64  `json:"request_count"`
 	InputTokens      int64  `json:"input_tokens"`

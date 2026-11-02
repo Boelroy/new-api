@@ -104,7 +104,8 @@ func handleBillingRemoteTagUsage(c *gin.Context) {
 }
 
 // handleBillingCCMaxUsage reports CC Max portal list-price bills per uploader
-// and day. Bills are pulled daily up to yesterday (ccmax_bill_synced_through).
+// and day, in CNY and in USD at the supplier FX rate used by the CC Max pages.
+// Bills are pulled daily up to yesterday (ccmax_bill_synced_through).
 func handleBillingCCMaxUsage(c *gin.Context) {
 	start, end, ok := billingExportRange(c)
 	if !ok {
@@ -131,7 +132,9 @@ func handleBillingCCMaxUsage(c *gin.Context) {
 		Username string `json:"username"`
 		Accounts int64  `json:"accounts"`
 		CNY      string `json:"cny"`
+		USD      string `json:"usd"`
 	}
+	fx := supplierFxRate()
 	out := make([]row, 0)
 	for rows.Next() {
 		var r row
@@ -141,7 +144,8 @@ func handleBillingCCMaxUsage(c *gin.Context) {
 			return
 		}
 		r.CNY = fmt.Sprintf("%d.%06d", micro/1_000_000, micro%1_000_000)
+		r.USD = fmt.Sprintf("%.6f", float64(micro)/1e6/fx)
 		out = append(out, r)
 	}
-	c.JSON(http.StatusOK, gin.H{"rows": out, "through": supplierConfigGet(cfgCCMaxBillSyncedThrough)})
+	c.JSON(http.StatusOK, gin.H{"rows": out, "through": supplierConfigGet(cfgCCMaxBillSyncedThrough), "fx_rate": fx})
 }

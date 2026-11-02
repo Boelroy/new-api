@@ -71,6 +71,8 @@ export type Source = {
   gateway_user_id: number
   usage_type: string
   settlement_mode: 'settlement' | 'usage_only'
+  // purchase: usage the supplier buys from us; it credits the supplier balance.
+  direction: 'expense' | 'purchase'
   discount: string
   fx_rate: string
   currency: string
@@ -157,6 +159,7 @@ export type StatementLine = {
   fx_rate: string
   rate_mode: string
   settlement_status: string
+  direction: string
   original_amount: string
   change: string
   balance: string

@@ -251,3 +251,94 @@ Verification:
 - Existing dev product lines are the source `usage_type` values: 皮皮 OpenAI/AWS/Anthropic/OpenRouter, Alice OpenAI.
   Rename them on each source (e.g. "openai 号池") so that the sheet matches the supplier's names; already-imported
   rows keep their old name.
+
+- Deployed to dev as **rc.329** (GHCR); `.env` backup `backups/.env-before-rc329-*`. Overview 10/31: 皮皮 OpenAI 1,957.01 (50,084 requests), Alice OpenAI 6,915.08; both unpriced.
+
+## 2026-11-02 — Dev sources configured for 皮皮
+
+- Source 9 `皮皮 · 七牛`: remote_tag, dev Report profile 1, all tags except `alice,alice2`, product line `openai 七牛`.
+  - Synced 10/29–11/02: 23 rows. 10/30 6,061.23; 10/31 17,799.94; 11/01 2,233.17; 11/02 provisional.
+  - 10/29 is 0; consistent with polarcode's snapshot Δ.
+- Source 10 `皮皮 · ccmax`: ccmax, uploaders `rangshan2,rongshan1`, CNY list price, product line `ccmax`.
+  - Synced 10/29–11/02: 7 rows. 10/29 ¥1,687.97; 10/30 ¥3,058.35; 10/31 ¥5,768.02; 11/01 ¥2,248.92.
+  - 11/02 awaits the next daily bill pull.
+- Both are usage_only (unpriced) until prices are set per line and day.
+- **aws / claude 官K blocked.** `https://asasas.201201200.xyz` is the 52.68.102.82 new-api gateway: `/api/status` works,
+  but `/api/report` returns 404 and `/report/*` serves the gateway SPA.
+  - The 82 nginx (`~/nginx/conf.d/newapi.conf`) only proxies to `newapi_backend`.
+  - `newapi-report` is published only as plain HTTP `0.0.0.0:8090`.
+  - An HTTPS route to the report API is needed before a `report_group` source can be added.
+
+## 2026-11-02 — aws / claude 官K connected; product lines renamed
+
+- 82 Report Service HTTPS entry: **`https://asasas-tools.201201200.xyz`**. `asasas.201201200.xyz` is the gateway.
+  - Credential `SUPPLIER_BILLING_SOURCE_AWS82_REPORT_TOKEN` (82 `REPORT_API_KEY`) was piped host-to-host into the dev
+    billing `.env` and added to `BILLING_SOURCE_ORIGINS`. `.env` backup: `backups/.env-before-aws82-*`.
+- Source 11 `皮皮 · aws`: report_group, gateway user 1, group `AWS_Bedrock`, product line `aws`. 10/29–11/02: 48 rows.
+- Source 12 `皮皮 · claude 官K`: report_group, user 1, group `Anthropic`, product line `claude 官K`. 25 rows.
+- Sources 1–5 (`OpenAI`) renamed to `openai 号池`. 52,041 imported unpriced rows were renamed by SQL in one
+  transaction (0 settled/ledger rows affected). Backup: `backups/sb_usage-before-rename-20261102T141431Z.dump`.
+- Legacy dev-gateway lines 皮皮 `AWS` (10/04 only) and `OpenRouter` (10/07–10/13) predate this period; left as is.
+
+Reconciliation vs the 皮皮 sheet (via the report API, Beijing days):
+
+| Day | Line | Sheet | Billing |
+|---|---|---|---|
+| 10/29 | aws | 28,966.78 | 28,966.69 |
+| 10/30 | aws | 89,715.29 | 89,716.13 |
+| 10/31 | aws | 98,131.16 | 98,126.63 |
+| 11/01 | aws | 53,024.17 | 53,024.05 |
+| 11/01 | claude 官K | 26,095.93 | 26,094.50 |
+| 10/30–11/01 | openai 号池 | 122.41 / 1,957.01 / 394.17 | match |
+| 10/29 | openai 号池 | 393.39 | 1,546.99 (mismatch) |
+| 10/30 / 10/31 | openai 七牛 | 22,895.78 / 1,449.33 | 6,061.23 / 17,799.94 (day split differs; snapshot Δ) |
+| 10/30 | ccmax | 752.86 | ¥3,058.35 list price (unit differs) |
+
+- aws and claude now match within ~0.01%. The earlier, larger gaps came from my ad-hoc `report_daily_agg` query, not from the data.
+
+## 2026-11-02 — Reconciliation of 皮皮 sheet 10/08–11/01
+
+Backfill (dev billing, unpriced, no ledger):
+- aws 10/08–10/28: 22 rows. claude 官K: 0 rows before 11/01. ccmax: 1 row (10/28). 七牛: 0 rows before 10/30.
+
+Sheet arithmetic:
+- Implied opening balance before 10/08 is **-3,056.14 U**.
+- Running balances are internally consistent.
+- Only 11/01 号池 (RMB 2,091.07 → 1,537.26) and 11/01 ccmax (134.64 → 336.60) are wrong.
+- Payments in the period: 15,000 + 10,000 + 50,000 + 60,000 + 100,000 = 235,000 U.
+
+Usage vs system:
+- openai 号池 matches every day within 0.5 USD except:
+  - 10/18: sheet -1,234.59 vs 1,064.01;
+  - 10/19: sheet -2,132.05 vs 2,261.81 (the sheet nets a credit of 2,298.60 / 4,393.86 USD);
+  - 10/22: +5.57.
+- aws matches 10/28–11/01 within 0.01%; 10/27 sheet 14.03 vs 44.23.
+- claude 官K 11/01 matches.
+- 七牛: the day split differs. Sheet 10/29 393.39, 10/30 22,895.78, 10/31 1,449.33; system 0 / 6,061.24 / 17,799.94, plus 11/01 2,233.17.
+  10/30+10/31: sheet 24,345 vs system 23,861.
+- ccmax (rongshan1+rangshan2, ¥ list price) does not correspond to the sheet.
+  The sheet has ccmax from 10/21, but these uploaders only have bills from 10/28.
+  The sheet's ccmax is a different measure/account set; needs clarification.
+
+Balance impact: sheet charges 291,813.57 U. Recomputed with system quantities for 号池/aws/claude (sheet prices and rates)
+gives 295,678.78 U (+3,865.21, almost all from the 10/18–10/19 negative 号池 rows).
+Sheet closing -59,870 → recomputed -63,734.92.
+
+## 2026-11-02 — Purchase direction, supplier pricing, display fixes (rc.330)
+
+- **Purchase direction** (`sb_sources.direction`, `sb_usage.direction`; default `expense`).
+  - `purchase` means the supplier buys from us (e.g. yfqh / dev gateway user 3 `yangfanqihang` on Alice keys, bought by 皮皮).
+  - Rows store a negative amount, so charges, corrections and re-pricing credit the supplier balance.
+  - Direction is fixed after creation. Purchase sources skip vendor (studio) ownership checks.
+- **Channel bindings are now per gateway user.** Distinct non-zero users of one channel may map to different suppliers.
+  All-users vs any user, or the same user, still conflict (key + application check).
+- Finding: 皮皮 netted yfqh's Alice-key usage into 号池 at 3.9 ÷ 6.7.
+  The sheet's 10/18 + 10/19 shortfall (6,692.46) equals yfqh's Alice usage on those days (6,692.47).
+  10/21–10/22 small gaps match too.
+- **Suppliers can price their own lines** (`POST /api/usage/price` is open to suppliers for their own supplier only).
+  Ledger postings record the actor. Supplier claims remain manager-only.
+- **Discount column** = unit price ÷ exchange rate (as %), also shown live in the price form.
+- **ccmax in USD**: the Report export adds `usd` = CNY ÷ `supplierFxRate()` (dev 7.3). Billing imports `list_usd` and
+  keeps "¥…" in the description. Unpriced rows take the new unit/label on the next sync.
+- **Display**: money shows 2 decimals with the exact value in the tooltip, and the narrow symbol ($ instead of US$).
+  The daily-usage supplier breakdown expands inline instead of opening a side panel.

@@ -212,9 +212,10 @@ export function SettlementSheet(props: {
   const statement = props.statement
   const currency = statement.supplier.currency
   const lines = statement.lines ?? []
-  const manager = Boolean(props.onPrice)
+  // Suppliers may price their own lines; claims stay with managers.
+  const actions = Boolean(props.onPrice || props.onClaim)
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set())
-  const columns = manager ? 11 : 10
+  const columns = actions ? 12 : 11
   // An imported line groups many rows under one price; its detail is those
   // rows summed by model, tag or uploader (the row description).
   const lineDetails = (line: StatementLine) => {
@@ -289,11 +290,12 @@ export function SettlementSheet(props: {
           'Unit price',
           'Original amount',
           'Exchange rate',
+          'Discount',
           'Settlement amount',
           'Payments',
           'Balance',
           'Supplier claim',
-          ...(manager ? ['Actions'] : []),
+          ...(actions ? ['Actions'] : []),
         ]}
         empty={!lines.length}
       >
@@ -348,6 +350,9 @@ export function SettlementSheet(props: {
                     {usage || line.kind === 'claim'
                       ? line.usage_type
                       : t(balanceKinds[line.kind] ?? line.kind)}
+                    {line.direction === 'purchase' && (
+                      <Badge tone='brand'>{t('Purchase')}</Badge>
+                    )}
                   </div>
                   {(line.description || line.note) && (
                     <div className='text-muted-foreground mt-1 max-w-56 text-xs break-words'>
@@ -388,6 +393,23 @@ export function SettlementSheet(props: {
                       ? `÷ ${line.fx_rate}`
                       : `× ${line.fx_rate}`
                     : '—'}
+                </td>
+                <td className='whitespace-nowrap'>
+                  {usage && !unpriced ? (
+                    <span title={t('Unit price ÷ exchange rate')}>
+                      {(
+                        ((Number(line.unit_price) *
+                          Number(line.discount || 1)) /
+                          (line.rate_mode === 'divide'
+                            ? Number(line.fx_rate)
+                            : 1 / Number(line.fx_rate))) *
+                        100
+                      ).toFixed(2)}
+                      %
+                    </span>
+                  ) : (
+                    '—'
+                  )}
                 </td>
                 <td className='font-medium'>
                   {usage && unpriced && (
@@ -431,7 +453,7 @@ export function SettlementSheet(props: {
                     '—'
                   )}
                 </td>
-                {manager && (
+                {actions && (
                   <td>
                     <div className='flex gap-2'>
                       {usage && line.origin === 'sync' && (
@@ -439,7 +461,7 @@ export function SettlementSheet(props: {
                           {t('Set price')}
                         </Button>
                       )}
-                      {(usage || line.kind === 'claim') && (
+                      {props.onClaim && (usage || line.kind === 'claim') && (
                         <Button
                           size='sm'
                           variant='outline'

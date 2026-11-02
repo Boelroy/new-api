@@ -84,7 +84,7 @@ func (s *Server) Handler(frontendDir string) http.Handler {
 	mux.HandleFunc("PUT /api/suppliers/{id}/initial-balance", s.manager(s.setInitialBalance))
 	mux.HandleFunc("PUT /api/claims", s.manager(s.saveClaim))
 	mux.HandleFunc("POST /api/usage", s.auth(s.createUsage))
-	mux.HandleFunc("POST /api/usage/price", s.manager(s.priceUsage))
+	mux.HandleFunc("POST /api/usage/price", s.auth(s.priceUsage))
 	mux.HandleFunc("POST /api/recharges", s.manager(s.createRecharge))
 	mux.HandleFunc("POST /api/recharges/{id}/reverse", s.manager(s.reverseRecharge))
 	mux.HandleFunc("GET /api/sources", s.manager(s.listSources))

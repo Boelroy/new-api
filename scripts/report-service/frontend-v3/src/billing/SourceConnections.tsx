@@ -33,7 +33,14 @@ export default function SourceConnections(props: {
               {source.base_url}
             </div>
           </td>
-          <td>{source.usage_type}</td>
+          <td>
+            {source.usage_type}
+            {source.direction === 'purchase' && (
+              <Badge tone='brand' className='ml-2'>
+                {t('Supplier buys from us')}
+              </Badge>
+            )}
+          </td>
           <td className='max-w-56 break-words'>
             {source.kind === 'report' ? (
               source.channel_ids

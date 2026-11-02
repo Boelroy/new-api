@@ -60,6 +60,12 @@ func (s *Server) validateSource(source *Source) ([]string, error) {
 	if source.SettlementMode != "settlement" && source.SettlementMode != "usage_only" {
 		return nil, errors.New("Invalid source configuration")
 	}
+	if source.Direction == "" {
+		source.Direction = "expense"
+	}
+	if source.Direction != "expense" && source.Direction != "purchase" {
+		return nil, errors.New("Invalid source configuration")
+	}
 	currencyAllowed := source.Currency == "USD" || (source.Kind == "ccmax" && source.Currency == "CNY")
 	if source.Name == "" || len(source.Name) > 120 || source.UsageType == "" || len(source.UsageType) > 120 || !currencyAllowed {
 		return nil, errors.New("Invalid source configuration")
@@ -140,7 +146,13 @@ func (s *Server) validateSource(source *Source) ([]string, error) {
 	keys := make([]string, len(channels))
 	for i, id := range channels {
 		parts[i] = strconv.FormatInt(id, 10)
+		// All-users bindings keep the original key. A user-scoped binding is
+		// per user, so distinct gateway users of one channel can map to
+		// different suppliers; bindSource rejects any overlapping user scope.
 		keys[i] = digest([]any{source.BaseURL, id})
+		if source.GatewayUserID > 0 {
+			keys[i] = digest([]any{source.BaseURL, id, "user", source.GatewayUserID})
+		}
 	}
 	source.ChannelIDs = strings.Join(parts, ",")
 	return keys, nil
@@ -169,6 +181,13 @@ func bindSource(tx *gorm.DB, source Source, keys []string) error {
 		}
 		if (source.Kind == "report" && other.Kind == "report_group") || (source.Kind == "report_group" && other.Kind == "report") {
 			return errMappingOverlap
+		}
+		if source.Kind == "report" && other.Kind == "report" && (source.GatewayUserID == 0 || other.GatewayUserID == 0 || source.GatewayUserID == other.GatewayUserID) {
+			for id := range strings.SplitSeq(other.ChannelIDs, ",") {
+				if slices.Contains(strings.Split(source.ChannelIDs, ","), id) {
+					return errMappingOverlap
+				}
+			}
 		}
 		if source.Kind != "remote_tag" || other.Kind != "remote_tag" || other.ProfileID != source.ProfileID || source.ExcludeSelector == other.ExcludeSelector {
 			continue
@@ -224,7 +243,7 @@ func (s *Server) createSource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	row := Source{SupplierID: supplier.ID, Name: body.Name, Kind: body.Kind, BaseURL: body.BaseURL, CredentialEnv: body.CredentialEnv, ChannelIDs: body.ChannelIDs, Selector: body.Selector, ExcludeSelector: body.ExcludeSelector, ProfileID: body.ProfileID, GatewayUserID: body.GatewayUserID, UsageType: body.UsageType, Currency: body.Currency, SettlementMode: body.SettlementMode, Discount: body.Discount, FxRate: body.FxRate}
+	row := Source{SupplierID: supplier.ID, Name: body.Name, Kind: body.Kind, Direction: body.Direction, BaseURL: body.BaseURL, CredentialEnv: body.CredentialEnv, ChannelIDs: body.ChannelIDs, Selector: body.Selector, ExcludeSelector: body.ExcludeSelector, ProfileID: body.ProfileID, GatewayUserID: body.GatewayUserID, UsageType: body.UsageType, Currency: body.Currency, SettlementMode: body.SettlementMode, Discount: body.Discount, FxRate: body.FxRate}
 	err = s.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&row).Error; err != nil {
 			return err
@@ -264,7 +283,7 @@ func (s *Server) updateSource(w http.ResponseWriter, r *http.Request) {
 	}
 	// Bindings are permanent: moving a source would hide previously billed costs.
 	// A mapping (selector) can change; it only steers later syncs.
-	if body.SupplierID != row.SupplierID || body.BaseURL != row.BaseURL || body.ChannelIDs != row.ChannelIDs || body.GatewayUserID != row.GatewayUserID || body.Currency != row.Currency || body.Kind != row.Kind || body.ProfileID != row.ProfileID {
+	if body.SupplierID != row.SupplierID || body.BaseURL != row.BaseURL || body.ChannelIDs != row.ChannelIDs || body.GatewayUserID != row.GatewayUserID || body.Currency != row.Currency || body.Kind != row.Kind || body.ProfileID != row.ProfileID || body.Direction != row.Direction {
 		s.fail(w, 400, "Source bindings cannot be changed")
 		return
 	}
@@ -371,7 +390,9 @@ func (s *Server) syncSource(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		vendorByChannel := make(map[int64]int64)
-		if len(channelIDs) > 0 {
+		// Supplier-studio ownership describes who sells a channel; usage a
+		// supplier buys from us on another head's channels has no vendor.
+		if len(channelIDs) > 0 && source.Direction != "purchase" {
 			vendorKeys := []VendorKey{}
 			if err := tx.Where("base_url = ? AND channel_id IN ?", source.BaseURL, channelIDs).Find(&vendorKeys).Error; err != nil {
 				return err
@@ -430,6 +451,10 @@ func (s *Server) syncSource(w http.ResponseWriter, r *http.Request) {
 				if vendorID := vendorByChannel[imported.ChannelID]; vendorID != 0 {
 					updates["vendor_id"] = vendorID
 				}
+				if existing.SettlementStatus == "unpriced" {
+					// Unpriced rows follow the source's current unit and label.
+					updates["unit"], updates["description"] = imported.Unit, imported.Description
+				}
 				if existing.SettlementStatus == "unpriced" && source.SettlementMode == "usage_only" {
 					if err := tx.Model(&existing).Updates(updates).Error; err != nil {
 						return err
@@ -455,6 +480,7 @@ func (s *Server) syncSource(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					return err
 				}
+				amount = directedCharge(amount, existing.Direction)
 				oldAmount, err := decimal.NewFromString(existing.Amount)
 				if err != nil {
 					return err
@@ -480,9 +506,10 @@ func (s *Server) syncSource(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					return err
 				}
+				amount = directedCharge(amount, source.Direction)
 				unitPrice, status = "1", "settled"
 			}
-			row := Usage{SupplierID: source.SupplierID, Date: imported.Date, SourceID: source.ID, ChannelID: imported.ChannelID, VendorID: vendorByChannel[imported.ChannelID], SourceName: source.Name, ExternalRef: imported.ExternalRef, MatchValue: imported.MatchValue, UsageType: source.UsageType, Description: imported.Description, Quantity: imported.Quantity, Unit: imported.Unit, UnitPrice: unitPrice, Currency: source.Currency, Discount: source.Discount, FxRate: source.FxRate, RateMode: "multiply", Amount: amount, SettlementStatus: status, Origin: "sync", RequestCount: imported.RequestCount, InputTokens: imported.InputTokens, OutputTokens: imported.OutputTokens, CacheReadTokens: imported.CacheReadTokens, CacheWriteTokens: imported.CacheWriteTokens, CreatedBy: actor, CreatedAt: now, IdempotencyKey: key, PayloadHash: digest(imported)}
+			row := Usage{SupplierID: source.SupplierID, Date: imported.Date, SourceID: source.ID, ChannelID: imported.ChannelID, VendorID: vendorByChannel[imported.ChannelID], SourceName: source.Name, ExternalRef: imported.ExternalRef, MatchValue: imported.MatchValue, Direction: source.Direction, UsageType: source.UsageType, Description: imported.Description, Quantity: imported.Quantity, Unit: imported.Unit, UnitPrice: unitPrice, Currency: source.Currency, Discount: source.Discount, FxRate: source.FxRate, RateMode: "multiply", Amount: amount, SettlementStatus: status, Origin: "sync", RequestCount: imported.RequestCount, InputTokens: imported.InputTokens, OutputTokens: imported.OutputTokens, CacheReadTokens: imported.CacheReadTokens, CacheWriteTokens: imported.CacheWriteTokens, CreatedBy: actor, CreatedAt: now, IdempotencyKey: key, PayloadHash: digest(imported)}
 			if err := tx.Create(&row).Error; err != nil {
 				return err
 			}
