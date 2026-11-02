@@ -5186,6 +5186,9 @@ func main() {
 
 	// PATCH (role/studio changes) + Profit stay super-admin-only.
 	superAPI := api.Group("", requireRole(minSuperAdminRole))
+	// Supplier-billing connectors (service-to-service via X-API-Key).
+	superAPI.GET("/billing/remote-tag-usage", handleBillingRemoteTagUsage)
+	superAPI.GET("/billing/ccmax-usage", handleBillingCCMaxUsage)
 	superAPI.PATCH("/users/:id", handleUserUpdate)
 
 	// Remote New-API inspector. Admin (supplier tier) can view profiles
