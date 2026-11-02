@@ -265,14 +265,12 @@ function Workspace(props: {
                 <Plus className='size-3.5' aria-hidden='true' />
                 {t('Add usage')}
               </Button>
-              {manager && (
-                <Button
-                  variant='outline'
-                  onClick={() => setTarget({ kind: 'recharge' })}
-                >
-                  {t('Record recharge')}
-                </Button>
-              )}
+              <Button
+                variant='outline'
+                onClick={() => setTarget({ kind: 'recharge' })}
+              >
+                {t('Record recharge')}
+              </Button>
             </>
           )}
           {page === 'suppliers' && (

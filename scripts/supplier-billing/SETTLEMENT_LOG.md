@@ -428,3 +428,10 @@ vs the sheet's same lines (289,752.04 U): system is **+705.11 U**:
 - Managers keep 结算, 供应商关系 and 供应商负责人与账号; the default page is 结算.
 - The 余额与付款明细 panel (recharge history with reversal, ledger, raw usage) moved under the single-supplier
   settlement sheet.
+- Deployed **rc.332** billing to dev; kept rc.332 + rc.331.
+
+## 2026-11-02 — rc.333: suppliers record their own recharges
+
+- `POST /api/recharges` is open to supplier logins for their own supplier only (other suppliers → 403).
+  `created_by` records the login. Reversals (`/api/recharges/{id}/reverse`) remain manager-only.
+- The settlement page shows 登记充值 to suppliers as well.

@@ -202,7 +202,8 @@ func TestServiceDatabaseMatrix(t *testing.T) {
 				assert.Equal(t, recharge.ID, retry.ID)
 				rechargeBody["amount"] = "2000"
 				assert.Equal(t, 409, manager.request(t, "POST", "/api/recharges", rechargeBody, nil).Code)
-				assert.Equal(t, 403, vendor.request(t, "POST", "/api/recharges", rechargeBody, nil).Code)
+				foreignRecharge := map[string]any{"supplier_id": other.ID, "date": today, "amount": "1000", "reference": "transfer-002", "idempotency_key": "recharge-002"}
+				assert.Equal(t, 403, vendor.request(t, "POST", "/api/recharges", foreignRecharge, nil).Code, "A supplier records recharges only for itself")
 				usageBody := map[string]any{"supplier_id": supplier.ID, "date": today, "usage_type": "Other usage", "description": "Supplier supplement", "quantity": "10", "unit": "items", "unit_price": "2", "currency": "USD", "discount": "0.88", "fx_rate": "7.2", "idempotency_key": "manual-001"}
 				usage := billingResponse[Usage](t, vendor.request(t, "POST", "/api/usage", usageBody, nil), 201)
 				assert.Equal(t, "126.720000", usage.Amount)
@@ -568,6 +569,10 @@ func TestServiceDatabaseMatrix(t *testing.T) {
 				sheetUser := User{Username: "sheet-supplier", PasswordHash: hash, Role: RoleSupplier, SupplierID: sheetSupplier.ID}
 				require.NoError(t, db.Create(&sheetUser).Error)
 				sheetClient := billingSessionClient(t, s, sheetUser)
+				ownRecharge := map[string]any{"supplier_id": sheetSupplier.ID, "date": "2024-01-02", "amount": "100", "reference": "supplier entered", "idempotency_key": "sheet-supplier-recharge"}
+				supplierRecharge := billingResponse[Recharge](t, sheetClient.request(t, "POST", "/api/recharges", ownRecharge, nil), 201)
+				assert.Equal(t, sheetUser.ID, supplierRecharge.CreatedBy, "The ledger records which login entered the recharge")
+				assert.Equal(t, 403, sheetClient.request(t, "POST", fmt.Sprintf("/api/recharges/%d/reverse", supplierRecharge.ID), map[string]string{"note": "undo"}, nil).Code, "Reversals stay with managers")
 				price["usage_type"], price["unit_price"] = "openai 号池", "4"
 				assert.Equal(t, 200, sheetClient.request(t, "POST", "/api/usage/price", price, nil).Code, "A supplier prices its own line")
 				var supplierPosting LedgerEntry

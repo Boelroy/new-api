@@ -925,8 +925,8 @@ describe('supplier billing workspace', () => {
     app()
     await screen.findByRole('button', { name: 'Add usage' })
     expect(
-      screen.queryByRole('button', { name: 'Record recharge' })
-    ).not.toBeInTheDocument()
+      screen.getByRole('button', { name: 'Record recharge' })
+    ).toBeInTheDocument()
     expect(
       screen.queryByRole('button', { name: 'Supplier heads and accounts' })
     ).not.toBeInTheDocument()
