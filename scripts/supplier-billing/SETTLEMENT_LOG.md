@@ -342,3 +342,76 @@ Sheet closing -59,870 → recomputed -63,734.92.
   keeps "¥…" in the description. Unpriced rows take the new unit/label on the next sync.
 - **Display**: money shows 2 decimals with the exact value in the tooltip, and the narrow symbol ($ instead of US$).
   The daily-usage supplier breakdown expands inline instead of opening a side panel.
+- Deployed **rc.330** to dev (report + billing). DB backup `backups/supplier_billing-before-rc330-20261102T144432Z.dump`;
+  compose backup `docker-compose.yml.bak-rc327-report`.
+  - Images cleaned; kept report rc.330 + rc.327 and billing rc.330 + rc.329. Removed report rc.322/323, billing rc.328
+    and the three host-built local billing images.
+- ccmax re-synced in USD (`list_usd`, FX 7.3). 10/28 104.55, 10/29 231.23, 10/30 418.95, 10/31 790.14.
+  Still does not match the sheet (e.g. 10/30 752.86).
+- Source 13 `皮皮 · yfqh 采购 (Alice key)`: report channels = Alice source 1's channels, gateway user 3, direction purchase.
+  - Synced 10/08–11/02: 701 rows. Priced 3.9 CNY ÷ 6.7.
+  - Per day it equals the sheet's 号池 shortfall **exactly**: 10/18 2,298.60, 10/19 4,393.87, 10/21 0.16, 10/22 5.56.
+    My earlier report_daily_agg day split (5,748.90 / 943.57) used a wrong hour→Beijing conversion; the billing import is right.
+  - Credit to 皮皮: 1,337.99 + 2,557.62 + 0.09 + 3.24 = **3,898.95 U**.
+- Local, not yet released: URL routing for the billing workspace (refresh keeps page/supplier/dates). 30/30 frontend tests pass.
+
+## 2026-11-02 — Priced 皮皮 lines per the sheet (dev)
+
+Prices set via `/api/usage/price` (CNY unit price ÷ rate):
+- 号池 3.9 (rate 6.71 on 10/08–10/09, 6.7 after), 10/08–11/01.
+- aws 5.2 (10/27–10/28) and 5.6 (10/29–11/01).
+- claude 官K 4.5 (11/01).
+- 七牛 3.8 (10/30–11/01).
+- Left unpriced: ccmax (measure unknown), 11/02 (in progress), legacy OpenRouter/aws crumbs outside the sheet.
+
+Result 10/08–11/01 (no payments or initial balance recorded yet): charges 290,457.16 U.
+vs the sheet's same lines (289,752.04 U): system is **+705.11 U**:
+- 七牛 +768.98: the sheet's 10/29–10/31 total 14,030.80 vs the system's 10/30–11/01 total 14,799.78; the day split differs.
+- 11/01 号池 −82.66 (sheet arithmetic error).
+- 10/27 aws +23.44 (44.23 vs 14.03 USD).
+- Rounding / small usage drift ≈ −4.6.
+- The yfqh purchase line (−3,898.95) exactly offsets the 10/18–10/22 号池 shortfall.
+
+## 2026-11-02 — 皮皮 sheet 10/01–10/07
+
+- Backfilled all 皮皮 sources to 10/01. New source 14 `Dev · 皮皮 · 补充渠道 (10/01–10/03)`: 62 dev-gateway channels
+  (heads ctf2026, lrm007, pipi, 皮皮), user 1, product line `openai 号池`.
+  - These channels were never bound by the initial connection; they only have usage 09/30–10/03.
+  - The first sync for 09/30–11/02 failed with "Report source response is incomplete or too large" (32 MB cap,
+    data-volume issue #2). 09/30–10/04 succeeded (1,799 rows).
+- Priced 10/01–10/07 at the sheet's rates (÷ 6.71): 号池 3.9, `AWS` (dev-gateway source 8, the sheet's
+  "aws 10月3日号池用量") 3.4, aws (82) 10/07 4.
+- Match: 号池 10/01 937.08 / 10/02 1,845.58 / 10/03 2,025.82 / 10/05 / 10/06; AWS 10/04 361.85; aws 10/07 108.29.
+  Differences: 10/04 号池 sheet 1,337.12 vs 1,328.12 (exactly 9.00 USD, likely a typo); 10/07 号池 −0.23.
+- Sheet carry-over error: the 10/01–10/07 sheet ends at **−1,528 U**, but the 10/08 sheet starts from **−3,056.14 U**
+  (= 2 × −1,528.07). The carried balance appears to be subtracted twice, overstating our debt by ~1,528 U.
+  Implied opening before 10/01: −158 + 544.66 = **+386.66 U**. Payment 10/03: 5,000 U.
+- ccmax priced at 2.5 ÷ 6.7 on `list_usd` (user approved), 10/28–11/01.
+  System U: 39.00 / 86.27 / 156.32 / 294.82 / 114.95 = **691.36 U**.
+  The sheet's ccmax total is 1,753.02 U, including 10/21–10/27 (1,130.49 U) that rongshan1/rangshan2 have no bills for.
+  Its daily values also differ: 10/28 135.16, 10/29 161.22, 10/30 280.92, 10/31 25.13, 11/01 20.10.
+- ccmax product line renamed to **腾讯 ccmax** (source 10 name/usage_type + 8 imported rows by SQL; no backup, per user). Amounts unchanged (691.39 USD-list rows).
+- **Correction:** the "carry-over error" was wrong. The sheet's row 147, "代付陈总号池欠款" (10,253.6 RMB ÷ 6.71 =
+  1,528.11 U), is a real charge: 皮皮 paid 陈总's pool debt on our behalf. The sheet's balance chain is consistent.
+  With the opening (+386.66 U), seven payments (245,000 U), the buyout (308.51 U) and this 代付 recorded, the system
+  closes around −59,508 U vs the sheet's −59,870 U. The ≈362 U gap is the itemized usage differences
+  (腾讯 ccmax, 七牛 split, 11/01 号池 arithmetic, 10/27 aws, 10/04 +9 USD).
+
+## 2026-11-02 — Recorded 皮皮 opening, payments and manual lines (dev)
+
+- Initial balance **+386.66 U** at 09/30 (from the sheet: 10/01 balance −158 + 544.66).
+- Recharges: 10/03 5,000; 10/12 15,000; 10/16 10,000; 10/29 50,000; 10/30 60,000; 10/31 100,000. Total 240,000 U
+  (the 245,000 quoted earlier was a mis-sum).
+- Manual lines (divide mode):
+  - 10/07 `代付` "代付陈总号池欠款": 10,253.6 CNY ÷ 6.71 = 1,528.11 U.
+  - 10/14 `买断`: 530 × 3.9 ÷ 6.7 = 308.51 U.
+- System closing on 11/01 is **−59,507.82 U** vs the sheet's −59,870 (+362.18).
+  Daily closings match within rounding (±0.6) until 10/24, apart from the +5.7 step on 10/04.
+  From 10/25 the steps are 腾讯 ccmax (10/21–10/28 sheet-only amounts and different daily values) and the 七牛 day split.
+
+## 2026-11-02 — rc.331: URL routing, inline price editing
+
+- The workspace keeps page, supplier head and dates in the URL.
+- Unit price and exchange rate are edited directly in the settlement sheet; the side-panel price form was removed.
+  - Saving happens on Enter or when focus leaves the row; moving between the row's two inputs does not save twice.
+  - Discount updates live; errors show in the row.

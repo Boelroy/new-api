@@ -2,7 +2,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 import { Fragment, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { Badge, Button, Card } from '../components/ui'
+import { Badge, Button, Card, Input } from '../components/ui'
 import {
   type InitialBalance,
   type Overview,
@@ -205,17 +205,67 @@ export function SettlementOverview(props: {
 export function SettlementSheet(props: {
   statement: Statement
   onInitial?: () => void
-  onPrice?: (line: StatementLine) => void
+  // Saves one product line's unit price and exchange rate for its day.
+  onSavePrice?: (
+    line: StatementLine,
+    unitPrice: string,
+    fxRate: string
+  ) => Promise<void>
   onClaim?: (line: StatementLine) => void
 }) {
   const { t } = useTranslation()
   const statement = props.statement
   const currency = statement.supplier.currency
   const lines = statement.lines ?? []
-  // Suppliers may price their own lines; claims stay with managers.
-  const actions = Boolean(props.onPrice || props.onClaim)
+  // Suppliers may price their own lines in place; claims stay with managers.
+  const actions = Boolean(props.onClaim)
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set())
   const columns = actions ? 12 : 11
+  const [drafts, setDrafts] = useState<
+    Record<number, { price: string; fx: string }>
+  >({})
+  const [saving, setSaving] = useState<number>()
+  const [rowErrors, setRowErrors] = useState<Record<number, string>>({})
+  const priceDraft = (index: number, line: StatementLine) => {
+    const priced =
+      line.settlement_status === 'settled' && line.rate_mode === 'divide'
+    return (
+      drafts[index] ?? {
+        price: priced ? line.unit_price : '',
+        fx: priced ? line.fx_rate : '',
+      }
+    )
+  }
+  const savePrice = async (index: number, line: StatementLine) => {
+    const draft = priceDraft(index, line)
+    const unchanged =
+      line.settlement_status === 'settled' &&
+      draft.price === line.unit_price &&
+      draft.fx === line.fx_rate
+    if (
+      !props.onSavePrice ||
+      saving !== undefined ||
+      unchanged ||
+      draft.price === '' ||
+      !(Number(draft.price) >= 0) ||
+      !(Number(draft.fx) > 0)
+    ) {
+      return
+    }
+    setSaving(index)
+    setRowErrors(({ [index]: _, ...rest }) => rest)
+    try {
+      await props.onSavePrice(line, draft.price, draft.fx)
+      setDrafts(({ [index]: _, ...rest }) => rest)
+    } catch (error) {
+      setRowErrors((current) => ({
+        ...current,
+        [index]: error instanceof Error ? error.message : 'Request failed',
+      }))
+    } finally {
+      setSaving(undefined)
+    }
+  }
   // An imported line groups many rows under one price; its detail is those
   // rows summed by model, tag or uploader (the row description).
   const lineDetails = (line: StatementLine) => {
@@ -309,6 +359,8 @@ export function SettlementSheet(props: {
             : '0'
           const open = expanded.has(index)
           const expandable = usage && line.origin === 'sync'
+          const editable = Boolean(props.onSavePrice) && expandable
+          const draft = priceDraft(index, line)
           const details = open ? lineDetails(line) : []
           return (
             <Fragment
@@ -371,10 +423,45 @@ export function SettlementSheet(props: {
                   )}
                 </td>
                 <td>
-                  {usage && !unpriced ? (
+                  {editable ? (
+                    <Input
+                      aria-label={t('Unit price')}
+                      data-price-row={index}
+                      className='h-7 w-20 text-xs'
+                      type='number'
+                      min='0'
+                      step='0.000001'
+                      placeholder='3.9'
+                      value={draft.price}
+                      disabled={saving === index}
+                      onChange={(event) =>
+                        setDrafts((current) => ({
+                          ...current,
+                          [index]: { ...draft, price: event.target.value },
+                        }))
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') void savePrice(index, line)
+                      }}
+                      onBlur={(event) => {
+                        if (
+                          event.relatedTarget?.getAttribute(
+                            'data-price-row'
+                          ) !== String(index)
+                        ) {
+                          void savePrice(index, line)
+                        }
+                      }}
+                    />
+                  ) : usage && !unpriced ? (
                     <Money value={line.unit_price} currency={line.currency} />
                   ) : (
                     '—'
+                  )}
+                  {rowErrors[index] && (
+                    <div role='alert' className='text-destructive mt-1 text-xs'>
+                      {t(rowErrors[index])}
+                    </div>
                   )}
                 </td>
                 <td>
@@ -388,14 +475,61 @@ export function SettlementSheet(props: {
                   )}
                 </td>
                 <td>
-                  {usage && !unpriced
-                    ? line.rate_mode === 'divide'
-                      ? `÷ ${line.fx_rate}`
-                      : `× ${line.fx_rate}`
-                    : '—'}
+                  {editable ? (
+                    <div className='flex items-center gap-1'>
+                      <span aria-hidden='true'>÷</span>
+                      <Input
+                        aria-label={t('Exchange rate')}
+                        data-price-row={index}
+                        className='h-7 w-16 text-xs'
+                        type='number'
+                        min='0.000001'
+                        step='0.000001'
+                        placeholder='6.7'
+                        value={draft.fx}
+                        disabled={saving === index}
+                        onChange={(event) =>
+                          setDrafts((current) => ({
+                            ...current,
+                            [index]: { ...draft, fx: event.target.value },
+                          }))
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') void savePrice(index, line)
+                        }}
+                        onBlur={(event) => {
+                          if (
+                            event.relatedTarget?.getAttribute(
+                              'data-price-row'
+                            ) !== String(index)
+                          ) {
+                            void savePrice(index, line)
+                          }
+                        }}
+                      />
+                    </div>
+                  ) : usage && !unpriced ? (
+                    line.rate_mode === 'divide' ? (
+                      `÷ ${line.fx_rate}`
+                    ) : (
+                      `× ${line.fx_rate}`
+                    )
+                  ) : (
+                    '—'
+                  )}
                 </td>
                 <td className='whitespace-nowrap'>
-                  {usage && !unpriced ? (
+                  {editable &&
+                  Number(draft.price) >= 0 &&
+                  Number(draft.fx) > 0 &&
+                  draft.price !== '' ? (
+                    <span title={t('Unit price ÷ exchange rate')}>
+                      {((Number(draft.price) / Number(draft.fx)) * 100).toFixed(
+                        2
+                      )}
+                      %
+                    </span>
+                  ) : usage && !unpriced ? (
                     <span title={t('Unit price ÷ exchange rate')}>
                       {(
                         ((Number(line.unit_price) *
@@ -456,11 +590,6 @@ export function SettlementSheet(props: {
                 {actions && (
                   <td>
                     <div className='flex gap-2'>
-                      {usage && line.origin === 'sync' && (
-                        <Button size='sm' onClick={() => props.onPrice?.(line)}>
-                          {t('Set price')}
-                        </Button>
-                      )}
                       {props.onClaim && (usage || line.kind === 'claim') && (
                         <Button
                           size='sm'

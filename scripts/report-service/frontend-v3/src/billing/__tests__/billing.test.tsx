@@ -137,6 +137,8 @@ function app() {
 }
 
 beforeEach(async () => {
+  // Routing state lives in the URL; each test starts on the default view.
+  window.history.replaceState(null, '', '/')
   setSession(null)
   localStorage.clear()
   await i18n.changeLanguage('en')
@@ -149,9 +151,51 @@ afterEach(() => {
 })
 
 describe('supplier billing workspace', () => {
+  it('restores page, supplier head and dates from the URL after a refresh', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/settlement?supplier=11&start=2026-10-01&end=2026-10-02'
+    )
+    const urls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        urls.push(url)
+        if (url === '/api/session') {
+          return response({
+            ...session,
+            user: { ...session.user, role: 'billing_manager', supplier_id: 0 },
+          })
+        }
+        if (url === '/api/suppliers') return response([supplier])
+        if (url.startsWith('/api/statement?')) return response(statement())
+        if (url.startsWith('/api/daily-summary?')) {
+          return response(dailySummary(supplier, '1.000000'))
+        }
+        throw new Error(`Unexpected URL: ${url}`)
+      })
+    )
+    const user = userEvent.setup()
+    app()
+    expect(
+      await screen.findByRole('heading', { name: 'Settlement' })
+    ).toBeInTheDocument()
+    await waitFor(() =>
+      expect(urls).toContain(
+        '/api/statement?supplier_id=11&start=2026-10-01&end=2026-10-02'
+      )
+    )
+    expect(screen.getByLabelText('Start date')).toHaveValue('2026-10-01')
+    await user.click(screen.getByRole('button', { name: 'Daily usage' }))
+    expect(window.location.pathname).toBe('/statement')
+    expect(window.location.search).toBe(
+      '?supplier=11&start=2026-10-01&end=2026-10-02'
+    )
+  })
   it('lets a supplier set its own price without manager-only claim actions', async () => {
     const usd: Supplier = { id: 21, name: '皮皮', currency: 'USD' }
-    const onPrice = vi.fn()
+    const onSavePrice = vi.fn(async () => {})
     render(
       <I18nextProvider i18n={i18n}>
         <SettlementSheet
@@ -182,7 +226,7 @@ describe('supplier billing workspace', () => {
               },
             ],
           }}
-          onPrice={onPrice}
+          onSavePrice={onSavePrice}
         />
       </I18nextProvider>
     )
@@ -190,10 +234,26 @@ describe('supplier billing workspace', () => {
     expect(
       within(row).queryByRole('button', { name: 'Supplier claim' })
     ).not.toBeInTheDocument()
-    await userEvent
-      .setup()
-      .click(within(row).getByRole('button', { name: 'Set price' }))
-    expect(onPrice).toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    const user = userEvent.setup()
+    await user.type(
+      within(row).getByRole('spinbutton', { name: 'Unit price' }),
+      '5.6'
+    )
+    await user.type(
+      within(row).getByRole('spinbutton', { name: 'Exchange rate' }),
+      '6.7'
+    )
+    expect(onSavePrice).not.toHaveBeenCalled()
+    expect(row).toHaveTextContent('83.58%')
+    await user.keyboard('{Enter}')
+    await waitFor(() =>
+      expect(onSavePrice).toHaveBeenCalledWith(
+        expect.objectContaining({ usage_type: 'aws' }),
+        '5.6',
+        '6.7'
+      )
+    )
   })
   it('breaks each supplier day into product lines in the settlement overview', () => {
     const usd: Supplier = { id: 21, name: '皮皮', currency: 'USD' }
@@ -427,20 +487,19 @@ describe('supplier billing workspace', () => {
         }),
       ],
     }
-    const onPrice = vi.fn()
+    const onSavePrice = vi.fn(async () => {})
     const user = userEvent.setup()
     render(
       <I18nextProvider i18n={i18n}>
         <SettlementSheet
           statement={sheet}
-          onPrice={onPrice}
+          onSavePrice={onSavePrice}
           onClaim={vi.fn()}
           onInitial={vi.fn()}
         />
       </I18nextProvider>
     )
     const pool = screen.getByRole('row', { name: /openai 号池/ })
-    expect(within(pool).getByText('÷ 6.7')).toBeInTheDocument()
     expect(within(pool).getByText(/58\.21/)).toBeInTheDocument()
     expect(within(pool).getByText('Matched')).toBeInTheDocument()
     expect(within(pool).getAllByText('$71.25').length).toBeGreaterThan(0)
@@ -461,53 +520,16 @@ describe('supplier billing workspace', () => {
     expect(
       screen.getAllByRole('row', { name: /gpt-4\.1/ }).length
     ).toBeGreaterThan(0)
-    await user.click(within(pool).getByRole('button', { name: 'Set price' }))
-    expect(onPrice).toHaveBeenCalledWith(sheet.lines?.[0])
-
-    const submitted: unknown[] = []
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (_url: string, init: RequestInit) => {
-        submitted.push(JSON.parse(String(init.body)))
-        return response({ ok: true, priced: 2 })
-      })
-    )
-    const onSaved = vi.fn()
-    render(
-      <I18nextProvider i18n={i18n}>
-        <EntryForm
-          target={{
-            kind: 'price',
-            line: line({ settlement_status: 'unpriced' }),
-          }}
-          supplier={usd}
-          suppliers={[usd]}
-          start='2026-10-30'
-          end='2026-10-30'
-          onClose={vi.fn()}
-          onSaved={onSaved}
-        />
-      </I18nextProvider>
-    )
-    await user.type(
-      screen.getByRole('spinbutton', { name: /Unit price/ }),
-      '3.9'
-    )
-    await user.type(
-      screen.getByRole('spinbutton', { name: /Exchange rate/ }),
-      '6.7'
-    )
-    expect(screen.getByRole('status')).toHaveTextContent('58.21%')
-    await user.click(screen.getByRole('button', { name: 'Submit' }))
-    await waitFor(() => expect(onSaved).toHaveBeenCalled())
-    expect(submitted[0]).toEqual({
-      supplier_id: 21,
-      date: '2026-10-30',
-      usage_type: 'openai 号池',
-      unit_price: '3.9',
-      currency: 'CNY',
-      fx_rate: '6.7',
+    const rate = within(pool).getByRole('spinbutton', {
+      name: 'Exchange rate',
     })
+    expect(rate).toHaveValue(6.7)
+    await user.clear(rate)
+    await user.type(rate, '6.71')
+    await user.tab()
+    await waitFor(() =>
+      expect(onSavePrice).toHaveBeenCalledWith(sheet.lines?.[0], '3.9', '6.71')
+    )
   })
   it('defaults to all heads and opens a day into head and supplier usage without financial tables', async () => {
     const second: Supplier = { id: 12, name: 'Supplier Beta', currency: 'USD' }

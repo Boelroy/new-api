@@ -32,7 +32,6 @@ export type FormKind =
   | 'sync'
   | 'reverse'
   | 'initial'
-  | 'price'
   | 'claim'
 export type FormTarget = {
   kind: FormKind
@@ -55,7 +54,6 @@ const titles: Record<FormKind, string> = {
   sync: 'Sync usage',
   reverse: 'Reverse recharge',
   initial: 'Set initial balance',
-  price: 'Set price',
   claim: 'Supplier claim',
 }
 
@@ -104,14 +102,6 @@ export default function EntryForm(props: {
     props.target.source?.exclude_selector ?? false
   )
   const formRef = useRef<HTMLFormElement>(null)
-  // The supplier sheet quotes a discount as unit price ÷ exchange rate.
-  const [priceDiscount, setPriceDiscount] = useState(() => {
-    const line = props.target.line
-    if (line?.settlement_status !== 'settled' || line.rate_mode !== 'divide') {
-      return ''
-    }
-    return ((Number(line.unit_price) / Number(line.fx_rate)) * 100).toFixed(2)
-  })
   const kind = props.target.kind
   const source = props.target.source
   let sourceDiscount = '100'
@@ -329,38 +319,6 @@ export default function EntryForm(props: {
       },
     ]
   }
-  const priced =
-    line?.settlement_status === 'settled' && line.rate_mode === 'divide'
-  if (kind === 'price') {
-    fields = [
-      {
-        name: 'unit_price',
-        label: 'Unit price',
-        type: 'number',
-        value: priced ? line.unit_price : undefined,
-        min: '0',
-        max: '1000000',
-        step: '0.000001',
-        hint: 'Original currency per 1 USD of usage',
-      },
-      {
-        name: 'currency',
-        label: 'Original currency',
-        value: priced ? line.currency : 'CNY',
-        hint: 'ISO currency code, for example CNY or USD',
-      },
-      {
-        name: 'fx_rate',
-        label: 'Exchange rate',
-        type: 'number',
-        value: priced ? line.fx_rate : undefined,
-        min: '0.000001',
-        max: '100000',
-        step: '0.000001',
-        hint: 'Original currency per 1 unit of settlement currency, for example 6.7 CNY per USD',
-      },
-    ]
-  }
   if (kind === 'claim') {
     fields = [
       {
@@ -465,14 +423,10 @@ export default function EntryForm(props: {
       method = 'PUT'
       data.revision = props.target.initial?.revision ?? 0
     }
-    if (kind === 'price' || kind === 'claim') {
+    if (kind === 'claim') {
       data.supplier_id = props.supplier?.id ?? 0
       data.date = line?.date ?? ''
       data.usage_type = line?.usage_type ?? ''
-    }
-    if (kind === 'price') {
-      path = '/usage/price'
-      data.currency = String(data.currency).toUpperCase()
     }
     if (kind === 'claim') {
       path = '/claims'
@@ -519,15 +473,6 @@ export default function EntryForm(props: {
         id='billing-entry'
         ref={formRef}
         onSubmit={submit}
-        onChange={(event) => {
-          if (kind !== 'price') return
-          const values = new FormData(event.currentTarget)
-          const price = Number(values.get('unit_price'))
-          const rate = Number(values.get('fx_rate'))
-          setPriceDiscount(
-            price > 0 && rate > 0 ? ((price / rate) * 100).toFixed(2) : ''
-          )
-        }}
         className='space-y-5'
       >
         {props.supplier &&
@@ -557,21 +502,9 @@ export default function EntryForm(props: {
             {props.target.recharge?.reference}
           </p>
         )}
-        {line && (kind === 'price' || kind === 'claim') && (
+        {line && kind === 'claim' && (
           <p className='text-sm'>
             {line.date} · <strong>{line.usage_type}</strong>
-          </p>
-        )}
-        {kind === 'price' && (
-          <p className='text-sm' role='status'>
-            {t('Discount')}: {priceDiscount ? `${priceDiscount}%` : '—'}
-          </p>
-        )}
-        {kind === 'price' && (
-          <p className='text-muted-foreground text-sm'>
-            {t(
-              'Applies to all imported usage of this product line and day. A changed price posts a correction and keeps the earlier charge.'
-            )}
           </p>
         )}
         {kind === 'initial' && props.target.initial && (

@@ -2,6 +2,12 @@ import { Collapsible } from '@base-ui/react/collapsible'
 import { Plus, RefreshCw } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import {
+  BrowserRouter,
+  useLocation,
+  useNavigate,
+  useSearchParams,
+} from 'react-router-dom'
 
 import { Badge, Button, Card, Input, Select } from '../components/ui'
 import {
@@ -112,25 +118,59 @@ export default function App() {
     updateSession(value)
   }
   if (!session) return <Login onLogin={acceptSession} />
+  // The router owns only this deployment's prefix; outside it (for example a
+  // misconfigured proxy) the workspace still renders from the site root.
+  const prefix = import.meta.env.BASE_URL.replace(/\/+$/, '')
+  const basename = window.location.pathname.startsWith(prefix) ? prefix : ''
   return (
-    <Workspace
-      key={session.user.id}
-      session={session}
-      onSession={acceptSession}
-    />
+    <BrowserRouter basename={basename}>
+      <Workspace
+        key={session.user.id}
+        session={session}
+        onSession={acceptSession}
+      />
+    </BrowserRouter>
   )
 }
+
+const pages: Page[] = ['statement', 'settlement', 'sources', 'suppliers']
+const datePattern = /^\d{4}-\d{2}-\d{2}$/
 
 function Workspace(props: {
   session: Session
   onSession: (session: Session | null) => void
 }) {
   const { t } = useTranslation()
-  const [page, setPage] = useState<Page>('statement')
-  const [selected, setSelected] = useState(0)
+  // Page, supplier head and dates live in the URL, so a refresh, bookmark or
+  // back/forward returns to the same view.
+  const location = useLocation()
+  const navigate = useNavigate()
+  const [params, setParams] = useSearchParams()
+  const routed = location.pathname.replace(/^\/+/, '').split('/')[0] as Page
+  const page: Page = pages.includes(routed) ? routed : 'statement'
+  const selected = Number(params.get('supplier')) || 0
+  const routedStart = params.get('start') ?? ''
+  const routedEnd = params.get('end') ?? ''
+  const start = datePattern.test(routedStart)
+    ? routedStart
+    : `${billingDate().slice(0, 7)}-01`
+  const end = datePattern.test(routedEnd) ? routedEnd : billingDate()
+  const setParam = (key: string, value: string) =>
+    setParams(
+      (current) => {
+        const next = new URLSearchParams(current)
+        if (value) next.set(key, value)
+        else next.delete(key)
+        return next
+      },
+      { replace: true }
+    )
+  const setPage = (next: Page) =>
+    navigate({ pathname: `/${next}`, search: location.search })
+  const setSelected = (id: number) => setParam('supplier', id ? String(id) : '')
+  const setStart = (value: string) => setParam('start', value)
+  const setEnd = (value: string) => setParam('end', value)
   const [version, setVersion] = useState(0)
-  const [start, setStart] = useState(() => `${billingDate().slice(0, 7)}-01`)
-  const [end, setEnd] = useState(() => billingDate())
   const [target, setTarget] = useState<FormTarget>()
   const [error, setError] = useState('')
   const [logoutBusy, setLogoutBusy] = useState(false)
@@ -408,7 +448,23 @@ function Workspace(props: {
                       })
                   : undefined
               }
-              onPrice={(line) => setTarget({ kind: 'price', line })}
+              onSavePrice={async (line, unitPrice, fxRate) => {
+                await request('/usage/price', {
+                  method: 'POST',
+                  body: {
+                    supplier_id: supplier.id,
+                    date: line.date,
+                    usage_type: line.usage_type,
+                    unit_price: unitPrice,
+                    currency:
+                      line.settlement_status === 'settled'
+                        ? line.currency
+                        : 'CNY',
+                    fx_rate: fxRate,
+                  },
+                })
+                refresh()
+              }}
               onClaim={
                 manager
                   ? (line) => setTarget({ kind: 'claim', line })
