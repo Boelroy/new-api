@@ -1,0 +1,35 @@
+name: supplier-billing
+
+services:
+  supplier-billing:
+    image: ${BILLING_IMAGE:?Set the supplier billing image tag}
+    container_name: newapi-supplier-billing
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      BILLING_LISTEN: 0.0.0.0:8092
+      BILLING_FRONTEND_DIR: /app/frontend
+    ports:
+      - "127.0.0.1:8092:8092"
+    networks:
+      - newapi-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8092/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    stop_grace_period: 60s
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  newapi-network:
+    external: true
+    name: ${BILLING_DOCKER_NETWORK:-newapi_newapi-network}
