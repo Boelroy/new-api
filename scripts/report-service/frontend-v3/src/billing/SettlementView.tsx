@@ -231,13 +231,39 @@ export function SettlementSheet(props: {
     fxRate: string
   ) => Promise<void>
   onClaim?: (line: StatementLine) => void
+  // Deletes a manual line or recharge; offered to its entrant and managers.
+  onDelete?: (line: StatementLine) => Promise<void>
+  userID?: number
+  manager?: boolean
 }) {
   const { t } = useTranslation()
   const statement = props.statement
   const currency = statement.supplier.currency
   const lines = statement.lines ?? []
   // Suppliers may price their own lines in place; claims stay with managers.
-  const actions = Boolean(props.onClaim)
+  const actions = Boolean(props.onClaim || props.onDelete)
+  const [confirming, setConfirming] = useState<number>()
+  const [deleting, setDeleting] = useState(false)
+  const deletable = (line: StatementLine) =>
+    Boolean(props.onDelete) &&
+    ((line.kind === 'usage' && line.origin === 'manual' && line.usage_id > 0) ||
+      (line.kind === 'recharge' && line.recharge_id > 0)) &&
+    (props.manager || line.created_by === props.userID)
+  const removeLine = async (index: number, line: StatementLine) => {
+    setDeleting(true)
+    setRowErrors(({ [index]: _, ...rest }) => rest)
+    try {
+      await props.onDelete?.(line)
+      setConfirming(undefined)
+    } catch (error) {
+      setRowErrors((current) => ({
+        ...current,
+        [index]: error instanceof Error ? error.message : 'Request failed',
+      }))
+    } finally {
+      setDeleting(false)
+    }
+  }
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set())
   const columns = actions ? 12 : 11
   const [drafts, setDrafts] = useState<
@@ -606,6 +632,35 @@ export function SettlementSheet(props: {
                 {actions && (
                   <td>
                     <div className='flex gap-2'>
+                      {deletable(line) && confirming !== index && (
+                        <Button
+                          size='sm'
+                          variant='ghost'
+                          onClick={() => setConfirming(index)}
+                        >
+                          {t('Delete')}
+                        </Button>
+                      )}
+                      {deletable(line) && confirming === index && (
+                        <>
+                          <Button
+                            size='sm'
+                            variant='danger'
+                            disabled={deleting}
+                            onClick={() => void removeLine(index, line)}
+                          >
+                            {t('Confirm delete')}
+                          </Button>
+                          <Button
+                            size='sm'
+                            variant='ghost'
+                            disabled={deleting}
+                            onClick={() => setConfirming(undefined)}
+                          >
+                            {t('Cancel')}
+                          </Button>
+                        </>
+                      )}
                       {props.onClaim && (usage || line.kind === 'claim') && (
                         <Button
                           size='sm'
@@ -616,6 +671,14 @@ export function SettlementSheet(props: {
                         </Button>
                       )}
                     </div>
+                    {!editable && rowErrors[index] && (
+                      <div
+                        role='alert'
+                        className='text-destructive mt-1 text-xs'
+                      >
+                        {t(rowErrors[index])}
+                      </div>
+                    )}
                   </td>
                 )}
               </tr>

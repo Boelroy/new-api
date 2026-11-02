@@ -386,6 +386,17 @@ function Workspace(props: {
                       })
                   : undefined
               }
+              userID={props.session.user.id}
+              manager={manager}
+              onDelete={async (line) => {
+                await request(
+                  line.kind === 'recharge'
+                    ? `/recharges/${line.recharge_id}`
+                    : `/usage/${line.usage_id}`,
+                  { method: 'DELETE' }
+                )
+                refresh()
+              }}
               onSavePrice={async (line, unitPrice, fxRate) => {
                 await request('/usage/price', {
                   method: 'POST',

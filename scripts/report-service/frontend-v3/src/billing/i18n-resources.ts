@@ -227,6 +227,8 @@ export const resources = {
       'Purchased usage credits the supplier balance. Use a gateway user ID to separate it from the channel owner.': 'Purchased usage credits the supplier balance. Use a gateway user ID to separate it from the channel owner.',
       'Discount': 'Discount',
       'Unit price ÷ exchange rate': 'Unit price ÷ exchange rate',
+      'Delete': 'Delete',
+      'Confirm delete': 'Confirm delete',
     },
   },
   zh: {
@@ -452,6 +454,8 @@ export const resources = {
       'Purchased usage credits the supplier balance. Use a gateway user ID to separate it from the channel owner.': '采购的用量会增加供应商余额。请填写网关用户 ID，与渠道所属供应商区分开。',
       'Discount': '折扣',
       'Unit price ÷ exchange rate': '单价 ÷ 汇率',
+      'Delete': '删除',
+      'Confirm delete': '确认删除',
     },
   },
   'zh-TW': {
@@ -677,6 +681,8 @@ export const resources = {
       'Purchased usage credits the supplier balance. Use a gateway user ID to separate it from the channel owner.': '採購的用量會增加供應商餘額。請填寫閘道使用者 ID，與渠道所屬供應商區分開。',
       'Discount': '折扣',
       'Unit price ÷ exchange rate': '單價 ÷ 匯率',
+      'Delete': '刪除',
+      'Confirm delete': '確認刪除',
     },
   },
   fr: {
@@ -906,6 +912,8 @@ export const resources = {
       'Purchased usage credits the supplier balance. Use a gateway user ID to separate it from the channel owner.': 'La consommation achetée crédite le solde du fournisseur. Indiquez un ID utilisateur de la passerelle pour la distinguer du propriétaire du canal.',
       'Discount': 'Remise',
       'Unit price ÷ exchange rate': 'Prix unitaire ÷ taux de change',
+      'Delete': 'Supprimer',
+      'Confirm delete': 'Confirmer la suppression',
     },
   },
   ja: {
@@ -1133,6 +1141,8 @@ export const resources = {
       'Purchased usage credits the supplier balance. Use a gateway user ID to separate it from the channel owner.': '購入分は仕入先の残高に加算されます。ゲートウェイのユーザー ID を指定してチャネル所有者と区別してください。',
       'Discount': '割引率',
       'Unit price ÷ exchange rate': '単価 ÷ 為替レート',
+      'Delete': '削除',
+      'Confirm delete': '削除を確定',
     },
   },
   ru: {
@@ -1361,6 +1371,8 @@ export const resources = {
       'Purchased usage credits the supplier balance. Use a gateway user ID to separate it from the channel owner.': 'Купленное потребление пополняет баланс поставщика. Укажите ID пользователя шлюза, чтобы отделить его от владельца канала.',
       'Discount': 'Скидка',
       'Unit price ÷ exchange rate': 'Цена ÷ курс',
+      'Delete': 'Удалить',
+      'Confirm delete': 'Подтвердить удаление',
     },
   },
   vi: {
@@ -1591,6 +1603,8 @@ export const resources = {
       'Purchased usage credits the supplier balance. Use a gateway user ID to separate it from the channel owner.': 'Lượng dùng được mua sẽ cộng vào số dư nhà cung cấp. Hãy nhập ID người dùng cổng để tách khỏi chủ kênh.',
       'Discount': 'Chiết khấu',
       'Unit price ÷ exchange rate': 'Đơn giá ÷ tỷ giá',
+      'Delete': 'Xóa',
+      'Confirm delete': 'Xác nhận xóa',
     },
   },
 }

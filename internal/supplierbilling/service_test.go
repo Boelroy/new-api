@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -573,6 +574,41 @@ func TestServiceDatabaseMatrix(t *testing.T) {
 				supplierRecharge := billingResponse[Recharge](t, sheetClient.request(t, "POST", "/api/recharges", ownRecharge, nil), 201)
 				assert.Equal(t, sheetUser.ID, supplierRecharge.CreatedBy, "The ledger records which login entered the recharge")
 				assert.Equal(t, 403, sheetClient.request(t, "POST", fmt.Sprintf("/api/recharges/%d/reverse", supplierRecharge.ID), map[string]string{"note": "undo"}, nil).Code, "Reversals stay with managers")
+				// Items a supplier entered can be deleted by that login; the ledger
+				// keeps the original posting and a cancelling one on the same date.
+				type deletionStatement struct {
+					Balance string          `json:"balance"`
+					Lines   []StatementLine `json:"lines"`
+					Ledger  []LedgerEntry   `json:"ledger"`
+				}
+				deletionURL := fmt.Sprintf("/api/statement?supplier_id=%d&start=2024-01-02&end=2024-01-02", sheetSupplier.ID)
+				before := billingResponse[deletionStatement](t, sheetClient.request(t, "GET", deletionURL, nil, nil), 200)
+				extra := billingResponse[Usage](t, sheetClient.request(t, "POST", "/api/usage", map[string]any{"supplier_id": sheetSupplier.ID, "date": "2024-01-02", "usage_type": "补录", "description": "typo", "quantity": "10", "unit": "USD", "unit_price": "6.7", "currency": "CNY", "discount": "1", "fx_rate": "6.7", "rate_mode": "divide", "idempotency_key": "sheet-supplier-extra"}, nil), 201)
+				assert.Equal(t, 404, vendor.request(t, "DELETE", fmt.Sprintf("/api/usage/%d", extra.ID), nil, nil).Code, "Another supplier cannot see the item")
+				assert.Equal(t, 200, sheetClient.request(t, "DELETE", fmt.Sprintf("/api/usage/%d", extra.ID), nil, nil).Code)
+				assert.Equal(t, 200, sheetClient.request(t, "DELETE", fmt.Sprintf("/api/usage/%d", extra.ID), nil, nil).Code, "Deleting twice posts nothing more")
+				assert.Equal(t, 200, sheetClient.request(t, "DELETE", fmt.Sprintf("/api/recharges/%d", supplierRecharge.ID), nil, nil).Code)
+				assert.Equal(t, 409, sheetClient.request(t, "DELETE", fmt.Sprintf("/api/recharges/%d", supplierRecharge.ID), nil, nil).Code)
+				var managerManual Usage
+				require.NoError(t, db.Where("supplier_id = ? AND usage_type = ?", sheetSupplier.ID, "ccmax").First(&managerManual).Error)
+				assert.Equal(t, 403, sheetClient.request(t, "DELETE", fmt.Sprintf("/api/usage/%d", managerManual.ID), nil, nil).Code, "Items entered by others stay")
+				var syncedRow Usage
+				require.NoError(t, db.Where("supplier_id = ? AND origin = ?", sheetSupplier.ID, "sync").First(&syncedRow).Error)
+				assert.Equal(t, 400, manager.request(t, "DELETE", fmt.Sprintf("/api/usage/%d", syncedRow.ID), nil, nil).Code, "Imported usage cannot be deleted")
+				after := billingResponse[deletionStatement](t, sheetClient.request(t, "GET", deletionURL, nil, nil), 200)
+				expectedBalance := decimal.RequireFromString(before.Balance).Sub(decimal.RequireFromString("100")).StringFixed(6)
+				assert.Equal(t, expectedBalance, after.Balance, "Deleting restores the balance without the recharge and the item")
+				assert.Equal(t, after.Balance, after.Lines[len(after.Lines)-1].Balance)
+				for _, line := range after.Lines {
+					assert.NotEqual(t, "补录", line.UsageType)
+					assert.NotEqual(t, supplierRecharge.ID, line.RechargeID)
+				}
+				kinds := map[string]int{}
+				for _, entry := range after.Ledger {
+					kinds[entry.Kind]++
+				}
+				assert.Equal(t, 1, kinds["usage_deletion"])
+				assert.Equal(t, 1, kinds["recharge_deletion"])
 				price["usage_type"], price["unit_price"] = "openai 号池", "4"
 				assert.Equal(t, 200, sheetClient.request(t, "POST", "/api/usage/price", price, nil).Code, "A supplier prices its own line")
 				var supplierPosting LedgerEntry

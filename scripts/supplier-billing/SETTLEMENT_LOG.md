@@ -444,3 +444,16 @@ vs the sheet's same lines (289,752.04 U): system is **+705.11 U**:
 - Sessions: idle and absolute lifetime **60 days** (was 30 min / 12 h), at the user's request.
   - Recorded as a risk decision in README (ASVS 5.0 7.3.1/7.3.2) with compensating controls.
   - Tests cover expiry beyond 60 days idle, a 30-day-idle session staying valid, and the cookie expiry.
+- Deployed **rc.334** billing to dev; kept rc.334 + rc.333.
+
+## 2026-11-02 — rc.335: entrants delete their own manual items
+
+- `DELETE /api/usage/{id}` (manual rows only) and `DELETE /api/recharges/{id}` are open to the login that entered
+  the item and to managers. Others get 403; another supplier gets 404; imported usage gets 400.
+- The ledger stays append-only:
+  - a deleted usage row gets `settlement_status=deleted` plus a `usage_deletion` posting of its amount;
+  - a deleted recharge gets `reversed=true` plus a `recharge_deletion` posting.
+  - Both postings use the original date.
+- The settlement sheet hides deleted items and their postings; the ledger tab keeps both.
+  Manager-only reversal of returned funds (dated today) is unchanged.
+- UI: a 删除 button on the entrant's own manual and recharge lines, with an inline 确认删除 / 取消 step (no dialog).

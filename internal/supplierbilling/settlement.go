@@ -36,6 +36,8 @@ type StatementLine struct {
 	Balance          string `json:"balance"`
 	Note             string `json:"note"`
 	RechargeID       int64  `json:"recharge_id"`
+	UsageID          int64  `json:"usage_id"`
+	CreatedBy        int64  `json:"created_by"`
 	Claim            *Claim `json:"claim"`
 }
 
@@ -126,6 +128,9 @@ func (s *Server) buildStatement(supplier Supplier, start, end time.Time, details
 	productOrder := map[string][]productKey{}
 	productRequests := map[productKey]int64{}
 	for _, item := range usage {
+		if item.SettlementStatus == "deleted" {
+			continue
+		}
 		quantity, quantityErr := decimal.NewFromString(item.Quantity)
 		amount, amountErr := decimal.NewFromString(item.Amount)
 		if quantityErr != nil || amountErr != nil {
@@ -176,7 +181,7 @@ func (s *Server) buildStatement(supplier Supplier, start, end time.Time, details
 		}
 		visibleEntries = append(visibleEntries, entry)
 		switch entry.Kind {
-		case "recharge", "recharge_reversal":
+		case "recharge", "recharge_reversal", "recharge_deletion":
 			totalRecharges = totalRecharges.Add(amount)
 			dayRecharges[entry.Date] = dayRecharges[entry.Date].Add(amount)
 		case "initial_balance", "initial_balance_reversal":
@@ -235,6 +240,11 @@ func settlementLines(usage []Usage, entries []LedgerEntry, claims []Claim, openi
 	totals := []lineTotals{}
 	index := map[statementLineKey]int{}
 	for _, item := range usage {
+		// A deleted manual item and its deletion posting cancel out; the
+		// ledger keeps both, the settlement sheet shows neither.
+		if item.SettlementStatus == "deleted" {
+			continue
+		}
 		key := statementLineKey{direction: item.Direction, date: item.Date, usageType: item.UsageType, unit: item.Unit, unitPrice: item.UnitPrice, currency: item.Currency, discount: item.Discount, fxRate: item.FxRate, rateMode: item.RateMode, status: item.SettlementStatus}
 		if item.Origin != "sync" {
 			key.manualID = item.ID
@@ -246,6 +256,7 @@ func settlementLines(usage []Usage, entries []LedgerEntry, claims []Claim, openi
 			lines = append(lines, StatementLine{Direction: item.Direction, Date: item.Date, Kind: "usage", UsageType: item.UsageType, Origin: item.Origin, Unit: item.Unit, UnitPrice: item.UnitPrice, Currency: item.Currency, Discount: item.Discount, FxRate: item.FxRate, RateMode: item.RateMode, SettlementStatus: item.SettlementStatus})
 			if item.Origin != "sync" {
 				lines[position].Description = item.Description
+				lines[position].UsageID, lines[position].CreatedBy = item.ID, item.CreatedBy
 			}
 			totals = append(totals, lineTotals{})
 		}
@@ -292,11 +303,17 @@ func settlementLines(usage []Usage, entries []LedgerEntry, claims []Claim, openi
 			lines = append(lines, StatementLine{Date: claim.Date, Kind: "claim", UsageType: claim.UsageType, Change: "0.000000", Claim: claim})
 		}
 	}
+	deletedRecharges := map[int64]bool{}
 	for _, entry := range entries {
-		if entry.Kind == "usage" || entry.Kind == "usage_adjustment" || entry.Kind == "adjustment" {
+		if entry.Kind == "recharge_deletion" {
+			deletedRecharges[entry.RechargeID] = true
+		}
+	}
+	for _, entry := range entries {
+		if entry.Kind == "usage" || entry.Kind == "usage_adjustment" || entry.Kind == "adjustment" || entry.Kind == "usage_deletion" || deletedRecharges[entry.RechargeID] {
 			continue
 		}
-		lines = append(lines, StatementLine{Date: entry.Date, Kind: entry.Kind, Change: entry.Amount, Note: entry.Note, RechargeID: entry.RechargeID})
+		lines = append(lines, StatementLine{Date: entry.Date, Kind: entry.Kind, Change: entry.Amount, Note: entry.Note, RechargeID: entry.RechargeID, CreatedBy: entry.CreatedBy})
 	}
 	slices.SortStableFunc(lines, func(a, b StatementLine) int {
 		if order := strings.Compare(a.Date, b.Date); order != 0 {
@@ -598,4 +615,101 @@ func (s *Server) priceUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.write(w, 200, map[string]any{"ok": true, "priced": priced})
+}
+
+// deletableBy reports whether a user may delete an item they entered. Managers
+// may delete any manual item; suppliers only items they entered themselves.
+func deletableBy(user User, supplierID, createdBy int64) bool {
+	if user.Role == RoleManager {
+		return true
+	}
+	return user.SupplierID == supplierID && createdBy == user.ID
+}
+
+// deleteUsage removes a manually entered usage item from the statement. The
+// ledger is append-only: a usage_deletion posting of the stored amount cancels
+// the original charge (or credit) on the same date.
+func (s *Server) deleteUsage(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		s.fail(w, 400, "Invalid usage item")
+		return
+	}
+	var row Usage
+	if err := s.DB.First(&row, id).Error; err != nil {
+		s.fail(w, 404, "Usage item not found")
+		return
+	}
+	user := currentUser(r)
+	if user.Role == RoleSupplier && row.SupplierID != user.SupplierID {
+		s.fail(w, 404, "Usage item not found")
+		return
+	}
+	if row.Origin != "manual" {
+		s.fail(w, 400, "Only manually entered items can be deleted")
+		return
+	}
+	if !deletableBy(user, row.SupplierID, row.CreatedBy) {
+		s.fail(w, 403, "Only the person who entered this item can delete it")
+		return
+	}
+	err = s.DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&Usage{}).Where("id = ? AND settlement_status <> ?", row.ID, "deleted").Update("settlement_status", "deleted")
+		if result.Error != nil || result.RowsAffected == 0 {
+			return result.Error
+		}
+		return tx.Create(&LedgerEntry{SupplierID: row.SupplierID, Date: row.Date, Kind: "usage_deletion", Amount: row.Amount, UsageID: row.ID, Note: "Deleted by entrant", CreatedBy: user.ID, CreatedAt: time.Now().Unix()}).Error
+	})
+	if err != nil {
+		s.fail(w, 500, "Database operation failed")
+		return
+	}
+	s.write(w, 200, map[string]bool{"ok": true})
+}
+
+// deleteRecharge removes a recharge entered by mistake. Unlike a reversal of
+// returned funds (dated today), the deletion posting keeps the recharge date.
+func (s *Server) deleteRecharge(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		s.fail(w, 400, "Invalid recharge")
+		return
+	}
+	var row Recharge
+	if err := s.DB.First(&row, id).Error; err != nil {
+		s.fail(w, 404, "Recharge not found")
+		return
+	}
+	user := currentUser(r)
+	if user.Role == RoleSupplier && row.SupplierID != user.SupplierID {
+		s.fail(w, 404, "Recharge not found")
+		return
+	}
+	if !deletableBy(user, row.SupplierID, row.CreatedBy) {
+		s.fail(w, 403, "Only the person who entered this item can delete it")
+		return
+	}
+	err = s.DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&Recharge{}).Where("id = ? AND reversed = ?", row.ID, false).Update("reversed", true)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return errConflict
+		}
+		amount, err := decimal.NewFromString(row.Amount)
+		if err != nil {
+			return err
+		}
+		return tx.Create(&LedgerEntry{SupplierID: row.SupplierID, Date: row.Date, Kind: "recharge_deletion", Amount: amount.Neg().StringFixed(6), RechargeID: row.ID, Note: "Deleted by entrant", CreatedBy: user.ID, CreatedAt: time.Now().Unix()}).Error
+	})
+	if errors.Is(err, errConflict) {
+		s.fail(w, 409, "This recharge was already reversed or deleted")
+		return
+	}
+	if err != nil {
+		s.fail(w, 500, "Database operation failed")
+		return
+	}
+	s.write(w, 200, map[string]bool{"ok": true})
 }

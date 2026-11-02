@@ -151,6 +151,71 @@ afterEach(() => {
 })
 
 describe('supplier billing workspace', () => {
+  it('lets the entrant delete their own manual line after an inline confirmation', async () => {
+    const usd: Supplier = { id: 21, name: '皮皮', currency: 'USD' }
+    const base = {
+      description: '',
+      quantity: '1.000000',
+      unit: 'CNY',
+      unit_price: '1',
+      currency: 'CNY',
+      discount: '1',
+      fx_rate: '6.71',
+      rate_mode: 'divide',
+      settlement_status: 'settled',
+      direction: 'expense',
+      original_amount: '0.000000',
+      note: '',
+      claim: null,
+    }
+    const own: StatementLine = {
+      ...base,
+      date: '2026-10-07',
+      kind: 'usage',
+      usage_type: '代付',
+      origin: 'manual',
+      change: '-1528.107303',
+      balance: '-1528.107303',
+      recharge_id: 0,
+      usage_id: 41,
+      created_by: 3,
+    }
+    const others: StatementLine = {
+      ...base,
+      date: '2026-10-08',
+      kind: 'recharge',
+      usage_type: '',
+      origin: '',
+      change: '5000.000000',
+      balance: '3471.892697',
+      recharge_id: 7,
+      usage_id: 0,
+      created_by: 1,
+    }
+    const onDelete = vi.fn(async () => {})
+    render(
+      <I18nextProvider i18n={i18n}>
+        <SettlementSheet
+          statement={{ ...statement(usd, '3471.892697'), lines: [own, others] }}
+          onDelete={onDelete}
+          userID={3}
+        />
+      </I18nextProvider>
+    )
+    const recharge = screen.getByRole('row', { name: /Recharge/ })
+    expect(
+      within(recharge).queryByRole('button', { name: 'Delete' })
+    ).not.toBeInTheDocument()
+    const manual = screen.getByRole('row', { name: /代付/ })
+    const user = userEvent.setup()
+    await user.click(within(manual).getByRole('button', { name: 'Delete' }))
+    expect(onDelete).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    await user.click(
+      within(manual).getByRole('button', { name: 'Confirm delete' })
+    )
+    await waitFor(() => expect(onDelete).toHaveBeenCalledWith(own))
+  })
   it('gives a supplier login only its own settlement page', async () => {
     window.history.replaceState(null, '', '/sources')
     const urls: string[] = []
@@ -254,6 +319,8 @@ describe('supplier billing workspace', () => {
                 balance: '0.000000',
                 note: '',
                 recharge_id: 0,
+                usage_id: 0,
+                created_by: 0,
                 claim: null,
               },
             ],
@@ -462,6 +529,8 @@ describe('supplier billing workspace', () => {
       balance: '39162.967815',
       note: '',
       recharge_id: 0,
+      usage_id: 0,
+      created_by: 0,
       claim: null,
       ...value,
     })

@@ -165,6 +165,9 @@ export type StatementLine = {
   balance: string
   note: string
   recharge_id: number
+  // Manual lines and recharges carry their id and the login that entered them.
+  usage_id: number
+  created_by: number
   claim: Claim | null
 }
 export type Statement = {
