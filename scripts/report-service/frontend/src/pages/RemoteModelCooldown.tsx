@@ -278,7 +278,7 @@ export default function RemoteModelCooldown() {
   return (
     <Layout
       title="模型限流冷却"
-      subtitle="本地/远程渠道出现「Rate limit reached」429 时,把该模型从该渠道下线,按 TPM/RPM 限额冷却后自动加回"
+      subtitle="本地/远程渠道出现「Rate limit reached」或 Bedrock ThrottlingException 429 时,把该模型从该渠道下线,按 TPM/RPM 限额冷却后自动加回"
     >
       <div className="space-y-4">
         <CooldownConfigCard scope="local" profiles={profiles} onRan={refresh} />

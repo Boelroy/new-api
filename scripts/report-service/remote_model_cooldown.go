@@ -5,12 +5,14 @@ package main
 // A leader-gated loop over the remote_error_log mirror (filled every 60s by
 // startRemoteErrorLogSync). When a remote channel keeps failing a model with
 // an OpenAI-style "Rate limit reached for <model> ... (TPM): Limit L, Used U,
-// Requested R" 429, the model is stripped from that channel's models list so
-// the remote stops routing it there, and re-added once a cooldown elapses.
+// Requested R" 429 (or an AWS Bedrock "ThrottlingException"), the model is
+// stripped from that channel's models list so the remote stops routing it
+// there, and re-added once a cooldown elapses.
 //
 // The cooldown follows the reported limit: one limit window (60s for per-min
 // limits) plus the time the overflow needs to drain at the limit's rate, never
-// below min_cooldown nor below the upstream's own "try again in". A channel
+// below min_cooldown nor below the upstream's own "try again in". Bedrock
+// throttling reports no limit, so it gets one minute window / min_cooldown. A channel
 // that trips again within escalate_window of its last restore doubles its
 // cooldown, capped at max_cooldown (per-day limits cap at 24h instead).
 //
@@ -222,11 +224,17 @@ type rateLimitInfo struct {
 }
 
 // parseRateLimit extracts the limit details from an upstream 429 message.
-// ok is false when the text is not a "Rate limit reached for ..." error —
-// "Request too large", quota exhaustion and account bans all fall out here.
+// ok is false when the text is neither a "Rate limit reached for ..." error
+// nor a Bedrock ThrottlingException — "Request too large", quota exhaustion
+// and account bans all fall out here.
 func parseRateLimit(msg string) (info rateLimitInfo, ok bool) {
 	m := rateLimitHeadRe.FindStringSubmatch(msg)
 	if m == nil {
+		// Bedrock says only "Too many requests/tokens, please wait"; no limit,
+		// no retry hint, so the cooldown falls back to window / min_cooldown.
+		if strings.Contains(msg, "ThrottlingException") {
+			return rateLimitInfo{Unit: "Bedrock throttling", Window: time.Minute}, true
+		}
 		return info, false
 	}
 	info.Model = m[1]
@@ -565,7 +573,7 @@ const rmcLocalCandidatesSQL = `
 		  LEFT JOIN channels c ON c.id = e.channel_id
 		 WHERE e.type = 5 AND e.channel_id > 0
 		   AND e.created_at >= $2
-		   AND e.content LIKE '%Rate limit reached for %'
+		   AND (e.content LIKE '%Rate limit reached for %' OR e.content LIKE '%ThrottlingException%')
 		   AND (l.profile_id IS NULL OR (
 		        l.state <> 'cooling'
 		        AND NOT (l.state = 'skipped' AND l.restore_at > $3)
@@ -590,7 +598,7 @@ func rmcStripProfile(ctx context.Context, cfg rmcConfig, profileID int64, creds 
 		    ON c.profile_id = e.profile_id AND c.remote_channel_id = e.channel_id
 		 WHERE e.profile_id = $1 AND e.status_code = 429 AND e.channel_id > 0
 		   AND e.created_at >= $2
-		   AND e.content_snippet LIKE '%Rate limit reached for %'
+		   AND (e.content_snippet LIKE '%Rate limit reached for %' OR e.content_snippet LIKE '%ThrottlingException%')
 		   AND (l.profile_id IS NULL OR (
 		        l.state <> 'cooling'
 		        AND NOT (l.state = 'skipped' AND l.restore_at > $3)
@@ -646,7 +654,9 @@ func rmcStripOne(ctx context.Context, cfg rmcConfig, profileID int64, cand rmcCa
 		time.Duration(cfg.MinCooldownSec)*time.Second, time.Duration(cfg.MaxCooldownSec)*time.Second)
 	cdSec := int(cd / time.Second)
 	limitNote := "limit details not parsed"
-	if parsed {
+	if parsed && info.Limit == 0 {
+		limitNote = info.Unit
+	} else if parsed {
 		limitNote = fmt.Sprintf("%s limit %d, used %d, requested %d, retry-after %s",
 			info.Unit, info.Limit, info.Used, info.Requested, info.RetryAfter)
 	}

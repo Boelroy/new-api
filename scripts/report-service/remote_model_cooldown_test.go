@@ -45,6 +45,12 @@ func TestParseRateLimit(t *testing.T) {
 			ok:   true,
 			want: rateLimitInfo{Model: "gpt-6-astra", Unit: "TPM", Window: time.Minute, Limit: 10, Used: 10, Requested: 5},
 		},
+		{
+			name: "bedrock throttling has no limit details",
+			msg:  "status_code=429, InvokeModelWithResponseStream: operation error Bedrock Runtime: InvokeModelWithResponseStream, exceeded maximum number of attempts, 1, https response error StatusCode: 429, RequestID: 32b3b7b6-51eb-4996-a3c3-f5e5db502c91, ThrottlingException: Too many requests, please wait before trying again.",
+			ok:   true,
+			want: rateLimitInfo{Unit: "Bedrock throttling", Window: time.Minute},
+		},
 		{name: "request too large is not a rate limit", msg: "status_code=429, Request too large for gpt-6-astra in organization org-X on tokens per min (TPM): Limit 1000000, Requested 1200000."},
 		{name: "no credits", msg: "status_code=429, You have no credits remaining. Add credits to continue using the API."},
 		{name: "terminated", msg: "status_code=429, Your access was terminated due to violation of our policies."},
