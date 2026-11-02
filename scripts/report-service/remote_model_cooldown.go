@@ -20,9 +20,16 @@ package main
 // stripped. Every action is audited in rs_remote_model_cooldown_event; the
 // ledger rs_remote_model_cooldown remembers what to restore and the trip
 // count used for escalation.
+//
+// The local new-api is covered too, as profile_id 0 (rmcLocalProfile), by its
+// own loop with its own config (keys rmc_local_*; the remote scope keeps
+// rmc_*): candidates come straight from the shared logs table, the
+// serving-channel floor from abilities, and strips / restores go through
+// patchLocalChannelModels so new-api rebuilds abilities and its routing cache.
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -38,19 +45,50 @@ import (
 	"github.com/lib/pq"
 )
 
+// Config key suffixes; the stored key is the scope's prefix + suffix.
 const (
-	cfgRMCEnabled        = "rmc_enabled"
-	cfgRMCProfiles       = "rmc_profiles" // CSV of profile ids
-	cfgRMCModels         = "rmc_models"   // CSV, empty = all models
-	cfgRMCTickSec        = "rmc_tick_sec"
-	cfgRMCWindowSec      = "rmc_window_sec"
-	cfgRMCMinHits        = "rmc_min_hits"
-	cfgRMCMinCooldownSec = "rmc_min_cooldown_sec"
-	cfgRMCMaxCooldownSec = "rmc_max_cooldown_sec"
-	cfgRMCEscalateSec    = "rmc_escalate_window_sec"
-	cfgRMCMinKeep        = "rmc_min_keep"
-	cfgRMCMaxActions     = "rmc_max_actions"
-	cfgRMCDryRun         = "rmc_dry_run"
+	cfgRMCEnabled        = "enabled"
+	cfgRMCProfiles       = "profiles" // CSV of profile ids (remote scope only)
+	cfgRMCModels         = "models"   // CSV, empty = all models
+	cfgRMCTickSec        = "tick_sec"
+	cfgRMCWindowSec      = "window_sec"
+	cfgRMCMinHits        = "min_hits"
+	cfgRMCMinCooldownSec = "min_cooldown_sec"
+	cfgRMCMaxCooldownSec = "max_cooldown_sec"
+	cfgRMCEscalateSec    = "escalate_window_sec"
+	cfgRMCMinKeep        = "min_keep"
+	cfgRMCMaxActions     = "max_actions"
+	cfgRMCDryRun         = "dry_run"
+)
+
+// rmcScope splits the loop into the remote profiles and the local new-api,
+// each with its own config, tick and ledger rows.
+type rmcScope string
+
+const (
+	rmcScopeRemote rmcScope = "remote"
+	rmcScopeLocal  rmcScope = "local"
+)
+
+func (s rmcScope) key(suffix string) string {
+	if s == rmcScopeLocal {
+		return "rmc_local_" + suffix
+	}
+	return "rmc_" + suffix
+}
+
+// rmcScopeOf reads ?scope=local|remote (default remote).
+func rmcScopeOf(c *gin.Context) rmcScope {
+	if c.Query("scope") == string(rmcScopeLocal) {
+		return rmcScopeLocal
+	}
+	return rmcScopeRemote
+}
+
+const (
+
+	// rmcLocalProfile is the ledger/event profile_id of the local new-api.
+	rmcLocalProfile int64 = 0
 
 	rmcTickDef, rmcTickMin, rmcTickMax                   = 20, 10, 600
 	rmcWindowDef, rmcWindowMin, rmcWindowMax             = 120, 30, 3600
@@ -65,6 +103,7 @@ const (
 )
 
 type rmcConfig struct {
+	Scope             rmcScope `json:"scope"`
 	Enabled           bool     `json:"enabled"`
 	ProfileIDs        []int64  `json:"profile_ids"`
 	Models            []string `json:"models"`
@@ -77,22 +116,34 @@ type rmcConfig struct {
 	MinKeep           int      `json:"min_keep"`
 	MaxActions        int      `json:"max_actions"`
 	DryRun            bool     `json:"dry_run"`
+	// LocalConfigured reports whether MAIN_SERVICE_URL + MAIN_SERVICE_TOKEN
+	// are set; without them the local scope never runs.
+	LocalConfigured bool `json:"local_configured"`
 }
 
 var (
-	rmcNudge  = make(chan struct{}, 1)
+	rmcNudges = map[rmcScope]chan struct{}{
+		rmcScopeRemote: make(chan struct{}, 1),
+		rmcScopeLocal:  make(chan struct{}, 1),
+	}
 	rmcTickMu sync.Mutex
 )
 
-func nudgeRemoteModelCooldown() {
+func nudgeModelCooldown(scope rmcScope) {
 	select {
-	case rmcNudge <- struct{}{}:
+	case rmcNudges[scope] <- struct{}{}:
 	default:
 	}
 }
 
-func loadRMCConfig() rmcConfig {
+// nudgeRemoteModelCooldown runs the remote scope right after an error-log sync.
+func nudgeRemoteModelCooldown() {
+	nudgeModelCooldown(rmcScopeRemote)
+}
+
+func loadRMCConfig(scope rmcScope) rmcConfig {
 	out := rmcConfig{
+		Scope:             scope,
 		ProfileIDs:        []int64{},
 		Models:            []string{},
 		TickSec:           rmcTickDef,
@@ -104,6 +155,7 @@ func loadRMCConfig() rmcConfig {
 		MinKeep:           rmcMinKeepDef,
 		MaxActions:        rmcMaxActionsDef,
 		DryRun:            true, // a fresh deployment only observes
+		LocalConfigured:   localNewAPIConfigured(),
 	}
 	get := func(key string) (string, bool) {
 		var v string
@@ -112,16 +164,16 @@ func loadRMCConfig() rmcConfig {
 		}
 		return v, true
 	}
-	readInt := func(key string, dst *int, min, max int) {
-		if v, ok := get(key); ok {
+	readInt := func(suffix string, dst *int, min, max int) {
+		if v, ok := get(scope.key(suffix)); ok {
 			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 				*dst = n
 			}
 		}
 		*dst = clampInt(*dst, min, max)
 	}
-	readBool := func(key string, dst *bool) {
-		if v, ok := get(key); ok {
+	readBool := func(suffix string, dst *bool) {
+		if v, ok := get(scope.key(suffix)); ok {
 			s := strings.TrimSpace(v)
 			*dst = s == "true" || s == "1"
 		}
@@ -129,14 +181,14 @@ func loadRMCConfig() rmcConfig {
 
 	readBool(cfgRMCEnabled, &out.Enabled)
 	readBool(cfgRMCDryRun, &out.DryRun)
-	if v, ok := get(cfgRMCProfiles); ok {
+	if v, ok := get(scope.key(cfgRMCProfiles)); ok && scope == rmcScopeRemote {
 		for _, s := range splitCSV(v) {
 			if id, err := strconv.ParseInt(s, 10, 64); err == nil && id > 0 {
 				out.ProfileIDs = append(out.ProfileIDs, id)
 			}
 		}
 	}
-	if v, ok := get(cfgRMCModels); ok {
+	if v, ok := get(scope.key(cfgRMCModels)); ok {
 		out.Models = splitCSV(v)
 	}
 	readInt(cfgRMCTickSec, &out.TickSec, rmcTickMin, rmcTickMax)
@@ -253,19 +305,27 @@ func csvHas(csv, item string) bool {
 
 func startRemoteModelCooldownLoop() {
 	log.Printf("[remote-cooldown] loop starting")
-	go func() {
-		time.Sleep(60 * time.Second) // stagger past the other schedulers
-		for {
-			cfg := loadRMCConfig()
-			if IsLeader() {
-				runRMCTick(context.Background(), cfg, cfg.Enabled)
+	scopes := []rmcScope{rmcScopeRemote}
+	if localNewAPIConfigured() {
+		scopes = append(scopes, rmcScopeLocal)
+	} else {
+		log.Printf("[remote-cooldown] MAIN_SERVICE_TOKEN not set; local scope disabled")
+	}
+	for _, scope := range scopes {
+		go func() {
+			time.Sleep(60 * time.Second) // stagger past the other schedulers
+			for {
+				cfg := loadRMCConfig(scope)
+				if IsLeader() {
+					runRMCTick(context.Background(), cfg, cfg.Enabled)
+				}
+				select {
+				case <-time.After(time.Duration(cfg.TickSec) * time.Second):
+				case <-rmcNudges[scope]:
+				}
 			}
-			select {
-			case <-time.After(time.Duration(cfg.TickSec) * time.Second):
-			case <-rmcNudge:
-			}
-		}
-	}()
+		}()
+	}
 	go func() {
 		time.Sleep(8 * time.Minute)
 		t := time.NewTicker(time.Hour)
@@ -319,19 +379,24 @@ func runRMCTick(ctx context.Context, cfg rmcConfig, strip bool) rmcSummary {
 	var sum rmcSummary
 	creds := rmcCredCache{}
 	actionsLeft := cfg.MaxActions
-	rmcRestoreDue(ctx, creds, &sum, &actionsLeft)
+	local := cfg.Scope == rmcScopeLocal
+	rmcRestoreDue(ctx, local, creds, &sum, &actionsLeft)
 	if !strip {
 		return sum
 	}
-	for _, pid := range cfg.ProfileIDs {
+	profileIDs := cfg.ProfileIDs
+	if local {
+		profileIDs = []int64{rmcLocalProfile}
+	}
+	for _, pid := range profileIDs {
 		if actionsLeft <= 0 || !IsLeader() {
 			break
 		}
 		rmcStripProfile(ctx, cfg, pid, creds, &sum, &actionsLeft)
 	}
 	if sum.Stripped+sum.Restored+sum.Errors > 0 {
-		log.Printf("[remote-cooldown] tick: stripped=%d restored=%d skipped=%d errors=%d dry_run=%v",
-			sum.Stripped, sum.Restored, sum.Skipped, sum.Errors, cfg.DryRun)
+		log.Printf("[remote-cooldown] %s tick: stripped=%d restored=%d skipped=%d errors=%d dry_run=%v",
+			cfg.Scope, sum.Stripped, sum.Restored, sum.Skipped, sum.Errors, cfg.DryRun)
 	}
 	return sum
 }
@@ -346,13 +411,15 @@ type rmcLedgerRow struct {
 	dryRun      bool
 }
 
-func rmcRestoreDue(ctx context.Context, creds rmcCredCache, sum *rmcSummary, actionsLeft *int) {
+// rmcRestoreDue restores the due rows of one scope: the local new-api's
+// (profile_id 0) when local is set, the remote profiles' otherwise.
+func rmcRestoreDue(ctx context.Context, local bool, creds rmcCredCache, sum *rmcSummary, actionsLeft *int) {
 	rows, err := db.Query(`
 		SELECT profile_id, channel_id, model, channel_name, trips, cooldown_sec, dry_run
 		  FROM rs_remote_model_cooldown
-		 WHERE state='cooling' AND restore_at <= $1
+		 WHERE state='cooling' AND restore_at <= $1 AND (profile_id = $3) = $4
 		 ORDER BY restore_at
-		 LIMIT $2`, time.Now().Unix(), *actionsLeft)
+		 LIMIT $2`, time.Now().Unix(), *actionsLeft, rmcLocalProfile, local)
 	if err != nil {
 		log.Printf("[remote-cooldown] query due restores: %v", err)
 		return
@@ -395,6 +462,28 @@ func rmcRestore(ctx context.Context, creds rmcCredCache, r rmcLedgerRow, action 
 	}
 	if r.dryRun {
 		finish("restored", "dry-run: nothing was stripped")
+		return nil
+	}
+	if r.profileID == rmcLocalProfile {
+		var models string
+		err := db.QueryRowContext(ctx, `SELECT COALESCE(models, '') FROM channels WHERE id=$1`, r.channelID).Scan(&models)
+		if err == sql.ErrNoRows {
+			finish("gone", "channel no longer exists locally")
+			return nil
+		}
+		if err != nil {
+			logRMCEvent(r.profileID, r.channelID, r.channelName, r.model, "error", r.cooldownSec, r.trips, 0, false, "restore fetch: "+err.Error())
+			return err
+		}
+		if csvHas(models, r.model) {
+			finish("restored", "model already present")
+			return nil
+		}
+		if err := patchLocalChannelModels(ctx, r.channelID, csvJoinModels(append(csvSplitModels(models), r.model))); err != nil {
+			logRMCEvent(r.profileID, r.channelID, r.channelName, r.model, "error", r.cooldownSec, r.trips, 0, false, "restore patch: "+err.Error())
+			return err
+		}
+		finish("restored", fmt.Sprintf("re-added after %ds cooldown", r.cooldownSec))
 		return nil
 	}
 	c := creds.get(r.profileID)
@@ -462,9 +551,33 @@ type rmcCandidate struct {
 	models         string
 }
 
+// rmcLocalCandidatesSQL is the local new-api twin of the remote candidate
+// query below: the same placeholders, reading new-api's own logs + channels.
+const rmcLocalCandidatesSQL = `
+		SELECT e.channel_id, e.model_name, count(*) AS hits,
+		       (array_agg(e.content ORDER BY e.created_at DESC))[1],
+		       COALESCE(max(l.trips), 0), COALESCE(max(l.restored_at), 0),
+		       COALESCE(max(c.name), ''), COALESCE(max(c."group"), ''),
+		       COALESCE(max(c.status), 0), COALESCE(max(c.models), '')
+		  FROM logs e
+		  LEFT JOIN rs_remote_model_cooldown l
+		    ON l.profile_id = $1 AND l.channel_id = e.channel_id AND l.model = e.model_name
+		  LEFT JOIN channels c ON c.id = e.channel_id
+		 WHERE e.type = 5 AND e.channel_id > 0
+		   AND e.created_at >= $2
+		   AND e.content LIKE '%Rate limit reached for %'
+		   AND (l.profile_id IS NULL OR (
+		        l.state <> 'cooling'
+		        AND NOT (l.state = 'skipped' AND l.restore_at > $3)
+		        AND e.created_at > l.restored_at))
+		 GROUP BY e.channel_id, e.model_name
+		HAVING count(*) >= $4
+		 ORDER BY hits DESC
+		 LIMIT $5`
+
 func rmcStripProfile(ctx context.Context, cfg rmcConfig, profileID int64, creds rmcCredCache, sum *rmcSummary, actionsLeft *int) {
 	now := time.Now()
-	rows, err := db.QueryContext(ctx, `
+	query := `
 		SELECT e.channel_id, e.model_name, count(*) AS hits,
 		       (array_agg(e.content_snippet ORDER BY e.created_at DESC))[1],
 		       COALESCE(max(l.trips), 0), COALESCE(max(l.restored_at), 0),
@@ -485,7 +598,11 @@ func rmcStripProfile(ctx context.Context, cfg rmcConfig, profileID int64, creds 
 		 GROUP BY e.channel_id, e.model_name
 		HAVING count(*) >= $4
 		 ORDER BY hits DESC
-		 LIMIT $5`,
+		 LIMIT $5`
+	if profileID == rmcLocalProfile {
+		query = rmcLocalCandidatesSQL
+	}
+	rows, err := db.QueryContext(ctx, query,
 		profileID, now.Unix()-int64(cfg.WindowSec), now.Unix(), cfg.MinHits, *actionsLeft)
 	if err != nil {
 		log.Printf("[remote-cooldown] profile=%d candidates: %v", profileID, err)
@@ -553,11 +670,17 @@ func rmcStripOne(ctx context.Context, cfg rmcConfig, profileID int64, cand rmcCa
 		logRMCEvent(profileID, cand.channelID, cand.name, cand.model, action, 0, trips, cand.hits, cfg.DryRun, why)
 	}
 
-	// Current channel state: the mirror in dry-run, the live remote otherwise.
+	// Current channel state: the candidate query already read the local
+	// channels row; for a remote it is the mirror in dry-run, the live remote
+	// otherwise.
+	local := profileID == rmcLocalProfile
 	status, models, group, name := cand.status, cand.models, cand.group, cand.name
 	var current map[string]any
-	c := creds.get(profileID)
-	if !cfg.DryRun {
+	var c rmcCreds
+	if !local {
+		c = creds.get(profileID)
+	}
+	if !cfg.DryRun && !local {
 		if c.err != nil {
 			return fmt.Errorf("load profile: %w", c.err)
 		}
@@ -592,7 +715,7 @@ func rmcStripOne(ctx context.Context, cfg rmcConfig, profileID int64, cand rmcCa
 	}
 
 	var others int
-	if err := db.QueryRowContext(ctx, `
+	othersQuery := `
 		SELECT count(*) FROM remote_channel_current c
 		 WHERE c.profile_id = $1 AND c.remote_channel_id <> $2 AND c.status = 1
 		   AND $3 = ANY(regexp_split_to_array(c.models, '\s*,\s*'))
@@ -600,8 +723,25 @@ func rmcStripOne(ctx context.Context, cfg rmcConfig, profileID int64, cand rmcCa
 		   AND NOT EXISTS (
 		       SELECT 1 FROM rs_remote_model_cooldown l
 		        WHERE l.profile_id = c.profile_id AND l.channel_id = c.remote_channel_id
-		          AND l.model = $3 AND l.state = 'cooling')`,
-		profileID, cand.channelID, cand.model, pq.Array(splitCSV(group))).Scan(&others); err != nil {
+		          AND l.model = $3 AND l.state = 'cooling')`
+	groups := splitCSV(group)
+	if local {
+		// abilities is the local (group, model, channel) routing table.
+		othersQuery = `
+		SELECT count(DISTINCT c.id) FROM abilities a
+		  JOIN channels c ON c.id = a.channel_id
+		 WHERE c.id <> $2 AND c.status = 1 AND a.enabled
+		   AND a.model = $3 AND a."group" = ANY($4::text[])
+		   AND NOT EXISTS (
+		       SELECT 1 FROM rs_remote_model_cooldown l
+		        WHERE l.profile_id = $1 AND l.channel_id = c.id
+		          AND l.model = $3 AND l.state = 'cooling')`
+		if len(groups) == 0 {
+			groups = []string{"default"}
+		}
+	}
+	if err := db.QueryRowContext(ctx, othersQuery,
+		profileID, cand.channelID, cand.model, pq.Array(groups)).Scan(&others); err != nil {
 		return fmt.Errorf("count serving channels: %w", err)
 	}
 	if others < cfg.MinKeep {
@@ -609,7 +749,11 @@ func rmcStripOne(ctx context.Context, cfg rmcConfig, profileID int64, cand rmcCa
 		return nil
 	}
 
-	if !cfg.DryRun {
+	if !cfg.DryRun && local {
+		if err := patchLocalChannelModels(ctx, cand.channelID, remaining); err != nil {
+			return fmt.Errorf("patch channel: %w", err)
+		}
+	} else if !cfg.DryRun {
 		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
 		current["models"] = remaining
@@ -663,7 +807,7 @@ func logRMCEvent(profileID, channelID int64, channelName, model, action string, 
 // ---- HTTP handlers (V1, admin-gated) ----
 
 func handleRMCConfigGet(c *gin.Context) {
-	c.JSON(http.StatusOK, loadRMCConfig())
+	c.JSON(http.StatusOK, loadRMCConfig(rmcScopeOf(c)))
 }
 
 func handleRMCConfigSet(c *gin.Context) {
@@ -685,17 +829,18 @@ func handleRMCConfigSet(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	setBool := func(key string, v *bool) error {
+	scope := rmcScopeOf(c)
+	setBool := func(suffix string, v *bool) error {
 		if v == nil {
 			return nil
 		}
-		return writeModelCleanupConfig(key, strconv.FormatBool(*v))
+		return writeModelCleanupConfig(scope.key(suffix), strconv.FormatBool(*v))
 	}
-	setInt := func(key string, v *int, min, max int) error {
+	setInt := func(suffix string, v *int, min, max int) error {
 		if v == nil {
 			return nil
 		}
-		return writeModelCleanupConfig(key, strconv.Itoa(clampInt(*v, min, max)))
+		return writeModelCleanupConfig(scope.key(suffix), strconv.Itoa(clampInt(*v, min, max)))
 	}
 	fail := func(err error) bool {
 		if err != nil {
@@ -704,19 +849,19 @@ func handleRMCConfigSet(c *gin.Context) {
 		}
 		return false
 	}
-	if body.ProfileIDs != nil {
+	if body.ProfileIDs != nil && scope == rmcScopeRemote {
 		ids := make([]string, 0, len(*body.ProfileIDs))
 		for _, id := range *body.ProfileIDs {
 			if id > 0 {
 				ids = append(ids, strconv.FormatInt(id, 10))
 			}
 		}
-		if fail(writeModelCleanupConfig(cfgRMCProfiles, strings.Join(cleanCSVList(ids), ","))) {
+		if fail(writeModelCleanupConfig(scope.key(cfgRMCProfiles), strings.Join(cleanCSVList(ids), ","))) {
 			return
 		}
 	}
 	if body.Models != nil {
-		if fail(writeModelCleanupConfig(cfgRMCModels, strings.Join(cleanCSVList(*body.Models), ","))) {
+		if fail(writeModelCleanupConfig(scope.key(cfgRMCModels), strings.Join(cleanCSVList(*body.Models), ","))) {
 			return
 		}
 	}
@@ -732,8 +877,8 @@ func handleRMCConfigSet(c *gin.Context) {
 		fail(setInt(cfgRMCMaxActions, body.MaxActions, rmcMaxActionsMin, rmcMaxActionsMax)) {
 		return
 	}
-	nudgeRemoteModelCooldown()
-	c.JSON(http.StatusOK, loadRMCConfig())
+	nudgeModelCooldown(scope)
+	c.JSON(http.StatusOK, loadRMCConfig(scope))
 }
 
 // handleRMCActive lists the (channel, model) pairs currently cooling down.
@@ -763,6 +908,9 @@ func handleRMCActive(c *gin.Context) {
 			&trips, &cooldownSec, &removedAt, &restoreAt, &unit, &limitValue, &hits, &detail, &dryRun); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
+		}
+		if profileID == rmcLocalProfile {
+			profileName = "本地"
 		}
 		items = append(items, gin.H{
 			"profile_id": profileID, "profile_name": profileName, "channel_id": channelID,
@@ -835,7 +983,11 @@ func handleRMCRunNow(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "this node is not the scheduler leader; try again"})
 		return
 	}
-	cfg := loadRMCConfig()
+	cfg := loadRMCConfig(rmcScopeOf(c))
+	if cfg.Scope == rmcScopeLocal && !cfg.LocalConfigured {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "MAIN_SERVICE_URL / MAIN_SERVICE_TOKEN not configured"})
+		return
+	}
 	sum := runRMCTick(c.Request.Context(), cfg, true)
 	c.JSON(http.StatusOK, gin.H{"summary": sum, "dry_run": cfg.DryRun})
 }

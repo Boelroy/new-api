@@ -7,13 +7,16 @@ import {
   type RemoteCooldownActive,
   type RemoteCooldownConfig,
   type RemoteCooldownEvent,
+  type RemoteCooldownScope,
   type RemoteProfile,
 } from '../api'
 
-// Remote Cooldown: when a remote channel keeps returning upstream
+// Model Cooldown: when a remote or local channel keeps returning upstream
 // "Rate limit reached for <model> … (TPM)" 429s, the model is stripped from
 // that channel and re-added after a cooldown derived from the reported limit
 // (one limit window + overflow drain, doubled on repeat trips, capped).
+// The local new-api (ledger profile_id 0) and the remote profiles each have
+// their own config card; the active list and event log are shared.
 
 const inputCls = 'border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900'
 
@@ -66,17 +69,161 @@ const NUM_FIELDS: { key: keyof RemoteCooldownConfig; label: string; hint: string
   { key: 'max_actions', label: '每轮最多动作', hint: '下线 + 恢复合计', min: 1, max: 500 },
 ]
 
-export default function RemoteModelCooldown() {
+// One scope's config: its own switches, thresholds, model filter and run-now.
+function CooldownConfigCard({ scope, profiles, onRan }: {
+  scope: RemoteCooldownScope
+  profiles: RemoteProfile[]
+  onRan: () => void
+}) {
   const [cfg, setCfg] = useState<RemoteCooldownConfig | null>(null)
-  const [profiles, setProfiles] = useState<RemoteProfile[]>([])
   const [saving, setSaving] = useState(false)
   const [running, setRunning] = useState(false)
+  const [modelInput, setModelInput] = useState('')
+  const local = scope === 'local'
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        setCfg(normalizeCfg(await api.remoteCooldownGetConfig(scope)))
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : String(e))
+      }
+    })()
+  }, [scope])
+
+  // Persist a partial config change and adopt the server's clamped result.
+  const save = async (patch: Partial<RemoteCooldownConfig>) => {
+    setSaving(true)
+    try {
+      setCfg(normalizeCfg(await api.remoteCooldownSetConfig(scope, patch)))
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e))
+      try { setCfg(normalizeCfg(await api.remoteCooldownGetConfig(scope))) } catch { /* ignore */ }
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const runNow = async () => {
+    setRunning(true)
+    try {
+      const res = await api.remoteCooldownRunNow(scope)
+      const s = res.summary
+      toast.success(
+        `${local ? '本地' : '远程'}${res.dry_run ? '演练' : '执行'}完成:命中 ${s.candidates},下线 ${s.stripped},恢复 ${s.restored},跳过 ${s.skipped},失败 ${s.errors}`,
+      )
+      onRan()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e))
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const addModel = () => {
+    const v = modelInput.trim()
+    if (v && cfg && !cfg.models.includes(v)) void save({ models: [...cfg.models, v] })
+    setModelInput('')
+  }
+
+  if (!cfg) {
+    return <Card className="p-5"><div className="text-sm text-secondary">加载中…</div></Card>
+  }
+
+  const blocked = local && !cfg.local_configured
+
+  return (
+    <Card className="p-5">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-sm font-semibold">
+          {local ? '本地 new-api' : '远程 Profile'}
+          {blocked && <span className="ml-2 text-[11px] font-normal text-red-600">未配置 MAIN_SERVICE_TOKEN,本地冷却不会运行</span>}
+        </div>
+        <div className="flex items-center gap-4">
+          <label className="flex items-center gap-2 text-xs">
+            <input type="checkbox" checked={cfg.dry_run} disabled={saving} onChange={e => void save({ dry_run: e.target.checked })} />
+            <span className={cfg.dry_run ? 'text-amber-700 font-medium' : 'text-gray-500'}>演练模式 (只记录不改渠道)</span>
+          </label>
+          <label className="flex items-center gap-2 text-xs">
+            <input type="checkbox" checked={cfg.enabled} disabled={saving} onChange={e => void save({ enabled: e.target.checked })} />
+            <span className={cfg.enabled ? 'text-green-700 font-medium' : 'text-gray-500'}>{cfg.enabled ? '已开启' : '已关闭'}</span>
+          </label>
+          <Button variant="outline" size="sm" onClick={runNow} disabled={running || blocked}>
+            {running ? '执行中…' : '立即执行一次'}
+          </Button>
+        </div>
+      </div>
+
+      {!local && (
+        <div className="mb-4">
+          <span className="mono-label block mb-1">生效的远程 Profile</span>
+          <div className="flex flex-wrap gap-3">
+            {profiles.length === 0 && <span className="text-[11px] text-gray-400">没有远程 Profile</span>}
+            {profiles.map(p => (
+              <label key={p.id} className="flex items-center gap-1.5 text-xs">
+                <input
+                  type="checkbox"
+                  checked={cfg.profile_ids.includes(p.id)}
+                  disabled={saving}
+                  onChange={e => void save({
+                    profile_ids: e.target.checked
+                      ? [...cfg.profile_ids, p.id]
+                      : cfg.profile_ids.filter(id => id !== p.id),
+                  })}
+                />
+                <span className="font-mono">{p.name}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        {NUM_FIELDS.map(f => (
+          <label key={f.key} className="block">
+            <span className="mono-label block mb-1">{f.label}</span>
+            <input
+              type="number" className={inputCls + ' w-full'} defaultValue={cfg[f.key] as number} min={f.min} max={f.max}
+              key={`${f.key}-${cfg[f.key] as number}`}
+              onBlur={e => { const n = Number(e.target.value); if (n !== cfg[f.key]) void save({ [f.key]: n }) }}
+            />
+            <span className="text-[10px] text-gray-400">{local && f.key === 'tick_sec' ? '直接读本地日志' : f.hint}</span>
+          </label>
+        ))}
+      </div>
+
+      <div className="mt-4">
+        <span className="mono-label block mb-1">只处理这些模型(空 = 全部)</span>
+        <div className="flex flex-wrap gap-1.5 mb-2 min-h-[1.5rem]">
+          {cfg.models.length === 0 && <span className="text-[11px] text-gray-400">(全部模型)</span>}
+          {cfg.models.map(v => (
+            <span key={v} className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-mono bg-brand-50 text-brand">
+              {v}
+              <button type="button" onClick={() => void save({ models: cfg.models.filter(x => x !== v) })} title="移除" className="opacity-60 hover:opacity-100">✕</button>
+            </span>
+          ))}
+        </div>
+        <div className="flex gap-1 max-w-md">
+          <input
+            value={modelInput} onChange={e => setModelInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addModel() } }}
+            placeholder="回车添加,例 gpt-6-astra"
+            className={inputCls + ' flex-1 font-mono'}
+          />
+          <Button variant="outline" size="sm" onClick={addModel}>添加</Button>
+        </div>
+      </div>
+    </Card>
+  )
+}
+
+export default function RemoteModelCooldown() {
+  const [profiles, setProfiles] = useState<RemoteProfile[]>([])
   const [active, setActive] = useState<RemoteCooldownActive[]>([])
   // Server clock minus local clock, so countdowns don't drift with a skewed browser.
   const [clockSkew, setClockSkew] = useState(0)
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
   const [events, setEvents] = useState<RemoteCooldownEvent[]>([])
-  const [modelInput, setModelInput] = useState('')
 
   const loadActive = async () => {
     try {
@@ -84,7 +231,7 @@ export default function RemoteModelCooldown() {
       setActive(res.items ?? [])
       setClockSkew(res.now - Math.floor(Date.now() / 1000))
     } catch {
-      // silent — the config load surfaces the real errors
+      // silent — the config cards surface the real errors
     }
   }
 
@@ -102,9 +249,7 @@ export default function RemoteModelCooldown() {
   useEffect(() => {
     void (async () => {
       try {
-        const [c, p] = await Promise.all([api.remoteCooldownGetConfig(), api.remoteProfiles()])
-        setCfg(normalizeCfg(c))
-        setProfiles(p.profiles ?? [])
+        setProfiles((await api.remoteProfiles()).profiles ?? [])
       } catch (e) {
         toast.error(e instanceof Error ? e.message : String(e))
       }
@@ -114,35 +259,6 @@ export default function RemoteModelCooldown() {
     const tick = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
     return () => { clearInterval(poll); clearInterval(tick) }
   }, [])
-
-  // Persist a partial config change and adopt the server's clamped result.
-  const save = async (patch: Partial<RemoteCooldownConfig>) => {
-    setSaving(true)
-    try {
-      setCfg(normalizeCfg(await api.remoteCooldownSetConfig(patch)))
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e))
-      try { setCfg(normalizeCfg(await api.remoteCooldownGetConfig())) } catch { /* ignore */ }
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const runNow = async () => {
-    setRunning(true)
-    try {
-      const res = await api.remoteCooldownRunNow()
-      const s = res.summary
-      toast.success(
-        `${res.dry_run ? '演练' : '执行'}完成:命中 ${s.candidates},下线 ${s.stripped},恢复 ${s.restored},跳过 ${s.skipped},失败 ${s.errors}`,
-      )
-      refresh()
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e))
-    } finally {
-      setRunning(false)
-    }
-  }
 
   const restoreNow = async (row: RemoteCooldownActive) => {
     if (!(await confirmDialog({ message: `立即把 ${row.model} 加回渠道 ${row.channel_id} (${row.channel_name})?`, confirmText: '恢复' }))) return
@@ -155,108 +271,18 @@ export default function RemoteModelCooldown() {
     }
   }
 
-  const addModel = () => {
-    const v = modelInput.trim()
-    if (v && cfg && !cfg.models.includes(v)) void save({ models: [...cfg.models, v] })
-    setModelInput('')
-  }
-
-  const profileName = (id: number) => profiles.find(p => p.id === id)?.name ?? `#${id}`
-
-  if (!cfg) {
-    return (
-      <Layout title="远程模型限流冷却" subtitle="429 限流自动下线模型,冷却后加回">
-        <div className="text-sm text-secondary">加载中…</div>
-      </Layout>
-    )
-  }
+  const profileName = (id: number) => id === 0 ? '本地' : profiles.find(p => p.id === id)?.name ?? `#${id}`
 
   const serverNow = nowSec + clockSkew
 
   return (
     <Layout
-      title="远程模型限流冷却"
-      subtitle="远程渠道出现「Rate limit reached」429 时,把该模型从该渠道下线,按 TPM/RPM 限额冷却后自动加回"
-      actions={
-        <Button variant="outline" size="sm" onClick={runNow} disabled={running}>
-          {running ? '执行中…' : '立即执行一次'}
-        </Button>
-      }
+      title="模型限流冷却"
+      subtitle="本地/远程渠道出现「Rate limit reached」429 时,把该模型从该渠道下线,按 TPM/RPM 限额冷却后自动加回"
     >
       <div className="space-y-4">
-        <Card className="p-5">
-          <div className="flex items-center justify-between mb-3">
-            <div className="text-sm font-semibold">调度</div>
-            <div className="flex items-center gap-4">
-              <label className="flex items-center gap-2 text-xs">
-                <input type="checkbox" checked={cfg.dry_run} disabled={saving} onChange={e => void save({ dry_run: e.target.checked })} />
-                <span className={cfg.dry_run ? 'text-amber-700 font-medium' : 'text-gray-500'}>演练模式 (只记录不改渠道)</span>
-              </label>
-              <label className="flex items-center gap-2 text-xs">
-                <input type="checkbox" checked={cfg.enabled} disabled={saving} onChange={e => void save({ enabled: e.target.checked })} />
-                <span className={cfg.enabled ? 'text-green-700 font-medium' : 'text-gray-500'}>{cfg.enabled ? '已开启' : '已关闭'}</span>
-              </label>
-            </div>
-          </div>
-
-          <div className="mb-4">
-            <span className="mono-label block mb-1">生效的远程 Profile</span>
-            <div className="flex flex-wrap gap-3">
-              {profiles.length === 0 && <span className="text-[11px] text-gray-400">没有远程 Profile</span>}
-              {profiles.map(p => (
-                <label key={p.id} className="flex items-center gap-1.5 text-xs">
-                  <input
-                    type="checkbox"
-                    checked={cfg.profile_ids.includes(p.id)}
-                    disabled={saving}
-                    onChange={e => void save({
-                      profile_ids: e.target.checked
-                        ? [...cfg.profile_ids, p.id]
-                        : cfg.profile_ids.filter(id => id !== p.id),
-                    })}
-                  />
-                  <span className="font-mono">{p.name}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            {NUM_FIELDS.map(f => (
-              <label key={f.key} className="block">
-                <span className="mono-label block mb-1">{f.label}</span>
-                <input
-                  type="number" className={inputCls + ' w-full'} defaultValue={cfg[f.key] as number} min={f.min} max={f.max}
-                  key={`${f.key}-${cfg[f.key] as number}`}
-                  onBlur={e => { const n = Number(e.target.value); if (n !== cfg[f.key]) void save({ [f.key]: n }) }}
-                />
-                <span className="text-[10px] text-gray-400">{f.hint}</span>
-              </label>
-            ))}
-          </div>
-
-          <div className="mt-4">
-            <span className="mono-label block mb-1">只处理这些模型(空 = 全部)</span>
-            <div className="flex flex-wrap gap-1.5 mb-2 min-h-[1.5rem]">
-              {cfg.models.length === 0 && <span className="text-[11px] text-gray-400">(全部模型)</span>}
-              {cfg.models.map(v => (
-                <span key={v} className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-mono bg-brand-50 text-brand">
-                  {v}
-                  <button type="button" onClick={() => void save({ models: cfg.models.filter(x => x !== v) })} title="移除" className="opacity-60 hover:opacity-100">✕</button>
-                </span>
-              ))}
-            </div>
-            <div className="flex gap-1 max-w-md">
-              <input
-                value={modelInput} onChange={e => setModelInput(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addModel() } }}
-                placeholder="回车添加,例 gpt-6-astra"
-                className={inputCls + ' flex-1 font-mono'}
-              />
-              <Button variant="outline" size="sm" onClick={addModel}>添加</Button>
-            </div>
-          </div>
-        </Card>
+        <CooldownConfigCard scope="local" profiles={profiles} onRan={refresh} />
+        <CooldownConfigCard scope="remote" profiles={profiles} onRan={refresh} />
 
         <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
           <div className="px-4 py-2 border-b border-gray-100 text-[11px] font-medium text-gray-700 flex items-center justify-between">

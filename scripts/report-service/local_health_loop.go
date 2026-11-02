@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -754,9 +755,29 @@ func reconcileLocalChannel(cov *channelCoverage, transitioned bool, st *tickStat
 		return false
 	}
 
+	// A model the rate-limit cooldown (remote_model_cooldown.go) took off this
+	// channel must not be re-added by a healthy probe before its cooldown ends.
+	rows, err := db.Query(`
+		SELECT model FROM rs_remote_model_cooldown
+		 WHERE profile_id=$1 AND channel_id=$2 AND state='cooling' AND NOT dry_run`,
+		rmcLocalProfile, cov.Channel.ID)
+	if err != nil {
+		log.Printf("[local-health] load cooldowns %d: %v", cov.Channel.ID, err)
+		return false
+	}
+	cooling := map[string]bool{}
+	for rows.Next() {
+		var m string
+		if rows.Scan(&m) == nil {
+			cooling[m] = true
+		}
+	}
+	rows.Close()
+	candidates := slices.DeleteFunc(slices.Clone(cov.Candidates), func(m string) bool { return cooling[m] })
+
 	current := csvSplitModels(cov.Channel.Models)
 	currentCSV := csvJoinModels(current)
-	desired := desiredChannelModels(current, cov.Candidates, states)
+	desired := desiredChannelModels(current, candidates, states)
 
 	// Never let a removal take the last enabled channel serving a model out of
 	// rotation: turning a degraded model into a completely unroutable one is

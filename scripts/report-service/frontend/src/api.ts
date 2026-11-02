@@ -504,7 +504,10 @@ export type ModelCleanupStat = {
 
 // ---- Remote model cooldown ----
 
+export type RemoteCooldownScope = 'remote' | 'local'
+
 export type RemoteCooldownConfig = {
+  scope: RemoteCooldownScope
   enabled: boolean
   profile_ids: number[]
   models: string[]
@@ -517,6 +520,7 @@ export type RemoteCooldownConfig = {
   min_keep: number
   max_actions: number
   dry_run: boolean
+  local_configured: boolean
 }
 
 export type RemoteCooldownActive = {
@@ -1916,10 +1920,13 @@ export const api = {
   // Strips a model from a remote channel on upstream rate-limit 429s and
   // re-adds it after a cooldown derived from the reported limit.
 
-  remoteCooldownGetConfig: () => request<RemoteCooldownConfig>('/api/remote-model-cooldown/config'),
+  // scope picks the config set: the remote profiles or the local new-api
+  // (ledger profile_id 0).
+  remoteCooldownGetConfig: (scope: RemoteCooldownScope) =>
+    request<RemoteCooldownConfig>(`/api/remote-model-cooldown/config?scope=${scope}`),
 
-  remoteCooldownSetConfig: (payload: Partial<RemoteCooldownConfig>) =>
-    request<RemoteCooldownConfig>('/api/remote-model-cooldown/config', {
+  remoteCooldownSetConfig: (scope: RemoteCooldownScope, payload: Partial<RemoteCooldownConfig>) =>
+    request<RemoteCooldownConfig>(`/api/remote-model-cooldown/config?scope=${scope}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -1937,8 +1944,8 @@ export const api = {
     return request<{ events: RemoteCooldownEvent[] }>(`/api/remote-model-cooldown/events${suffix ? '?' + suffix : ''}`)
   },
 
-  remoteCooldownRunNow: () =>
-    request<{ summary: RemoteCooldownSummary; dry_run: boolean }>('/api/remote-model-cooldown/run', { method: 'POST' }),
+  remoteCooldownRunNow: (scope: RemoteCooldownScope) =>
+    request<{ summary: RemoteCooldownSummary; dry_run: boolean }>(`/api/remote-model-cooldown/run?scope=${scope}`, { method: 'POST' }),
 
   remoteCooldownRestore: (payload: { profile_id: number; channel_id: number; model: string }) =>
     request<{ ok: boolean }>('/api/remote-model-cooldown/restore', {
