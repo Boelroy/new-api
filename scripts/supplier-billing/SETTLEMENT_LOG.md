@@ -435,3 +435,12 @@ vs the sheet's same lines (289,752.04 U): system is **+705.11 U**:
 - `POST /api/recharges` is open to supplier logins for their own supplier only (other suppliers → 403).
   `created_by` records the login. Reversals (`/api/recharges/{id}/reverse`) remain manager-only.
 - The settlement page shows 登记充值 to suppliers as well.
+- Deployed **rc.333** billing to dev; kept rc.333 + rc.332.
+
+## 2026-11-02 — rc.334: colors and 60-day sign-in
+
+- Money shown as a balance effect: charges are red "−$", recharges, payments and purchase credits are green "+$".
+  Remaining balances are signed and colored (sheet, cards and overview).
+- Sessions: idle and absolute lifetime **60 days** (was 30 min / 12 h), at the user's request.
+  - Recorded as a risk decision in README (ASVS 5.0 7.3.1/7.3.2) with compensating controls.
+  - Tests cover expiry beyond 60 days idle, a 30-day-idle session staying valid, and the cookie expiry.

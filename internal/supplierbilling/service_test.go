@@ -1277,11 +1277,16 @@ func testBillingAuthentication(t *testing.T, s *Server, managerUser, supplierUse
 	var csrfWrites int64
 	require.NoError(t, s.DB.Model(&Supplier{}).Where("name = ?", "CSRF must not write").Count(&csrfWrites).Error)
 	assert.Zero(t, csrfWrites)
-	for _, expiry := range []map[string]any{{"expires_at": time.Now().Unix() - 1}, {"last_seen_at": time.Now().Add(-31 * time.Minute).Unix()}} {
+	for _, expiry := range []map[string]any{{"expires_at": time.Now().Unix() - 1}, {"last_seen_at": time.Now().Unix() - sessionIdleSeconds - 60}} {
 		expired := billingSessionClient(t, s, supplierUser)
 		require.NoError(t, s.DB.Model(&Session{}).Where("token_hash = ?", hashSessionToken(expired.cookie.Value)).Updates(expiry).Error)
 		assert.Equal(t, 401, expired.request(t, "GET", "/api/session", nil, nil).Code)
 	}
+	// The documented 60-day lifetime keeps a month-idle session signed in.
+	idle := billingSessionClient(t, s, supplierUser)
+	require.NoError(t, s.DB.Model(&Session{}).Where("token_hash = ?", hashSessionToken(idle.cookie.Value)).Update("last_seen_at", time.Now().Add(-30*24*time.Hour).Unix()).Error)
+	assert.Equal(t, 200, idle.request(t, "GET", "/api/session", nil, nil).Code)
+	assert.WithinDuration(t, time.Now().Add(60*24*time.Hour), idle.cookie.Expires, time.Minute)
 	loginBody := map[string]string{"username": managerUser.Username, "password": "wrong-password"}
 	wrong := anonymous.request(t, "POST", "/api/login", loginBody, nil)
 	assert.Equal(t, 401, wrong.Code)

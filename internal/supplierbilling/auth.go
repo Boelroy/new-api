@@ -26,8 +26,11 @@ import (
 )
 
 const (
-	sessionIdleSeconds = int64(30 * 60)
-	sessionMaxSeconds  = int64(12 * 60 * 60)
+	// Sessions last 60 days, idle or not, by the operator's documented risk
+	// decision (ASVS 5.0 7.3.1/7.3.2): logout, password change and disabling
+	// revoke them at once, and account changes still require the password.
+	sessionIdleSeconds = int64(60 * 24 * 60 * 60)
+	sessionMaxSeconds  = int64(60 * 24 * 60 * 60)
 	loginWindowSeconds = int64(15 * 60)
 	// A fixed, valid Argon2id encoding makes unknown-account checks perform
 	// the same KDF work as known accounts without creating a usable account.

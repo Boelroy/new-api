@@ -321,7 +321,14 @@ ASVS 5.0.0 references used for this scope: password controls **6.2.1–6.2.5,
 **7.2.1–7.2.4, 7.3.1–7.3.2, 7.4.1–7.4.3, 7.5.1**. The focused regressions cover
 failure/unknown-account responses, throttling, foreign credentials, origin/CSRF,
 expiry, logout replay, reauthentication, password rotation, disabled accounts,
-and the last-manager invariant. MFA and session-inventory UI are not implemented;
+and the last-manager invariant. Session lifetime (ASVS 7.3.1 inactivity timeout, 7.3.2 absolute lifetime) is a
+documented operator decision since 2026-11-02: both are **60 days** (previously 30
+minutes idle / 12 hours absolute), at the owner's request to avoid frequent sign-ins.
+Compensating controls: host-only Secure/HttpOnly/SameSite=Strict cookies, at most five
+sessions per account, immediate revocation on logout, password change and account
+disable, and current-password reauthentication for account changes. Financial actions
+(pricing, recharges) do not require reauthentication; treat a lost device as a
+credential compromise and change the password. MFA and session-inventory UI are not implemented;
 the service must not be represented as ASVS Level 2 compliant.
 
 The frontend directly reuses V3 cards, controls, side panels, form sections,

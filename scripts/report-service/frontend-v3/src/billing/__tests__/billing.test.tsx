@@ -329,7 +329,7 @@ describe('supplier billing workspace', () => {
       </I18nextProvider>
     )
     const aws = screen.getByRole('row', { name: /aws/ })
-    expect(within(aws).getByText('$300.00')).toBeInTheDocument()
+    expect(within(aws).getByText('-$300.00')).toHaveClass('text-destructive')
     const ccmax = screen.getByRole('row', { name: /ccmax/ })
     expect(within(ccmax).getByText('¥3,058.35')).toBeInTheDocument()
     expect(within(ccmax).getByText('Unpriced')).toBeInTheDocument()
@@ -540,9 +540,10 @@ describe('supplier billing workspace', () => {
     ).toBeInTheDocument()
     expect(
       within(screen.getByRole('row', { name: /Recharge/ })).getAllByText(
-        '$99,162.97'
-      )
-    ).not.toHaveLength(0)
+        '+$99,162.97'
+      )[0]
+    ).toHaveClass('text-success')
+    expect(within(pool).getByText('-$71.25')).toHaveClass('text-destructive')
     expect(screen.getByText('Not set')).toBeInTheDocument()
     await user.click(within(pool).getByRole('button', { name: 'Details' }))
     const astraRows = screen.getAllByRole('row', { name: /gpt-6-astra/ })

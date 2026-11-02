@@ -218,6 +218,8 @@ export function Money(props: {
   value: string
   currency: string
   exact?: boolean
+  // signed shows a balance effect: green "+" for credits, red "−" for charges.
+  signed?: boolean
 }) {
   const { i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
@@ -240,12 +242,18 @@ export function Money(props: {
     style: 'currency',
     currency: props.currency,
     currencyDisplay: 'narrowSymbol',
+    signDisplay: props.signed ? 'exceptZero' : 'auto',
     minimumFractionDigits: 2,
     maximumFractionDigits: 6,
   }).formatToParts(signed)
   return (
     <span
-      className='tnum whitespace-nowrap'
+      className={cx(
+        'tnum whitespace-nowrap',
+        props.signed &&
+          !isZero &&
+          (negative ? 'text-destructive' : 'text-success')
+      )}
       title={props.exact ? undefined : props.value}
     >
       {parts

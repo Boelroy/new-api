@@ -19,6 +19,10 @@ const balanceKinds: Record<string, string> = {
   initial_balance_reversal: 'Initial balance correction',
 }
 
+// A charge reduces the supplier balance, so it is shown as a negative effect.
+const negate = (value: string) =>
+  value.startsWith('-') ? value.slice(1) : `-${value}`
+
 function InitialBalanceSummary(props: {
   initial?: InitialBalance | null
   currency: string
@@ -30,7 +34,11 @@ function InitialBalanceSummary(props: {
       <span className='text-muted-foreground'>{t('Initial balance')}</span>
       {props.initial ? (
         <>
-          <Money value={props.initial.amount} currency={props.currency} />
+          <Money
+            value={props.initial.amount}
+            currency={props.currency}
+            signed
+          />
           <span className='text-muted-foreground'>{props.initial.date}</span>
         </>
       ) : (
@@ -72,7 +80,11 @@ export function SettlementOverview(props: {
             <div>
               <div className='mono-label mb-1'>{t('Current balance')}</div>
               <div className='text-xl font-semibold'>
-                <Money value={item.balance} currency={item.supplier.currency} />
+                <Money
+                  value={item.balance}
+                  currency={item.supplier.currency}
+                  signed
+                />
               </div>
             </div>
             <dl className='grid grid-cols-2 gap-2 text-xs'>
@@ -81,8 +93,9 @@ export function SettlementOverview(props: {
               </dt>
               <dd className='text-right'>
                 <Money
-                  value={item.total_usage}
+                  value={negate(item.total_usage)}
                   currency={item.supplier.currency}
+                  signed
                 />
               </dd>
               <dt className='text-muted-foreground'>{t('Period recharges')}</dt>
@@ -90,6 +103,7 @@ export function SettlementOverview(props: {
                 <Money
                   value={item.total_recharges}
                   currency={item.supplier.currency}
+                  signed
                 />
               </dd>
             </dl>
@@ -168,7 +182,11 @@ export function SettlementOverview(props: {
                 </td>
                 <td className='whitespace-nowrap'>
                   {product && (
-                    <Money value={product.amount} currency={currency} />
+                    <Money
+                      value={negate(product.amount)}
+                      currency={currency}
+                      signed
+                    />
                   )}
                   {product && Number(product.unpriced) > 0 && (
                     <Badge tone='warning' className='ml-2'>
@@ -180,7 +198,7 @@ export function SettlementOverview(props: {
                 {index === 0 && (
                   <>
                     <td rowSpan={products.length} className='align-top'>
-                      <Money value={payments} currency={currency} />
+                      <Money value={payments} currency={currency} signed />
                     </td>
                     <td
                       rowSpan={products.length}
@@ -189,6 +207,7 @@ export function SettlementOverview(props: {
                       <Money
                         value={day?.closing_balance ?? '0'}
                         currency={currency}
+                        signed
                       />
                     </td>
                   </>
@@ -298,7 +317,7 @@ export function SettlementSheet(props: {
   const cards = [
     { label: 'Current balance', value: statement.balance },
     { label: 'Opening balance', value: statement.opening_balance },
-    { label: 'Period settlement', value: statement.total_usage },
+    { label: 'Period settlement', value: negate(statement.total_usage) },
     { label: 'Period recharges', value: statement.total_recharges },
   ]
   return (
@@ -308,7 +327,7 @@ export function SettlementSheet(props: {
           <Card key={card.label} className='p-5'>
             <div className='mono-label mb-3'>{t(card.label)}</div>
             <div className='text-xl font-semibold tracking-tight break-all'>
-              <Money value={card.value} currency={currency} />
+              <Money value={card.value} currency={currency} signed />
             </div>
           </Card>
         ))}
@@ -550,10 +569,7 @@ export function SettlementSheet(props: {
                     <Badge tone='warning'>{t('Unpriced')}</Badge>
                   )}
                   {usage && !unpriced && (
-                    <Money
-                      value={(-Number(line.change)).toFixed(6)}
-                      currency={currency}
-                    />
+                    <Money value={line.change} currency={currency} signed />
                   )}
                   {!usage && '—'}
                 </td>
@@ -561,11 +577,11 @@ export function SettlementSheet(props: {
                   {usage || line.kind === 'claim' ? (
                     '—'
                   ) : (
-                    <Money value={line.change} currency={currency} />
+                    <Money value={line.change} currency={currency} signed />
                   )}
                 </td>
                 <td className='font-medium whitespace-nowrap'>
-                  <Money value={line.balance} currency={currency} />
+                  <Money value={line.balance} currency={currency} signed />
                 </td>
                 <td className='whitespace-nowrap'>
                   {line.claim ? (
@@ -643,7 +659,8 @@ export function SettlementSheet(props: {
                                 '—'
                               ) : (
                                 <Money
-                                  value={value.amount.toFixed(6)}
+                                  signed
+                                  value={(-value.amount).toFixed(6)}
                                   currency={currency}
                                 />
                               )}
