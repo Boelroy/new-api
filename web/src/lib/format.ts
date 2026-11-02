@@ -29,26 +29,7 @@ import {
 // Number Formatting
 // ============================================================================
 
-export function formatNumber(
-  value: number | null | undefined,
-  locales?: Intl.LocalesArgument
-): string {
-  if (value == null || Number.isNaN(value as number)) return '-'
-  return Intl.NumberFormat(locales, { maximumFractionDigits: 2 }).format(
-    value as number
-  )
-}
-
-export function formatCompactNumber(
-  value: number | null | undefined,
-  locales?: Intl.LocalesArgument
-): string {
-  if (value == null || Number.isNaN(value as number)) return '-'
-  return Intl.NumberFormat(locales, {
-    notation: 'compact',
-    maximumFractionDigits: 1,
-  }).format(value as number)
-}
+export { formatNumber, formatCompactNumber } from './number-format'
 
 export function formatPercent(value: number | null | undefined): string {
   if (value == null || Number.isNaN(value as number)) return '-'
