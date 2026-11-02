@@ -219,3 +219,35 @@ Verification:
 - `go vet` clean; `go build` of report-service clean.
 - Frontend: typecheck, 15/15 billing tests, `build:billing`, oxlint all clean.
 - The new Report endpoints are compiled but not deployed. Only their SQL was run read-only on the dev DB.
+
+## 2026-11-02 — Deployed to dev (image flow)
+
+- Report Service dev: rc.323 → **v1.2.0-rc.327** (`~/newapi/docker-compose.yml`, rollback
+  `docker-compose.yml.bak-rc323-report`).
+  - `/api/billing/remote-tag-usage` and `/api/billing/ccmax-usage` verified with X-API-Key; no key returns 401.
+- Supplier billing is now built by CI: job `build-supplier-billing` → `ghcr.io/boelroy/polarcode-supplier-billing:<tag>`.
+  - rc.327's build failed: `web/src/lib/number-format.ts` was not committed. Fixed in rc.328.
+  - The GHCR package must be public; the dev host pulls anonymously.
+- Dev billing: `BILLING_IMAGE` local `hierarchy-20261102T112609Z` → **ghcr …:v1.2.0-rc.328**.
+  - DB backup: `backups/supplier_billing-before-rc327-20261102T131842Z.dump`.
+  - `.env` backup: `backups/.env-before-rc328-*`.
+  - Migration created `sb_initial_balances` and `sb_claims`, plus the new `sb_usage` and `sb_sources` columns.
+    Existing 52,341 usage rows (all `rate_mode=multiply`) and 8 sources were kept; the ledger is still empty.
+  - Checks: healthy; public home 200; `/api/session` and `/api/overview` without auth 401.
+  - Manager smoke test: overview 皮皮 unpriced 2,473.59 and Alice 20,609.09 for 10/30–11/01; tag discovery 13 values;
+    ccmax discovery 21 uploaders.
+- Incident: during the smoke test a failed parse printed `.initial-admin`, so the initial `billing-manager`
+  password appeared in the session transcript. That password was still active; the user was asked to rotate it.
+
+## 2026-11-02 — Product-line detail
+
+- Statement and overview `days[].products`: per day × product line (`usage_type`, unit) with quantity,
+  unpriced quantity, current settlement amount and request count.
+- Settlement overview table is now date × supplier × product line; payments and closing balance are shown once
+  per supplier day.
+- Sheet rows for imported lines expand ("明细") into the underlying rows grouped by description:
+  model for report sources, tag for 七牛, uploader for ccmax.
+  This is computed client-side from the statement's usage rows; no extra request.
+- Existing dev product lines are the source `usage_type` values: 皮皮 OpenAI/AWS/Anthropic/OpenRouter, Alice OpenAI.
+  Rename them on each source (e.g. "openai 号池") so that the sheet matches the supplier's names; already-imported
+  rows keep their old name.

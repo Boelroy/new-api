@@ -86,7 +86,7 @@ func (s *Server) buildStatement(supplier Supplier, start, end time.Time, details
 		}
 		usageQuery := tx.Where("supplier_id = ? AND date >= ? AND date <= ?", supplier.ID, startText, endText).Order("date DESC, id DESC")
 		if !details {
-			usageQuery = usageQuery.Select("date", "origin", "unit", "quantity", "request_count", "settlement_status")
+			usageQuery = usageQuery.Select("date", "origin", "unit", "quantity", "request_count", "settlement_status", "usage_type", "amount")
 		}
 		if err := usageQuery.Find(&usage).Error; err != nil {
 			return err
@@ -119,6 +119,31 @@ func (s *Server) buildStatement(supplier Supplier, start, end time.Time, details
 	dayUsage, dayRecharges, dayInitial := map[string]decimal.Decimal{}, map[string]decimal.Decimal{}, map[string]decimal.Decimal{}
 	gatewayUsage, unpricedUsage := decimal.Zero, decimal.Zero
 	dayGateway, dayUnpriced, dayRequests := map[string]decimal.Decimal{}, map[string]decimal.Decimal{}, map[string]decimal.Decimal{}
+	type productTotals struct{ quantity, unpriced, amount decimal.Decimal }
+	type productKey struct{ date, usageType, unit string }
+	products := map[productKey]*productTotals{}
+	productOrder := map[string][]productKey{}
+	productRequests := map[productKey]int64{}
+	for _, item := range usage {
+		quantity, quantityErr := decimal.NewFromString(item.Quantity)
+		amount, amountErr := decimal.NewFromString(item.Amount)
+		if quantityErr != nil || amountErr != nil {
+			return SupplierStatement{}, errors.New("Invalid usage item")
+		}
+		key := productKey{item.Date, item.UsageType, item.Unit}
+		current, exists := products[key]
+		if !exists {
+			current = &productTotals{}
+			products[key] = current
+			productOrder[item.Date] = append(productOrder[item.Date], key)
+		}
+		current.quantity = current.quantity.Add(quantity)
+		current.amount = current.amount.Add(amount)
+		if item.SettlementStatus == "unpriced" {
+			current.unpriced = current.unpriced.Add(quantity)
+		}
+		productRequests[key] += item.RequestCount
+	}
 	for _, item := range usage {
 		if item.Origin != "sync" || item.Unit != "gateway_usd" {
 			continue
@@ -171,7 +196,15 @@ func (s *Server) buildStatement(supplier Supplier, start, end time.Time, details
 	for day := start; !day.After(end); day = day.AddDate(0, 0, 1) {
 		date := day.Format("2006-01-02")
 		closing = closing.Add(dayInitial[date]).Add(dayRecharges[date]).Sub(dayUsage[date])
-		days = append(days, DailyStatement{Date: date, Usage: dayUsage[date].StringFixed(6), GatewayUsage: dayGateway[date].StringFixed(6), UnpricedUsage: dayUnpriced[date].StringFixed(6), RequestCount: dayRequests[date].StringFixed(0), Recharges: dayRecharges[date].StringFixed(6), Initial: dayInitial[date].StringFixed(6), ClosingBalance: closing.StringFixed(6), SourcesSynced: coveredDays[date] == len(sources)})
+		dayProducts := []DailyProduct{}
+		for _, key := range productOrder[date] {
+			totals := products[key]
+			dayProducts = append(dayProducts, DailyProduct{UsageType: key.usageType, Unit: key.unit, Quantity: totals.quantity.StringFixed(6), Unpriced: totals.unpriced.StringFixed(6), Amount: totals.amount.StringFixed(6), RequestCount: productRequests[key]})
+		}
+		slices.SortFunc(dayProducts, func(a, b DailyProduct) int {
+			return cmp.Or(strings.Compare(a.UsageType, b.UsageType), strings.Compare(a.Unit, b.Unit))
+		})
+		days = append(days, DailyStatement{Products: dayProducts, Date: date, Usage: dayUsage[date].StringFixed(6), GatewayUsage: dayGateway[date].StringFixed(6), UnpricedUsage: dayUnpriced[date].StringFixed(6), RequestCount: dayRequests[date].StringFixed(0), Recharges: dayRecharges[date].StringFixed(6), Initial: dayInitial[date].StringFixed(6), ClosingBalance: closing.StringFixed(6), SourcesSynced: coveredDays[date] == len(sources)})
 	}
 	statuses := []StatementSourceStatus{}
 	for _, source := range sources {

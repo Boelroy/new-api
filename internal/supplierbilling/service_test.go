@@ -588,6 +588,10 @@ func TestServiceDatabaseMatrix(t *testing.T) {
 						found = true
 						assert.Equal(t, repriced.Balance, item.Days[0].ClosingBalance)
 						assert.Nil(t, item.Lines)
+						assert.Equal(t, []DailyProduct{
+							{UsageType: "ccmax", Unit: "USD", Quantity: "752.860000", Unpriced: "0.000000", Amount: "280.917910"},
+							{UsageType: "openai 号池", Unit: "gateway_usd", Quantity: "122.407600", Unpriced: "0.000000", Amount: "73.079165", RequestCount: 2},
+						}, item.Days[0].Products, "Each day is broken down by product line")
 					}
 				}
 				assert.True(t, found)

@@ -312,6 +312,19 @@ type DailyStatement struct {
 	Initial        string `json:"initial"`
 	ClosingBalance string `json:"closing_balance"`
 	SourcesSynced  bool   `json:"sources_synced"`
+	// Products breaks the day down by product line (usage type).
+	Products []DailyProduct `json:"products"`
+}
+
+// DailyProduct is one product line's usage and current settlement amount for
+// a day. Unpriced is the part of Quantity that has no agreed price yet.
+type DailyProduct struct {
+	UsageType    string `json:"usage_type"`
+	Unit         string `json:"unit"`
+	Quantity     string `json:"quantity"`
+	Unpriced     string `json:"unpriced"`
+	Amount       string `json:"amount"`
+	RequestCount int64  `json:"request_count"`
 }
 
 type StatementSourceStatus struct {

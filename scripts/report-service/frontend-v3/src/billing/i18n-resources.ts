@@ -218,6 +218,8 @@ export const resources = {
       'Unmapped': 'Unmapped',
       'Add a value': 'Add a value',
       'All except {{values}}': 'All except {{values}}',
+      'Details': 'Details',
+      'Item': 'Item',
     },
   },
   zh: {
@@ -434,6 +436,8 @@ export const resources = {
       'Unmapped': '未映射',
       'Add a value': '手动添加',
       'All except {{values}}': '除 {{values}} 外全部',
+      'Details': '明细',
+      'Item': '项目',
     },
   },
   'zh-TW': {
@@ -650,6 +654,8 @@ export const resources = {
       'Unmapped': '未映射',
       'Add a value': '手動新增',
       'All except {{values}}': '除 {{values}} 外全部',
+      'Details': '明細',
+      'Item': '項目',
     },
   },
   fr: {
@@ -870,6 +876,8 @@ export const resources = {
       'Unmapped': 'Non associé',
       'Add a value': 'Ajouter une valeur',
       'All except {{values}}': 'Tout sauf {{values}}',
+      'Details': 'Détails',
+      'Item': 'Élément',
     },
   },
   ja: {
@@ -1088,6 +1096,8 @@ export const resources = {
       'Unmapped': '未割り当て',
       'Add a value': '値を追加',
       'All except {{values}}': '{{values}} 以外すべて',
+      'Details': '明細',
+      'Item': '項目',
     },
   },
   ru: {
@@ -1307,6 +1317,8 @@ export const resources = {
       'Unmapped': 'Не сопоставлено',
       'Add a value': 'Добавить значение',
       'All except {{values}}': 'Всё, кроме {{values}}',
+      'Details': 'Подробности',
+      'Item': 'Позиция',
     },
   },
   vi: {
@@ -1528,6 +1540,8 @@ export const resources = {
       'Unmapped': 'Chưa ánh xạ',
       'Add a value': 'Thêm giá trị',
       'All except {{values}}': 'Tất cả trừ {{values}}',
+      'Details': 'Chi tiết',
+      'Item': 'Mục',
     },
   },
 }

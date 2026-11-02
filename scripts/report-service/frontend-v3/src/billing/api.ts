@@ -113,6 +113,16 @@ export type Recharge = {
   created_at: number
   reversed?: boolean
 }
+// One product line (usage type) on one day; unpriced is the part of quantity
+// that has no agreed price yet and so adds nothing to amount.
+export type DailyProduct = {
+  usage_type: string
+  unit: string
+  quantity: string
+  unpriced: string
+  amount: string
+  request_count: number
+}
 export type InitialBalance = {
   id: number
   supplier_id: number
@@ -174,6 +184,7 @@ export type Statement = {
     initial?: string
     closing_balance: string
     sources_synced: boolean
+    products?: DailyProduct[]
   }[]
   source_status: {
     id: number

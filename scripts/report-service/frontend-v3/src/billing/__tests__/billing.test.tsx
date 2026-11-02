@@ -18,7 +18,7 @@ import App from '../App'
 import { Money } from '../components'
 import EntryForm from '../EntryForm'
 import i18n from '../i18n'
-import { SettlementSheet } from '../SettlementView'
+import { SettlementOverview, SettlementSheet } from '../SettlementView'
 import StatementView from '../StatementView'
 
 const supplier: Supplier = { id: 11, name: 'Supplier Alpha', currency: 'CNY' }
@@ -148,6 +148,53 @@ afterEach(() => {
 })
 
 describe('supplier billing workspace', () => {
+  it('breaks each supplier day into product lines in the settlement overview', () => {
+    const usd: Supplier = { id: 21, name: '皮皮', currency: 'USD' }
+    const day = statement(usd, '-310.000000').days[0]
+    render(
+      <I18nextProvider i18n={i18n}>
+        <SettlementOverview
+          overview={{
+            suppliers: [
+              {
+                ...statement(usd, '-310.000000'),
+                days: [
+                  {
+                    ...day,
+                    products: [
+                      {
+                        usage_type: 'aws',
+                        unit: 'gateway_usd',
+                        quantity: '100.000000',
+                        unpriced: '0.000000',
+                        amount: '300.000000',
+                        request_count: 9,
+                      },
+                      {
+                        usage_type: 'ccmax',
+                        unit: 'cny_list',
+                        quantity: '3058.350000',
+                        unpriced: '3058.350000',
+                        amount: '0.000000',
+                        request_count: 0,
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          }}
+          onInitial={vi.fn()}
+          onOpen={vi.fn()}
+        />
+      </I18nextProvider>
+    )
+    const aws = screen.getByRole('row', { name: /aws/ })
+    expect(within(aws).getByText('$300.00')).toBeInTheDocument()
+    const ccmax = screen.getByRole('row', { name: /ccmax/ })
+    expect(within(ccmax).getByText('CN¥3,058.35')).toBeInTheDocument()
+    expect(within(ccmax).getByText('Unpriced')).toBeInTheDocument()
+  })
   it('maps remote channel tags with recent values, owners and an all-except option', async () => {
     const usd: Supplier = { id: 21, name: '皮皮', currency: 'USD' }
     const alice: Supplier = { id: 22, name: 'Alice', currency: 'USD' }
@@ -281,6 +328,27 @@ describe('supplier billing workspace', () => {
       ...statement(usd, '99162.967815'),
       opening_balance: '39234.220000',
       initial_balance: null,
+      usage: ['gpt-6-astra', 'gpt-4.1', 'gpt-6-astra'].map((model, id) => ({
+        id,
+        date: '2026-10-30',
+        source_id: 1,
+        source_name: 'Dev OpenAI',
+        usage_type: 'openai 号池',
+        description: model,
+        quantity: model === 'gpt-4.1' ? '22.4076' : '50',
+        unit: 'gateway_usd',
+        unit_price: '3.9',
+        currency: 'CNY',
+        discount: '1',
+        fx_rate: '6.7',
+        rate_mode: 'divide' as const,
+        amount: '1.000000',
+        origin: 'sync' as const,
+        settlement_status: 'settled' as const,
+        created_by: 1,
+        created_at: 0,
+        request_count: 2,
+      })),
       lines: [
         line({
           claim: {
@@ -335,6 +403,14 @@ describe('supplier billing workspace', () => {
       )
     ).not.toHaveLength(0)
     expect(screen.getByText('Not set')).toBeInTheDocument()
+    await user.click(within(pool).getByRole('button', { name: 'Details' }))
+    const astraRows = screen.getAllByRole('row', { name: /gpt-6-astra/ })
+    const astra = astraRows[astraRows.length - 1]
+    expect(within(astra).getByText('$100.00')).toBeInTheDocument()
+    expect(within(astra).getByText('4')).toBeInTheDocument()
+    expect(
+      screen.getAllByRole('row', { name: /gpt-4\.1/ }).length
+    ).toBeGreaterThan(0)
     await user.click(within(pool).getByRole('button', { name: 'Set price' }))
     expect(onPrice).toHaveBeenCalledWith(sheet.lines?.[0])
 
