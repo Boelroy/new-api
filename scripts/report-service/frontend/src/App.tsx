@@ -14,8 +14,7 @@ import CacheReport from './pages/CacheReport'
 import ErrorCenter from './pages/ErrorCenter'
 import ModelHealth from './pages/ModelHealth'
 import ModelCleanup from './pages/ModelCleanup'
-import ChannelPriority from './pages/ChannelPriority'
-import RemoteModelCooldown from './pages/RemoteModelCooldown'
+import Scheduling from './pages/Scheduling'
 import RemoteChannels from './pages/RemoteChannels'
 import LocalChannelSync from './pages/LocalChannelSync'
 import LocalToRemoteSync from './pages/LocalToRemoteSync'
@@ -106,8 +105,9 @@ export default function App() {
         <Route path="/errors" element={<RoleGate min={ROLE_ADMIN}><ErrorCenter /></RoleGate>} />
         <Route path="/model-health" element={<RoleGate min={ROLE_ADMIN}><ModelHealth /></RoleGate>} />
         <Route path="/model-cleanup" element={<RoleGate min={ROLE_ADMIN}><ModelCleanup /></RoleGate>} />
-        <Route path="/channel-priority" element={<RoleGate min={ROLE_ADMIN}><ChannelPriority /></RoleGate>} />
-        <Route path="/remote-model-cooldown" element={<RoleGate min={ROLE_ADMIN}><RemoteModelCooldown /></RoleGate>} />
+        <Route path="/scheduling" element={<RoleGate min={ROLE_ADMIN}><Scheduling /></RoleGate>} />
+        <Route path="/channel-priority" element={<Navigate to="/scheduling?tab=priority" replace />} />
+        <Route path="/remote-model-cooldown" element={<Navigate to="/scheduling?tab=cooldown" replace />} />
         <Route path="/testing" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
         <Route path="/testing/:projectId" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
         <Route path="/users" element={<RoleGate min={ROLE_ADMIN}><Users /></RoleGate>} />

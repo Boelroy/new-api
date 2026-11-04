@@ -586,6 +586,37 @@ export type ChanPrioConfig = {
   dry_run: boolean
 }
 
+// Stream-failure guard (stream_guard.go): a (channel, model) whose recent
+// streams end in response.failed has the model stripped and the channel
+// demoted. restored_at > 0 once an operator undid it from the 调度 page.
+export type StreamGuardEvent = {
+  id: number
+  channel_id: number
+  channel_name: string
+  channel_status: number
+  channel_priority: number
+  model: string
+  action: string
+  streams: number
+  failed: number
+  old_priority: number
+  new_priority: number
+  created_at: number
+  restored_at: number
+  model_present: boolean
+}
+
+export type StreamGuardRules = {
+  tick_sec: number
+  window_sec: number
+  min_streams: number
+  min_failed: number
+  min_fail_rate: number
+  wide_share: number
+  wide_min_chans: number
+  demote_priority: number
+}
+
 export type ChanPrioEvent = {
   id: number
   channel_id: number
@@ -1979,6 +2010,16 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+    }),
+
+  streamGuardEvents: () =>
+    request<{ events: StreamGuardEvent[]; rules: StreamGuardRules }>('/api/stream-guard/events'),
+
+  streamGuardRestore: (id: number) =>
+    request<{ ok: boolean; priority: number }>('/api/stream-guard/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
     }),
 
   chanPrioEvents: (params?: { channel_id?: number; action?: string; limit?: number }) => {

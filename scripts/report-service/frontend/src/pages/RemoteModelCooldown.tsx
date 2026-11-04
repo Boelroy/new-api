@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import Layout from '../components/Layout'
 import { Button, Card } from '../components/ui'
 import { confirmDialog, toast } from '../components/feedback'
 import {
@@ -217,7 +216,7 @@ function CooldownConfigCard({ scope, profiles, onRan }: {
   )
 }
 
-export default function RemoteModelCooldown() {
+export function ModelCooldownPanel() {
   const [profiles, setProfiles] = useState<RemoteProfile[]>([])
   const [active, setActive] = useState<RemoteCooldownActive[]>([])
   // Server clock minus local clock, so countdowns don't drift with a skewed browser.
@@ -276,10 +275,8 @@ export default function RemoteModelCooldown() {
   const serverNow = nowSec + clockSkew
 
   return (
-    <Layout
-      title="模型限流冷却"
-      subtitle="本地/远程渠道出现「Rate limit reached」或 Bedrock ThrottlingException 429 时,把该模型从该渠道下线,按 TPM/RPM 限额冷却后自动加回"
-    >
+    <>
+      <p className="text-xs text-gray-500 mb-4">本地/远程渠道出现「Rate limit reached」或 Bedrock ThrottlingException 429 时,把该模型从该渠道下线,按 TPM/RPM 限额冷却后自动加回</p>
       <div className="space-y-4">
         <CooldownConfigCard scope="local" profiles={profiles} onRan={refresh} />
         <CooldownConfigCard scope="remote" profiles={profiles} onRan={refresh} />
@@ -368,6 +365,6 @@ export default function RemoteModelCooldown() {
           </div>
         </div>
       </div>
-    </Layout>
+    </>
   )
 }

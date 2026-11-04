@@ -4916,6 +4916,7 @@ func main() {
 			new_priority BIGINT NOT NULL,
 			created_at   BIGINT NOT NULL
 		)`,
+		`ALTER TABLE rs_stream_guard_event ADD COLUMN IF NOT EXISTS restored_at BIGINT NOT NULL DEFAULT 0`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
@@ -5211,6 +5212,9 @@ func main() {
 	adminAPI.GET("/channel-priority/events", handleChanPrioEvents)
 	adminAPI.GET("/channel-priority/status", handleChanPrioStatus)
 	adminAPI.POST("/channel-priority/run", handleChanPrioRunNow)
+	// Stream-failure guard (stream_guard.go): action log + manual restore.
+	adminAPI.GET("/stream-guard/events", handleStreamGuardEvents)
+	adminAPI.POST("/stream-guard/restore", handleStreamGuardRestore)
 	// Key Tester: admin+, tester (role=5), studio_operator (role=2),
 	// remote_studio_operator (role=3), and project_admin (role=7). Tester
 	// is scoped to Key Tester + Provider Testing (see the testingAPI group

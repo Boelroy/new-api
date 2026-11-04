@@ -17,7 +17,7 @@ const GROUP_LABELS: Record<SidebarGroup, string> = {
 const NAV_ORDER = [
   '/', '/profit', '/billing', '/cache', '/errors', '/model-health',
   '/keys', '/allkeys', '/tester', '/remote-channels', '/pool-upload',
-  '/local-sync', '/local-remote-sync', '/model-cleanup', '/channel-priority', '/remote-model-cooldown', '/users', '/settings', '/testing',
+  '/local-sync', '/local-remote-sync', '/model-cleanup', '/scheduling', '/users', '/settings', '/testing',
   '/supplier-accounts',
 ]
 function navIndex(to: string): number {
@@ -43,8 +43,7 @@ const NAV_COLORS: Record<string, string> = {
   '/local-sync': '#3B82F6',  // Local Sync — blue
   '/local-remote-sync': '#0EA5E9', // Local→Remote Sync — sky
   '/model-cleanup': '#DC2626', // Model Cleanup — red
-  '/channel-priority': '#0891B2', // Channel Priority — cyan-700
-  '/remote-model-cooldown': '#EA580C', // Remote Cooldown — orange-600
+  '/scheduling': '#EA580C', // Scheduling (cooldown / priority / stream guard) — orange-600
   '/users': '#8B5CF6',       // User — violet
   '/settings': '#64748B',    // Settings — slate
   '/testing': '#14B8A6',     // Provider Testing — teal
@@ -225,19 +224,10 @@ const MODEL_CLEANUP_ITEM: Item = {
   ),
 }
 
-const REMOTE_COOLDOWN_ITEM: Item = {
-  to: '/remote-model-cooldown', label: 'Model Cooldown', group: 'admin',
-  icon: (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="13" r="8" />
-      <path d="M12 9v4l2 2" />
-      <path d="M9 2h6" />
-    </svg>
-  ),
-}
-
-const CHANNEL_PRIORITY_ITEM: Item = {
-  to: '/channel-priority', label: 'Channel Priority', group: 'admin',
+// 调度: model cooldown, channel-priority tuning and the stream-failure guard
+// share one page (pages/Scheduling.tsx); the old routes redirect into its tabs.
+const SCHEDULING_ITEM: Item = {
+  to: '/scheduling', label: 'Scheduling', group: 'admin',
   icon: (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <line x1="4" y1="21" x2="4" y2="14" />
@@ -315,7 +305,7 @@ export function baselineItemsFor(role: number, flags: SidebarFlags): Item[] {
     const items: Item[] = [
       USAGE_REPORT_ITEM, BILLING_ITEM, CACHE_REPORT_ITEM, ERROR_CENTER_ITEM, MODEL_HEALTH_ITEM,
       KEY_CAPACITY_ITEM, ALL_KEYS_ITEM, KEY_TESTER_ITEM, REMOTE_CHANNELS_ITEM,
-      LOCAL_SYNC_ITEM, LOCAL_TO_REMOTE_SYNC_ITEM, MODEL_CLEANUP_ITEM, CHANNEL_PRIORITY_ITEM, REMOTE_COOLDOWN_ITEM, USERS_ITEM,
+      LOCAL_SYNC_ITEM, LOCAL_TO_REMOTE_SYNC_ITEM, MODEL_CLEANUP_ITEM, SCHEDULING_ITEM, USERS_ITEM,
     ]
     if (showSupplier) items.push(SUPPLIER_ACCOUNTS_ITEM)
     if (role >= ROLE_SUPER_ADMIN) {

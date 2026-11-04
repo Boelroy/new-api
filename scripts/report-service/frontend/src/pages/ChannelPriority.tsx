@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import Layout from '../components/Layout'
 import { Button, Card } from '../components/ui'
 import { toast } from '../components/feedback'
 import { api, type ChanPrioConfig, type ChanPrioDemoted, type ChanPrioEvent } from '../api'
@@ -59,7 +58,7 @@ function NumField({ label, value, min, max, hint, onSave }: {
   )
 }
 
-export default function ChannelPriority() {
+export function ChannelPriorityPanel() {
   const [cfg, setCfg] = useState<ChanPrioConfig | null>(null)
   const [saving, setSaving] = useState(false)
   const [running, setRunning] = useState(false)
@@ -121,19 +120,15 @@ export default function ChannelPriority() {
   }
 
   if (!cfg) {
-    return (
-      <Layout title="渠道优先级自调" subtitle="429 限流自动降权 / 恢复自动升权">
-        <div className="text-sm text-secondary">加载中…</div>
-      </Layout>
-    )
+    return <div className="text-sm text-secondary">加载中…</div>
   }
 
   return (
-    <Layout
-      title="渠道优先级自调"
-      subtitle="被 429 限流的渠道自动降低优先级(移出主轮换),恢复后自动升回基线"
-      actions={<Button variant="outline" size="sm" onClick={runNow} disabled={running}>{running ? '执行中…' : '立即执行一次'}</Button>}
-    >
+    <>
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <p className="text-xs text-gray-500">被 429 限流的渠道自动降低优先级(移出主轮换),恢复后自动升回基线</p>
+        <Button variant="outline" size="sm" onClick={runNow} disabled={running}>{running ? '执行中…' : '立即执行一次'}</Button>
+      </div>
       <div className="space-y-4">
         <Card className="p-5">
           <div className="flex items-center justify-between mb-3">
@@ -257,6 +252,6 @@ export default function ChannelPriority() {
           </div>
         </div>
       </div>
-    </Layout>
+    </>
   )
 }

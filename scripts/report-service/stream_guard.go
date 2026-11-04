@@ -20,9 +20,12 @@ import (
 	"context"
 	"database/sql"
 	"log"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -186,4 +189,132 @@ func applyStreamGuard(ctx context.Context, p streamGuardPair) error {
 	log.Printf("[stream-guard] channel %d: %s (model %s, %d/%d streams failed in %s, priority %d -> %d)",
 		p.channelID, action, p.model, p.failed, p.total, streamGuardWindow, oldPriority, streamGuardDemotePriority)
 	return nil
+}
+
+// handleStreamGuardEvents lists guard actions newest first, with the channel's
+// current state so the page can tell which strips are still in effect, plus
+// the active thresholds.
+func handleStreamGuardEvents(c *gin.Context) {
+	rows, err := db.Query(`
+		SELECT e.id, e.channel_id, COALESCE(ch.name,''), COALESCE(ch.status,0), COALESCE(ch.priority,0),
+		       e.model, e.action, e.streams, e.failed, e.old_priority, e.new_priority, e.created_at, e.restored_at,
+		       COALESCE(','||ch.models||',' LIKE '%,'||e.model||',%', false)
+		FROM rs_stream_guard_event e
+		LEFT JOIN channels ch ON ch.id = e.channel_id
+		ORDER BY e.id DESC LIMIT 500`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	events := make([]gin.H, 0)
+	for rows.Next() {
+		var (
+			id, channelID, chPriority, oldPriority, newPriority, createdAt, restoredAt int64
+			chStatus, streams, failed                                                  int
+			name, model, action                                                        string
+			modelPresent                                                               bool
+		)
+		if err := rows.Scan(&id, &channelID, &name, &chStatus, &chPriority, &model, &action, &streams, &failed,
+			&oldPriority, &newPriority, &createdAt, &restoredAt, &modelPresent); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		events = append(events, gin.H{
+			"id": id, "channel_id": channelID, "channel_name": name, "channel_status": chStatus,
+			"channel_priority": chPriority, "model": model, "action": action, "streams": streams,
+			"failed": failed, "old_priority": oldPriority, "new_priority": newPriority,
+			"created_at": createdAt, "restored_at": restoredAt, "model_present": modelPresent,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"events": events,
+		"rules": gin.H{
+			"tick_sec": int(streamGuardTick.Seconds()), "window_sec": int(streamGuardWindow.Seconds()),
+			"min_streams": streamGuardMinStreams, "min_failed": streamGuardMinFailed,
+			"min_fail_rate": streamGuardMinFailRate, "wide_share": streamGuardWideShare,
+			"wide_min_chans": streamGuardWideMinChans, "demote_priority": streamGuardDemotePriority,
+		},
+	})
+}
+
+// handleStreamGuardRestore undoes one guard action: puts the model back on the
+// channel (channels.models + one ability row per channel group) and raises the
+// priority back to what it was before the event, if it is still lower.
+func handleStreamGuardRestore(c *gin.Context) {
+	var payload struct {
+		ID int64 `json:"id"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil || payload.ID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id required"})
+		return
+	}
+	ctx := c.Request.Context()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	var channelID, oldPriority, restoredAt int64
+	var model, action string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT channel_id, model, action, old_priority, restored_at FROM rs_stream_guard_event WHERE id = $1 FOR UPDATE`,
+		payload.ID).Scan(&channelID, &model, &action, &oldPriority, &restoredAt); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "event not found"})
+		return
+	}
+	if restoredAt > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "already restored"})
+		return
+	}
+	var models, groups string
+	var status int
+	var priority, weight sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(models,''), COALESCE("group",''), COALESCE(status,0), priority, weight FROM channels WHERE id = $1 FOR UPDATE`,
+		channelID).Scan(&models, &groups, &status, &priority, &weight); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+		return
+	}
+	newPriority := max(priority.Int64, oldPriority)
+	if strings.Contains(action, "strip_model") && !slices.Contains(csvSplitModels(models), model) {
+		if _, err := tx.ExecContext(ctx, `UPDATE channels SET models = $1 WHERE id = $2`,
+			csvJoinModels(append(csvSplitModels(models), model)), channelID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		for _, g := range csvSplitModels(groups) {
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO abilities ("group", model, channel_id, enabled, priority, weight)
+				VALUES ($1, $2, $3, $4, $5, $6)
+				ON CONFLICT DO NOTHING`,
+				g, model, channelID, status == 1, newPriority, weight.Int64); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+		}
+	}
+	if newPriority > priority.Int64 {
+		if _, err := tx.ExecContext(ctx, `UPDATE channels SET priority = $1 WHERE id = $2`, newPriority, channelID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE abilities SET priority = $1 WHERE channel_id = $2`, newPriority, channelID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE rs_stream_guard_event SET restored_at = $1 WHERE id = $2`,
+		time.Now().Unix(), payload.ID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	log.Printf("[stream-guard] restored event %d: channel %d model %s priority -> %d", payload.ID, channelID, model, newPriority)
+	c.JSON(http.StatusOK, gin.H{"ok": true, "priority": newPriority})
 }
