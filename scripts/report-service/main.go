@@ -4904,6 +4904,18 @@ func main() {
 			error          TEXT NOT NULL DEFAULT '',
 			probed_at      BIGINT NOT NULL DEFAULT 0
 		)`,
+		// Models stripped / channels demoted by the stream-failure guard (stream_guard.go).
+		`CREATE TABLE IF NOT EXISTS rs_stream_guard_event (
+			id           BIGSERIAL PRIMARY KEY,
+			channel_id   BIGINT NOT NULL,
+			model        TEXT NOT NULL,
+			action       TEXT NOT NULL,
+			streams      INT NOT NULL,
+			failed       INT NOT NULL,
+			old_priority BIGINT NOT NULL,
+			new_priority BIGINT NOT NULL,
+			created_at   BIGINT NOT NULL
+		)`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
@@ -4939,6 +4951,7 @@ func main() {
 	startModelCleanupLoop()
 	startChannelPriorityLoop()
 	startKeyTierLoop()
+	startStreamGuardLoop()
 	startRemoteModelCooldownLoop()
 	startRemoteErrorLogSync()
 	startRemoteAutoDisableLoop()
