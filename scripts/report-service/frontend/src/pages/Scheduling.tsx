@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
 import Layout from '../components/Layout'
 import { Card } from '../components/ui'
 import { toast, confirmDialog } from '../components/feedback'
@@ -7,16 +6,8 @@ import { api, type StreamGuardEvent, type StreamGuardRules } from '../api'
 import { ModelCooldownPanel } from './RemoteModelCooldown'
 import { ChannelPriorityPanel } from './ChannelPriority'
 
-// 调度: the three automatic traffic schedulers on one page — 429 model
+// 调度: the three automatic traffic schedulers stacked on one page — 429 model
 // cooldown, 429 channel-priority tuning, and the stream-failure guard.
-
-type Tab = 'cooldown' | 'priority' | 'stream'
-
-const TABS: { id: Tab; label: string }[] = [
-  { id: 'cooldown', label: '模型限流冷却' },
-  { id: 'priority', label: '渠道优先级自调' },
-  { id: 'stream', label: '断流处理' },
-]
 
 function fmtTime(unix: number): string {
   if (!unix) return '—'
@@ -160,30 +151,37 @@ function StreamGuardPanel() {
   )
 }
 
+const SECTIONS = [
+  { id: 'cooldown', title: '模型限流冷却', body: <ModelCooldownPanel /> },
+  { id: 'priority', title: '渠道优先级自调', body: <ChannelPriorityPanel /> },
+  { id: 'stream', title: '断流处理', body: <StreamGuardPanel /> },
+]
+
 export default function Scheduling() {
-  const [params, setParams] = useSearchParams()
-  const tab = (TABS.some(t => t.id === params.get('tab')) ? params.get('tab') : 'cooldown') as Tab
+  // Old /channel-priority and /remote-model-cooldown routes redirect here
+  // with a #section; the SPA render does not scroll to it on its own.
+  useEffect(() => {
+    const id = window.location.hash.slice(1)
+    if (id) document.getElementById(id)?.scrollIntoView()
+  }, [])
 
   return (
     <Layout title="调度" subtitle="限流冷却、优先级自调、断流处理 —— 自动把流量从有问题的 Key 上挪走">
-      <div className="flex items-center gap-1 border-b border-gray-200 mb-4">
-        {TABS.map(t => (
-          <button
-            key={t.id}
-            onClick={() => setParams({ tab: t.id }, { replace: true })}
-            className={`px-3 py-2 text-sm border-b-2 -mb-px transition-colors ${
-              tab === t.id
-                ? 'border-gray-900 text-gray-900 font-medium'
-                : 'border-transparent text-gray-500 hover:text-gray-800'
-            }`}
-          >
-            {t.label}
-          </button>
+      <nav className="flex items-center gap-2 mb-6 text-xs">
+        {SECTIONS.map(s => (
+          <a key={s.id} href={`#${s.id}`} className="rounded-md border border-gray-200 bg-white px-2.5 py-1 text-gray-600 hover:text-gray-900 hover:border-gray-400">
+            {s.title}
+          </a>
+        ))}
+      </nav>
+      <div className="space-y-10">
+        {SECTIONS.map(s => (
+          <section key={s.id} id={s.id} className="scroll-mt-4">
+            <h2 className="text-base font-semibold text-gray-900 mb-2">{s.title}</h2>
+            {s.body}
+          </section>
         ))}
       </div>
-      {tab === 'cooldown' && <ModelCooldownPanel />}
-      {tab === 'priority' && <ChannelPriorityPanel />}
-      {tab === 'stream' && <StreamGuardPanel />}
     </Layout>
   )
 }
