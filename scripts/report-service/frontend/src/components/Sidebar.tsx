@@ -225,7 +225,7 @@ const MODEL_CLEANUP_ITEM: Item = {
 }
 
 // 调度: model cooldown, channel-priority tuning and the stream-failure guard
-// share one page (pages/Scheduling.tsx); the old routes redirect to its sections.
+// share one page (pages/Scheduling.tsx); the old routes redirect to its tabs.
 const SCHEDULING_ITEM: Item = {
   to: '/scheduling', label: 'Scheduling', group: 'admin',
   icon: (

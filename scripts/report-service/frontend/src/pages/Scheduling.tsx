@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import Layout from '../components/Layout'
 import { Card } from '../components/ui'
 import { toast, confirmDialog } from '../components/feedback'
-import { api, type StreamGuardEvent, type StreamGuardRules } from '../api'
+import { api, type StreamGuardConfig, type StreamGuardEvent } from '../api'
 import { ModelCooldownPanel } from './RemoteModelCooldown'
-import { ChannelPriorityPanel } from './ChannelPriority'
+import { ChannelPriorityPanel, NumField } from './ChannelPriority'
 
-// 调度: the three automatic traffic schedulers stacked on one page — 429 model
+// 调度: the three automatic traffic schedulers as tabs of one page — 429 model
 // cooldown, 429 channel-priority tuning, and the stream-failure guard.
 
 function fmtTime(unix: number): string {
@@ -30,18 +31,34 @@ const CHANNEL_STATUS: Record<number, { text: string; cls: string }> = {
 
 function StreamGuardPanel() {
   const [events, setEvents] = useState<StreamGuardEvent[]>([])
-  const [rules, setRules] = useState<StreamGuardRules | null>(null)
+  const [cfg, setCfg] = useState<StreamGuardConfig | null>(null)
+  const [saving, setSaving] = useState(false)
   const [busy, setBusy] = useState<number | null>(null)
 
   const load = useCallback(async () => {
     try {
       const res = await api.streamGuardEvents()
       setEvents(res.events)
-      setRules(res.rules)
     } catch (e) {
       toast.error(e)
     }
   }, [])
+
+  useEffect(() => {
+    api.streamGuardConfig().then(setCfg).catch(e => toast.error(e))
+  }, [])
+
+  const save = async (patch: Partial<StreamGuardConfig>) => {
+    setSaving(true)
+    try {
+      setCfg(await api.saveStreamGuardConfig(patch))
+      toast.success('已保存，下一轮检查生效')
+    } catch (e) {
+      toast.error(e)
+    } finally {
+      setSaving(false)
+    }
+  }
 
   useEffect(() => {
     void load()
@@ -73,15 +90,47 @@ function StreamGuardPanel() {
       </p>
       <div className="space-y-4">
         <Card className="p-5">
-          <div className="text-sm font-semibold mb-3">规则</div>
-          {rules ? (
-            <ul className="text-xs text-gray-600 space-y-1.5 list-disc pl-4">
-              <li>每 <b>{rules.tick_sec / 60}</b> 分钟检查一次所有启用渠道最近 <b>{rules.window_sec / 60}</b> 分钟的流式请求（只在 leader 节点执行）。</li>
-              <li>同一渠道同一模型：流 ≥ <b>{rules.min_streams}</b> 条、失败 ≥ <b>{rules.min_failed}</b> 条、失败率 ≥ <b>{Math.round(rules.min_fail_rate * 100)}%</b> 即命中。</li>
-              <li>命中后从该渠道下掉这个模型（渠道只剩这一个模型时不下，只降优先级），渠道优先级降到 <b>{rules.demote_priority}</b>。newapi 约 60 秒内生效。</li>
-              <li>同一模型在 ≥ <b>{Math.round(rules.wide_share * 100)}%</b> 的渠道（且 ≥ {rules.wide_min_chans} 个）同时失败，视为上游整体故障，不处理。</li>
-              <li>不会自动恢复；误判时在下方点「恢复」，模型加回、优先级回到处理前的值。</li>
-            </ul>
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-sm font-semibold">规则</div>
+            {cfg && (
+              <label className="flex items-center gap-2 text-xs">
+                <input type="checkbox" checked={cfg.enabled} disabled={saving} onChange={e => void save({ enabled: e.target.checked })} />
+                <span className={cfg.enabled ? 'text-green-700 font-medium' : 'text-gray-500'}>{cfg.enabled ? '已开启' : '已关闭'}</span>
+              </label>
+            )}
+          </div>
+          {cfg ? (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+                <NumField key={`t${cfg.tick_sec}`} label="检查间隔 (秒)" value={cfg.tick_sec} min={30} max={3600}
+                  onSave={n => void save({ tick_sec: n })} />
+                <NumField key={`w${cfg.window_sec}`} label="统计窗口 (秒)" value={cfg.window_sec} min={60} max={21600}
+                  hint="看最近这么久的流式请求" onSave={n => void save({ window_sec: n })} />
+                <NumField key={`s${cfg.min_streams}`} label="最少流数" value={cfg.min_streams} min={1} max={100000}
+                  hint="窗口内该渠道该模型至少这么多条流" onSave={n => void save({ min_streams: n })} />
+                <NumField key={`f${cfg.min_failed}`} label="最少失败数" value={cfg.min_failed} min={1} max={100000}
+                  hint="response.failed 至少这么多条" onSave={n => void save({ min_failed: n })} />
+                <NumField key={`r${cfg.min_fail_rate_pct}`} label="失败率阈值 (%)" value={cfg.min_fail_rate_pct} min={1} max={100}
+                  onSave={n => void save({ min_fail_rate_pct: n })} />
+                <NumField key={`ws${cfg.wide_share_pct}`} label="整体故障占比 (%)" value={cfg.wide_share_pct} min={1} max={100}
+                  hint="同一模型这么多比例的渠道同时失败 → 不处理" onSave={n => void save({ wide_share_pct: n })} />
+                <NumField key={`wc${cfg.wide_min_chans}`} label="整体故障最少渠道数" value={cfg.wide_min_chans} min={1} max={1000}
+                  hint="且至少这么多个渠道" onSave={n => void save({ wide_min_chans: n })} />
+                <NumField key={`p${cfg.demote_priority}`} label="降到的优先级" value={cfg.demote_priority} min={-100000} max={100000}
+                  hint="newapi 优先级越高越先用" onSave={n => void save({ demote_priority: n })} />
+              </div>
+              <div className="flex items-center gap-6 mt-4 text-xs">
+                <label className="flex items-center gap-2">
+                  <input type="checkbox" checked={cfg.strip_model} disabled={saving} onChange={e => void save({ strip_model: e.target.checked })} />
+                  <span>命中后下掉该模型（渠道只剩这一个模型时不下）</span>
+                </label>
+                <label className="flex items-center gap-2">
+                  <input type="checkbox" checked={cfg.demote} disabled={saving} onChange={e => void save({ demote: e.target.checked })} />
+                  <span>命中后降低渠道优先级</span>
+                </label>
+              </div>
+              <p className="text-[11px] text-gray-400 mt-3">只在 leader 节点执行；改动约 60 秒内同步到 newapi。不会自动恢复，误判时在下方点「恢复」。</p>
+            </>
           ) : <div className="text-xs text-gray-400">加载中…</div>}
         </Card>
 
@@ -151,37 +200,38 @@ function StreamGuardPanel() {
   )
 }
 
-const SECTIONS = [
-  { id: 'cooldown', title: '模型限流冷却', body: <ModelCooldownPanel /> },
-  { id: 'priority', title: '渠道优先级自调', body: <ChannelPriorityPanel /> },
-  { id: 'stream', title: '断流处理', body: <StreamGuardPanel /> },
+type Tab = 'cooldown' | 'priority' | 'stream'
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: 'cooldown', label: '模型限流冷却' },
+  { id: 'priority', label: '渠道优先级自调' },
+  { id: 'stream', label: '断流处理' },
 ]
 
 export default function Scheduling() {
-  // Old /channel-priority and /remote-model-cooldown routes redirect here
-  // with a #section; the SPA render does not scroll to it on its own.
-  useEffect(() => {
-    const id = window.location.hash.slice(1)
-    if (id) document.getElementById(id)?.scrollIntoView()
-  }, [])
+  const [params, setParams] = useSearchParams()
+  const tab = (TABS.some(t => t.id === params.get('tab')) ? params.get('tab') : 'cooldown') as Tab
 
   return (
     <Layout title="调度" subtitle="限流冷却、优先级自调、断流处理 —— 自动把流量从有问题的 Key 上挪走">
-      <nav className="flex items-center gap-2 mb-6 text-xs">
-        {SECTIONS.map(s => (
-          <a key={s.id} href={`#${s.id}`} className="rounded-md border border-gray-200 bg-white px-2.5 py-1 text-gray-600 hover:text-gray-900 hover:border-gray-400">
-            {s.title}
-          </a>
-        ))}
-      </nav>
-      <div className="space-y-10">
-        {SECTIONS.map(s => (
-          <section key={s.id} id={s.id} className="scroll-mt-4">
-            <h2 className="text-base font-semibold text-gray-900 mb-2">{s.title}</h2>
-            {s.body}
-          </section>
+      <div className="flex items-center gap-1 border-b border-gray-200 mb-4">
+        {TABS.map(t => (
+          <button
+            key={t.id}
+            onClick={() => setParams({ tab: t.id }, { replace: true })}
+            className={`px-3 py-2 text-sm border-b-2 -mb-px transition-colors ${
+              tab === t.id
+                ? 'border-gray-900 text-gray-900 font-medium'
+                : 'border-transparent text-gray-500 hover:text-gray-800'
+            }`}
+          >
+            {t.label}
+          </button>
         ))}
       </div>
+      {tab === 'cooldown' && <ModelCooldownPanel />}
+      {tab === 'priority' && <ChannelPriorityPanel />}
+      {tab === 'stream' && <StreamGuardPanel />}
     </Layout>
   )
 }

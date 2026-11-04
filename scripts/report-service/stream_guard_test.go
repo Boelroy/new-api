@@ -26,7 +26,7 @@ func TestStreamGuardVerdict(t *testing.T) {
 	}
 	for _, tc := range cases {
 		var got []int64
-		for _, p := range streamGuardVerdict(tc.pairs) {
+		for _, p := range streamGuardVerdict(streamGuardDefaults, tc.pairs) {
 			got = append(got, p.channelID)
 		}
 		assert.ElementsMatch(t, tc.want, got, tc.name)

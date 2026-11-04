@@ -5213,6 +5213,8 @@ func main() {
 	adminAPI.GET("/channel-priority/status", handleChanPrioStatus)
 	adminAPI.POST("/channel-priority/run", handleChanPrioRunNow)
 	// Stream-failure guard (stream_guard.go): action log + manual restore.
+	adminAPI.GET("/stream-guard/config", handleStreamGuardConfigGet)
+	adminAPI.POST("/stream-guard/config", handleStreamGuardConfigSet)
 	adminAPI.GET("/stream-guard/events", handleStreamGuardEvents)
 	adminAPI.POST("/stream-guard/restore", handleStreamGuardRestore)
 	// Key Tester: admin+, tester (role=5), studio_operator (role=2),

@@ -9,7 +9,7 @@ import { api, type ChanPrioConfig, type ChanPrioDemoted, type ChanPrioEvent } fr
 // channel with no 429 for the up-window is stepped back up toward the baseline
 // it had when first demoted.
 
-const inputCls = 'border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900'
+export const inputCls = 'border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-gray-50 focus:outline-none focus:border-gray-900'
 
 function fmtTime(unix: number): string {
   if (!unix) return '—'
@@ -43,7 +43,7 @@ function ChipList({ items, onRemove }: { items: string[]; onRemove: (v: string) 
   )
 }
 
-function NumField({ label, value, min, max, hint, onSave }: {
+export function NumField({ label, value, min, max, hint, onSave }: {
   label: string; value: number; min: number; max: number; hint?: string; onSave: (n: number) => void
 }) {
   return (

@@ -106,8 +106,8 @@ export default function App() {
         <Route path="/model-health" element={<RoleGate min={ROLE_ADMIN}><ModelHealth /></RoleGate>} />
         <Route path="/model-cleanup" element={<RoleGate min={ROLE_ADMIN}><ModelCleanup /></RoleGate>} />
         <Route path="/scheduling" element={<RoleGate min={ROLE_ADMIN}><Scheduling /></RoleGate>} />
-        <Route path="/channel-priority" element={<Navigate to="/scheduling#priority" replace />} />
-        <Route path="/remote-model-cooldown" element={<Navigate to="/scheduling#cooldown" replace />} />
+        <Route path="/channel-priority" element={<Navigate to="/scheduling?tab=priority" replace />} />
+        <Route path="/remote-model-cooldown" element={<Navigate to="/scheduling?tab=cooldown" replace />} />
         <Route path="/testing" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
         <Route path="/testing/:projectId" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />
         <Route path="/users" element={<RoleGate min={ROLE_ADMIN}><Users /></RoleGate>} />

@@ -606,14 +606,18 @@ export type StreamGuardEvent = {
   model_present: boolean
 }
 
-export type StreamGuardRules = {
+// Operator-tunable stream guard settings (report_config stream_guard_config).
+export type StreamGuardConfig = {
+  enabled: boolean
   tick_sec: number
   window_sec: number
   min_streams: number
   min_failed: number
-  min_fail_rate: number
-  wide_share: number
+  min_fail_rate_pct: number
+  wide_share_pct: number
   wide_min_chans: number
+  strip_model: boolean
+  demote: boolean
   demote_priority: number
 }
 
@@ -2013,7 +2017,16 @@ export const api = {
     }),
 
   streamGuardEvents: () =>
-    request<{ events: StreamGuardEvent[]; rules: StreamGuardRules }>('/api/stream-guard/events'),
+    request<{ events: StreamGuardEvent[] }>('/api/stream-guard/events'),
+
+  streamGuardConfig: () => request<StreamGuardConfig>('/api/stream-guard/config'),
+
+  saveStreamGuardConfig: (patch: Partial<StreamGuardConfig>) =>
+    request<StreamGuardConfig>('/api/stream-guard/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }),
 
   streamGuardRestore: (id: number) =>
     request<{ ok: boolean; priority: number }>('/api/stream-guard/restore', {
