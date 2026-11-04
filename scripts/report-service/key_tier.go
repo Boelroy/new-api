@@ -7,7 +7,9 @@ package main
 // model that was called, and those limits are fixed per tier. Probing each key
 // with a one-token gpt-4o-mini request (the model whose limits differ on every
 // tier boundary) and matching the token limit against the published table gives
-// the tier. Results are stored in rs_key_tier and joined into /api/keys/data.
+// the tier. A leader-only loop probes new keys within minutes and re-probes
+// every key daily; results are stored in rs_key_tier and joined into
+// /api/keys/data, where Key Capacity marks each key with its tier.
 
 import (
 	"bytes"
@@ -16,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -29,6 +32,9 @@ const (
 	keyTierProbeModel       = "gpt-4o-mini"
 	keyTierProbeConcurrency = 4
 	keyTierProbeTimeout     = 20 * time.Second
+	keyTierTickInterval     = 5 * time.Minute
+	keyTierRefreshAge       = 24 * time.Hour
+	keyTierBatchSize        = 50
 )
 
 // keyTierTPM is OpenAI's published gpt-4o-mini tokens-per-minute limit for each
@@ -113,30 +119,17 @@ func probeOpenAIKeyTier(ctx context.Context, key, baseURL, proxyURL string) keyT
 	return res
 }
 
-// handleKeyTierProbe probes the requested enabled OpenAI channels (all of them
-// when ids is empty) and stores the estimated tier per channel.
-func handleKeyTierProbe(c *gin.Context) {
-	var payload struct {
-		IDs []int `json:"ids"`
-	}
-	if err := c.ShouldBindJSON(&payload); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	query := `SELECT id, key, COALESCE(base_url,''), COALESCE(setting,'') FROM channels WHERE status = 1 AND type = 1`
-	args := []any{}
-	if len(payload.IDs) > 0 {
-		query += ` AND id = ANY($1::bigint[])`
-		ids := make([]string, len(payload.IDs))
-		for i, id := range payload.IDs {
-			ids[i] = strconv.Itoa(id)
-		}
-		args = append(args, "{"+strings.Join(ids, ",")+"}")
-	}
-	rows, err := db.Query(query, args...)
+// probeKeyTiers probes enabled OpenAI channels matching filter (an SQL
+// fragment over channels c LEFT JOIN rs_key_tier t, appended after the WHERE)
+// and stores the estimated tier per channel.
+func probeKeyTiers(ctx context.Context, filter string, args ...any) ([]keyTierProbeResult, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT c.id, c.key, COALESCE(c.base_url,''), COALESCE(c.setting,'')
+		FROM channels c
+		LEFT JOIN rs_key_tier t ON t.channel_id = c.id
+		WHERE c.status = 1 AND c.type = 1 `+filter, args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+		return nil, err
 	}
 	type target struct {
 		id                    int
@@ -147,8 +140,7 @@ func handleKeyTierProbe(c *gin.Context) {
 		var t target
 		if err := rows.Scan(&t.id, &t.key, &t.baseURL, &t.setting); err != nil {
 			rows.Close()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
+			return nil, err
 		}
 		targets = append(targets, t)
 	}
@@ -169,7 +161,7 @@ func handleKeyTierProbe(c *gin.Context) {
 			defer func() { <-sem }()
 			// Multi-key channels store one key per line; the first is representative.
 			key, _, _ := strings.Cut(t.key, "\n")
-			r := probeOpenAIKeyTier(c.Request.Context(), key, t.baseURL, strings.TrimSpace(setting.Proxy))
+			r := probeOpenAIKeyTier(ctx, key, t.baseURL, strings.TrimSpace(setting.Proxy))
 			r.ChannelID = t.id
 			results[i] = r
 		}()
@@ -181,7 +173,7 @@ func handleKeyTierProbe(c *gin.Context) {
 		if r.Tier != nil {
 			tier = sql.NullInt64{Int64: int64(*r.Tier), Valid: true}
 		}
-		if _, err := db.Exec(`
+		if _, err := db.ExecContext(ctx, `
 			INSERT INTO rs_key_tier (channel_id, tier, limit_requests, limit_tokens, probe_model, http_status, error, probed_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			ON CONFLICT (channel_id) DO UPDATE SET
@@ -192,9 +184,59 @@ func handleKeyTierProbe(c *gin.Context) {
 			  limit_tokens   = CASE WHEN EXCLUDED.tier IS NULL THEN rs_key_tier.limit_tokens ELSE EXCLUDED.limit_tokens END,
 			  probe_model=$5, http_status=$6, error=$7, probed_at=$8`,
 			r.ChannelID, tier, r.LimitRequests, r.LimitTokens, keyTierProbeModel, r.HTTPStatus, r.Error, r.ProbedAt); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
+			return nil, err
 		}
 	}
+	return results, nil
+}
+
+// handleKeyTierProbe re-probes the requested enabled OpenAI channels (all of
+// them when ids is empty) on demand.
+func handleKeyTierProbe(c *gin.Context) {
+	var payload struct {
+		IDs []int `json:"ids"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	filter, args := "", []any{}
+	if len(payload.IDs) > 0 {
+		ids := make([]string, len(payload.IDs))
+		for i, id := range payload.IDs {
+			ids[i] = strconv.Itoa(id)
+		}
+		filter, args = `AND c.id = ANY($1::bigint[])`, []any{"{" + strings.Join(ids, ",") + "}"}
+	}
+	results, err := probeKeyTiers(c.Request.Context(), filter, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"probed": len(results), "results": results})
+}
+
+// startKeyTierLoop keeps tiers current without operator action: every tick the
+// leader probes enabled OpenAI channels that were never probed (fresh uploads)
+// or whose last probe is older than keyTierRefreshAge, oldest first.
+func startKeyTierLoop() {
+	log.Printf("[key-tier] loop starting")
+	go func() {
+		time.Sleep(2 * time.Minute) // stagger past the other schedulers
+		for {
+			if IsLeader() {
+				cutoff := time.Now().Add(-keyTierRefreshAge).Unix()
+				results, err := probeKeyTiers(context.Background(), `
+					AND (t.channel_id IS NULL OR t.probed_at < $1)
+					ORDER BY COALESCE(t.probed_at, 0), c.id
+					LIMIT $2`, cutoff, keyTierBatchSize)
+				if err != nil {
+					log.Printf("[key-tier] probe: %v", err)
+				} else if len(results) > 0 {
+					log.Printf("[key-tier] probed %d OpenAI keys", len(results))
+				}
+			}
+			time.Sleep(keyTierTickInterval)
+		}
+	}()
 }

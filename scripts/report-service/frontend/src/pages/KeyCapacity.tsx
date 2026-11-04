@@ -209,10 +209,10 @@ export default function KeyCapacity() {
         <button
           onClick={handleProbeTier}
           disabled={tierProbing}
-          title="用每个 OpenAI Key 发 1 个 gpt-4o-mini 的 1 token 请求，按返回的限额推算 Tier；有勾选时只探测勾选的"
+          title="后台每 5 分钟自动探测新 Key、每 24 小时复测一次；这里可立即重测，有勾选时只测勾选的"
           className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50"
         >
-          {tierProbing ? '探测中…' : '探测 Tier'}
+          {tierProbing ? '探测中…' : '立即探测 Tier'}
         </button>
       )}
       <button onClick={load} className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700">

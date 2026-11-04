@@ -4938,6 +4938,7 @@ func main() {
 	startLocalHealthLoop()
 	startModelCleanupLoop()
 	startChannelPriorityLoop()
+	startKeyTierLoop()
 	startRemoteModelCooldownLoop()
 	startRemoteErrorLogSync()
 	startRemoteAutoDisableLoop()
