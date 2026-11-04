@@ -898,11 +898,12 @@ func insertLocalChannelForPending(pendingID int64, studio, suffix, key string, q
 	if err := tx.QueryRow(`
 		INSERT INTO channels
 		(type, key, status, name, weight, created_time, base_url, "group", models,
-		 model_mapping, status_code_mapping, priority, auto_ban, used_quota, channel_info, tag, param_override)
+		 model_mapping, status_code_mapping, priority, auto_ban, used_quota, channel_info, tag, param_override, setting)
 		VALUES ($9, $1, 1, $2, 0, $3, $12, $8, $4,
-		        $10, '', $7, 1, 0, $5::json, $6, $11)
+		        $10, '', $7, 1, 0, $5::json, $6, $11, $13)
 		RETURNING id`,
 		key, name, now, activeModels, channelInfoDefault, studio, priority, channelGroup, storedType, modelMapping, paramOverride, baseURL,
+		channelSettingFor(storedType),
 	).Scan(&channelID); err != nil {
 		return fmt.Errorf("insert channel: %v", err)
 	}

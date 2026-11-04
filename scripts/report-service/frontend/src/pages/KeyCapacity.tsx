@@ -31,6 +31,32 @@ function ProgressBar({ pct }: { pct: number }) {
   )
 }
 
+// Estimated OpenAI usage tier, read from the rate limits a one-token
+// gpt-4o-mini probe returns. Non-OpenAI channels have no tier.
+function TierBadge({ ch }: { ch: ChannelRow }) {
+  if (ch.type !== 1) return <span className="text-gray-300">—</span>
+  if (ch.tier == null) {
+    if (ch.tier_error) return <span className="text-rose-600" title={ch.tier_error}>探测失败</span>
+    return <span className="text-gray-300">未探测</span>
+  }
+  const cls = ch.tier >= 5 ? 'bg-violet-50 text-violet-700 border-violet-200'
+    : ch.tier >= 4 ? 'bg-blue-50 text-blue-700 border-blue-200'
+    : ch.tier >= 3 ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+    : 'bg-amber-50 text-amber-700 border-amber-200'
+  const probed = ch.tier_probed_at ? new Date(ch.tier_probed_at * 1000).toLocaleString('zh-CN') : ''
+  const title = [
+    `gpt-4o-mini 限额：${(ch.tier_limit_rpm ?? 0).toLocaleString()} RPM / ${(ch.tier_limit_tpm ?? 0).toLocaleString()} TPM`,
+    probed && `探测时间：${probed}`,
+    ch.tier_error && `最近一次探测失败（显示的是上次结果）：${ch.tier_error}`,
+  ].filter(Boolean).join('\n')
+  return (
+    <span title={title} className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] font-semibold tabular-nums ${cls}`}>
+      {ch.tier === 0 ? 'Free' : `T${ch.tier}`}
+      {ch.tier_error && <span className="text-rose-500">!</span>}
+    </span>
+  )
+}
+
 export default function KeyCapacity() {
   const [channels, setChannels] = useState<ChannelRow[]>([])
   const [totalLastHour, setTotalLastHour] = useState(0)
@@ -54,6 +80,8 @@ export default function KeyCapacity() {
   const [bulkPriority, setBulkPriority] = useState('')
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkMsg, setBulkMsg] = useState<string | null>(null)
+
+  const [tierProbing, setTierProbing] = useState(false)
 
   // 批量创建渠道弹窗开关。面板自带卡片外壳，弹窗只提供遮罩 + 关闭。
   const [createOpen, setCreateOpen] = useState(false)
@@ -142,6 +170,21 @@ export default function KeyCapacity() {
     }
   }
 
+  // 勾选了 OpenAI 渠道就只探测勾选的，否则探测全部启用中的 OpenAI 渠道。
+  const handleProbeTier = async () => {
+    const ids = channels.filter(ch => ch.type === 1 && selected.has(ch.id)).map(ch => ch.id)
+    setTierProbing(true)
+    try {
+      const res = await api.probeKeyTier(ids)
+      toast.success(`已探测 ${res.probed} 个 OpenAI Key 的 Tier`)
+      await load()
+    } catch (e) {
+      toast.error(e)
+    } finally {
+      setTierProbing(false)
+    }
+  }
+
   let totalUsed = 0, totalQuota = 0, totalRemaining = 0
   channels.forEach(ch => {
     totalUsed += ch.used_usd
@@ -162,6 +205,16 @@ export default function KeyCapacity() {
         </svg>
         批量创建渠道
       </button>
+      {!isProjectAdmin && (
+        <button
+          onClick={handleProbeTier}
+          disabled={tierProbing}
+          title="用每个 OpenAI Key 发 1 个 gpt-4o-mini 的 1 token 请求，按返回的限额推算 Tier；有勾选时只探测勾选的"
+          className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+        >
+          {tierProbing ? '探测中…' : '探测 Tier'}
+        </button>
+      )}
       <button onClick={load} className="bg-brand text-white rounded-md px-3 py-1.5 text-xs hover:bg-brand-700">
         刷新数据
       </button>
@@ -260,7 +313,7 @@ export default function KeyCapacity() {
                     className="rounded border-gray-300"
                   />
                 </th>
-                {['ID','名称','Key 末尾','优先级','已用 ($)','额度 ($)','剩余 ($)','剩余%','最近1小时消耗 ($)','预计剩余时长'].map(h => (
+                {['ID','名称','Key 末尾','Tier','优先级','已用 ($)','额度 ($)','剩余 ($)','剩余%','最近1小时消耗 ($)','预计剩余时长'].map(h => (
                   <th key={h} className="sticky top-0 z-10 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">{h}</th>
                 ))}
               </tr>
@@ -271,6 +324,13 @@ export default function KeyCapacity() {
                 const selCount = rows.reduce((n, ch) => n + (selected.has(ch.id) ? 1 : 0), 0)
                 const allSel = selCount === rows.length
                 const someSel = selCount > 0 && !allSel
+                const tierCounts = new Map<string, number>()
+                for (const ch of rows) {
+                  if (ch.type !== 1 || ch.tier == null) continue
+                  const label = ch.tier === 0 ? 'Free' : `T${ch.tier}`
+                  tierCounts.set(label, (tierCounts.get(label) ?? 0) + 1)
+                }
+                const tierSummary = Array.from(tierCounts.entries()).sort().map(([k, n]) => `${k}×${n}`).join(' ')
                 let gUsed = 0, gQuota = 0, gRemaining = 0, gLastHour = 0, gQuotaSet = false
                 rows.forEach(ch => {
                   gUsed += ch.used_usd
@@ -290,7 +350,7 @@ export default function KeyCapacity() {
                           className="rounded border-gray-300"
                         />
                       </td>
-                      <td colSpan={10} className="px-3 py-1.5 border-b border-gray-200">
+                      <td colSpan={11} className="px-3 py-1.5 border-b border-gray-200">
                         <div className="flex items-center gap-2 flex-wrap">
                           <button
                             onClick={() => toggleGroupCollapse(groupName)}
@@ -305,6 +365,7 @@ export default function KeyCapacity() {
                             {gQuotaSet && <> / 额度 ${gQuota.toFixed(2)} · 剩 <span className="text-emerald-600">${gRemaining.toFixed(2)}</span></>}
                             {gLastHour > 0 && <> · 近1h ${gLastHour.toFixed(4)}</>}
                           </span>
+                          {tierSummary && <span className="text-[11px] text-gray-500 tabular-nums">· {tierSummary}</span>}
                         </div>
                       </td>
                     </tr>
@@ -333,6 +394,7 @@ export default function KeyCapacity() {
                             </span>
                           </td>
                           <td className="px-3 py-1.5 border-b border-gray-50 font-mono text-gray-400">{ch.key}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-50"><TierBadge ch={ch} /></td>
                           <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{ch.priority || <span className="text-gray-300">—</span>}</td>
                           <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">${ch.used_usd.toFixed(4)}</td>
                           <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{quota != null ? '$' + quota.toFixed(2) : <span className="text-gray-300">未设置</span>}</td>

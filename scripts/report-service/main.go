@@ -1344,6 +1344,13 @@ type ChannelRow struct {
 	QuotaUSD     *float64 `json:"quota_usd"`
 	UnitPriceCNY *float64 `json:"unit_price_cny"`
 	Note         string   `json:"note"`
+	// Estimated OpenAI usage tier from rs_key_tier (Key Capacity only). Nil
+	// when the channel was never probed or the probe could not read limits.
+	Tier         *int   `json:"tier,omitempty"`
+	TierLimitRPM int64  `json:"tier_limit_rpm,omitempty"`
+	TierLimitTPM int64  `json:"tier_limit_tpm,omitempty"`
+	TierProbedAt int64  `json:"tier_probed_at,omitempty"`
+	TierError    string `json:"tier_error,omitempty"`
 }
 
 type KeySummary struct {
@@ -1355,9 +1362,12 @@ func queryKeyData() ([]ChannelRow, error) {
 	rows, err := db.Query(`
 		SELECT c.id, COALESCE(c.name,''), c.key, COALESCE(c.status,1), COALESCE(c.type,0), COALESCE(c.tag,''),
 		       COALESCE(c."group",''), COALESCE(c.priority,0),
-		       COALESCE(c.used_quota,0), q.quota_usd, q.unit_price_cny, COALESCE(q.note,'')
+		       COALESCE(c.used_quota,0), q.quota_usd, q.unit_price_cny, COALESCE(q.note,''),
+		       t.tier, COALESCE(t.limit_requests,0), COALESCE(t.limit_tokens,0),
+		       COALESCE(t.probed_at,0), COALESCE(t.error,'')
 		FROM channels c
 		LEFT JOIN report_key_quotas q ON q.channel_id = c.id
+		LEFT JOIN rs_key_tier t ON t.channel_id = c.id
 		WHERE c.status = 1
 		ORDER BY c.id`)
 	if err != nil {
@@ -1371,8 +1381,14 @@ func queryKeyData() ([]ChannelRow, error) {
 		var r ChannelRow
 		var usedQuota int64
 		var quotaUSD, unitPrice sql.NullFloat64
-		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &r.Type, &r.Tag, &r.Group, &r.Priority, &usedQuota, &quotaUSD, &unitPrice, &r.Note); err != nil {
+		var tier sql.NullInt64
+		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &r.Type, &r.Tag, &r.Group, &r.Priority, &usedQuota, &quotaUSD, &unitPrice, &r.Note,
+			&tier, &r.TierLimitRPM, &r.TierLimitTPM, &r.TierProbedAt, &r.TierError); err != nil {
 			return nil, err
+		}
+		if tier.Valid {
+			v := int(tier.Int64)
+			r.Tier = &v
 		}
 		r.UsedUSD = roundTo(float64(usedQuota)/quotaPerUnit, 4)
 		if quotaUSD.Valid {
@@ -2899,6 +2915,19 @@ func handleSetBatchModels(c *gin.Context) {
 
 const channelInfoDefault = `{"is_multi_key":false,"multi_key_size":0,"multi_key_status_list":null,"multi_key_polling_index":0,"multi_key_mode":""}`
 
+// channelSettingFor returns the channels.setting written for every key we
+// onboard. new-api otherwise funnels all channels of one upstream host into a
+// single HTTP/2 connection pool, so one upstream GOAWAY kills every in-flight
+// request across all keys at once. OpenAI (type 1) goes HTTP/1.1 — one request
+// per connection, so a dropped connection fails only that request; every other
+// type keeps HTTP/2 with 8 shards (the maximum), cutting the blast radius to ~1/8.
+func channelSettingFor(channelType int) string {
+	if channelType == 1 {
+		return `{"http_protocol":"http1"}`
+	}
+	return `{"http2_connection_shards":8}`
+}
+
 func handleBatchCreateChannels(c *gin.Context) {
 	var payload struct {
 		Studio string `json:"studio"`
@@ -3286,12 +3315,13 @@ func handleBatchCreateChannels(c *gin.Context) {
 			INSERT INTO channels
 			(type, key, status, name, weight, created_time, base_url, "group", models,
 			 model_mapping, status_code_mapping, priority, auto_ban, used_quota,
-			 channel_info, tag, other, settings, param_override)
+			 channel_info, tag, other, settings, param_override, setting)
 			VALUES ($1, $2, 1, $3, 0, $4, $5, $6, $7,
-			        $13, '', $8, 1, 0, $9::json, $10, $11, $12, $14)
+			        $13, '', $8, 1, 0, $9::json, $10, $11, $12, $14, $15)
 			RETURNING id`,
 			storedType, key, name, now, baseUrl, groupName, activeModels,
 			priority, channelInfoDefault, studio, other, settings, e.modelMapping, paramOverride,
+			channelSettingFor(storedType),
 		).Scan(&channelID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("insert channel: %v", err)})
@@ -4863,6 +4893,17 @@ func main() {
 		   ON local_model_health_event(created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_local_model_health_event_channel
 		   ON local_model_health_event(channel_id, id DESC)`,
+		// Estimated OpenAI usage tier per channel (key_tier.go), shown on Key Capacity.
+		`CREATE TABLE IF NOT EXISTS rs_key_tier (
+			channel_id     BIGINT PRIMARY KEY,
+			tier           INT,
+			limit_requests BIGINT NOT NULL DEFAULT 0,
+			limit_tokens   BIGINT NOT NULL DEFAULT 0,
+			probe_model    TEXT NOT NULL DEFAULT '',
+			http_status    INT NOT NULL DEFAULT 0,
+			error          TEXT NOT NULL DEFAULT '',
+			probed_at      BIGINT NOT NULL DEFAULT 0
+		)`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
@@ -4995,6 +5036,8 @@ func main() {
 	// route.
 	api.GET("/keys/data", requireRoleOrProjectAdmin(minAdminRole), handleKeysData)
 	api.POST("/keys/quota", requireRoleOrProjectAdmin(minAdminRole), handleSaveQuotas)
+	// Tier probing sends a live request with each key, so it stays admin-only.
+	api.POST("/keys/tier-probe", requireRole(minAdminRole), handleKeyTierProbe)
 	api.POST("/channels/batch-priority", requireRoleOrProjectAdmin(minAdminRole), handleBatchUpdateChannelPriority)
 	// Studios list is needed by BatchCreatePanel (Key Capacity) so project
 	// admin can populate the studio dropdown. Also used by admin+ Users

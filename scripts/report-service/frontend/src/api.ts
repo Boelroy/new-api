@@ -66,6 +66,13 @@ export type ChannelRow = {
   quota_usd: number | null
   unit_price_cny: number | null
   note: string
+  // Estimated OpenAI usage tier (Key Capacity only; /api/keys/tier-probe).
+  // Absent when the key was never probed or the probe read no limits.
+  tier?: number
+  tier_limit_rpm?: number
+  tier_limit_tpm?: number
+  tier_probed_at?: number
+  tier_error?: string
 }
 
 export type DownstreamPricing = {
@@ -999,6 +1006,15 @@ export const api = {
     }),
 
   getKeysData: () => request<KeySummary>('/api/keys/data'),
+
+  // Probes enabled OpenAI channels (all of them when ids is empty) with a
+  // one-token request and stores the tier implied by the rate-limit headers.
+  probeKeyTier: (ids: number[]) =>
+    request<{ probed: number }>('/api/keys/tier-probe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    }),
 
   saveQuotas: (payload: { key: string; quota_usd: number }[]) =>
     request<{ saved: number }>('/api/keys/quota', {

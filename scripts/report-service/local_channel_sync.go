@@ -347,13 +347,13 @@ func syncCredentialToLocalChannel(profileID, remoteChannelID, callerID int64) (c
 		INSERT INTO channels
 		(type, key, status, name, weight, created_time, base_url, "group", models,
 		 model_mapping, status_code_mapping, priority, auto_ban, used_quota,
-		 channel_info, tag, other, settings)
+		 channel_info, tag, other, settings, setting)
 		VALUES ($1, $2, 1, $3, 0, $4, '', $5, $6,
 		        '', '', 0, 1, 0,
-		        $7::json, '', $8, $9)
+		        $7::json, '', $8, $9, $10)
 		RETURNING id`,
 		channelType, key, name, now, channelGroup, models,
-		channelInfoDefault, cred.region, cred.settingsJSON,
+		channelInfoDefault, cred.region, cred.settingsJSON, channelSettingFor(channelType),
 	).Scan(&channelID); err != nil {
 		return 0, false, fmt.Errorf("insert channel: %v", err)
 	}

@@ -4230,6 +4230,7 @@ func uploadOneKeyToRemote(ctx context.Context, p uploadOneKeyParams) (int64, err
 		"priority":     p.Priority,
 		"weight":       0,
 		"created_time": time.Now().Unix(),
+		"setting":      channelSettingFor(p.Type),
 		"channel_info": gin.H{
 			"is_multi_key":            false,
 			"multi_key_size":          0,
