@@ -1110,38 +1110,36 @@ func aggregateDay(dateStr string) error {
 }
 
 func backfillMissingDays() {
-	// Find all UTC dates in logs (past 90 days) not yet in cache
-	cutoff := time.Now().UTC().AddDate(0, 0, -90).Unix()
-	rows, err := db.Query(`
-		SELECT DISTINCT to_char(to_timestamp(created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD') as d
-		FROM logs WHERE type=2 AND created_at >= $1`+excludeChannelTestLogs+`
-		ORDER BY d`, cutoff)
-	if err != nil {
-		log.Printf("backfill query error: %v", err)
-		return
-	}
-	defer rows.Close()
-
-	var dates []string
-	for rows.Next() {
-		var d string
-		if err := rows.Scan(&d); err == nil {
-			dates = append(dates, d)
+	// Aggregate any of the past 90 UTC days that has logs but no report_daily_agg
+	// rows. Walk the days instead of SELECT DISTINCT over 90 days of logs: that
+	// scan reads the whole table (token_name is outside every index) and on a
+	// ~190GB logs table ran for 20+ minutes per restart, saturating disk IO.
+	// Each probe below stops at the first matching row via the created_at index.
+	todayStart := time.Now().UTC().Truncate(24 * time.Hour)
+	today := todayStart.Format("2006-01-02")
+	for i := 90; i >= 1; i-- {
+		day := todayStart.AddDate(0, 0, -i)
+		d := day.Format("2006-01-02")
+		var aggregated bool
+		if err := db.QueryRow(`SELECT EXISTS (SELECT 1 FROM report_daily_agg WHERE date = $1)`, d).Scan(&aggregated); err != nil {
+			log.Printf("backfill check %s error: %v", d, err)
+			return
 		}
-	}
-
-	today := time.Now().UTC().Format("2006-01-02")
-	for _, d := range dates {
-		if d == today {
-			continue // today is handled by hourly refresh
+		if aggregated {
+			continue
 		}
-		var count int
-		db.QueryRow(`SELECT COUNT(*) FROM report_daily_agg WHERE date=$1`, d).Scan(&count)
-		if count == 0 {
-			log.Printf("backfilling %s...", d)
-			if err := aggregateDay(d); err != nil {
-				log.Printf("backfill %s error: %v", d, err)
-			}
+		var hasLogs bool
+		if err := db.QueryRow(`SELECT EXISTS (SELECT 1 FROM logs WHERE type=2 AND created_at >= $1 AND created_at < $2`+excludeChannelTestLogs+`)`,
+			day.Unix(), day.AddDate(0, 0, 1).Unix()).Scan(&hasLogs); err != nil {
+			log.Printf("backfill check %s error: %v", d, err)
+			return
+		}
+		if !hasLogs {
+			continue
+		}
+		log.Printf("backfilling %s...", d)
+		if err := aggregateDay(d); err != nil {
+			log.Printf("backfill %s error: %v", d, err)
 		}
 	}
 
