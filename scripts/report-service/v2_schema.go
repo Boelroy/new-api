@@ -148,6 +148,14 @@ var v2SchemaStatements = []string{
 		created_at BIGINT NOT NULL,
 		PRIMARY KEY (manager_id, member_id)
 	)`,
+	// supplier_ccmax users barred from uploading new CC Max accounts (row
+	// present = blocked). Toggled by their ccmax_manager or a super admin;
+	// re-authorizing an existing account stays allowed.
+	`CREATE TABLE IF NOT EXISTS rs_ccmax_upload_block (
+		user_id    BIGINT PRIMARY KEY,
+		blocked_by BIGINT NOT NULL,
+		created_at BIGINT NOT NULL
+	)`,
 	// Each CC Max account's portal bill per UTC+8 day (sum over models,
 	// micro-yuan at original price), pulled from the portal WEB bill/query
 	// every morning for the previous day (ccmax_report.go).

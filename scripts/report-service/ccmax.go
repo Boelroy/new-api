@@ -468,6 +468,10 @@ func handleCCMaxSubmit(c *gin.Context) {
 	}
 	uidAny, _ := c.Get("user_id")
 	uid, _ := uidAny.(int64)
+	if !reauth && ccmaxUploadBlocked(uid) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "你的上号权限已被关闭，请联系你的管理者", "upload_disabled": true})
+		return
+	}
 	studioAny, _ := c.Get("studio")
 	studio, _ := studioAny.(string)
 	state := strings.TrimSpace(body.State)
@@ -979,7 +983,16 @@ func handleCCMaxAccountList(c *gin.Context) {
 		c.JSON(http.StatusFailedDependency, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"accounts": rows, "fx_rate": supplierFxRate()})
+	uidAny, _ := c.Get("user_id")
+	uid, _ := uidAny.(int64)
+	c.JSON(http.StatusOK, gin.H{"accounts": rows, "fx_rate": supplierFxRate(), "upload_disabled": ccmaxUploadBlocked(uid)})
+}
+
+// ccmaxUploadBlocked reports whether user uid may not upload new CC Max
+// accounts (rs_ccmax_upload_block).
+func ccmaxUploadBlocked(uid int64) bool {
+	var one int
+	return db.QueryRow(`SELECT 1 FROM rs_ccmax_upload_block WHERE user_id=$1`, uid).Scan(&one) == nil
 }
 
 // ccmaxCallerOwns reports whether the caller may act on portal account id:
@@ -1434,8 +1447,10 @@ func handleCCMaxMembersList(c *gin.Context) {
 		return
 	}
 	rows, err := db.Query(
-		`SELECT u.id, u.username, u.status, u.created_at FROM rs_ccmax_manager_member m
+		`SELECT u.id, u.username, u.status, u.created_at, b.user_id IS NOT NULL
+		   FROM rs_ccmax_manager_member m
 		   JOIN rs_auth_user u ON u.id = m.member_id
+		   LEFT JOIN rs_ccmax_upload_block b ON b.user_id = m.member_id
 		  WHERE m.manager_id=$1 ORDER BY u.username`, managerID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1447,11 +1462,13 @@ func handleCCMaxMembersList(c *gin.Context) {
 		Username  string `json:"username"`
 		Status    int    `json:"status"`
 		CreatedAt int64  `json:"created_at"`
+		// UploadDisabled: barred from uploading new accounts.
+		UploadDisabled bool `json:"upload_disabled"`
 	}
 	out := []member{}
 	for rows.Next() {
 		var m member
-		if err := rows.Scan(&m.ID, &m.Username, &m.Status, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Username, &m.Status, &m.CreatedAt, &m.UploadDisabled); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -1540,4 +1557,52 @@ func handleCCMaxMemberCreate(c *gin.Context) {
 	callerAny, _ := c.Get("user_id")
 	log.Printf("[ccmax] user %v created supplier_ccmax user %d (%s), manager %d", callerAny, id, username, managerID)
 	c.JSON(http.StatusOK, gin.H{"id": id, "username": username, "password": password})
+}
+
+// handleCCMaxMemberUploadSet turns new-account uploads on or off for a
+// supplier_ccmax user. A ccmax_manager may only toggle their own members; a
+// super admin any supplier_ccmax user.
+func handleCCMaxMemberUploadSet(c *gin.Context) {
+	memberID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || memberID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	var body struct {
+		Disabled bool `json:"disabled"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	callerAny, _ := c.Get("user_id")
+	callerID, _ := callerAny.(int64)
+	if !ccmaxCallerIsSuperAdmin(c) {
+		managerID, ok := ccmaxCallerManagerID(c)
+		if !ok {
+			return
+		}
+		var one int
+		if db.QueryRow(`SELECT 1 FROM rs_ccmax_manager_member WHERE manager_id=$1 AND member_id=$2`,
+			managerID, memberID).Scan(&one) != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "号商不存在"})
+			return
+		}
+	}
+	if target, err := authUserByID(memberID); err != nil || target.Role != minSupplierCCMaxRole {
+		c.JSON(http.StatusNotFound, gin.H{"error": "号商不存在"})
+		return
+	}
+	if body.Disabled {
+		_, err = db.Exec(`INSERT INTO rs_ccmax_upload_block (user_id, blocked_by, created_at) VALUES ($1, $2, $3)
+			ON CONFLICT (user_id) DO NOTHING`, memberID, callerID, time.Now().Unix())
+	} else {
+		_, err = db.Exec(`DELETE FROM rs_ccmax_upload_block WHERE user_id=$1`, memberID)
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	log.Printf("[ccmax] user %d set upload_disabled=%v for supplier_ccmax user %d", callerID, body.Disabled, memberID)
+	c.JSON(http.StatusOK, gin.H{"id": memberID, "upload_disabled": body.Disabled})
 }

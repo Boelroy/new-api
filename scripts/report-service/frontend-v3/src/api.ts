@@ -2222,7 +2222,8 @@ export const api = {
   ccmaxOptions: () =>
     request<{ plans: string[]; register_locations: { value: string; label: string }[] | null }>('/api/ccmax/options'),
 
-  ccmaxAccounts: () => request<{ accounts: CCMaxAccount[]; fx_rate: number }>('/api/ccmax/accounts'),
+  ccmaxAccounts: () =>
+    request<{ accounts: CCMaxAccount[]; fx_rate: number; upload_disabled: boolean }>('/api/ccmax/accounts'),
 
   // Failure reason as the portal records it (sync / check failure or the
   // Claude-side state such as 封号 / token 撤销).
@@ -2255,7 +2256,18 @@ export const api = {
     }),
 
   ccmaxMembers: () =>
-    request<{ members: { id: number; username: string; status: number; created_at: number }[] }>('/api/ccmax/members'),
+    request<{
+      members: { id: number; username: string; status: number; created_at: number; upload_disabled: boolean }[]
+    }>('/api/ccmax/members'),
+
+  // disabled: bar that supplier_ccmax user from uploading new accounts
+  // (re-authorizing existing ones stays allowed).
+  setCCMaxMemberUpload: (id: number, disabled: boolean) =>
+    request<{ id: number; upload_disabled: boolean }>(`/api/ccmax/members/${id}/upload`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ disabled }),
+    }),
 
   // managerId: admin-only, assigns the new user to that ccmax_manager (0 = none);
   // a manager's new user is always assigned to them.

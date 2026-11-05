@@ -5252,6 +5252,7 @@ func main() {
 	// admins may create too, optionally assigning a manager.
 	ccmaxAPI.GET("/members", handleCCMaxMembersList)
 	ccmaxAPI.POST("/members", requireRoleOrCCMaxManager(minSuperAdminRole), handleCCMaxMemberCreate)
+	ccmaxAPI.PUT("/members/:id/upload", requireRoleOrCCMaxManager(minSuperAdminRole), handleCCMaxMemberUploadSet)
 	// Every supplier_ccmax user with their accounts' usage — super admin only.
 	ccmaxAPI.GET("/users", requireRole(minSuperAdminRole), handleCCMaxUsersStats)
 	// 结算: stored daily bills per settlement party, scoped like /accounts;

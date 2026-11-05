@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { CircleAlert, Copy, ExternalLink, KeyRound, Pencil } from 'lucide-react'
 import Layout from '../components/Layout'
 import { Badge, Button, Card, Input, Select, Textarea } from '../components/ui'
-import { Modal, promptDialog, toast } from '../components/feedback'
+import { Modal, confirmDialog, promptDialog, toast } from '../components/feedback'
 import {
   api,
   ROLE_SUPER_ADMIN,
@@ -415,6 +415,8 @@ export default function CCMaxAccounts() {
   const [locations, setLocations] = useState<{ value: string; label: string }[]>([])
   const [rows, setRows] = useState<CCMaxAccount[]>([])
   const [fxRate, setFxRate] = useState(7.2)
+  // Set when the caller's manager has turned off their new-account uploads.
+  const [uploadDisabled, setUploadDisabled] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [loading, setLoading] = useState(false)
   const [reason, setReason] = useState<{ account: string; text: string } | null>(null)
@@ -479,6 +481,7 @@ export default function CCMaxAccounts() {
       const res = await api.ccmaxAccounts()
       setRows(res.accounts ?? [])
       if (res.fx_rate > 0) setFxRate(res.fx_rate)
+      setUploadDisabled(!!res.upload_disabled)
     } catch (e) {
       toast.error(e)
     } finally {
@@ -603,7 +606,14 @@ export default function CCMaxAccounts() {
       {isAdmin && <ReportCard />}
 
       {isManager && <MembersCard onCreated={() => void load()} />}
-      {!isManager && <OAuthFlow plans={plans} locations={locations} onDone={() => void load()} />}
+      {!isManager &&
+        (uploadDisabled ? (
+          <Card className="p-4 text-sm text-muted-foreground">
+            你的上号权限已被管理者关闭，暂不能上新号；已有账号仍可重新授权。如需上号请联系你的管理者。
+          </Card>
+        ) : (
+          <OAuthFlow plans={plans} locations={locations} onDone={() => void load()} />
+        ))}
 
       <Card className="mt-4 overflow-hidden p-0">
         <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
@@ -1112,7 +1122,9 @@ function ReportCard() {
 // from just a username. The server generates the password and returns it
 // once, so it is shown here until dismissed.
 function MembersCard(props: { onCreated: () => void }) {
-  const [members, setMembers] = useState<{ id: number; username: string; status: number }[]>([])
+  const [members, setMembers] = useState<
+    { id: number; username: string; status: number; upload_disabled: boolean }[]
+  >([])
   const [username, setUsername] = useState('')
   const [creating, setCreating] = useState(false)
   const [created, setCreated] = useState<{ username: string; password: string } | null>(null)
@@ -1145,6 +1157,26 @@ function MembersCard(props: { onCreated: () => void }) {
     }
   }
 
+  async function toggleUpload(m: { id: number; username: string; upload_disabled: boolean }) {
+    const disable = !m.upload_disabled
+    const ok = await confirmDialog({
+      title: disable ? '关闭上号' : '开启上号',
+      message: disable
+        ? `关闭后 ${m.username} 不能再上新号（已有账号仍可重新授权）。确认关闭？`
+        : `允许 ${m.username} 继续上新号？`,
+      confirmText: disable ? '关闭上号' : '开启上号',
+      danger: disable,
+    })
+    if (!ok) return
+    try {
+      const res = await api.setCCMaxMemberUpload(m.id, disable)
+      setMembers((list) => list.map((x) => (x.id === m.id ? { ...x, upload_disabled: res.upload_disabled } : x)))
+      toast.success(disable ? '已关闭上号' : '已开启上号')
+    } catch (e) {
+      toast.error(e)
+    }
+  }
+
   return (
     <Card className="mb-4 space-y-3 p-4">
       <div className="text-sm font-semibold">我的号商</div>
@@ -1166,14 +1198,20 @@ function MembersCard(props: { onCreated: () => void }) {
         </Button>
       </div>
       {created && <CreatedCredential {...created} onDismiss={() => setCreated(null)} />}
-      <div className="flex flex-wrap gap-1.5 text-xs">
+      <div className="flex flex-wrap gap-2 text-xs">
         {members.length === 0 ? (
           <span className="text-muted-foreground">暂无号商。</span>
         ) : (
           members.map((m) => (
-            <Badge key={m.id} tone={m.status === 1 ? 'neutral' : 'danger'} className="font-mono">
-              {m.username}
-            </Badge>
+            <div key={m.id} className="flex items-center gap-1.5 rounded-lg border border-border px-2 py-1">
+              <Badge tone={m.status === 1 ? 'neutral' : 'danger'} className="font-mono">
+                {m.username}
+              </Badge>
+              <Badge tone={m.upload_disabled ? 'danger' : 'success'}>{m.upload_disabled ? '禁止上号' : '可上号'}</Badge>
+              <Button size="sm" variant="ghost" onClick={() => void toggleUpload(m)}>
+                {m.upload_disabled ? '开启' : '关闭'}
+              </Button>
+            </div>
           ))
         )}
       </div>
