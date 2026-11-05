@@ -2019,6 +2019,18 @@ export const api = {
   streamGuardEvents: () =>
     request<{ events: StreamGuardEvent[] }>('/api/stream-guard/events'),
 
+  keyTierGuardConfig: () => request<{ enabled: boolean; max_tier: number }>('/api/key-tier-guard/config'),
+
+  saveKeyTierGuardConfig: (patch: { enabled?: boolean; max_tier?: number }) =>
+    request<{ enabled: boolean; max_tier: number }>('/api/key-tier-guard/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }),
+
+  keyTierGuardDisabled: () =>
+    request<{ items: { channel_id: number; channel_name: string; channel_status: number; tier: number; limit_rpm: number; limit_tpm: number; disabled_at: number }[] }>('/api/key-tier-guard/disabled'),
+
   streamGuardConfig: () => request<StreamGuardConfig>('/api/stream-guard/config'),
 
   saveStreamGuardConfig: (patch: Partial<StreamGuardConfig>) =>

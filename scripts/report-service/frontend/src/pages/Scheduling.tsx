@@ -203,12 +203,112 @@ function StreamGuardPanel() {
   )
 }
 
-type Tab = 'cooldown' | 'priority' | 'stream'
+function TierGuardPanel() {
+  const [cfg, setCfg] = useState<{ enabled: boolean; max_tier: number } | null>(null)
+  const [items, setItems] = useState<Awaited<ReturnType<typeof api.keyTierGuardDisabled>>['items']>([])
+
+  const load = useCallback(async () => {
+    try {
+      setItems((await api.keyTierGuardDisabled()).items)
+    } catch (e) {
+      toast.error(e)
+    }
+  }, [])
+
+  useEffect(() => {
+    api.keyTierGuardConfig().then(setCfg).catch(e => toast.error(e))
+    void load()
+    const t = setInterval(load, 30000)
+    return () => clearInterval(t)
+  }, [load])
+
+  const save = async (patch: { enabled?: boolean; max_tier?: number }) => {
+    try {
+      setCfg(await api.saveKeyTierGuardConfig(patch))
+      toast.success('已保存，下一轮巡检生效')
+    } catch (e) {
+      toast.error(e)
+    }
+  }
+
+  return (
+    <>
+      <p className="text-xs text-gray-500 mb-4">
+        后台每 5 分钟探测 OpenAI Key 的 Tier（见 Key Capacity 的 Tier 列），Tier 不高于设定值的 Key 直接禁用（手动禁用状态，newapi 不会自动启用回来）。
+      </p>
+      <div className="space-y-4">
+        <Card className="p-5">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-sm font-semibold">规则</div>
+            {cfg && (
+              <label className="flex items-center gap-2 text-xs">
+                <input type="checkbox" checked={cfg.enabled} onChange={e => void save({ enabled: e.target.checked })} />
+                <span className={cfg.enabled ? 'text-green-700 font-medium' : 'text-gray-500'}>{cfg.enabled ? '已开启' : '已关闭'}</span>
+              </label>
+            )}
+          </div>
+          {cfg ? (
+            <label className="flex items-center gap-2 text-xs">
+              <span>禁用 Tier ≤</span>
+              <select
+                value={cfg.max_tier}
+                onChange={e => void save({ max_tier: Number(e.target.value) })}
+                className="border border-gray-200 rounded-md px-2 py-1 bg-gray-50"
+              >
+                {[0, 1, 2, 3, 4].map(t => <option key={t} value={t}>{t === 0 ? 'Free' : `T${t}`}</option>)}
+              </select>
+              <span className="text-gray-400">的 OpenAI Key</span>
+            </label>
+          ) : <div className="text-xs text-gray-400">加载中…</div>}
+        </Card>
+
+        <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+          <div className="px-4 py-2 border-b border-gray-100 text-[11px] font-medium text-gray-700 flex items-center justify-between">
+            <span>已禁用（{items.length}）</span>
+            <button className="text-[11px] text-gray-400 hover:text-gray-700" onClick={() => void load()}>刷新</button>
+          </div>
+          <div className="overflow-x-auto max-h-[70vh] overflow-y-auto">
+            <table className="w-full text-xs whitespace-nowrap border-separate border-spacing-0">
+              <thead>
+                <tr>
+                  {['禁用时间', '渠道', 'Tier', 'gpt-4o-mini 限额', '渠道当前'].map(h => (
+                    <th key={h} className="sticky top-0 z-10 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {items.length === 0 && <tr><td colSpan={5} className="px-3 py-6 text-center text-gray-400">暂无</td></tr>}
+                {items.map(it => {
+                  const st = CHANNEL_STATUS[it.channel_status] ?? { text: `状态 ${it.channel_status}`, cls: 'text-gray-400' }
+                  return (
+                    <tr key={it.channel_id} className="hover:bg-gray-50">
+                      <td className="px-3 py-1.5 border-b border-gray-50 tabular-nums">{fmtTime(it.disabled_at)}</td>
+                      <td className="px-3 py-1.5 border-b border-gray-50">
+                        <span className="tabular-nums">{it.channel_id}</span>
+                        <span className="text-gray-500 ml-1.5">{it.channel_name}</span>
+                      </td>
+                      <td className="px-3 py-1.5 border-b border-gray-50 font-semibold">{it.tier === 0 ? 'Free' : `T${it.tier}`}</td>
+                      <td className="px-3 py-1.5 border-b border-gray-50 tabular-nums">{it.limit_rpm.toLocaleString()} RPM / {it.limit_tpm.toLocaleString()} TPM</td>
+                      <td className={`px-3 py-1.5 border-b border-gray-50 ${st.cls}`}>{st.text}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </>
+  )
+}
+
+type Tab = 'cooldown' | 'priority' | 'stream' | 'tier'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'cooldown', label: '模型限流冷却' },
   { id: 'priority', label: '渠道优先级自调' },
   { id: 'stream', label: '断流处理' },
+  { id: 'tier', label: 'Tier 巡检' },
 ]
 
 export default function Scheduling() {
@@ -216,7 +316,7 @@ export default function Scheduling() {
   const tab = (TABS.some(t => t.id === params.get('tab')) ? params.get('tab') : 'cooldown') as Tab
 
   return (
-    <Layout title="调度" subtitle="限流冷却、优先级自调、断流处理 —— 自动把流量从有问题的 Key 上挪走">
+    <Layout title="调度" subtitle="限流冷却、优先级自调、断流处理、Tier 巡检 —— 自动把流量从有问题的 Key 上挪走">
       <div className="flex items-center gap-1 border-b border-gray-200 mb-4">
         {TABS.map(t => (
           <button
@@ -235,6 +335,7 @@ export default function Scheduling() {
       {tab === 'cooldown' && <ModelCooldownPanel />}
       {tab === 'priority' && <ChannelPriorityPanel />}
       {tab === 'stream' && <StreamGuardPanel />}
+      {tab === 'tier' && <TierGuardPanel />}
     </Layout>
   )
 }

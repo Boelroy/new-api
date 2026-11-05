@@ -4915,6 +4915,7 @@ func main() {
 			created_at   BIGINT NOT NULL
 		)`,
 		`ALTER TABLE rs_stream_guard_event ADD COLUMN IF NOT EXISTS restored_at BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE rs_key_tier ADD COLUMN IF NOT EXISTS disabled_at BIGINT NOT NULL DEFAULT 0`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
@@ -5211,6 +5212,10 @@ func main() {
 	adminAPI.GET("/channel-priority/status", handleChanPrioStatus)
 	adminAPI.POST("/channel-priority/run", handleChanPrioRunNow)
 	// Stream-failure guard (stream_guard.go): action log + manual restore.
+	// Tier patrol (key_tier.go): disables OpenAI keys at or below a tier.
+	adminAPI.GET("/key-tier-guard/config", handleKeyTierGuardConfigGet)
+	adminAPI.POST("/key-tier-guard/config", handleKeyTierGuardConfigSet)
+	adminAPI.GET("/key-tier-guard/disabled", handleKeyTierGuardDisabled)
 	adminAPI.GET("/stream-guard/config", handleStreamGuardConfigGet)
 	adminAPI.POST("/stream-guard/config", handleStreamGuardConfigSet)
 	adminAPI.GET("/stream-guard/events", handleStreamGuardEvents)

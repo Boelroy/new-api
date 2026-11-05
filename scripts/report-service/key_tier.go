@@ -16,6 +16,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -235,8 +236,124 @@ func startKeyTierLoop() {
 				} else if len(results) > 0 {
 					log.Printf("[key-tier] probed %d OpenAI keys", len(results))
 				}
+				if guard := loadKeyTierGuardConfig(); guard.Enabled {
+					if err := disableLowTierKeys(context.Background(), guard); err != nil {
+						log.Printf("[key-tier] disable low tier: %v", err)
+					}
+				}
 			}
 			time.Sleep(keyTierTickInterval)
 		}
 	}()
+}
+
+// keyTierGuardConfig: the tier patrol disables enabled OpenAI channels whose
+// probed tier is at or below MaxTier (low tiers hit rate limits under pool
+// load). Stored as JSON in report_config, edited from the 调度 page.
+type keyTierGuardConfig struct {
+	Enabled bool `json:"enabled"`
+	MaxTier int  `json:"max_tier"`
+}
+
+const cfgKeyTierGuard = "key_tier_guard_config"
+
+func loadKeyTierGuardConfig() keyTierGuardConfig {
+	cfg := keyTierGuardConfig{Enabled: true, MaxTier: 3}
+	var raw string
+	if err := db.QueryRow(`SELECT value FROM report_config WHERE key = $1`, cfgKeyTierGuard).Scan(&raw); err == nil {
+		_ = json.Unmarshal([]byte(raw), &cfg)
+	}
+	cfg.MaxTier = clampInt(cfg.MaxTier, 0, 4)
+	return cfg
+}
+
+// disableLowTierKeys sets status=2 (manual disable, which new-api's automatic
+// re-enable leaves alone) on every enabled OpenAI channel whose last probe put
+// it at or below cfg.MaxTier, and stamps rs_key_tier.disabled_at.
+func disableLowTierKeys(ctx context.Context, cfg keyTierGuardConfig) error {
+	rows, err := db.QueryContext(ctx, `
+		SELECT c.id, t.tier FROM channels c
+		JOIN rs_key_tier t ON t.channel_id = c.id
+		WHERE c.status = 1 AND c.type = 1 AND t.tier IS NOT NULL AND t.tier <= $1`, cfg.MaxTier)
+	if err != nil {
+		return err
+	}
+	type hit struct{ id, tier int }
+	var hits []hit
+	for rows.Next() {
+		var h hit
+		if err := rows.Scan(&h.id, &h.tier); err != nil {
+			rows.Close()
+			return err
+		}
+		hits = append(hits, h)
+	}
+	rows.Close()
+	for _, h := range hits {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		_, err1 := tx.ExecContext(ctx, `UPDATE channels SET status = 2 WHERE id = $1 AND status = 1`, h.id)
+		_, err2 := tx.ExecContext(ctx, `UPDATE abilities SET enabled = false WHERE channel_id = $1`, h.id)
+		_, err3 := tx.ExecContext(ctx, `UPDATE rs_key_tier SET disabled_at = $1 WHERE channel_id = $2`, time.Now().Unix(), h.id)
+		if err := errors.Join(err1, err2, err3); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		log.Printf("[key-tier] disabled channel %d: tier %d <= T%d", h.id, h.tier, cfg.MaxTier)
+	}
+	return nil
+}
+
+func handleKeyTierGuardConfigGet(c *gin.Context) {
+	c.JSON(http.StatusOK, loadKeyTierGuardConfig())
+}
+
+func handleKeyTierGuardConfigSet(c *gin.Context) {
+	cfg := loadKeyTierGuardConfig()
+	if err := c.ShouldBindJSON(&cfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	cfg.MaxTier = clampInt(cfg.MaxTier, 0, 4)
+	raw, _ := json.Marshal(cfg)
+	if _, err := db.Exec(`
+		INSERT INTO report_config (key, value, updated_at) VALUES ($1, $2, $3)
+		ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = $3`,
+		cfgKeyTierGuard, string(raw), time.Now().Unix()); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, cfg)
+}
+
+// handleKeyTierGuardDisabled lists channels the patrol disabled, newest first.
+func handleKeyTierGuardDisabled(c *gin.Context) {
+	rows, err := db.Query(`
+		SELECT t.channel_id, COALESCE(ch.name,''), COALESCE(ch.status,0), t.tier, t.limit_requests, t.limit_tokens, t.disabled_at
+		FROM rs_key_tier t LEFT JOIN channels ch ON ch.id = t.channel_id
+		WHERE t.disabled_at > 0 ORDER BY t.disabled_at DESC LIMIT 500`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	items := make([]gin.H, 0)
+	for rows.Next() {
+		var id, rpm, tpm, at int64
+		var status int
+		var tier sql.NullInt64
+		var name string
+		if err := rows.Scan(&id, &name, &status, &tier, &rpm, &tpm, &at); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		items = append(items, gin.H{"channel_id": id, "channel_name": name, "channel_status": status,
+			"tier": tier.Int64, "limit_rpm": rpm, "limit_tpm": tpm, "disabled_at": at})
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
 }
