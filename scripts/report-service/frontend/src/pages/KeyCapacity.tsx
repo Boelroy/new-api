@@ -380,7 +380,7 @@ export default function KeyCapacity() {
                       const etaF = fmtETA(eta)
                       const isSelected = selected.has(ch.id)
                       return (
-                        <tr key={ch.id} className={isSelected ? 'bg-blue-50/40 hover:bg-blue-50' : ch.alerts?.length ? 'bg-rose-50 hover:bg-rose-100/70' : 'hover:bg-gray-50'}>
+                        <tr key={ch.id} className={isSelected ? 'bg-blue-50/40 hover:bg-blue-50' : 'hover:bg-gray-50'}>
                           <td className="px-3 py-1.5 border-b border-gray-50 w-8">
                             <input
                               type="checkbox"
@@ -393,11 +393,14 @@ export default function KeyCapacity() {
                           <td className="px-3 py-1.5 border-b border-gray-50">
                             <span className="inline-flex items-center gap-2">
                               <ProviderMark type={ch.type} size={18} />
-                              <span className={ch.alerts?.length ? 'text-rose-700 font-medium' : ''}>{ch.name}</span>
+                              <span>{ch.name}</span>
+                              {!!ch.alerts?.length && (
+                                <span
+                                  title={ch.alerts.join('\n')}
+                                  className="inline-flex size-4 items-center justify-center rounded-full bg-rose-500 text-[10px] font-bold text-white cursor-help"
+                                >!</span>
+                              )}
                             </span>
-                            {ch.alerts?.map(a => (
-                              <div key={a} className="text-[11px] text-rose-600 mt-0.5 whitespace-normal">⚠ {a}</div>
-                            ))}
                           </td>
                           <td className="px-3 py-1.5 border-b border-gray-50 font-mono text-gray-400">{ch.key}</td>
                           <td className="px-3 py-1.5 border-b border-gray-50"><TierBadge ch={ch} /></td>
