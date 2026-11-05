@@ -799,6 +799,9 @@ export type RemoteProfile = {
   user_id?: number
   has_token?: boolean
   proxy?: string           // outbound proxy for reaching this remote; super_admin only, empty = direct
+  // 'seller' = seller-scoped token (/api/seller/channel/* only; no search /
+  // logs, so usage stats and error sync are unavailable). super_admin only.
+  api_mode?: 'admin' | 'seller'
   default_models: string   // preloaded into the batch-upload models field (anthropic)
   default_group: string    // preloaded into the batch-upload group field (anthropic uploads)
   // Preloaded into the batch-upload group + models fields when the Gemini
@@ -1245,6 +1248,7 @@ export const api = {
     user_id: number
     access_token: string
     proxy?: string
+    api_mode?: 'admin' | 'seller'
     default_models?: string
     default_group?: string
     default_gemini_group?: string
@@ -1271,6 +1275,7 @@ export const api = {
       user_id?: number
       access_token?: string
       proxy?: string
+      api_mode?: 'admin' | 'seller'
       default_models?: string
       default_group?: string
       default_gemini_group?: string

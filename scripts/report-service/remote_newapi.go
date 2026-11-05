@@ -99,6 +99,7 @@ type remoteProfile struct {
 	UserID              int64  `json:"user_id"`
 	HasToken            bool   `json:"has_token"`       // token never returned; UI shows only whether set
 	Proxy               string `json:"proxy,omitempty"` // outbound proxy for reaching this remote; super-admin only
+	APIMode             string `json:"api_mode"`        // remoteAPIModeAdmin | remoteAPIModeSeller
 	DefaultModels       string `json:"default_models"`
 	DefaultGroup        string `json:"default_group"`
 	DefaultGeminiGroup  string `json:"default_gemini_group"`
@@ -404,7 +405,7 @@ func handleRemoteProfileList(c *gin.Context) {
 		        default_models, default_group, default_gemini_group, default_gemini_models, default_vertex_models,
 		        default_openai_group, default_openai_models,
 		        pool_interval_sec, pool_batch_size,
-		        auto_mode, rpm_base, rpm_min, proxy,
+		        auto_mode, rpm_base, rpm_min, proxy, api_mode,
 		        created_at, updated_at
 		 FROM remote_newapi_profile ORDER BY name ASC`,
 	)
@@ -441,7 +442,7 @@ func handleRemoteProfileList(c *gin.Context) {
 			&p.DefaultModels, &p.DefaultGroup, &p.DefaultGeminiGroup, &p.DefaultGeminiModels, &p.DefaultVertexModels,
 			&p.DefaultOpenAIGroup, &p.DefaultOpenAIModels,
 			&p.PoolIntervalSec, &p.PoolBatchSize,
-			&p.AutoMode, &p.RPMBase, &p.RPMMin, &p.Proxy,
+			&p.AutoMode, &p.RPMBase, &p.RPMMin, &p.Proxy, &p.APIMode,
 			&p.CreatedAt, &p.UpdatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -493,6 +494,7 @@ func handleRemoteProfileCreate(c *gin.Context) {
 		UserID              int64  `json:"user_id"`
 		AccessToken         string `json:"access_token"`
 		Proxy               string `json:"proxy"`
+		APIMode             string `json:"api_mode"`
 		DefaultModels       string `json:"default_models"`
 		DefaultGroup        string `json:"default_group"`
 		DefaultGeminiGroup  string `json:"default_gemini_group"`
@@ -541,6 +543,11 @@ func handleRemoteProfileCreate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	apiMode, err := normalizeAPIMode(body.APIMode)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	// Missing pool tuning values fall back to the schema default via the
 	// same clamp — keeps create + update paths converging on the same
 	// safety bounds without duplicating the constants.
@@ -564,13 +571,13 @@ func handleRemoteProfileCreate(c *gin.Context) {
 		 (name, host, user_id, access_token_enc, default_models, default_group, default_gemini_group, default_gemini_models, default_vertex_models,
 		  default_openai_group, default_openai_models,
 		  pool_interval_sec, pool_batch_size,
-		  auto_mode, rpm_base, rpm_min, proxy,
+		  auto_mode, rpm_base, rpm_min, proxy, api_mode,
 		  created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18) RETURNING id`,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19) RETURNING id`,
 		body.Name, host, body.UserID, enc, body.DefaultModels, body.DefaultGroup, body.DefaultGeminiGroup, body.DefaultGeminiModels, body.DefaultVertexModels,
 		body.DefaultOpenAIGroup, body.DefaultOpenAIModels,
 		poolInterval, poolBatch,
-		autoMode, rpmBase, rpmMin, proxy, now,
+		autoMode, rpmBase, rpmMin, proxy, apiMode, now,
 	).Scan(&id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -578,7 +585,7 @@ func handleRemoteProfileCreate(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, remoteProfile{
 		ID: id, Name: body.Name, Host: host, UserID: body.UserID,
-		HasToken: true, Proxy: proxy, DefaultModels: body.DefaultModels, DefaultGroup: body.DefaultGroup,
+		HasToken: true, Proxy: proxy, APIMode: apiMode, DefaultModels: body.DefaultModels, DefaultGroup: body.DefaultGroup,
 		DefaultGeminiGroup:  body.DefaultGeminiGroup,
 		DefaultGeminiModels: body.DefaultGeminiModels,
 		DefaultVertexModels: body.DefaultVertexModels,
@@ -603,6 +610,7 @@ func handleRemoteProfileUpdate(c *gin.Context) {
 		UserID              *int64  `json:"user_id,omitempty"`
 		AccessToken         *string `json:"access_token,omitempty"` // empty string = leave unchanged
 		Proxy               *string `json:"proxy,omitempty"`        // empty string = clear proxy (direct)
+		APIMode             *string `json:"api_mode,omitempty"`
 		DefaultModels       *string `json:"default_models,omitempty"`
 		DefaultGroup        *string `json:"default_group,omitempty"`
 		DefaultGeminiGroup  *string `json:"default_gemini_group,omitempty"`
@@ -741,6 +749,17 @@ func handleRemoteProfileUpdate(c *gin.Context) {
 			return
 		}
 		if _, err := db.Exec(`UPDATE remote_newapi_profile SET proxy=$1, updated_at=$2 WHERE id=$3`, p, now, id); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.APIMode != nil {
+		m, err := normalizeAPIMode(*body.APIMode)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if _, err := db.Exec(`UPDATE remote_newapi_profile SET api_mode=$1, updated_at=$2 WHERE id=$3`, m, now, id); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -1087,23 +1106,61 @@ func normalizeProxy(raw string) (string, error) {
 	return s, nil
 }
 
-// remoteProxyForHost resolves the outbound proxy configured for the remote
-// deployment at `host`, or "" to connect directly. Read fresh from the DB
-// on every call: report-service runs multi-node, so an in-memory cache would
-// go stale on the other node after a proxy edit; the extra indexed SELECT is
-// negligible against the 20–90s network calls it fronts. host isn't UNIQUE
-// in the schema (name is), but one host == one remote deployment in practice,
-// so any matching row's proxy is the right one for reaching that host.
-func remoteProxyForHost(host string) string {
-	var proxy string
-	if err := db.QueryRow(
-		`SELECT proxy FROM remote_newapi_profile WHERE host=$1 LIMIT 1`,
-		host,
-	).Scan(&proxy); err != nil {
-		// No row (ad-hoc host typed in place) or read error ⇒ direct.
-		return ""
+// Remote management API flavours. Admin is stock new-api; seller is a
+// seller-scoped token on a forked remote that only exposes its own channels
+// under /api/seller/channel/ — no search, no logs.
+const (
+	remoteAPIModeAdmin  = "admin"
+	remoteAPIModeSeller = "seller"
+)
+
+// errRemoteSellerUnsupported is returned (without a network call) for remote
+// endpoints a seller-mode profile has no equivalent of.
+var errRemoteSellerUnsupported = errors.New("not supported by a seller-mode profile")
+
+func normalizeAPIMode(raw string) (string, error) {
+	switch m := strings.TrimSpace(raw); m {
+	case "", remoteAPIModeAdmin:
+		return remoteAPIModeAdmin, nil
+	case remoteAPIModeSeller:
+		return m, nil
+	default:
+		return "", errors.New("api_mode must be admin or seller")
 	}
-	return strings.TrimSpace(proxy)
+}
+
+// remoteTransportForHost resolves the outbound proxy ("" = direct) and the
+// API mode configured for the remote deployment at `host`. Read fresh from
+// the DB on every call: report-service runs multi-node, so an in-memory
+// cache would go stale on the other node after an edit; the extra indexed
+// SELECT is negligible against the 20–90s network calls it fronts. host
+// isn't UNIQUE in the schema (name is), but one host == one remote
+// deployment in practice, so any matching row is the right one.
+func remoteTransportForHost(host string) (proxy, apiMode string) {
+	if err := db.QueryRow(
+		`SELECT proxy, api_mode FROM remote_newapi_profile WHERE host=$1 LIMIT 1`,
+		host,
+	).Scan(&proxy, &apiMode); err != nil {
+		// No row (ad-hoc host typed in place) or read error ⇒ direct admin.
+		return "", remoteAPIModeAdmin
+	}
+	return strings.TrimSpace(proxy), apiMode
+}
+
+// remoteAPIPath maps a stock admin path onto the profile's API mode. Seller
+// mode moves /api/channel/* under /api/seller/channel/ and rejects what the
+// seller API lacks (channel search, every /api/log endpoint).
+func remoteAPIPath(apiMode, path string) (string, error) {
+	if apiMode != remoteAPIModeSeller {
+		return path, nil
+	}
+	if path == "/api/channel/search" {
+		return "", errRemoteSellerUnsupported
+	}
+	if rest, ok := strings.CutPrefix(path, "/api/channel/"); ok {
+		return "/api/seller/channel/" + rest, nil
+	}
+	return "", errRemoteSellerUnsupported
 }
 
 // remoteHTTPClients caches one *http.Client per proxy URL ("" = direct) so
@@ -1159,7 +1216,12 @@ func remoteDoJSON(ctx context.Context, method, host, path, token string, userID 
 // returns {success,message,time} at the top level (no data), which remoteDoJSON
 // would wrongly treat as empty on success.
 func remoteDoRaw(ctx context.Context, method, host, path, token string, userID int64, query url.Values, body any) ([]byte, error) {
-	endpoint := host + path
+	proxy, apiMode := remoteTransportForHost(host)
+	modePath, err := remoteAPIPath(apiMode, path)
+	if err != nil {
+		return nil, fmt.Errorf("%s %s: %w", method, path, err)
+	}
+	endpoint := host + modePath
 	if query != nil && len(query) > 0 {
 		if strings.Contains(endpoint, "?") {
 			endpoint += "&" + query.Encode()
@@ -1185,7 +1247,7 @@ func remoteDoRaw(ctx context.Context, method, host, path, token string, userID i
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client := remoteHTTPClient(remoteProxyForHost(host))
+	client := remoteHTTPClient(proxy)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http: %v", err)
@@ -4286,6 +4348,24 @@ func lookupRemoteChannelBySha(ctx context.Context, host, token string, userID in
 		q.Set("group", group)
 	}
 	data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/channel/search", token, userID, q, nil)
+	if errors.Is(err, errRemoteSellerUnsupported) {
+		// Seller API has no search; a seller only sees its own channels, so
+		// walking the full list is cheap.
+		channels, _, err := iterateRemoteChannels(ctx, host, token, userID, 100, nil)
+		if err != nil {
+			return 0, fmt.Errorf("list failed: %v", err)
+		}
+		var matched int64
+		for _, ch := range channels {
+			if strings.Contains(ch.Name, sha) && ch.ID > matched {
+				matched = ch.ID
+			}
+		}
+		if matched == 0 {
+			return 0, errors.New("reverse-lookup returned no match")
+		}
+		return matched, nil
+	}
 	if err != nil {
 		return 0, fmt.Errorf("search failed: %v", err)
 	}
@@ -6127,7 +6207,8 @@ func startRemoteErrorLogSync() {
 }
 
 func syncAllProfilesErrorLogs() {
-	rows, err := db.Query(`SELECT id FROM remote_newapi_profile ORDER BY id`)
+	// Seller-mode profiles have no /api/log access.
+	rows, err := db.Query(`SELECT id FROM remote_newapi_profile WHERE api_mode <> 'seller' ORDER BY id`)
 	if err != nil {
 		log.Printf("[error-sync] list profiles: %v", err)
 		return

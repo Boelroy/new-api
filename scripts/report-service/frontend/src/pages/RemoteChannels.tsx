@@ -538,6 +538,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
   const [formName, setFormName] = useState('')
   const [formHost, setFormHost] = useState('')
   const [formProxy, setFormProxy] = useState('')
+  const [formAPIMode, setFormAPIMode] = useState<'admin' | 'seller'>('admin')
   const [formUserID, setFormUserID] = useState('')
   const [formToken, setFormToken] = useState('')
   // Batch-upload defaults preloaded into the create modal from the
@@ -774,6 +775,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     setFormName('')
     setFormHost('')
     setFormProxy('')
+    setFormAPIMode('admin')
     setFormUserID('')
     setFormToken('')
     setFormDefaultModels(DEFAULT_ANTHROPIC_MODELS)
@@ -821,6 +823,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
     // Proxy isn't a secret like host/token; prefill so the admin sees the
     // current value and can clear it by blanking the field.
     setFormProxy(p.proxy || '')
+    setFormAPIMode(p.api_mode === 'seller' ? 'seller' : 'admin')
     setFormUserID(p.user_id != null ? String(p.user_id) : '')
     setFormToken('')
     setFormDefaultModels(p.default_models || '')
@@ -867,6 +870,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           user_id: uid,
           access_token: formToken.trim(),
           proxy: formProxy.trim(),
+          api_mode: formAPIMode,
           default_models: formDefaultModels.trim(),
           default_group: formDefaultGroup.trim(),
           default_gemini_group: formDefaultGeminiGroup.trim(),
@@ -883,6 +887,7 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
           user_id: uid,
           // Always sent (empty clears the proxy → direct connection).
           proxy: formProxy.trim(),
+          api_mode: formAPIMode,
           default_models: formDefaultModels.trim(),
           default_group: formDefaultGroup.trim(),
           default_gemini_group: formDefaultGeminiGroup.trim(),
@@ -3158,6 +3163,19 @@ function RemoteChannelsAdmin({ role }: { role: number }) {
                   placeholder="http://user:pass@host:port（留空 = 直连，不走代理）"
                   className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-gray-900"
                 />
+              </Field>
+              <Field label="API 模式">
+                <select
+                  value={formAPIMode}
+                  onChange={e => setFormAPIMode(e.target.value === 'seller' ? 'seller' : 'admin')}
+                  className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-gray-900"
+                >
+                  <option value="admin">管理员 (/api/channel/)</option>
+                  <option value="seller">卖家 (/api/seller/channel/)</option>
+                </select>
+                {formAPIMode === 'seller' && (
+                  <p className="text-[10px] text-gray-400 mt-1">卖家令牌只能管理自己的渠道；没有日志接口，用量统计、错误同步、自动批量（按 RPM）不可用。</p>
+                )}
               </Field>
               <Field label="User ID (New-Api-User header)">
                 <input

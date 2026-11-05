@@ -4655,6 +4655,11 @@ func main() {
 		// key upload, log/stat, auto-disable) is routed through it when set.
 		// Empty ⇒ connect directly. Resolved by host inside remoteDoJSON.
 		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS proxy TEXT NOT NULL DEFAULT ''`,
+		// Which management API the profile's token speaks: 'admin' (the
+		// stock /api/channel/* + /api/log/*) or 'seller' (a seller-scoped
+		// token on a forked remote, /api/seller/channel/* only). Resolved
+		// by host inside remoteDoRaw, same as proxy.
+		`ALTER TABLE remote_newapi_profile ADD COLUMN IF NOT EXISTS api_mode TEXT NOT NULL DEFAULT 'admin'`,
 		// Per-(profile, studio) accept/reject flag for studio operator key
 		// uploads. Missing row = accepting; accepting=false rejects the
 		// enqueue with 403. Super admin toggles this from the queue panel.

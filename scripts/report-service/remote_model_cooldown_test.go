@@ -107,3 +107,29 @@ func TestNextTrips(t *testing.T) {
 	assert.Equal(t, 1, nextTrips(4, now-3600, now, escalate), "streak resets after the window")
 	assert.Equal(t, 1, nextTrips(4, now-10, now, 0), "escalation disabled")
 }
+
+func TestRemoteAPIPath(t *testing.T) {
+	cases := []struct {
+		mode, path, want string
+		unsupported      bool
+	}{
+		{mode: remoteAPIModeAdmin, path: "/api/channel/search", want: "/api/channel/search"},
+		{mode: remoteAPIModeAdmin, path: "/api/log/stat", want: "/api/log/stat"},
+		{mode: remoteAPIModeSeller, path: "/api/channel/", want: "/api/seller/channel/"},
+		{mode: remoteAPIModeSeller, path: "/api/channel/42", want: "/api/seller/channel/42"},
+		{mode: remoteAPIModeSeller, path: "/api/channel/test/42", want: "/api/seller/channel/test/42"},
+		{mode: remoteAPIModeSeller, path: "/api/channel/42/status", want: "/api/seller/channel/42/status"},
+		{mode: remoteAPIModeSeller, path: "/api/channel/search", unsupported: true},
+		{mode: remoteAPIModeSeller, path: "/api/log/", unsupported: true},
+		{mode: remoteAPIModeSeller, path: "/api/log/stat", unsupported: true},
+	}
+	for _, tc := range cases {
+		got, err := remoteAPIPath(tc.mode, tc.path)
+		if tc.unsupported {
+			require.ErrorIs(t, err, errRemoteSellerUnsupported, tc.path)
+			continue
+		}
+		require.NoError(t, err, tc.path)
+		assert.Equal(t, tc.want, got)
+	}
+}
