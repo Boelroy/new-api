@@ -5,7 +5,7 @@ import { toast } from '../components/feedback'
 import { baselineItemsFor, invalidateSidebarBoot, type SidebarFlags } from '../components/Sidebar'
 import { TZ_OPTIONS, useReportTz } from '../lib/reportTz'
 import { withBase } from '../basePath'
-import { api, type MainServiceTokenStatus, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_01, ROLE_TESTER, ROLE_USER } from '../api'
+import { api, type MainServiceTokenStatus, type ProxyReportSettings, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_01, ROLE_TESTER, ROLE_USER } from '../api'
 
 type Tab = 'general' | 'sidebar' | 'aws'
 
@@ -42,6 +42,7 @@ function GeneralSettings() {
         </select>
       </Card>
       <MainServiceTokenCard />
+      <ProxyReportCard />
     </div>
   )
 }
@@ -101,6 +102,99 @@ function MainServiceTokenCard() {
           <Button variant="outline" size="sm" onClick={() => void submit('')} disabled={saving}>清除</Button>
         )}
       </div>
+    </Card>
+  )
+}
+
+// newapi-proxy 用量播报: today's usage of the enabled proxy channels by
+// supplier, pushed to Lark by the proxy at the set UTC+8 hours or on demand.
+function ProxyReportCard() {
+  const [st, setSt] = useState<ProxyReportSettings | null>(null)
+  const [webhook, setWebhook] = useState('')
+  const [hours, setHours] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [pushing, setPushing] = useState(false)
+
+  const apply = (next: ProxyReportSettings) => {
+    setSt(next)
+    setWebhook(next.webhook)
+    setHours(next.hours)
+  }
+
+  useEffect(() => {
+    api.proxyReportSettings().then(apply).catch(e => toast.error(e))
+  }, [])
+
+  const save = async () => {
+    setSaving(true)
+    try {
+      apply(await api.setProxyReportSettings({ webhook: webhook.trim(), hours: hours.trim() }))
+      toast.success('已保存')
+    } catch (e) {
+      toast.error(e)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // The proxy picks the request up within ~15s; poll until its outcome is newer.
+  const push = async () => {
+    setPushing(true)
+    try {
+      const { push_at } = await api.pushProxyReport()
+      for (let i = 0; i < 40; i++) {
+        await new Promise(r => setTimeout(r, 3000))
+        const next = await api.proxyReportSettings()
+        if (next.last && next.last.at >= push_at) {
+          setSt(next)
+          if (next.last.ok) toast.success('已推送')
+          else toast.error(next.last.error || '推送失败')
+          return
+        }
+      }
+      toast.error('newapi-proxy 2 分钟内没有响应，请确认它在运行')
+    } catch (e) {
+      toast.error(e)
+    } finally {
+      setPushing(false)
+    }
+  }
+
+  const dirty = st != null && (webhook.trim() !== st.webhook || hours.trim() !== st.hours)
+  const inputCls = 'w-full border border-border rounded-lg px-3 py-2 text-sm bg-canvas focus:outline-none focus:border-brand'
+  return (
+    <Card className="p-5 lg:col-span-2">
+      <MonoLabel>newapi-proxy</MonoLabel>
+      <div className="text-sm font-semibold text-ink mt-1 mb-1">渠道用量播报</div>
+      <p className="text-xs text-secondary mb-3">
+        把通过 newapi-proxy 创建、当前启用的渠道今日（UTC+8 00:00 起）的花费、请求数、RPM/TPM 按供应商汇总推送到 Lark。由 newapi-proxy 负责发送。
+      </p>
+      <div className="grid grid-cols-1 md:grid-cols-[1fr_12rem] gap-3 mb-3">
+        <label className="space-y-1">
+          <span className="text-xs text-secondary">Lark Webhook（留空 = 关闭）</span>
+          <input value={webhook} onChange={e => setWebhook(e.target.value)} autoComplete="off" placeholder="https://open.larksuite.com/open-apis/bot/v2/hook/..." className={`${inputCls} font-mono`} />
+        </label>
+        <label className="space-y-1">
+          <span className="text-xs text-secondary">定时推送（UTC+8 整点，逗号分隔）</span>
+          <input value={hours} onChange={e => setHours(e.target.value)} placeholder="例如 10,22；留空只手动" className={inputCls} />
+        </label>
+      </div>
+      <div className="flex gap-2 mb-3">
+        <Button size="sm" onClick={() => void save()} disabled={saving || !dirty}>{saving ? '保存中…' : '保存'}</Button>
+        <Button variant="outline" size="sm" onClick={() => void push()} disabled={pushing || dirty || !st?.webhook}>
+          {pushing ? '推送中…' : '立即推送'}
+        </Button>
+        {dirty && <span className="text-xs text-secondary self-center">先保存再推送</span>}
+      </div>
+      {st?.last && (
+        <div className="text-xs space-y-1">
+          <div>
+            上次推送：{new Date(st.last.at * 1000).toLocaleString()}（{st.last.trigger === 'manual' ? '手动' : '定时'}）
+            <span className={st.last.ok ? 'ml-2 text-emerald-600 font-medium' : 'ml-2 text-rose-600 font-medium'}>{st.last.ok ? '成功' : `失败：${st.last.error ?? ''}`}</span>
+          </div>
+          {st.last.text && <pre className="whitespace-pre-wrap break-words rounded-lg bg-canvas border border-border p-3 max-h-80 overflow-auto">{st.last.text}</pre>}
+        </div>
+      )}
     </Card>
   )
 }

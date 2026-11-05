@@ -5277,6 +5277,10 @@ func main() {
 	// Local new-api admin token (MAIN_SERVICE_TOKEN) editable from Settings.
 	api.GET("/main-service-token", requireRole(minSuperAdminRole), handleMainServiceTokenGet)
 	api.PUT("/main-service-token", requireRole(minSuperAdminRole), handleMainServiceTokenSet)
+	// newapi-proxy usage report (pushed by the proxy itself, see proxy_report.go).
+	api.GET("/proxy-report/settings", requireRole(minSuperAdminRole), handleProxyReportSettingsGet)
+	api.PUT("/proxy-report/settings", requireRole(minSuperAdminRole), handleProxyReportSettingsSet)
+	api.POST("/proxy-report/push", requireRole(minSuperAdminRole), handleProxyReportPush)
 
 	// AWS Bedrock default regions + region->prefix map — read via
 	// /api/auth/config, set here by super admin only.

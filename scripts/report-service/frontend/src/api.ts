@@ -596,6 +596,15 @@ export type ChanPrioConfig = {
 // Stream-failure guard (stream_guard.go): a (channel, model) whose recent
 // streams end in response.failed has the model stripped and the channel
 // demoted. restored_at > 0 once an operator undid it from the 调度 page.
+// newapi-proxy usage report. The proxy sends it; last is the outcome of its
+// most recent push (manual or scheduled).
+export type ProxyReportSettings = {
+  webhook: string
+  hours: string
+  push_at: number
+  last: { at: number; trigger: 'manual' | 'scheduled'; ok: boolean; error?: string; text: string } | null
+}
+
 export type MainServiceTokenStatus = {
   configured: boolean
   source: '' | 'settings' | 'env'
@@ -999,6 +1008,18 @@ export const api = {
   // Local new-api admin token (MAIN_SERVICE_TOKEN). The token itself is never
   // returned, only whether one is set and where it comes from.
   mainServiceToken: () => request<MainServiceTokenStatus>('/api/main-service-token'),
+
+  proxyReportSettings: () => request<ProxyReportSettings>('/api/proxy-report/settings'),
+
+  setProxyReportSettings: (payload: { webhook?: string; hours?: string }) =>
+    request<ProxyReportSettings>('/api/proxy-report/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  // Queues a push; the proxy sends it within ~15s and records the outcome.
+  pushProxyReport: () => request<{ push_at: number }>('/api/proxy-report/push', { method: 'POST' }),
 
   setMainServiceToken: (token: string) =>
     request<MainServiceTokenStatus>('/api/main-service-token', {
