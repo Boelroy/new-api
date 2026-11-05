@@ -1349,6 +1349,9 @@ type ChannelRow struct {
 	TierLimitTPM int64  `json:"tier_limit_tpm,omitempty"`
 	TierProbedAt int64  `json:"tier_probed_at,omitempty"`
 	TierError    string `json:"tier_error,omitempty"`
+	// Alerts explains why a key is currently throttled or routed around
+	// (Key Capacity only); empty when healthy.
+	Alerts []string `json:"alerts,omitempty"`
 }
 
 type KeySummary struct {
@@ -1421,7 +1424,98 @@ func queryKeyData() ([]ChannelRow, error) {
 			channels[idx].LastHourUSD = roundTo(float64(q)/quotaPerUnit, 6)
 		}
 	}
+	if err := attachKeyAlerts(channels, idxMap, now); err != nil {
+		log.Printf("[keys] alerts: %v", err)
+	}
 	return channels, nil
+}
+
+// attachKeyAlerts marks keys that the schedulers are currently routing around
+// (or that are throttled right now) with human-readable reasons for Key
+// Capacity: a model in 429 cooldown, a priority demoted by 429 tuning, an
+// unrestored stream-guard action, or a burst of 429s in the last 10 minutes.
+func attachKeyAlerts(channels []ChannelRow, idxMap map[int]int, now int64) error {
+	add := func(id int, reason string) {
+		if idx, ok := idxMap[id]; ok {
+			channels[idx].Alerts = append(channels[idx].Alerts, reason)
+		}
+	}
+	rows, err := db.Query(`
+		SELECT channel_id, model, restore_at FROM rs_remote_model_cooldown
+		WHERE profile_id = 0 AND state = 'cooling' AND NOT dry_run`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id int
+		var model string
+		var restoreAt int64
+		if err := rows.Scan(&id, &model, &restoreAt); err != nil {
+			rows.Close()
+			return err
+		}
+		add(id, fmt.Sprintf("限流冷却：%s 已下线，约 %d 分钟后恢复", model, max(0, (restoreAt-now+59)/60)))
+	}
+	rows.Close()
+
+	rows, err = db.Query(`
+		SELECT s.channel_id, s.base_priority, COALESCE(c.priority, 0)
+		FROM rs_channel_priority_state s JOIN channels c ON c.id = s.channel_id
+		WHERE COALESCE(c.priority, 0) < s.base_priority`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id, base, cur int
+		if err := rows.Scan(&id, &base, &cur); err != nil {
+			rows.Close()
+			return err
+		}
+		add(id, fmt.Sprintf("429 限流降权：优先级 %d（基线 %d）", cur, base))
+	}
+	rows.Close()
+
+	rows, err = db.Query(`
+		SELECT channel_id, model, action, failed, streams FROM rs_stream_guard_event
+		WHERE restored_at = 0 AND created_at >= $1 ORDER BY id`, now-24*3600)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id, failed, streams int
+		var model, action string
+		if err := rows.Scan(&id, &model, &action, &failed, &streams); err != nil {
+			rows.Close()
+			return err
+		}
+		what := "已降优先级"
+		if strings.Contains(action, "strip_model") {
+			what = model + " 已下线并降优先级"
+			if !strings.Contains(action, "demote") {
+				what = model + " 已下线"
+			}
+		}
+		add(id, fmt.Sprintf("断流：%s 流失败 %d/%d，%s（可能快没额度）", model, failed, streams, what))
+	}
+	rows.Close()
+
+	rows, err = db.Query(`
+		SELECT channel_id, COUNT(*) FROM logs
+		WHERE type = 5 AND created_at >= $1 AND content LIKE '%status_code=429%'
+		GROUP BY channel_id HAVING COUNT(*) >= 5`, now-600)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id, n int
+		if err := rows.Scan(&id, &n); err != nil {
+			rows.Close()
+			return err
+		}
+		add(id, fmt.Sprintf("近 10 分钟 429 限流 %d 次", n))
+	}
+	rows.Close()
+	return nil
 }
 
 func queryTotalLastHour() (float64, error) {

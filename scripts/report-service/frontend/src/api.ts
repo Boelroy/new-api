@@ -73,6 +73,8 @@ export type ChannelRow = {
   tier_limit_tpm?: number
   tier_probed_at?: number
   tier_error?: string
+  // Why the key is currently throttled / routed around (Key Capacity only).
+  alerts?: string[]
 }
 
 export type DownstreamPricing = {
