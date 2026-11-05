@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { Button, Card } from '../components/ui'
 import { confirmDialog, toast } from '../components/feedback'
@@ -136,7 +137,7 @@ function CooldownConfigCard({ scope, profiles, onRan }: {
       <div className="flex items-center justify-between mb-3">
         <div className="text-sm font-semibold">
           {local ? '本地 new-api' : '远程 Profile'}
-          {blocked && <span className="ml-2 text-[11px] font-normal text-red-600">未配置 MAIN_SERVICE_TOKEN,本地冷却不会运行</span>}
+          {blocked && <span className="ml-2 text-[11px] font-normal text-red-600">未配置本地 new-api 管理令牌,本地冷却不会运行 · <Link to="/settings" className="underline">去 Settings 配置</Link></span>}
         </div>
         <div className="flex items-center gap-4">
           <label className="flex items-center gap-2 text-xs">

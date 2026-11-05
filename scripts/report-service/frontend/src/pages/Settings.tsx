@@ -5,7 +5,7 @@ import { toast } from '../components/feedback'
 import { baselineItemsFor, invalidateSidebarBoot, type SidebarFlags } from '../components/Sidebar'
 import { TZ_OPTIONS, useReportTz } from '../lib/reportTz'
 import { withBase } from '../basePath'
-import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_01, ROLE_TESTER, ROLE_USER } from '../api'
+import { api, type MainServiceTokenStatus, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_01, ROLE_TESTER, ROLE_USER } from '../api'
 
 type Tab = 'general' | 'sidebar' | 'aws'
 
@@ -41,12 +41,67 @@ function GeneralSettings() {
           {TZ_OPTIONS.map(z => <option key={z} value={z}>{z}</option>)}
         </select>
       </Card>
-      <Card className="p-5">
-        <MonoLabel>More</MonoLabel>
-        <div className="text-sm font-semibold text-ink mt-1 mb-1">其他全站设置</div>
-        <p className="text-xs text-secondary">更多站点级配置将陆续加入这里。</p>
-      </Card>
+      <MainServiceTokenCard />
     </div>
+  )
+}
+
+// Local new-api admin token used by the schedulers (model cooldown, model
+// health, model cleanup). Saved here it overrides MAIN_SERVICE_TOKEN from the
+// environment; the server checks it against new-api before storing.
+function MainServiceTokenCard() {
+  const [st, setSt] = useState<MainServiceTokenStatus | null>(null)
+  const [token, setToken] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    api.mainServiceToken().then(setSt).catch(e => toast.error(e))
+  }, [])
+
+  const submit = async (value: string) => {
+    setSaving(true)
+    try {
+      setSt(await api.setMainServiceToken(value))
+      setToken('')
+      toast.success(value ? '已验证并保存' : '已清除，回退到环境变量')
+    } catch (e) {
+      toast.error(e)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const sourceText = st?.source === 'settings' ? '后台配置' : st?.source === 'env' ? '环境变量 MAIN_SERVICE_TOKEN' : '未配置'
+  return (
+    <Card className="p-5">
+      <MonoLabel>Local new-api</MonoLabel>
+      <div className="text-sm font-semibold text-ink mt-1 mb-1">管理令牌</div>
+      <p className="text-xs text-secondary mb-3">
+        模型限流冷却（本地）、模型健康、模型清理通过它调用本地 new-api 的渠道接口。填 new-api 上用户 {st?.user_id ?? '1'} 的访问令牌（需要渠道读写权限），保存前会先验证。
+      </p>
+      {st && (
+        <div className="text-xs mb-3 space-y-0.5">
+          <div>状态：<span className={st.configured ? 'text-emerald-600 font-medium' : 'text-rose-600 font-medium'}>{st.configured ? '已配置' : '未配置'}</span>
+            {st.masked && <span className="ml-2 font-mono text-secondary">{st.masked}</span>}
+          </div>
+          <div className="text-secondary">来源：{sourceText}{!st.url && ' · MAIN_SERVICE_URL 未设置'}</div>
+        </div>
+      )}
+      <div className="flex gap-2">
+        <input
+          type="password"
+          autoComplete="off"
+          value={token}
+          onChange={e => setToken(e.target.value)}
+          placeholder="粘贴新的访问令牌"
+          className="flex-1 border border-border rounded-lg px-3 py-2 text-sm bg-canvas focus:outline-none focus:border-brand font-mono"
+        />
+        <Button size="sm" onClick={() => void submit(token.trim())} disabled={saving || !token.trim()}>{saving ? '验证中…' : '保存'}</Button>
+        {st?.source === 'settings' && (
+          <Button variant="outline" size="sm" onClick={() => void submit('')} disabled={saving}>清除</Button>
+        )}
+      </div>
+    </Card>
   )
 }
 

@@ -313,18 +313,14 @@ func csvHas(csv, item string) bool {
 
 func startRemoteModelCooldownLoop() {
 	log.Printf("[remote-cooldown] loop starting")
-	scopes := []rmcScope{rmcScopeRemote}
-	if localNewAPIConfigured() {
-		scopes = append(scopes, rmcScopeLocal)
-	} else {
-		log.Printf("[remote-cooldown] MAIN_SERVICE_TOKEN not set; local scope disabled")
-	}
-	for _, scope := range scopes {
+	for _, scope := range []rmcScope{rmcScopeRemote, rmcScopeLocal} {
 		go func() {
 			time.Sleep(60 * time.Second) // stagger past the other schedulers
 			for {
 				cfg := loadRMCConfig(scope)
-				if IsLeader() {
+				// The local scope needs the new-api token, which can be saved
+				// from Settings at any time, so check it per tick.
+				if IsLeader() && (scope != rmcScopeLocal || localNewAPIConfigured()) {
 					runRMCTick(context.Background(), cfg, cfg.Enabled)
 				}
 				select {

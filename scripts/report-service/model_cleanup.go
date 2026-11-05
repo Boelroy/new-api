@@ -162,17 +162,14 @@ func writeModelCleanupConfig(key, value string) error {
 // ---- Loop ----
 
 func startModelCleanupLoop() {
-	if !localNewAPIConfigured() {
-		log.Printf("[model-cleanup] MAIN_SERVICE_TOKEN not set; scheduler disabled")
-		return
-	}
 	log.Printf("[model-cleanup] loop starting")
 	go func() {
 		// Stagger past the other schedulers' first ticks.
 		time.Sleep(75 * time.Second)
 		for {
 			cfg := loadModelCleanupConfig()
-			if cfg.Enabled && IsLeader() {
+			// The token can be saved from Settings at any time, so check per tick.
+			if cfg.Enabled && IsLeader() && localNewAPIConfigured() {
 				runModelCleanupTick(context.Background(), cfg)
 			}
 			select {

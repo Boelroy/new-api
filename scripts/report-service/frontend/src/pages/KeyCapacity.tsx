@@ -57,6 +57,28 @@ function TierBadge({ ch }: { ch: ChannelRow }) {
   )
 }
 
+function fmtTokens(n: number): string {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`
+  if (n >= 1e3) return `${Math.round(n / 1e3)}K`
+  return String(n)
+}
+
+// Last-60s tokens on the key's main model against its per-minute limit.
+// Logged tokens undercount what OpenAI reserves (input + max output), so this
+// is a floor on the real usage.
+function TpmUsage({ ch }: { ch: ChannelRow }) {
+  if (!ch.main_limit_tpm) return <span className="text-gray-300">—</span>
+  const used = ch.main_used_tpm ?? 0
+  const pct = (used / ch.main_limit_tpm) * 100
+  const cls = pct >= 95 ? 'text-rose-600 font-semibold' : pct >= 80 ? 'text-amber-600 font-medium' : 'text-gray-700'
+  return (
+    <span className={`tabular-nums ${cls}`} title={`${ch.main_model}：近 1 分钟 ${used.toLocaleString()} / 上限 ${ch.main_limit_tpm.toLocaleString()} TPM（日志口径，实际预扣更高）`}>
+      {fmtTokens(used)} / {fmtTokens(ch.main_limit_tpm)}
+      <span className="ml-1 text-[11px]">{pct.toFixed(0)}%</span>
+    </span>
+  )
+}
+
 export default function KeyCapacity() {
   const [channels, setChannels] = useState<ChannelRow[]>([])
   const [totalLastHour, setTotalLastHour] = useState(0)
@@ -313,7 +335,7 @@ export default function KeyCapacity() {
                     className="rounded border-gray-300"
                   />
                 </th>
-                {['ID','名称','Key 末尾','Tier','优先级','已用 ($)','额度 ($)','剩余 ($)','剩余%','最近1小时消耗 ($)','预计剩余时长'].map(h => (
+                {['ID','名称','Key 末尾','Tier','TPM 占用','优先级','已用 ($)','额度 ($)','剩余 ($)','剩余%','最近1小时消耗 ($)','预计剩余时长'].map(h => (
                   <th key={h} className="sticky top-0 z-10 bg-gray-50 px-3 py-2 text-left mono-label border-b border-gray-200">{h}</th>
                 ))}
               </tr>
@@ -350,7 +372,7 @@ export default function KeyCapacity() {
                           className="rounded border-gray-300"
                         />
                       </td>
-                      <td colSpan={11} className="px-3 py-1.5 border-b border-gray-200">
+                      <td colSpan={12} className="px-3 py-1.5 border-b border-gray-200">
                         <div className="flex items-center gap-2 flex-wrap">
                           <button
                             onClick={() => toggleGroupCollapse(groupName)}
@@ -395,15 +417,18 @@ export default function KeyCapacity() {
                               <ProviderMark type={ch.type} size={18} />
                               <span>{ch.name}</span>
                               {!!ch.alerts?.length && (
-                                <span
-                                  title={ch.alerts.join('\n')}
-                                  className="inline-flex size-4 items-center justify-center rounded-full bg-rose-500 text-[10px] font-bold text-white cursor-help"
-                                >!</span>
+                                <span className="relative group inline-flex">
+                                  <span className="inline-flex size-4 items-center justify-center rounded-full bg-rose-500 text-[10px] font-bold text-white cursor-help">!</span>
+                                  <span className="pointer-events-none absolute left-6 top-1/2 -translate-y-1/2 z-30 hidden group-hover:block w-max max-w-[28rem] rounded-md bg-gray-900 px-3 py-2 text-[11px] leading-relaxed text-white shadow-lg whitespace-normal">
+                                    {ch.alerts.map(a => <div key={a}>• {a}</div>)}
+                                  </span>
+                                </span>
                               )}
                             </span>
                           </td>
                           <td className="px-3 py-1.5 border-b border-gray-50 font-mono text-gray-400">{ch.key}</td>
                           <td className="px-3 py-1.5 border-b border-gray-50"><TierBadge ch={ch} /></td>
+                          <td className="px-3 py-1.5 border-b border-gray-50"><TpmUsage ch={ch} /></td>
                           <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{ch.priority || <span className="text-gray-300">—</span>}</td>
                           <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">${ch.used_usd.toFixed(4)}</td>
                           <td className="px-3 py-1.5 border-b border-gray-50 text-right tabular-nums">{quota != null ? '$' + quota.toFixed(2) : <span className="text-gray-300">未设置</span>}</td>

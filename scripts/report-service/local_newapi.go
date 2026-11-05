@@ -23,16 +23,46 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
-// mainServiceToken is read in main() alongside mainServiceURL/mainServiceUID.
+// mainServiceToken is the MAIN_SERVICE_TOKEN env value read in main(). A token
+// saved from Settings (report_config main_service_token) takes precedence;
+// see currentMainServiceToken.
 var mainServiceToken string
+
+// mainServiceTokenOverride caches the Settings-saved token so every new-api
+// call doesn't hit the database. Loaded at startup, replaced on save.
+var mainServiceTokenOverride atomic.Pointer[string]
+
+const cfgMainServiceToken = "main_service_token"
+
+func loadMainServiceTokenOverride() {
+	var v string
+	_ = db.QueryRow(`SELECT value FROM report_config WHERE key = $1`, cfgMainServiceToken).Scan(&v)
+	v = strings.TrimSpace(v)
+	mainServiceTokenOverride.Store(&v)
+}
+
+// currentMainServiceToken returns the token used against the local new-api
+// and where it came from ("settings", "env" or "").
+func currentMainServiceToken() (string, string) {
+	if p := mainServiceTokenOverride.Load(); p != nil && *p != "" {
+		return *p, "settings"
+	}
+	if mainServiceToken != "" {
+		return mainServiceToken, "env"
+	}
+	return "", ""
+}
 
 // localStatusEndpointMissing caches the one-time discovery that this new-api
 // predates POST /api/channel/:id/status (added in 4aee5f7d5). 0 = unknown,
@@ -44,7 +74,8 @@ var localStatusEndpointMissing atomic.Int32
 var localNewAPIClient = &http.Client{}
 
 func localNewAPIConfigured() bool {
-	return mainServiceURL != "" && mainServiceToken != ""
+	token, _ := currentMainServiceToken()
+	return mainServiceURL != "" && token != ""
 }
 
 // localNewAPIDo performs one authenticated call against the local new-api.
@@ -74,7 +105,8 @@ func localNewAPIDo(ctx context.Context, method, path string, query url.Values, b
 	if err != nil {
 		return 0, nil, err
 	}
-	req.Header.Set("Authorization", mainServiceToken)
+	token, _ := currentMainServiceToken()
+	req.Header.Set("Authorization", token)
 	req.Header.Set("New-Api-User", mainServiceUID)
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
@@ -254,4 +286,83 @@ func snippet(raw []byte) string {
 		return s[:200] + "…"
 	}
 	return s
+}
+
+// maskToken shows only enough of a credential to tell two apart.
+func maskToken(t string) string {
+	if len(t) <= 8 {
+		return strings.Repeat("*", len(t))
+	}
+	return t[:4] + "…" + t[len(t)-4:]
+}
+
+// handleMainServiceTokenGet reports whether a token is configured and where it
+// comes from. The token itself is never returned.
+func handleMainServiceTokenGet(c *gin.Context) {
+	token, source := currentMainServiceToken()
+	c.JSON(http.StatusOK, gin.H{
+		"configured": localNewAPIConfigured(),
+		"source":     source,
+		"masked":     maskToken(token),
+		"url":        mainServiceURL,
+		"user_id":    mainServiceUID,
+		"env_set":    mainServiceToken != "",
+	})
+}
+
+// handleMainServiceTokenSet saves (or with an empty token, clears) the
+// Settings token. A new token must authenticate against the local new-api
+// channel list before it is stored, so a typo can't silently stop the
+// schedulers.
+func handleMainServiceTokenSet(c *gin.Context) {
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	token := strings.TrimSpace(body.Token)
+	if token != "" {
+		if mainServiceURL == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "MAIN_SERVICE_URL is not set"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, mainServiceURL+"/api/channel/?p=1&page_size=1", nil)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		req.Header.Set("Authorization", token)
+		req.Header.Set("New-Api-User", mainServiceUID)
+		resp, err := localNewAPIClient.Do(req)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "new-api unreachable: " + err.Error()})
+			return
+		}
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		resp.Body.Close()
+		var env localEnvelope
+		_ = json.Unmarshal(raw, &env)
+		if resp.StatusCode != http.StatusOK || !env.Success {
+			msg := env.Message
+			if msg == "" {
+				msg = snippet(raw)
+			}
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("new-api rejected the token (HTTP %d): %s", resp.StatusCode, msg)})
+			return
+		}
+	}
+	if _, err := db.Exec(`
+		INSERT INTO report_config (key, value, updated_at) VALUES ($1, $2, $3)
+		ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = $3`,
+		cfgMainServiceToken, token, time.Now().Unix()); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	mainServiceTokenOverride.Store(&token)
+	log.Printf("[settings] main service token %s", map[bool]string{true: "saved", false: "cleared"}[token != ""])
+	handleMainServiceTokenGet(c)
 }

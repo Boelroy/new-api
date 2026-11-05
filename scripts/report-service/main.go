@@ -1349,6 +1349,11 @@ type ChannelRow struct {
 	TierLimitTPM int64  `json:"tier_limit_tpm,omitempty"`
 	TierProbedAt int64  `json:"tier_probed_at,omitempty"`
 	TierError    string `json:"tier_error,omitempty"`
+	// TPM usage on the key's main model: tokens logged in the last 60s against
+	// that model's per-minute limit (from the tier probe). Key Capacity only.
+	MainModel    string `json:"main_model,omitempty"`
+	MainLimitTPM int64  `json:"main_limit_tpm,omitempty"`
+	MainUsedTPM  int64  `json:"main_used_tpm,omitempty"`
 	// Alerts explains why a key is currently throttled or routed around
 	// (Key Capacity only); empty when healthy.
 	Alerts []string `json:"alerts,omitempty"`
@@ -1365,7 +1370,8 @@ func queryKeyData() ([]ChannelRow, error) {
 		       COALESCE(c."group",''), COALESCE(c.priority,0),
 		       COALESCE(c.used_quota,0), q.quota_usd, q.unit_price_cny, COALESCE(q.note,''),
 		       t.tier, COALESCE(t.limit_requests,0), COALESCE(t.limit_tokens,0),
-		       COALESCE(t.probed_at,0), COALESCE(t.error,'')
+		       COALESCE(t.probed_at,0), COALESCE(t.error,''),
+		       COALESCE(t.main_model,''), COALESCE(t.main_limit_tpm,0)
 		FROM channels c
 		LEFT JOIN report_key_quotas q ON q.channel_id = c.id
 		LEFT JOIN rs_key_tier t ON t.channel_id = c.id
@@ -1384,7 +1390,7 @@ func queryKeyData() ([]ChannelRow, error) {
 		var quotaUSD, unitPrice sql.NullFloat64
 		var tier sql.NullInt64
 		if err := rows.Scan(&r.ID, &r.Name, &r.Key, &r.Status, &r.Type, &r.Tag, &r.Group, &r.Priority, &usedQuota, &quotaUSD, &unitPrice, &r.Note,
-			&tier, &r.TierLimitRPM, &r.TierLimitTPM, &r.TierProbedAt, &r.TierError); err != nil {
+			&tier, &r.TierLimitRPM, &r.TierLimitTPM, &r.TierProbedAt, &r.TierError, &r.MainModel, &r.MainLimitTPM); err != nil {
 			return nil, err
 		}
 		if tier.Valid {
@@ -1424,6 +1430,25 @@ func queryKeyData() ([]ChannelRow, error) {
 			channels[idx].LastHourUSD = roundTo(float64(q)/quotaPerUnit, 6)
 		}
 	}
+	tpmRows, err := db.Query(`
+		SELECT channel_id, model_name, COALESCE(SUM(prompt_tokens + completion_tokens), 0)
+		FROM logs WHERE type = 2 AND created_at >= $1 GROUP BY 1, 2`, now-60)
+	if err != nil {
+		return nil, err
+	}
+	for tpmRows.Next() {
+		var chID int
+		var model string
+		var used int64
+		if err := tpmRows.Scan(&chID, &model, &used); err != nil {
+			tpmRows.Close()
+			return nil, err
+		}
+		if idx, ok := idxMap[chID]; ok && channels[idx].MainModel == model {
+			channels[idx].MainUsedTPM = used
+		}
+	}
+	tpmRows.Close()
 	if err := attachKeyAlerts(channels, idxMap, now); err != nil {
 		log.Printf("[keys] alerts: %v", err)
 	}
@@ -5010,6 +5035,8 @@ func main() {
 		)`,
 		`ALTER TABLE rs_stream_guard_event ADD COLUMN IF NOT EXISTS restored_at BIGINT NOT NULL DEFAULT 0`,
 		`ALTER TABLE rs_key_tier ADD COLUMN IF NOT EXISTS disabled_at BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE rs_key_tier ADD COLUMN IF NOT EXISTS main_model TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE rs_key_tier ADD COLUMN IF NOT EXISTS main_limit_tpm BIGINT NOT NULL DEFAULT 0`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
@@ -5041,6 +5068,7 @@ func main() {
 	startRemoteSnapshotPrune()
 	startRemotePendingScheduler()
 	startLocalPendingScheduler()
+	loadMainServiceTokenOverride()
 	startLocalHealthLoop()
 	startModelCleanupLoop()
 	startChannelPriorityLoop()
@@ -5240,6 +5268,9 @@ func main() {
 	// Deployment statistics timezone — read via /api/auth/config, set here
 	// by super admin only.
 	api.PUT("/report-settings", requireRole(minSuperAdminRole), handleReportSettingsSet)
+	// Local new-api admin token (MAIN_SERVICE_TOKEN) editable from Settings.
+	api.GET("/main-service-token", requireRole(minSuperAdminRole), handleMainServiceTokenGet)
+	api.PUT("/main-service-token", requireRole(minSuperAdminRole), handleMainServiceTokenSet)
 
 	// AWS Bedrock default regions + region->prefix map — read via
 	// /api/auth/config, set here by super admin only.

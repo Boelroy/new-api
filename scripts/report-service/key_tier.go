@@ -63,6 +63,10 @@ type keyTierProbeResult struct {
 	HTTPStatus    int    `json:"http_status"`
 	Error         string `json:"error"`
 	ProbedAt      int64  `json:"probed_at"`
+	// Rate limit of the model this key served most in the last hour; that is
+	// the bucket that actually fills up, unlike the gpt-4o-mini tier probe.
+	MainModel    string `json:"main_model,omitempty"`
+	MainLimitTPM int64  `json:"main_limit_tpm,omitempty"`
 }
 
 func probeOpenAIKeyTier(ctx context.Context, key, baseURL, proxyURL string) keyTierProbeResult {
@@ -120,26 +124,62 @@ func probeOpenAIKeyTier(ctx context.Context, key, baseURL, proxyURL string) keyT
 	return res
 }
 
+// isResponsesTextModel reports whether model can be probed with a tiny
+// /v1/responses call (image and audio models cannot).
+func isResponsesTextModel(model string) bool {
+	return strings.HasPrefix(model, "gpt-") && !strings.Contains(model, "image") &&
+		!strings.Contains(model, "audio") && !strings.Contains(model, "tts")
+}
+
+// probeModelTPMLimit reads model's tokens-per-minute limit for this key from a
+// 16-token /v1/responses call. 0 when the call fails or carries no header.
+func probeModelTPMLimit(ctx context.Context, key, baseURL, proxyURL, model string) int64 {
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if base == "" {
+		base = "https://api.openai.com"
+	}
+	body, _ := json.Marshal(map[string]any{"model": model, "input": "hi", "max_output_tokens": 16})
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/responses", bytes.NewReader(body))
+	if err != nil {
+		return 0
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(key))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := remoteHTTPClient(proxyURL).Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+	limit, _ := strconv.ParseInt(resp.Header.Get("x-ratelimit-limit-tokens"), 10, 64)
+	return limit
+}
+
 // probeKeyTiers probes enabled OpenAI channels matching filter (an SQL
 // fragment over channels c LEFT JOIN rs_key_tier t, appended after the WHERE)
 // and stores the estimated tier per channel.
 func probeKeyTiers(ctx context.Context, filter string, args ...any) ([]keyTierProbeResult, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT c.id, c.key, COALESCE(c.base_url,''), COALESCE(c.setting,'')
+		SELECT c.id, c.key, COALESCE(c.base_url,''), COALESCE(c.setting,''),
+		       COALESCE((SELECT l.model_name FROM logs l
+		                 WHERE l.channel_id = c.id AND l.type = 2 AND l.created_at >= $`+strconv.Itoa(len(args)+1)+`
+		                 GROUP BY l.model_name ORDER BY COUNT(*) DESC LIMIT 1), '')
 		FROM channels c
 		LEFT JOIN rs_key_tier t ON t.channel_id = c.id
-		WHERE c.status = 1 AND c.type = 1 `+filter, args...)
+		WHERE c.status = 1 AND c.type = 1 `+filter, append(args, time.Now().Add(-time.Hour).Unix())...)
 	if err != nil {
 		return nil, err
 	}
 	type target struct {
-		id                    int
-		key, baseURL, setting string
+		id                               int
+		key, baseURL, setting, mainModel string
 	}
 	var targets []target
 	for rows.Next() {
 		var t target
-		if err := rows.Scan(&t.id, &t.key, &t.baseURL, &t.setting); err != nil {
+		if err := rows.Scan(&t.id, &t.key, &t.baseURL, &t.setting, &t.mainModel); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -164,6 +204,10 @@ func probeKeyTiers(ctx context.Context, filter string, args ...any) ([]keyTierPr
 			key, _, _ := strings.Cut(t.key, "\n")
 			r := probeOpenAIKeyTier(ctx, key, t.baseURL, strings.TrimSpace(setting.Proxy))
 			r.ChannelID = t.id
+			if r.Tier != nil && isResponsesTextModel(t.mainModel) {
+				r.MainModel = t.mainModel
+				r.MainLimitTPM = probeModelTPMLimit(ctx, key, t.baseURL, strings.TrimSpace(setting.Proxy), t.mainModel)
+			}
 			results[i] = r
 		}()
 	}
@@ -175,16 +219,19 @@ func probeKeyTiers(ctx context.Context, filter string, args ...any) ([]keyTierPr
 			tier = sql.NullInt64{Int64: int64(*r.Tier), Valid: true}
 		}
 		if _, err := db.ExecContext(ctx, `
-			INSERT INTO rs_key_tier (channel_id, tier, limit_requests, limit_tokens, probe_model, http_status, error, probed_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			INSERT INTO rs_key_tier (channel_id, tier, limit_requests, limit_tokens, probe_model, http_status, error, probed_at, main_model, main_limit_tpm)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			ON CONFLICT (channel_id) DO UPDATE SET
 			  -- A failed probe (dead key, network error) keeps the last known tier
 			  -- and limits; the error column tells the operator it is stale.
 			  tier           = COALESCE(EXCLUDED.tier, rs_key_tier.tier),
 			  limit_requests = CASE WHEN EXCLUDED.tier IS NULL THEN rs_key_tier.limit_requests ELSE EXCLUDED.limit_requests END,
 			  limit_tokens   = CASE WHEN EXCLUDED.tier IS NULL THEN rs_key_tier.limit_tokens ELSE EXCLUDED.limit_tokens END,
-			  probe_model=$5, http_status=$6, error=$7, probed_at=$8`,
-			r.ChannelID, tier, r.LimitRequests, r.LimitTokens, keyTierProbeModel, r.HTTPStatus, r.Error, r.ProbedAt); err != nil {
+			  probe_model=$5, http_status=$6, error=$7, probed_at=$8,
+			  main_model     = CASE WHEN EXCLUDED.main_limit_tpm > 0 THEN EXCLUDED.main_model ELSE rs_key_tier.main_model END,
+			  main_limit_tpm = CASE WHEN EXCLUDED.main_limit_tpm > 0 THEN EXCLUDED.main_limit_tpm ELSE rs_key_tier.main_limit_tpm END`,
+			r.ChannelID, tier, r.LimitRequests, r.LimitTokens, keyTierProbeModel, r.HTTPStatus, r.Error, r.ProbedAt,
+			r.MainModel, r.MainLimitTPM); err != nil {
 			return nil, err
 		}
 	}

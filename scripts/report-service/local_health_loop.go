@@ -72,10 +72,6 @@ func recordLocalHealthTick(st tickStats) {
 }
 
 func startLocalHealthLoop() {
-	if !localNewAPIConfigured() {
-		log.Printf("[local-health] MAIN_SERVICE_TOKEN not set; scheduler disabled")
-		return
-	}
 	log.Printf("[local-health] loop starting")
 	go func() {
 		// Stagger past the pool schedulers' first ticks so a cold start
@@ -83,7 +79,8 @@ func startLocalHealthLoop() {
 		time.Sleep(60 * time.Second)
 		for {
 			cfg := loadLocalHealthConfig()
-			if cfg.Enabled && IsLeader() {
+			// The token can be saved from Settings at any time, so check per tick.
+			if cfg.Enabled && IsLeader() && localNewAPIConfigured() {
 				runLocalHealthTickOnce(cfg)
 			}
 			select {

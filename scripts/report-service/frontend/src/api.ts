@@ -75,6 +75,11 @@ export type ChannelRow = {
   tier_error?: string
   // Why the key is currently throttled / routed around (Key Capacity only).
   alerts?: string[]
+  // Tokens logged in the last 60s on the key's main model vs that model's
+  // per-minute limit (Key Capacity only).
+  main_model?: string
+  main_limit_tpm?: number
+  main_used_tpm?: number
 }
 
 export type DownstreamPricing = {
@@ -591,6 +596,15 @@ export type ChanPrioConfig = {
 // Stream-failure guard (stream_guard.go): a (channel, model) whose recent
 // streams end in response.failed has the model stripped and the channel
 // demoted. restored_at > 0 once an operator undid it from the 调度 page.
+export type MainServiceTokenStatus = {
+  configured: boolean
+  source: '' | 'settings' | 'env'
+  masked: string
+  url: string
+  user_id: string
+  env_set: boolean
+}
+
 export type StreamGuardEvent = {
   id: number
   channel_id: number
@@ -979,6 +993,17 @@ export const api = {
   // AWS Bedrock config (super admin). default_regions = the list pre-selected in
   // the batch-create picker; region_prefix_map = region→inference-prefix
   // overrides. Read from /api/auth/config; set here.
+  // Local new-api admin token (MAIN_SERVICE_TOKEN). The token itself is never
+  // returned, only whether one is set and where it comes from.
+  mainServiceToken: () => request<MainServiceTokenStatus>('/api/main-service-token'),
+
+  setMainServiceToken: (token: string) =>
+    request<MainServiceTokenStatus>('/api/main-service-token', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    }),
+
   setAwsConfig: (payload: { default_regions?: string[]; region_prefix_map?: Record<string, string>; default_group?: string; default_models?: string }) =>
     request<{ ok: boolean; default_regions: string[]; region_prefix_map: Record<string, string>; default_group: string; default_models: string }>('/api/aws-config', {
       method: 'PUT',
