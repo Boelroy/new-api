@@ -33,6 +33,8 @@ function StreamGuardPanel() {
   const [events, setEvents] = useState<StreamGuardEvent[]>([])
   const [cfg, setCfg] = useState<StreamGuardConfig | null>(null)
   const [saving, setSaving] = useState(false)
+  // Bumped on every save so the inputs remount with the stored (clamped) value.
+  const [rev, setRev] = useState(0)
   const [busy, setBusy] = useState<number | null>(null)
 
   const load = useCallback(async () => {
@@ -52,6 +54,7 @@ function StreamGuardPanel() {
     setSaving(true)
     try {
       setCfg(await api.saveStreamGuardConfig(patch))
+      setRev(r => r + 1)
       toast.success('已保存，下一轮检查生效')
     } catch (e) {
       toast.error(e)
@@ -102,21 +105,21 @@ function StreamGuardPanel() {
           {cfg ? (
             <>
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-                <NumField key={`t${cfg.tick_sec}`} label="检查间隔 (秒)" value={cfg.tick_sec} min={30} max={3600}
+                <NumField key={`t${rev}`} label="检查间隔 (秒)" value={cfg.tick_sec} min={5} max={3600}
                   onSave={n => void save({ tick_sec: n })} />
-                <NumField key={`w${cfg.window_sec}`} label="统计窗口 (秒)" value={cfg.window_sec} min={60} max={21600}
+                <NumField key={`w${rev}`} label="统计窗口 (秒)" value={cfg.window_sec} min={30} max={21600}
                   hint="看最近这么久的流式请求" onSave={n => void save({ window_sec: n })} />
-                <NumField key={`s${cfg.min_streams}`} label="最少流数" value={cfg.min_streams} min={1} max={100000}
+                <NumField key={`s${rev}`} label="最少流数" value={cfg.min_streams} min={1} max={100000}
                   hint="窗口内该渠道该模型至少这么多条流" onSave={n => void save({ min_streams: n })} />
-                <NumField key={`f${cfg.min_failed}`} label="最少失败数" value={cfg.min_failed} min={1} max={100000}
+                <NumField key={`f${rev}`} label="最少失败数" value={cfg.min_failed} min={1} max={100000}
                   hint="response.failed 至少这么多条" onSave={n => void save({ min_failed: n })} />
-                <NumField key={`r${cfg.min_fail_rate_pct}`} label="失败率阈值 (%)" value={cfg.min_fail_rate_pct} min={1} max={100}
+                <NumField key={`r${rev}`} label="失败率阈值 (%)" value={cfg.min_fail_rate_pct} min={1} max={100}
                   onSave={n => void save({ min_fail_rate_pct: n })} />
-                <NumField key={`ws${cfg.wide_share_pct}`} label="整体故障占比 (%)" value={cfg.wide_share_pct} min={1} max={100}
+                <NumField key={`ws${rev}`} label="整体故障占比 (%)" value={cfg.wide_share_pct} min={1} max={100}
                   hint="同一模型这么多比例的渠道同时失败 → 不处理" onSave={n => void save({ wide_share_pct: n })} />
-                <NumField key={`wc${cfg.wide_min_chans}`} label="整体故障最少渠道数" value={cfg.wide_min_chans} min={1} max={1000}
+                <NumField key={`wc${rev}`} label="整体故障最少渠道数" value={cfg.wide_min_chans} min={1} max={1000}
                   hint="且至少这么多个渠道" onSave={n => void save({ wide_min_chans: n })} />
-                <NumField key={`p${cfg.demote_priority}`} label="降到的优先级" value={cfg.demote_priority} min={-100000} max={100000}
+                <NumField key={`p${rev}`} label="降到的优先级" value={cfg.demote_priority} min={-100000} max={100000}
                   hint="newapi 优先级越高越先用" onSave={n => void save({ demote_priority: n })} />
               </div>
               <div className="flex items-center gap-6 mt-4 text-xs">

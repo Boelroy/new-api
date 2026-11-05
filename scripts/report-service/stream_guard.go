@@ -65,8 +65,8 @@ var streamGuardDefaults = streamGuardConfig{
 // clamp bounds every field so a bad save cannot stall the loop or make it
 // fire on every stream.
 func (c streamGuardConfig) clamp() streamGuardConfig {
-	c.TickSec = clampInt(c.TickSec, 30, 3600)
-	c.WindowSec = clampInt(c.WindowSec, 60, 6*3600)
+	c.TickSec = clampInt(c.TickSec, 5, 3600)
+	c.WindowSec = clampInt(c.WindowSec, 30, 6*3600)
 	c.MinStreams = clampInt(c.MinStreams, 1, 100000)
 	c.MinFailed = clampInt(c.MinFailed, 1, 100000)
 	c.MinFailRatePct = clampInt(c.MinFailRatePct, 1, 100)
