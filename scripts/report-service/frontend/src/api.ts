@@ -441,7 +441,17 @@ async function request<T>(url: string, opts?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     const text = await res.text()
-    throw new Error(text || res.statusText)
+    // An HTML or empty body came from Cloudflare/the proxy, not from us —
+    // nothing useful to show, so ask the user to retry.
+    if (!text.trim() || /^\s*<(!doctype|html)/i.test(text)) {
+      throw new Error('服务繁忙或远端限流，请稍后再试')
+    }
+    let msg = text
+    try {
+      const body = JSON.parse(text)
+      if (typeof body?.error === 'string' && body.error) msg = body.error
+    } catch { /* not JSON */ }
+    throw new Error(msg)
   }
   return res.json()
 }

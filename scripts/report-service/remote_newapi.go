@@ -1262,9 +1262,20 @@ func remoteDoRaw(ctx context.Context, method, host, path, token string, userID i
 		if len(snippet) > 200 {
 			snippet = snippet[:200] + "…"
 		}
-		return nil, fmt.Errorf("remote returned %d: %s", resp.StatusCode, snippet)
+		return nil, &remoteStatusError{Status: resp.StatusCode, Snippet: snippet}
 	}
 	return raw, nil
+}
+
+// remoteStatusError is a non-2xx answer from a remote new-api, kept typed so
+// handlers can tell its rate limit (429) apart from other failures.
+type remoteStatusError struct {
+	Status  int
+	Snippet string
+}
+
+func (e *remoteStatusError) Error() string {
+	return fmt.Sprintf("remote returned %d: %s", e.Status, e.Snippet)
 }
 
 // remotePutChannel writes back a channel previously fetched with
@@ -3921,7 +3932,7 @@ func handleRemoteChannelsRefresh(c *gin.Context) {
 	remoteChannelsRefreshInFlightMu.Lock()
 	if remoteChannelsRefreshInFlight[profileID] {
 		remoteChannelsRefreshInFlightMu.Unlock()
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "another refresh is already running for this profile, try again in a few seconds"})
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "正在刷新中，请稍后再试"})
 		return
 	}
 	remoteChannelsRefreshInFlight[profileID] = true
@@ -3945,6 +3956,13 @@ func handleRemoteChannelsRefresh(c *gin.Context) {
 	defer cancel()
 	channels, total, err := iterateRemoteChannels(ctx, host, token, userID, 100, nil)
 	if err != nil {
+		// 429 instead of 502: Cloudflare in front of the report swaps a 502
+		// body for its own HTML error page.
+		var se *remoteStatusError
+		if errors.As(err, &se) && se.Status == http.StatusTooManyRequests {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "远端限流，请稍后再试"})
+			return
+		}
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
