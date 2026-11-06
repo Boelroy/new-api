@@ -1118,6 +1118,16 @@ const (
 // endpoints a seller-mode profile has no equivalent of.
 var errRemoteSellerUnsupported = errors.New("not supported by a seller-mode profile")
 
+var errRemoteLookupNoMatch = errors.New("reverse-lookup returned no match")
+
+// uploadCreatedPrefix starts the error of an upload whose channel was created
+// but whose id lookup failed.
+const uploadCreatedPrefix = "created but "
+
+// pendingUploadGap spaces the scheduler's uploads so a batch does not trip
+// the remote's per-IP /api rate limit.
+const pendingUploadGap = time.Second
+
 func normalizeAPIMode(raw string) (string, error) {
 	switch m := strings.TrimSpace(raw); m {
 	case "", remoteAPIModeAdmin:
@@ -1276,6 +1286,11 @@ type remoteStatusError struct {
 
 func (e *remoteStatusError) Error() string {
 	return fmt.Sprintf("remote returned %d: %s", e.Status, e.Snippet)
+}
+
+func isRemoteRateLimited(err error) bool {
+	var se *remoteStatusError
+	return errors.As(err, &se) && se.Status == http.StatusTooManyRequests
 }
 
 // remotePutChannel writes back a channel previously fetched with
@@ -3509,8 +3524,11 @@ func runPendingTickForProfile(profileID int64) {
 		activeRows.Close()
 	}
 
-	// Step 2: upload all pool_size=0 pending items (immediate lane).
-	uploadImmediatePending(host, token, userID, profileID)
+	// Step 2: upload all pool_size=0 pending items (immediate lane). A
+	// remote 429 ends the tick; the next one retries.
+	if uploadImmediatePending(host, token, userID, profileID) {
+		return
+	}
 
 	// Step 3: pool refill. Runs at most once per profile.pool_interval_sec,
 	// and only when the previous batch has fully drained. Fails soft on
@@ -3627,11 +3645,11 @@ func fetchRemoteRPM(host, token string, userID int64) (int64, error) {
 // uploadImmediatePending drains pool_size=0 rows (the "upload right away"
 // lane). Priority is respected as stored — super admin explicitly picked
 // it. Capped per-tick so a giant backlog can't monopolise the tick.
-func uploadImmediatePending(host, token string, userID, profileID int64) {
+func uploadImmediatePending(host, token string, userID, profileID int64) (rateLimited bool) {
 	const immediatePerTick = 20
 	rows, err := db.Query(
 		`SELECT id, key_encrypted, quota_usd, note, name_prefix, group_name,
-		        tag, models, priority, channel_type
+		        tag, models, priority, channel_type, failed_reason
 		   FROM remote_pending_key
 		  WHERE profile_id = $1 AND pool_size = 0 AND status = 'pending'
 		  ORDER BY id ASC LIMIT $2`,
@@ -3639,12 +3657,18 @@ func uploadImmediatePending(host, token string, userID, profileID int64) {
 	)
 	if err != nil {
 		log.Printf("[pending-scheduler] pick immediate: %v", err)
-		return
+		return false
 	}
 	jobs := scanUploadJobs(rows)
-	for _, j := range jobs {
-		runSingleUpload(host, token, userID, profileID, j, j.priority)
+	for i, j := range jobs {
+		if i > 0 {
+			time.Sleep(pendingUploadGap)
+		}
+		if runSingleUpload(host, token, userID, profileID, j, j.priority) {
+			return true
+		}
 	}
+	return false
 }
 
 // uploadPoolBatch picks up to `n` oldest pending pool rows (FIFO by
@@ -3660,7 +3684,7 @@ func uploadPoolBatch(host, token string, userID, profileID int64, n int) {
 	}
 	rows, err := db.Query(
 		`SELECT id, key_encrypted, quota_usd, note, name_prefix, group_name,
-		        tag, models, priority, channel_type
+		        tag, models, priority, channel_type, failed_reason
 		   FROM remote_pending_key
 		  WHERE profile_id = $1 AND pool_size > 0 AND status = 'pending'
 		  ORDER BY created_at ASC, id ASC
@@ -3687,9 +3711,14 @@ func uploadPoolBatch(host, token string, userID, profileID int64, n int) {
 		log.Printf("[pending-scheduler] scan pMax profile %d: %v", profileID, err)
 		return
 	}
-	for _, j := range jobs {
+	for i, j := range jobs {
+		if i > 0 {
+			time.Sleep(pendingUploadGap)
+		}
 		pMax++
-		runSingleUpload(host, token, userID, profileID, j, pMax)
+		if runSingleUpload(host, token, userID, profileID, j, pMax) {
+			return
+		}
 	}
 }
 
@@ -3706,6 +3735,7 @@ type pendingUploadJob struct {
 	models      string
 	priority    int64
 	channelType int
+	lastFailure string
 }
 
 func scanUploadJobs(rows *sql.Rows) []pendingUploadJob {
@@ -3718,7 +3748,7 @@ func scanUploadJobs(rows *sql.Rows) []pendingUploadJob {
 		// falls back to 14 (Anthropic).
 		var ct sql.NullInt64
 		if err := rows.Scan(&j.id, &j.enc, &j.quota, &j.note, &j.prefix,
-			&j.group, &j.tag, &j.models, &j.priority, &ct); err != nil {
+			&j.group, &j.tag, &j.models, &j.priority, &ct, &j.lastFailure); err != nil {
 			continue
 		}
 		if ct.Valid && ct.Int64 > 0 {
@@ -3735,14 +3765,38 @@ func scanUploadJobs(rows *sql.Rows) []pendingUploadJob {
 // pending row. `priority` is the value to hand to the remote and to
 // persist on the row — the caller decides whether it's the row's stored
 // priority (immediate lane) or a freshly computed accumulator (pool lane).
-func runSingleUpload(host, token string, userID, profileID int64, j pendingUploadJob, priority int64) {
+//
+// Returns true when the remote rate-limited us: the row stays pending without
+// spending an attempt and the caller stops for this tick.
+func runSingleUpload(host, token string, userID, profileID int64, j pendingUploadJob, priority int64) (rateLimited bool) {
 	key, err := decryptRemoteToken(j.enc)
 	if err != nil {
 		pendingRecordFailure(j.id, "decrypt: "+err.Error())
-		return
+		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
+	// The last try created the channel but lost its id lookup; find it
+	// instead of creating a duplicate.
+	if strings.HasPrefix(j.lastFailure, uploadCreatedPrefix) {
+		group := j.group
+		if strings.TrimSpace(group) == "" {
+			group = "default"
+		}
+		chID, err := lookupRemoteChannelBySha(ctx, host, token, userID, keySha8(strings.TrimSpace(key)), group)
+		if err == nil {
+			pendingMarkActive(j.id, chID, priority)
+			return false
+		}
+		if isRemoteRateLimited(err) {
+			pendingRecordRateLimited(j.id, j.lastFailure)
+			return true
+		}
+		if !errors.Is(err, errRemoteLookupNoMatch) {
+			pendingRecordFailure(j.id, uploadCreatedPrefix+err.Error())
+			return false
+		}
+	}
 	var quotaPtr *float64
 	if j.quota > 0 {
 		q := j.quota
@@ -3764,18 +3818,38 @@ func runSingleUpload(host, token string, userID, profileID int64, j pendingUploa
 		Note:       j.note,
 	})
 	if err != nil {
+		if isRemoteRateLimited(err) {
+			pendingRecordRateLimited(j.id, err.Error())
+			return true
+		}
 		pendingRecordFailure(j.id, err.Error())
-		return
+		return false
 	}
+	pendingMarkActive(j.id, chID, priority)
+	return false
+}
+
+func pendingMarkActive(id, chID, priority int64) {
 	now := time.Now().Unix()
 	if _, err := db.Exec(
 		`UPDATE remote_pending_key
 		    SET status='active', remote_channel_id=$1, activated_at=$2, updated_at=$2,
 		        priority=$3, failed_reason=''
 		  WHERE id=$4`,
-		chID, now, priority, j.id,
+		chID, now, priority, id,
 	); err != nil {
-		log.Printf("[pending-scheduler] mark active %d: %v", j.id, err)
+		log.Printf("[pending-scheduler] mark active %d: %v", id, err)
+	}
+}
+
+// pendingRecordRateLimited notes the reason but keeps the attempt count, so a
+// remote 429 never fails a key.
+func pendingRecordRateLimited(id int64, reason string) {
+	if _, err := db.Exec(
+		`UPDATE remote_pending_key SET failed_reason = $1, updated_at = $2 WHERE id = $3`,
+		reason, time.Now().Unix(), id,
+	); err != nil {
+		log.Printf("[pending-scheduler] record rate limit %d: %v", id, err)
 	}
 }
 
@@ -3958,8 +4032,7 @@ func handleRemoteChannelsRefresh(c *gin.Context) {
 	if err != nil {
 		// 429 instead of 502: Cloudflare in front of the report swaps a 502
 		// body for its own HTML error page.
-		var se *remoteStatusError
-		if errors.As(err, &se) && se.Status == http.StatusTooManyRequests {
+		if isRemoteRateLimited(err) {
 			c.JSON(http.StatusTooManyRequests, gin.H{"error": "远端限流，请稍后再试"})
 			return
 		}
@@ -4348,7 +4421,7 @@ func uploadOneKeyToRemote(ctx context.Context, p uploadOneKeyParams) (int64, err
 	// for the two shape branches. Kept in sync via the same helper below.
 	channelID, err := lookupRemoteChannelBySha(ctx, p.Host, p.Token, p.UserID, sha, p.Group)
 	if err != nil {
-		return 0, fmt.Errorf("created but %v", err)
+		return 0, fmt.Errorf(uploadCreatedPrefix+"%w", err)
 	}
 	if p.QuotaUSD != nil || strings.TrimSpace(p.Note) != "" {
 		_ = upsertMeta(p.ProfileID, channelID, p.QuotaUSD, nil, strings.TrimSpace(p.Note), nil, nil)
@@ -4371,7 +4444,7 @@ func lookupRemoteChannelBySha(ctx context.Context, host, token string, userID in
 		// walking the full list is cheap.
 		channels, _, err := iterateRemoteChannels(ctx, host, token, userID, 100, nil)
 		if err != nil {
-			return 0, fmt.Errorf("list failed: %v", err)
+			return 0, fmt.Errorf("list failed: %w", err)
 		}
 		var matched int64
 		for _, ch := range channels {
@@ -4380,12 +4453,12 @@ func lookupRemoteChannelBySha(ctx context.Context, host, token string, userID in
 			}
 		}
 		if matched == 0 {
-			return 0, errors.New("reverse-lookup returned no match")
+			return 0, errRemoteLookupNoMatch
 		}
 		return matched, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("search failed: %v", err)
+		return 0, fmt.Errorf("search failed: %w", err)
 	}
 	type hit struct {
 		ID   int64  `json:"id"`
@@ -4411,7 +4484,7 @@ func lookupRemoteChannelBySha(ctx context.Context, host, token string, userID in
 		}
 	}
 	if matched == 0 {
-		return 0, errors.New("reverse-lookup returned no match")
+		return 0, errRemoteLookupNoMatch
 	}
 	return matched, nil
 }
