@@ -1269,16 +1269,9 @@ export default function RemoteChannelsStudio() {
           <button
             onClick={openImmediate}
             disabled={!selectedID}
-            className="border border-gray-300 text-gray-800 rounded-md px-3 py-1.5 text-sm hover:bg-gray-50 disabled:opacity-50"
-          >
-            上普通 Key
-          </button>
-          <button
-            onClick={openBatch}
-            disabled={!selectedID}
             className="bg-brand text-white rounded-md px-3 py-1.5 text-sm hover:bg-brand-700 disabled:opacity-50"
           >
-            批量上 5刀key (Pool)
+            批量上 Key
           </button>
         </div>
       }
@@ -1824,7 +1817,7 @@ export default function RemoteChannelsStudio() {
       {immOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="bg-white rounded-xl shadow-lg w-full max-w-lg p-5">
-            <div className="text-base font-semibold mb-1">上普通 Key</div>
+            <div className="text-base font-semibold mb-1">批量上 Key</div>
             <div className="text-[11px] text-gray-500 mb-3">
               立即上传（不进 Pool 队列），默认 priority = 0。
             </div>
