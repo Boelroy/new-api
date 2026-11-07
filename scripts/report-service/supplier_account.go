@@ -731,13 +731,17 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	}
 	reqBytes, _ := json.Marshal(upstreamReq)
 
+	// Failures answer 422, not 502: Cloudflare in front of the report swaps a
+	// 502 body for its own HTML page and the portal's reason would be lost.
 	status, respBody, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/accounts", effectiveOpenAPIToken(), reqBytes)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		log.Printf("[supplier-account] create %s/%s: %v", body.Provider, body.Model, err)
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "号池接口不可达: " + err.Error()})
 		return
 	}
 	if status < 200 || status >= 300 {
-		c.JSON(http.StatusBadGateway, gin.H{"error": supplierErr(respBody)})
+		log.Printf("[supplier-account] create %s/%s: portal %d: %s", body.Provider, body.Model, status, supplierErr(respBody))
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": supplierErr(respBody)})
 		return
 	}
 	var upstream struct {
@@ -746,7 +750,8 @@ func handleSupplierAccountCreate(c *gin.Context) {
 		Msg   string `json:"msg"`
 	}
 	if err := json.Unmarshal(respBody, &upstream); err != nil || upstream.ID == 0 {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "unexpected upstream response: " + strings.TrimSpace(string(respBody))})
+		log.Printf("[supplier-account] create %s/%s: unexpected portal response: %s", body.Provider, body.Model, strings.TrimSpace(string(respBody)))
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "unexpected upstream response: " + strings.TrimSpace(string(respBody))})
 		return
 	}
 
