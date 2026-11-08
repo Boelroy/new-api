@@ -4426,7 +4426,138 @@ func uploadOneKeyToRemote(ctx context.Context, p uploadOneKeyParams) (int64, err
 	if p.QuotaUSD != nil || strings.TrimSpace(p.Note) != "" {
 		_ = upsertMeta(p.ProfileID, channelID, p.QuotaUSD, nil, strings.TrimSpace(p.Note), nil, nil)
 	}
+	if p.Type == 1 {
+		go pruneDeadOpenAIImageModels(p.Host, p.Token, p.UserID, channelID, key, p.BaseURL, p.Models)
+	}
 	return channelID, nil
+}
+
+// openAIImageProbeSlots caps concurrent image probes so a large batch upload
+// doesn't fire dozens of image generations at the remote at once.
+var openAIImageProbeSlots = make(chan struct{}, 2)
+
+// pruneDeadOpenAIImageModels tests every image model on a freshly uploaded
+// OpenAI channel with a real /v1/images/generations call made straight from
+// here with the key (not through the remote, whose admin API may 429), and
+// removes the models that fail from the remote channel. 400/401/403/404/503
+// and a 429 insufficient_quota drop a model; transport errors, timeouts, other
+// 5xx and a plain rate-limit 429 leave it in place. A channel left with no model is
+// disabled. Runs in the background: image generation can take most of a
+// minute per model.
+func pruneDeadOpenAIImageModels(host, token string, userID, channelID int64, key, baseURL, models string) {
+	var imageModels []string
+	for m := range strings.SplitSeq(models, ",") {
+		m = strings.TrimSpace(m)
+		lower := strings.ToLower(m)
+		if strings.Contains(lower, "image") || strings.HasPrefix(lower, "dall-e") {
+			imageModels = append(imageModels, m)
+		}
+	}
+	if len(imageModels) == 0 {
+		return
+	}
+	openAIImageProbeSlots <- struct{}{}
+	defer func() { <-openAIImageProbeSlots }()
+
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if base == "" {
+		base = "https://api.openai.com"
+	}
+	// Shared direct transport; the per-call context bounds the wait instead of
+	// the client's 20s timeout, which image generation routinely exceeds.
+	client := *remoteHTTPClient("")
+	client.Timeout = 0
+
+	dead := map[string]string{}
+	for _, m := range imageModels {
+		reqBody := map[string]any{"model": m, "prompt": "a cute cat", "n": 1, "size": "1024x1024"}
+		// Cheapest accepted shape per family: dall-e-2 goes down to 256x256,
+		// gpt-image only to 1024x1024 but takes quality=low.
+		switch lower := strings.ToLower(m); {
+		case strings.HasPrefix(lower, "dall-e-2"):
+			reqBody["size"] = "256x256"
+		case !strings.HasPrefix(lower, "dall-e"):
+			reqBody["quality"] = "low"
+		}
+		buf, _ := json.Marshal(reqBody)
+		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/images/generations", bytes.NewReader(buf))
+		if err != nil {
+			cancel()
+			log.Printf("[openai-image-probe] channel %d model %s: build request: %v", channelID, m, err)
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			cancel()
+			log.Printf("[openai-image-probe] channel %d model %s: request failed, keeping: %v", channelID, m, err)
+			continue
+		}
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		resp.Body.Close()
+		cancel()
+		if resp.StatusCode < 300 {
+			continue
+		}
+		var env struct {
+			Error struct {
+				Message string `json:"message"`
+				Code    string `json:"code"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &env)
+		reason := fmt.Sprintf("HTTP %d %s %s", resp.StatusCode, env.Error.Code, env.Error.Message)
+		if len(reason) > 300 {
+			reason = reason[:300]
+		}
+		transient := (resp.StatusCode >= 500 && resp.StatusCode != http.StatusServiceUnavailable) ||
+			(resp.StatusCode == http.StatusTooManyRequests && env.Error.Code != "insufficient_quota")
+		if transient {
+			log.Printf("[openai-image-probe] channel %d model %s: transient, keeping: %s", channelID, m, reason)
+			continue
+		}
+		dead[m] = reason
+	}
+	if len(dead) == 0 {
+		log.Printf("[openai-image-probe] channel %d: image models ok %v", channelID, imageModels)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/channel/"+strconv.FormatInt(channelID, 10), token, userID, nil, nil)
+	if err != nil {
+		log.Printf("[openai-image-probe] channel %d: fetch current: %v", channelID, err)
+		return
+	}
+	var current map[string]any
+	if err := json.Unmarshal(data, &current); err != nil {
+		log.Printf("[openai-image-probe] channel %d: decode current: %v", channelID, err)
+		return
+	}
+	currentModels, _ := current["models"].(string)
+	kept := make([]string, 0)
+	for m := range strings.SplitSeq(currentModels, ",") {
+		m = strings.TrimSpace(m)
+		if _, isDead := dead[m]; m != "" && !isDead {
+			kept = append(kept, m)
+		}
+	}
+	for m, reason := range dead {
+		log.Printf("[openai-image-probe] channel %d: dropping %s: %s", channelID, m, reason)
+	}
+	if len(kept) == 0 {
+		if err := remoteSetChannelStatus(ctx, host, token, userID, channelID, 2); err != nil {
+			log.Printf("[openai-image-probe] channel %d: no model left, disable failed: %v", channelID, err)
+		}
+		return
+	}
+	current["models"] = strings.Join(kept, ",")
+	if err := remotePutChannel(ctx, host, token, userID, current); err != nil {
+		log.Printf("[openai-image-probe] channel %d: update models: %v", channelID, err)
+	}
 }
 
 // lookupRemoteChannelBySha runs the sha8-keyword search and picks the
