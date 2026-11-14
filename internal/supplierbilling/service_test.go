@@ -760,6 +760,52 @@ func TestServiceDatabaseMatrix(t *testing.T) {
 				assert.Equal(t, 409, manager.request(t, "POST", "/api/sources", channelMode, nil).Code, "Channel and group sources cannot share an upstream")
 			}
 
+			// Studio sources follow the channel tag, so rotated channels keep
+			// billing to their supplier without editing a channel list.
+			{
+				t.Setenv("SUPPLIER_BILLING_SOURCE_STUDIO", "test-studio-token")
+				rows := []map[string]any{reportUsageFixture("2024-01-02 03:00", "5", 71), reportUsageFixture("2024-01-02 03:00", "3", 72), reportUsageFixture("2024-01-02 03:00", "2", 73), reportUsageFixture("2024-01-02 03:00", "7", 74)}
+				for i, studio := range []string{"alice", "alice3", "lrm", "lrm"} {
+					rows[i]["studio"] = studio
+				}
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					data, err := common.Marshal(rows)
+					require.NoError(t, err)
+					_, _ = w.Write(data)
+				}))
+				defer upstream.Close()
+				s.SourceOrigins = append(s.SourceOrigins, upstream.URL)
+				aliceHead := Supplier{Name: "Alice studio test", Currency: "USD"}
+				pipiHead := Supplier{Name: "皮皮 studio test", Currency: "USD"}
+				require.NoError(t, db.Create(&aliceHead).Error)
+				require.NoError(t, db.Create(&pipiHead).Error)
+				studio := Source{Kind: "report_studio", SupplierID: aliceHead.ID, Name: "Alice studios", UsageType: "openai 号池", BaseURL: upstream.URL, CredentialEnv: "SUPPLIER_BILLING_SOURCE_STUDIO", GatewayUserID: 1, Currency: "USD", SettlementMode: "usage_only", Selector: "alice3, alice"}
+				aliceStudios := billingResponse[Source](t, manager.request(t, "POST", "/api/sources", studio, nil), 201)
+				assert.Equal(t, "alice,alice3", aliceStudios.Selector)
+				rest := studio
+				rest.SupplierID, rest.Name, rest.Selector, rest.ExcludeSelector = pipiHead.ID, "皮皮 studios", "alice", true
+				assert.Equal(t, 409, manager.request(t, "POST", "/api/sources", rest, nil).Code, "'All other studios' must exclude every mapped studio")
+				rest.Selector = "alice,alice3"
+				restStudios := billingResponse[Source](t, manager.request(t, "POST", "/api/sources", rest, nil), 201)
+				channel := Source{Kind: "report", SupplierID: pipiHead.ID, Name: "皮皮 channel", UsageType: "openai 号池", BaseURL: upstream.URL, CredentialEnv: "SUPPLIER_BILLING_SOURCE_STUDIO", ChannelIDs: "74", GatewayUserID: 1, Currency: "USD", SettlementMode: "usage_only"}
+				billingResponse[Source](t, manager.request(t, "POST", "/api/sources", channel, nil), 201)
+				group := Source{Kind: "report_group", SupplierID: pipiHead.ID, Name: "group", UsageType: "aws", BaseURL: upstream.URL, CredentialEnv: "SUPPLIER_BILLING_SOURCE_STUDIO", GatewayUserID: 1, Currency: "USD", SettlementMode: "usage_only", Selector: "default"}
+				assert.Equal(t, 409, manager.request(t, "POST", "/api/sources", group, nil).Code, "Group and studio sources cannot share an upstream")
+
+				day := map[string]string{"start": "2024-01-02", "end": "2024-01-02"}
+				aliceSync := fmt.Sprintf("/api/sources/%d/sync", aliceStudios.ID)
+				assert.Equal(t, float64(2), billingResponse[map[string]any](t, manager.request(t, "POST", aliceSync, day, nil), 200)["created"])
+				assert.Equal(t, float64(1), billingResponse[map[string]any](t, manager.request(t, "POST", fmt.Sprintf("/api/sources/%d/sync", restStudios.ID), day, nil), 200)["created"], "Channel 74 is billed by its channel source, not again by 'all other studios'")
+				assert.Equal(t, float64(0), billingResponse[map[string]any](t, manager.request(t, "POST", aliceSync, day, nil), 200)["created"], "Re-sync does not import twice")
+				var aliceUsage []Usage
+				require.NoError(t, db.Where("source_id = ?", aliceStudios.ID).Order("channel_id").Find(&aliceUsage).Error)
+				require.Len(t, aliceUsage, 2)
+				assert.Equal(t, []string{"alice", "alice3"}, []string{aliceUsage[0].MatchValue, aliceUsage[1].MatchValue})
+
+				delete(rows[0], "studio")
+				assert.Equal(t, 502, manager.request(t, "POST", aliceSync, day, nil).Code, "Usage without a studio fails the sync instead of falling to 'all other studios'")
+			}
+
 			// Purchase direction: another gateway user's usage on a head's
 			// channels is bought by a different supplier and credits its balance.
 			{

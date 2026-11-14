@@ -256,6 +256,7 @@ export default function EntryForm(props: {
     const hidden: Record<SourceKind, string[]> = {
       report: ['profile_id'],
       report_group: ['profile_id', 'channel_ids'],
+      report_studio: ['profile_id', 'channel_ids'],
       remote_tag: ['channel_ids', 'gateway_user_id'],
       ccmax: ['profile_id', 'channel_ids', 'gateway_user_id', 'fx_rate'],
     }
@@ -395,7 +396,9 @@ export default function EntryForm(props: {
       data.currency = sourceKind === 'ccmax' ? 'CNY' : 'USD'
       data.profile_id = Number(data.profile_id || 0)
       data.selector = mapped.join(',')
-      data.exclude_selector = sourceKind === 'remote_tag' && excludeMapped
+      data.exclude_selector =
+        (sourceKind === 'remote_tag' || sourceKind === 'report_studio') &&
+        excludeMapped
       if (sourceKind === 'ccmax' && settlementMode === 'settlement') {
         data.fx_rate = '1'
       }
@@ -547,6 +550,7 @@ export default function EntryForm(props: {
                 <option value='report_group'>
                   {t('Gateway user and groups')}
                 </option>
+                <option value='report_studio'>{t('Report studios')}</option>
                 <option value='remote_tag'>{t('Remote channel tags')}</option>
                 <option value='ccmax'>{t('CC Max users')}</option>
               </Select>

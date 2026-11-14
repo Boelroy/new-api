@@ -71,7 +71,7 @@ func fetchSourceJSON(ctx context.Context, source Source, endpoint string, query 
 // source mapping, so discovery and sync read the same rows.
 func FetchSourceUsage(ctx context.Context, source Source, start, end time.Time) ([]ImportedUsage, string, error) {
 	endText := end.In(businessZone).Format("2006-01-02")
-	if source.Kind == "report" || source.Kind == "report_group" {
+	if source.Kind == "report" || source.Kind == "report_group" || source.Kind == "report_studio" {
 		rows, err := FetchReportUsage(ctx, source, start, end)
 		return rows, endText, err
 	}

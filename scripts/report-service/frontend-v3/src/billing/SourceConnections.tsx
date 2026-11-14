@@ -50,6 +50,7 @@ export default function SourceConnections(props: {
                   {t(
                     {
                       report_group: 'Gateway user and groups',
+                      report_studio: 'Report studios',
                       remote_tag: 'Remote channel tags',
                       ccmax: 'CC Max users',
                     }[source.kind]

@@ -42,8 +42,9 @@ func FetchReportUsage(ctx context.Context, source Source, start, end time.Time) 
 	if source.GatewayUserID < 0 || source.GatewayUserID > maxGatewayUserID {
 		return nil, errors.New("Invalid source configuration")
 	}
+	channelList := source.Kind != "report_group" && source.Kind != "report_studio"
 	channels := make(map[int64]struct{})
-	if source.Kind != "report_group" {
+	if channelList {
 		for raw := range strings.SplitSeq(source.ChannelIDs, ",") {
 			id, parseErr := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
 			if parseErr != nil || id <= 0 {
@@ -76,6 +77,7 @@ func FetchReportUsage(ctx context.Context, source Source, start, end time.Time) 
 		TokenID          *int64       `json:"token_id"`
 		ChannelID        *int64       `json:"channel_id"`
 		Model            string       `json:"model"`
+		Studio           string       `json:"studio"`
 		RequestCount     *int64       `json:"request_count"`
 		InputTokens      *int64       `json:"input_tokens"`
 		OutputTokens     *int64       `json:"output_tokens"`
@@ -124,16 +126,25 @@ func FetchReportUsage(ctx context.Context, source Source, start, end time.Time) 
 			return nil, errors.New("Report source returned duplicate usage data")
 		}
 		seen[externalRef] = struct{}{}
-		if _, allowed := channels[*row.ChannelID]; (source.Kind != "report_group" && !allowed) || hour.Before(from) || !hour.Before(until) {
+		if _, allowed := channels[*row.ChannelID]; (channelList && !allowed) || hour.Before(from) || !hour.Before(until) {
 			continue
 		}
 		if source.GatewayUserID != 0 && *row.UserID != source.GatewayUserID {
 			continue
 		}
+		matchValue := row.Group
+		if source.Kind == "report_studio" {
+			// An upstream without the studio field cannot attribute usage; fail
+			// closed rather than bill it to an "all other studios" source.
+			matchValue = strings.TrimSpace(row.Studio)
+			if matchValue == "" || len(matchValue) > 120 {
+				return nil, errors.New("Report source returned incomplete usage data")
+			}
+		}
 		result = append(result, ImportedUsage{
 			ExternalRef:      externalRef,
 			ChannelID:        *row.ChannelID,
-			MatchValue:       row.Group,
+			MatchValue:       matchValue,
 			Date:             hour.In(location).Format("2006-01-02"),
 			Description:      row.Model,
 			Quantity:         amount.String(),

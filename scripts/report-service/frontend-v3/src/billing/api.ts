@@ -47,8 +47,15 @@ export type DailySummary = {
   }[]
 }
 // report: explicit channel IDs; report_group: a gateway user's groups;
-// remote_tag: a remote profile's channel tags; ccmax: CC Max uploaders.
-export type SourceKind = 'report' | 'report_group' | 'remote_tag' | 'ccmax'
+// report_studio: report studios (channel tags), so rotated channels follow
+// their supplier; remote_tag: a remote profile's channel tags; ccmax: CC Max
+// uploaders.
+export type SourceKind =
+  | 'report'
+  | 'report_group'
+  | 'report_studio'
+  | 'remote_tag'
+  | 'ccmax'
 export type MappingOption = {
   value: string
   quantity: string

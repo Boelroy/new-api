@@ -9,7 +9,7 @@ import { ErrorNotice, Money } from './components'
 // line. Recent values come from the source itself, with their current owner,
 // so a value already mapped elsewhere is visible before saving.
 export default function MappingPicker(props: {
-  kind: 'report_group' | 'remote_tag' | 'ccmax'
+  kind: 'report_group' | 'report_studio' | 'remote_tag' | 'ccmax'
   sourceID?: number
   suppliers: Supplier[]
   selected: string[]
@@ -25,6 +25,7 @@ export default function MappingPicker(props: {
   const [manual, setManual] = useState('')
   const label = {
     report_group: 'Gateway groups',
+    report_studio: 'Studios',
     remote_tag: 'Channel tags',
     ccmax: 'CC Max users',
   }[props.kind]
@@ -57,7 +58,7 @@ export default function MappingPicker(props: {
   return (
     <fieldset className='space-y-3'>
       <legend className='mb-1.5'>{t(label)}</legend>
-      {props.kind === 'remote_tag' && (
+      {(props.kind === 'remote_tag' || props.kind === 'report_studio') && (
         <label className='flex items-center gap-2 text-sm'>
           <input
             type='checkbox'

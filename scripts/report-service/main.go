@@ -932,15 +932,19 @@ func handleNotifyDigest(c *gin.Context) {
 // ---- Daily Cache ----
 
 type DailyRow struct {
-	Hour             string  `json:"hour"`
-	UserID           int     `json:"user_id"`
-	Username         string  `json:"username"`
-	TokenID          int     `json:"token_id"`
-	TokenName        string  `json:"token_name"`
-	ChannelID        int     `json:"channel_id"`
-	ChannelName      string  `json:"channel_name"`
-	Group            string  `json:"group"`
-	Model            string  `json:"model"`
+	Hour        string `json:"hour"`
+	UserID      int    `json:"user_id"`
+	Username    string `json:"username"`
+	TokenID     int    `json:"token_id"`
+	TokenName   string `json:"token_name"`
+	ChannelID   int    `json:"channel_id"`
+	ChannelName string `json:"channel_name"`
+	Group       string `json:"group"`
+	Model       string `json:"model"`
+	// Studio is the supplier identity the 供应商账单 tab groups by: the channel
+	// tag, else the MMDD-<studio>- channel-name segment. Only /api/report
+	// fills it; aggregation never stores it.
+	Studio           string  `json:"studio"`
 	RequestCount     int     `json:"request_count"`
 	InputTokens      int64   `json:"input_tokens"`
 	OutputTokens     int64   `json:"output_tokens"`
@@ -2603,12 +2607,14 @@ func handleReport(c *gin.Context) {
 	endDate := c.DefaultQuery("end", time.Now().UTC().Format("2006-01-02"))
 
 	rows, err := db.Query(`
-		SELECT hour, user_id, username, token_id, token_name, channel_id, channel_name, COALESCE("group",''), model,
-		       request_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-		       total_tokens, input_cost, output_cost, cache_read_cost, cache_write_cost, total_cost
-		FROM report_daily_agg
-		WHERE date >= $1 AND date <= $2
-		ORDER BY hour, model`, startDate, endDate)
+		SELECT a.hour, a.user_id, a.username, a.token_id, a.token_name, a.channel_id, a.channel_name, COALESCE(a."group",''), a.model,
+		       COALESCE(NULLIF(TRIM(c.tag),''), split_part(a.channel_name,'-',2)),
+		       a.request_count, a.input_tokens, a.output_tokens, a.cache_read_tokens, a.cache_write_tokens,
+		       a.total_tokens, a.input_cost, a.output_cost, a.cache_read_cost, a.cache_write_cost, a.total_cost
+		FROM report_daily_agg a
+		LEFT JOIN channels c ON c.id = a.channel_id
+		WHERE a.date >= $1 AND a.date <= $2
+		ORDER BY a.hour, a.model`, startDate, endDate)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -2619,7 +2625,7 @@ func handleReport(c *gin.Context) {
 	for rows.Next() {
 		var r DailyRow
 		if err := rows.Scan(&r.Hour, &r.UserID, &r.Username, &r.TokenID, &r.TokenName,
-			&r.ChannelID, &r.ChannelName, &r.Group, &r.Model, &r.RequestCount,
+			&r.ChannelID, &r.ChannelName, &r.Group, &r.Model, &r.Studio, &r.RequestCount,
 			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens,
 			&r.TotalTokens, &r.InputCost, &r.OutputCost, &r.CacheReadCost, &r.CacheWriteCost, &r.TotalCost); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

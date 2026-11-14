@@ -21,7 +21,7 @@ var (
 	errMappingOverlap     = errors.New("Source mapping overlaps another source")
 )
 
-var sourceKinds = []string{"report", "report_group", "remote_tag", "ccmax"}
+var sourceKinds = []string{"report", "report_group", "report_studio", "remote_tag", "ccmax"}
 
 // validateSourceEndpoint canonicalizes the upstream URL and checks the server
 // allowlist and credential name shared by every source kind.
@@ -89,8 +89,10 @@ func (s *Server) validateSource(source *Source) ([]string, error) {
 	if source.Kind != "report" {
 		source.ChannelIDs = ""
 		if source.Kind != "remote_tag" {
-			source.ExcludeSelector = false
 			source.ProfileID = 0
+		}
+		if source.Kind != "remote_tag" && source.Kind != "report_studio" {
+			source.ExcludeSelector = false
 		}
 		if source.Kind == "remote_tag" && source.ProfileID <= 0 {
 			return nil, errors.New("Select a remote profile")
@@ -111,6 +113,9 @@ func (s *Server) validateSource(source *Source) ([]string, error) {
 		}
 		slices.Sort(values)
 		source.Selector = strings.Join(values, ",")
+		if source.ExcludeSelector && source.Kind == "report_studio" {
+			return []string{digest([]any{source.BaseURL, "studio-rest"})}, nil
+		}
 		if source.ExcludeSelector {
 			return []string{digest([]any{source.BaseURL, "tag-rest", source.ProfileID})}, nil
 		}
@@ -121,6 +126,8 @@ func (s *Server) validateSource(source *Source) ([]string, error) {
 			switch source.Kind {
 			case "report_group":
 				keys[i] = digest([]any{source.BaseURL, "group", value})
+			case "report_studio":
+				keys[i] = digest([]any{source.BaseURL, "studio", value})
 			case "remote_tag":
 				keys[i] = digest([]any{source.BaseURL, "tag", source.ProfileID, value})
 			default:
@@ -169,7 +176,9 @@ func (source Source) mapsValue(value string) bool {
 
 // bindSource replaces a source's bindings inside tx. Channel and group sources
 // on one upstream cannot be mixed, because a channel's group is not known here;
-// an "all other tags" source must exclude every tag mapped elsewhere.
+// neither can group and studio sources. An "all other tags/studios" source must
+// exclude every value mapped elsewhere. Channel sources may coexist with studio
+// sources: sync drops a studio row whose channel a channel source bills.
 func bindSource(tx *gorm.DB, source Source, keys []string) error {
 	others := []Source{}
 	if err := tx.Where("base_url = ? AND id <> ?", source.BaseURL, source.ID).Find(&others).Error; err != nil {
@@ -182,6 +191,9 @@ func bindSource(tx *gorm.DB, source Source, keys []string) error {
 		if (source.Kind == "report" && other.Kind == "report_group") || (source.Kind == "report_group" && other.Kind == "report") {
 			return errMappingOverlap
 		}
+		if (source.Kind == "report_studio" && other.Kind == "report_group") || (source.Kind == "report_group" && other.Kind == "report_studio") {
+			return errMappingOverlap
+		}
 		if source.Kind == "report" && other.Kind == "report" && (source.GatewayUserID == 0 || other.GatewayUserID == 0 || source.GatewayUserID == other.GatewayUserID) {
 			for id := range strings.SplitSeq(other.ChannelIDs, ",") {
 				if slices.Contains(strings.Split(source.ChannelIDs, ","), id) {
@@ -189,7 +201,8 @@ func bindSource(tx *gorm.DB, source Source, keys []string) error {
 				}
 			}
 		}
-		if source.Kind != "remote_tag" || other.Kind != "remote_tag" || other.ProfileID != source.ProfileID || source.ExcludeSelector == other.ExcludeSelector {
+		selectorKind := source.Kind == "remote_tag" || source.Kind == "report_studio"
+		if !selectorKind || other.Kind != source.Kind || other.ProfileID != source.ProfileID || source.ExcludeSelector == other.ExcludeSelector {
 			continue
 		}
 		rest, mapped := source, other
@@ -355,9 +368,29 @@ func (s *Server) syncSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fetched, through, err := FetchSourceUsage(r.Context(), source, start, end)
+	// A channel listed by a channel source on the same upstream and user scope
+	// is billed there; a studio source must not bill that channel's usage again.
+	channelBilled := map[int64]bool{}
+	if source.Kind == "report_studio" {
+		channelSources := []Source{}
+		if err := s.DB.Where("base_url = ? AND kind = ?", source.BaseURL, "report").Find(&channelSources).Error; err != nil {
+			s.fail(w, 500, "Database operation failed")
+			return
+		}
+		for _, other := range channelSources {
+			if other.BaseURL != source.BaseURL || (other.GatewayUserID != 0 && source.GatewayUserID != 0 && other.GatewayUserID != source.GatewayUserID) {
+				continue
+			}
+			for raw := range strings.SplitSeq(other.ChannelIDs, ",") {
+				if id, parseErr := strconv.ParseInt(raw, 10, 64); parseErr == nil {
+					channelBilled[id] = true
+				}
+			}
+		}
+	}
 	rows := make([]ImportedUsage, 0, len(fetched))
 	for _, imported := range fetched {
-		if source.mapsValue(imported.MatchValue) {
+		if source.mapsValue(imported.MatchValue) && !channelBilled[imported.ChannelID] {
 			rows = append(rows, imported)
 		}
 	}
