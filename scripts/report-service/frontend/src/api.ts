@@ -638,6 +638,8 @@ export type StreamGuardEvent = {
   new_priority: number
   created_at: number
   restored_at: number
+  // > 0: high-tier channel, auto-restored once this time passes.
+  cooldown_until: number
   model_present: boolean
 }
 
@@ -654,6 +656,9 @@ export type StreamGuardConfig = {
   strip_model: boolean
   demote: boolean
   demote_priority: number
+  cooldown_min_tier: number
+  cooldown_sec: number
+  cooldown_max_sec: number
 }
 
 export type ChanPrioEvent = {

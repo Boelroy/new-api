@@ -5089,6 +5089,7 @@ func main() {
 			created_at   BIGINT NOT NULL
 		)`,
 		`ALTER TABLE rs_stream_guard_event ADD COLUMN IF NOT EXISTS restored_at BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE rs_stream_guard_event ADD COLUMN IF NOT EXISTS cooldown_until BIGINT NOT NULL DEFAULT 0`,
 		`ALTER TABLE rs_key_tier ADD COLUMN IF NOT EXISTS disabled_at BIGINT NOT NULL DEFAULT 0`,
 		`ALTER TABLE rs_key_tier ADD COLUMN IF NOT EXISTS main_model TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE rs_key_tier ADD COLUMN IF NOT EXISTS main_limit_tpm BIGINT NOT NULL DEFAULT 0`,

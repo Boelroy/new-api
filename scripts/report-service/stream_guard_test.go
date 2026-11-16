@@ -32,3 +32,16 @@ func TestStreamGuardVerdict(t *testing.T) {
 		assert.ElementsMatch(t, tc.want, got, tc.name)
 	}
 }
+
+// The cooldown doubles per repeat up to the cap, and is never shorter than the
+// window (else the failures that caused it would re-strip the model at once).
+func TestStreamGuardCooldown(t *testing.T) {
+	cfg := streamGuardDefaults.clamp()
+	for repeats, want := range []int64{1800, 3600, 7200, 14400, 14400} {
+		assert.Equal(t, want, streamGuardCooldown(cfg, repeats), "repeats=%d", repeats)
+	}
+
+	short := streamGuardConfig{WindowSec: 900, CooldownSec: 60, CooldownMaxSec: 30}.clamp()
+	assert.Equal(t, 900, short.CooldownSec)
+	assert.Equal(t, 900, short.CooldownMaxSec)
+}

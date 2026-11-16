@@ -15,11 +15,18 @@ package main
 // priority); new-api's 60s channel-cache sync picks them up. Every action is
 // recorded in rs_stream_guard_event with the previous priority so an operator
 // can restore it by hand.
+//
+// High-tier keys (rs_key_tier.tier >= CooldownMinTier) rarely die of credit
+// exhaustion; their failed streams are mostly upstream timeouts, so for them
+// the action is a cooldown: cooldown_until is stamped on the event and the
+// loop restores it once that passes. Repeat hits on the same (channel, model)
+// within 24h double the cooldown up to CooldownMaxSec.
 
 import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"slices"
@@ -51,6 +58,11 @@ type streamGuardConfig struct {
 	Demote       bool `json:"demote"`
 	// Demoted channels drop to this priority (new-api routes higher first).
 	DemotePriority int `json:"demote_priority"`
+	// Channels whose probed OpenAI tier is at least CooldownMinTier get a
+	// timed cooldown instead of a permanent strip; 0 turns cooldowns off.
+	CooldownMinTier int `json:"cooldown_min_tier"`
+	CooldownSec     int `json:"cooldown_sec"`
+	CooldownMaxSec  int `json:"cooldown_max_sec"`
 }
 
 const cfgStreamGuard = "stream_guard_config"
@@ -60,6 +72,7 @@ var streamGuardDefaults = streamGuardConfig{
 	MinStreams: 10, MinFailed: 3, MinFailRatePct: 10,
 	WideSharePct: 50, WideMinChans: 3,
 	StripModel: true, Demote: true, DemotePriority: 0,
+	CooldownMinTier: 5, CooldownSec: 1800, CooldownMaxSec: 4 * 3600,
 }
 
 // clamp bounds every field so a bad save cannot stall the loop or make it
@@ -73,6 +86,11 @@ func (c streamGuardConfig) clamp() streamGuardConfig {
 	c.WideSharePct = clampInt(c.WideSharePct, 1, 100)
 	c.WideMinChans = clampInt(c.WideMinChans, 1, 1000)
 	c.DemotePriority = clampInt(c.DemotePriority, -100000, 100000)
+	c.CooldownMinTier = clampInt(c.CooldownMinTier, 0, len(keyTierTPM)-1)
+	// A cooldown shorter than the window would re-strip on the failures that
+	// caused it as soon as the model is back.
+	c.CooldownSec = clampInt(c.CooldownSec, max(60, c.WindowSec), 7*86400)
+	c.CooldownMaxSec = clampInt(c.CooldownMaxSec, c.CooldownSec, 7*86400)
 	return c
 }
 
@@ -124,6 +142,10 @@ func startStreamGuardLoop() {
 		time.Sleep(3 * time.Minute) // stagger past the other schedulers
 		for {
 			cfg := loadStreamGuardConfig()
+			if IsLeader() {
+				// Due cooldowns are restored even while the guard is switched off.
+				restoreDueStreamGuardCooldowns(context.Background())
+			}
 			if cfg.Enabled && IsLeader() {
 				if err := runStreamGuardTick(context.Background(), cfg); err != nil {
 					log.Printf("[stream-guard] tick: %v", err)
@@ -201,6 +223,23 @@ func applyStreamGuard(ctx context.Context, cfg streamGuardConfig, p streamGuardP
 		return nil
 	}
 
+	now := time.Now().Unix()
+	var cooldownUntil int64
+	var tier sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT tier FROM rs_key_tier WHERE channel_id = $1`, p.channelID).Scan(&tier); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if cfg.CooldownMinTier > 0 && tier.Valid && tier.Int64 >= int64(cfg.CooldownMinTier) {
+		var repeats int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM rs_stream_guard_event
+			WHERE channel_id = $1 AND model = $2 AND cooldown_until > 0 AND created_at >= $3`,
+			p.channelID, p.model, now-24*3600).Scan(&repeats); err != nil {
+			return err
+		}
+		cooldownUntil = now + streamGuardCooldown(cfg, repeats)
+	}
+
 	if stripped {
 		if _, err := tx.ExecContext(ctx, `UPDATE channels SET models = $1 WHERE id = $2`,
 			csvJoinModels(remaining), p.channelID); err != nil {
@@ -231,17 +270,59 @@ func applyStreamGuard(ctx context.Context, cfg streamGuardConfig, p streamGuardP
 	action := strings.Join(actions, "+")
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO rs_stream_guard_event
-		  (channel_id, model, action, streams, failed, old_priority, new_priority, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		p.channelID, p.model, action, p.total, p.failed, oldPriority, newPriority, time.Now().Unix()); err != nil {
+		  (channel_id, model, action, streams, failed, old_priority, new_priority, created_at, cooldown_until)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		p.channelID, p.model, action, p.total, p.failed, oldPriority, newPriority, now, cooldownUntil); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	log.Printf("[stream-guard] channel %d: %s (model %s, %d/%d streams failed in %ds, priority %d -> %d)",
-		p.channelID, action, p.model, p.failed, p.total, cfg.WindowSec, oldPriority, newPriority)
+	log.Printf("[stream-guard] channel %d: %s (model %s, %d/%d streams failed in %ds, priority %d -> %d, tier %v, cooldown %ds)",
+		p.channelID, action, p.model, p.failed, p.total, cfg.WindowSec, oldPriority, newPriority,
+		tier.Int64, max(0, cooldownUntil-now))
 	return nil
+}
+
+// streamGuardCooldown is how long a high-tier channel keeps the model off:
+// CooldownSec, doubled for each earlier cooldown of the same pair in the last
+// 24h, capped at CooldownMaxSec.
+func streamGuardCooldown(cfg streamGuardConfig, repeats int) int64 {
+	cooldown := int64(cfg.CooldownSec)
+	for range min(repeats, 16) {
+		cooldown = min(cooldown*2, int64(cfg.CooldownMaxSec))
+	}
+	return cooldown
+}
+
+// restoreDueStreamGuardCooldowns restores every cooldown event whose time is
+// up. An event whose channel is gone is closed so it is not retried forever.
+func restoreDueStreamGuardCooldowns(ctx context.Context) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT id FROM rs_stream_guard_event
+		WHERE restored_at = 0 AND cooldown_until > 0 AND cooldown_until <= $1
+		ORDER BY id`, time.Now().Unix())
+	if err != nil {
+		log.Printf("[stream-guard] due cooldowns: %v", err)
+		return
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	for _, id := range ids {
+		_, err := restoreStreamGuardEvent(ctx, id)
+		if errors.Is(err, errStreamGuardChannelGone) {
+			_, err = db.ExecContext(ctx, `UPDATE rs_stream_guard_event SET restored_at = $1 WHERE id = $2`, time.Now().Unix(), id)
+		}
+		if err != nil && !errors.Is(err, errStreamGuardRestored) {
+			log.Printf("[stream-guard] cooldown restore event %d: %v", id, err)
+		}
+	}
 }
 
 func handleStreamGuardConfigGet(c *gin.Context) {
@@ -272,7 +353,7 @@ func handleStreamGuardConfigSet(c *gin.Context) {
 func handleStreamGuardEvents(c *gin.Context) {
 	rows, err := db.Query(`
 		SELECT e.id, e.channel_id, COALESCE(ch.name,''), COALESCE(ch.status,0), COALESCE(ch.priority,0),
-		       e.model, e.action, e.streams, e.failed, e.old_priority, e.new_priority, e.created_at, e.restored_at,
+		       e.model, e.action, e.streams, e.failed, e.old_priority, e.new_priority, e.created_at, e.restored_at, e.cooldown_until,
 		       COALESCE(','||ch.models||',' LIKE '%,'||e.model||',%', false)
 		FROM rs_stream_guard_event e
 		LEFT JOIN channels ch ON ch.id = e.channel_id
@@ -285,13 +366,13 @@ func handleStreamGuardEvents(c *gin.Context) {
 	events := make([]gin.H, 0)
 	for rows.Next() {
 		var (
-			id, channelID, chPriority, oldPriority, newPriority, createdAt, restoredAt int64
-			chStatus, streams, failed                                                  int
-			name, model, action                                                        string
-			modelPresent                                                               bool
+			id, channelID, chPriority, oldPriority, newPriority, createdAt, restoredAt, cooldownUntil int64
+			chStatus, streams, failed                                                                 int
+			name, model, action                                                                       string
+			modelPresent                                                                              bool
 		)
 		if err := rows.Scan(&id, &channelID, &name, &chStatus, &chPriority, &model, &action, &streams, &failed,
-			&oldPriority, &newPriority, &createdAt, &restoredAt, &modelPresent); err != nil {
+			&oldPriority, &newPriority, &createdAt, &restoredAt, &cooldownUntil, &modelPresent); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -299,15 +380,89 @@ func handleStreamGuardEvents(c *gin.Context) {
 			"id": id, "channel_id": channelID, "channel_name": name, "channel_status": chStatus,
 			"channel_priority": chPriority, "model": model, "action": action, "streams": streams,
 			"failed": failed, "old_priority": oldPriority, "new_priority": newPriority,
-			"created_at": createdAt, "restored_at": restoredAt, "model_present": modelPresent,
+			"created_at": createdAt, "restored_at": restoredAt, "cooldown_until": cooldownUntil,
+			"model_present": modelPresent,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"events": events})
 }
 
-// handleStreamGuardRestore undoes one guard action: puts the model back on the
+var (
+	errStreamGuardNoEvent     = errors.New("event not found")
+	errStreamGuardRestored    = errors.New("already restored")
+	errStreamGuardChannelGone = errors.New("channel not found")
+)
+
+// restoreStreamGuardEvent undoes one guard action: puts the model back on the
 // channel (channels.models + one ability row per channel group) and raises the
-// priority back to what it was before the event, if it is still lower.
+// priority back to what it was before the event, if it is still lower. It
+// returns the channel's priority afterwards.
+func restoreStreamGuardEvent(ctx context.Context, id int64) (int64, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var channelID, oldPriority, restoredAt int64
+	var model, action string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT channel_id, model, action, old_priority, restored_at FROM rs_stream_guard_event WHERE id = $1 FOR UPDATE`,
+		id).Scan(&channelID, &model, &action, &oldPriority, &restoredAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, errStreamGuardNoEvent
+		}
+		return 0, err
+	}
+	if restoredAt > 0 {
+		return 0, errStreamGuardRestored
+	}
+	var models, groups string
+	var status int
+	var priority, weight sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(models,''), COALESCE("group",''), COALESCE(status,0), priority, weight FROM channels WHERE id = $1 FOR UPDATE`,
+		channelID).Scan(&models, &groups, &status, &priority, &weight); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, errStreamGuardChannelGone
+		}
+		return 0, err
+	}
+	newPriority := max(priority.Int64, oldPriority)
+	if strings.Contains(action, "strip_model") && !slices.Contains(csvSplitModels(models), model) {
+		if _, err := tx.ExecContext(ctx, `UPDATE channels SET models = $1 WHERE id = $2`,
+			csvJoinModels(append(csvSplitModels(models), model)), channelID); err != nil {
+			return 0, err
+		}
+		for _, g := range csvSplitModels(groups) {
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO abilities ("group", model, channel_id, enabled, priority, weight)
+				VALUES ($1, $2, $3, $4, $5, $6)
+				ON CONFLICT DO NOTHING`,
+				g, model, channelID, status == 1, newPriority, weight.Int64); err != nil {
+				return 0, err
+			}
+		}
+	}
+	if newPriority > priority.Int64 {
+		if _, err := tx.ExecContext(ctx, `UPDATE channels SET priority = $1 WHERE id = $2`, newPriority, channelID); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE abilities SET priority = $1 WHERE channel_id = $2`, newPriority, channelID); err != nil {
+			return 0, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE rs_stream_guard_event SET restored_at = $1 WHERE id = $2`,
+		time.Now().Unix(), id); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	log.Printf("[stream-guard] restored event %d: channel %d model %s priority -> %d", id, channelID, model, newPriority)
+	return newPriority, nil
+}
+
 func handleStreamGuardRestore(c *gin.Context) {
 	var payload struct {
 		ID int64 `json:"id"`
@@ -316,72 +471,15 @@ func handleStreamGuardRestore(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "id required"})
 		return
 	}
-	ctx := c.Request.Context()
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
+	priority, err := restoreStreamGuardEvent(c.Request.Context(), payload.ID)
+	switch {
+	case errors.Is(err, errStreamGuardNoEvent), errors.Is(err, errStreamGuardChannelGone):
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+	case errors.Is(err, errStreamGuardRestored):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+	case err != nil:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+	default:
+		c.JSON(http.StatusOK, gin.H{"ok": true, "priority": priority})
 	}
-	defer tx.Rollback()
-
-	var channelID, oldPriority, restoredAt int64
-	var model, action string
-	if err := tx.QueryRowContext(ctx,
-		`SELECT channel_id, model, action, old_priority, restored_at FROM rs_stream_guard_event WHERE id = $1 FOR UPDATE`,
-		payload.ID).Scan(&channelID, &model, &action, &oldPriority, &restoredAt); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "event not found"})
-		return
-	}
-	if restoredAt > 0 {
-		c.JSON(http.StatusConflict, gin.H{"error": "already restored"})
-		return
-	}
-	var models, groups string
-	var status int
-	var priority, weight sql.NullInt64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(models,''), COALESCE("group",''), COALESCE(status,0), priority, weight FROM channels WHERE id = $1 FOR UPDATE`,
-		channelID).Scan(&models, &groups, &status, &priority, &weight); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
-		return
-	}
-	newPriority := max(priority.Int64, oldPriority)
-	if strings.Contains(action, "strip_model") && !slices.Contains(csvSplitModels(models), model) {
-		if _, err := tx.ExecContext(ctx, `UPDATE channels SET models = $1 WHERE id = $2`,
-			csvJoinModels(append(csvSplitModels(models), model)), channelID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		for _, g := range csvSplitModels(groups) {
-			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO abilities ("group", model, channel_id, enabled, priority, weight)
-				VALUES ($1, $2, $3, $4, $5, $6)
-				ON CONFLICT DO NOTHING`,
-				g, model, channelID, status == 1, newPriority, weight.Int64); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
-		}
-	}
-	if newPriority > priority.Int64 {
-		if _, err := tx.ExecContext(ctx, `UPDATE channels SET priority = $1 WHERE id = $2`, newPriority, channelID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE abilities SET priority = $1 WHERE channel_id = $2`, newPriority, channelID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE rs_stream_guard_event SET restored_at = $1 WHERE id = $2`,
-		time.Now().Unix(), payload.ID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	log.Printf("[stream-guard] restored event %d: channel %d model %s priority -> %d", payload.ID, channelID, model, newPriority)
-	c.JSON(http.StatusOK, gin.H{"ok": true, "priority": newPriority})
 }

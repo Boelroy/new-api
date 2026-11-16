@@ -121,6 +121,12 @@ function StreamGuardPanel() {
                   hint="且至少这么多个渠道" onSave={n => void save({ wide_min_chans: n })} />
                 <NumField key={`p${rev}`} label="降到的优先级" value={cfg.demote_priority} min={-100000} max={100000}
                   hint="newapi 优先级越高越先用" onSave={n => void save({ demote_priority: n })} />
+                <NumField key={`ct${rev}`} label="冷却 Tier 门槛" value={cfg.cooldown_min_tier} min={0} max={5}
+                  hint="Tier ≥ 此值的 Key 只冷却、到期自动恢复；0 = 关闭" onSave={n => void save({ cooldown_min_tier: n })} />
+                <NumField key={`cs${rev}`} label="冷却时长 (分钟)" value={Math.round(cfg.cooldown_sec / 60)} min={1} max={10080}
+                  hint="不短于统计窗口；24 小时内再犯翻倍" onSave={n => void save({ cooldown_sec: n * 60 })} />
+                <NumField key={`cm${rev}`} label="冷却上限 (分钟)" value={Math.round(cfg.cooldown_max_sec / 60)} min={1} max={10080}
+                  onSave={n => void save({ cooldown_max_sec: n * 60 })} />
               </div>
               <div className="flex items-center gap-6 mt-4 text-xs">
                 <label className="flex items-center gap-2">
@@ -132,7 +138,7 @@ function StreamGuardPanel() {
                   <span>命中后降低渠道优先级</span>
                 </label>
               </div>
-              <p className="text-[11px] text-gray-400 mt-3">只在 leader 节点执行；改动约 60 秒内同步到 newapi。不会自动恢复，误判时在下方点「恢复」。</p>
+              <p className="text-[11px] text-gray-400 mt-3">只在 leader 节点执行；改动约 60 秒内同步到 newapi。高 Tier Key 冷却到期自动恢复，其余不会自动恢复，误判时在下方点「恢复」。</p>
             </>
           ) : <div className="text-xs text-gray-400">加载中…</div>}
         </Card>
@@ -165,7 +171,12 @@ function StreamGuardPanel() {
                         <span className="text-gray-500 ml-1.5">{ev.channel_name}</span>
                       </td>
                       <td className="px-3 py-1.5 border-b border-gray-50 font-mono">{ev.model}</td>
-                      <td className="px-3 py-1.5 border-b border-gray-50">{ACTION_LABEL[ev.action] ?? ev.action}</td>
+                      <td className="px-3 py-1.5 border-b border-gray-50">
+                        {ACTION_LABEL[ev.action] ?? ev.action}
+                        {ev.cooldown_until > 0 && (
+                          <span className="ml-1.5 text-amber-600">冷却至 {fmtTime(ev.cooldown_until)}</span>
+                        )}
+                      </td>
                       <td className="px-3 py-1.5 border-b border-gray-50 tabular-nums">
                         <span className={ev.restored_at ? '' : 'text-rose-600 font-medium'}>{ev.failed}</span> / {ev.streams}
                         <span className="text-gray-400 ml-1">({Math.round((ev.failed / Math.max(1, ev.streams)) * 100)}%)</span>
