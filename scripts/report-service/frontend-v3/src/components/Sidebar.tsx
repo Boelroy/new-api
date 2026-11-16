@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { NavLink } from 'react-router-dom'
-import { Radio, Upload, BarChart3, ScrollText, KeyRound, BadgeCheck, Users, CalendarDays, type LucideIcon } from 'lucide-react'
-import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_CCMAX_MANAGER, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_02, ROLE_SUPPLIER_CCMAX } from '../api'
+import { Radio, Upload, BarChart3, ScrollText, KeyRound, BadgeCheck, Users, CalendarDays, PackagePlus, type LucideIcon } from 'lucide-react'
+import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_CCMAX_MANAGER, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_02, ROLE_SUPPLIER_CCMAX, ROLE_SUPPLIER_GYNH } from '../api'
 import { getCachedRole, loadRole } from '../auth'
 import { cx } from './ui'
 
@@ -79,6 +79,23 @@ const GROUPS: NavGroup[] = [
         label: 'CC Max 用户',
         icon: Users,
         allow: (r) => r >= ROLE_SUPER_ADMIN,
+      },
+    ],
+  },
+  {
+    title: '供给台',
+    items: [
+      {
+        to: '/gynh',
+        label: '供给台上号',
+        icon: PackagePlus,
+        allow: (r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_GYNH,
+      },
+      {
+        to: '/gynh-usage',
+        label: '供给台用量',
+        icon: BarChart3,
+        allow: (r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_GYNH,
       },
     ],
   },

@@ -58,8 +58,10 @@ var (
 // Supplier Account portal config lives in supplier_account.go
 // (supplierAccountBaseURL / supplierAccountToken).
 
-// Role tiers mirror common.RoleCommonUser / RoleAdminUser / RoleRootUser in
-// the main service. Routes are gated against these via requireRole.
+// Role tiers mirror common.RoleCommonUser / RoleRootUser in the main service.
+// Routes are gated against these via requireRole. Admin is 50 here rather
+// than the main service's 10, so 11-49 are free for horizontal roles; main
+// service roles and pre-change tokens are mapped by normalizeRole.
 //
 // minTesterRole, minStudioOperatorRole and minProjectAdminRole are
 // horizontal specializations, not tiers: they grant access to a narrow set
@@ -77,9 +79,27 @@ const (
 	minProjectAdminRole         = 7   // Key Capacity + Key Tester only
 	minSupplierCCMaxRole        = 8   // supplier_ccmax: CC Max (Claude OAuth) 上号 + own usage only
 	minCCMaxManagerRole         = 9   // ccmax_manager: views the CC Max accounts of assigned supplier_ccmax users
-	minAdminRole                = 10  // common.RoleAdminUser
+	minSupplierGynhRole         = 11  // supplier_gynh: 供给台 (GYNH) key upload + own accounts only
+	minAdminRole                = 50  // admin; the main service's common.RoleAdminUser is 10
 	minSuperAdminRole           = 100 // common.RoleRootUser
 )
+
+// legacyAdminRole is the admin tier before it moved to minAdminRole. It is
+// still what the main service sends for admins, and what report-service
+// tokens issued before the move carry.
+const (
+	legacyAdminRole    = 10
+	legacyAdminRoleKey = "10"
+)
+
+// normalizeRole maps a role from the main service or an older token onto the
+// current tiers.
+func normalizeRole(role int) int {
+	if role == legacyAdminRole {
+		return minAdminRole
+	}
+	return role
+}
 
 // SSO session cache: maps session cookie value → (role, expiry).
 type ssoCacheEntry struct {
@@ -140,11 +160,12 @@ func checkMainServiceSession(rawCookieHeader string) (int, bool) {
 	if body.Data.Role < minUserRole {
 		return 0, false
 	}
+	role := normalizeRole(body.Data.Role)
 
 	ssoCacheMu.Lock()
-	ssoCache[rawCookieHeader] = ssoCacheEntry{role: body.Data.Role, exp: time.Now().Add(5 * time.Minute)}
+	ssoCache[rawCookieHeader] = ssoCacheEntry{role: role, exp: time.Now().Add(5 * time.Minute)}
 	ssoCacheMu.Unlock()
-	return body.Data.Role, true
+	return role, true
 }
 
 // newJWT mints a local session token. user_id=0 marks SSO-issued tokens that
@@ -191,7 +212,7 @@ func authMiddleware(c *gin.Context) {
 			var username, studio string
 			if claims, ok := parsed.Claims.(jwt.MapClaims); ok {
 				if r, ok := claims["role"].(float64); ok {
-					role = int(r)
+					role = normalizeRole(int(r))
 				}
 				if u, ok := claims["user_id"].(float64); ok {
 					userID = int64(u)
@@ -358,6 +379,21 @@ func requireRoleOrSupplier02(min int) gin.HandlerFunc {
 		roleAny, _ := c.Get("role")
 		role, _ := roleAny.(int)
 		if role >= min || role == minSupplierRole02 {
+			c.Next()
+			return
+		}
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		c.Abort()
+	}
+}
+
+// requireRoleOrSupplierGynh grants access to callers at min tier OR the
+// supplier_gynh role. The gynh handlers scope rows to the uploader.
+func requireRoleOrSupplierGynh(min int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		roleAny, _ := c.Get("role")
+		role, _ := roleAny.(int)
+		if role >= min || role == minSupplierGynhRole {
 			c.Next()
 			return
 		}
@@ -1725,7 +1761,7 @@ func handleSSOCallback(c *gin.Context) {
 		return
 	}
 	ssoUsername, _ := claims["sub"].(string)
-	localToken, err := newJWT(0, ssoUsername, int(roleRaw), "")
+	localToken, err := newJWT(0, ssoUsername, normalizeRole(int(roleRaw)), "")
 	if err != nil {
 		c.Redirect(http.StatusFound, "/login?error=sso_failed")
 		return
@@ -2149,7 +2185,7 @@ func handleLogout(c *gin.Context) {
 func isValidRoleTier(role int) bool {
 	switch role {
 	case minUserRole, minStudioOperatorRole, minRemoteStudioOperatorRole,
-		minSupplierRole, minSupplierRole02, minSupplierCCMaxRole, minCCMaxManagerRole, minTesterRole, minProjectAdminRole, minAdminRole, minSuperAdminRole:
+		minSupplierRole, minSupplierRole02, minSupplierCCMaxRole, minCCMaxManagerRole, minSupplierGynhRole, minTesterRole, minProjectAdminRole, minAdminRole, minSuperAdminRole:
 		return true
 	}
 	return false
@@ -2195,7 +2231,7 @@ func handleUserCreate(c *gin.Context) {
 		return
 	}
 	if !isValidRoleTier(body.Role) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, or 100"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 50, or 100"})
 		return
 	}
 	// Anti-escalation on create: an admin (non-super) can only mint accounts
@@ -2260,7 +2296,7 @@ func handleUserUpdate(c *gin.Context) {
 	// out, and cannot demote the last remaining super admin via this handler.
 	if body.Role != nil {
 		if !isValidRoleTier(*body.Role) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, or 100"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 50, or 100"})
 			return
 		}
 		if target.Role >= minSuperAdminRole && *body.Role < minSuperAdminRole {
@@ -4591,6 +4627,9 @@ func main() {
 		// to get a fresh token whose iat >= disabled_at.
 		`ALTER TABLE rs_auth_user ADD COLUMN IF NOT EXISTS status INT NOT NULL DEFAULT 1`,
 		`ALTER TABLE rs_auth_user ADD COLUMN IF NOT EXISTS disabled_at BIGINT NOT NULL DEFAULT 0`,
+		// Admin tier moved 10 → 50 to free 11-49 for horizontal roles. Old
+		// nodes still treat 50 as admin (>= 10), so a rolling deploy is safe.
+		`UPDATE rs_auth_user SET role = 50 WHERE role = 10`,
 		// Login attempts log — used for per-username lockout and per-IP rate
 		// limiting on /api/login. Pruned to ~24h by startPruneLoginAttempts.
 		`CREATE TABLE IF NOT EXISTS rs_login_attempt (
@@ -5053,6 +5092,18 @@ func main() {
 			log.Fatalf("Failed to create table: %v", err)
 		}
 	}
+	// Sidebar overrides are keyed by role value; carry the admin entry over to
+	// the new tier.
+	if overrides := sidebarOverridesMap(); overrides[legacyAdminRoleKey] != nil {
+		if _, ok := overrides[strconv.Itoa(minAdminRole)]; !ok {
+			overrides[strconv.Itoa(minAdminRole)] = overrides[legacyAdminRoleKey]
+		}
+		delete(overrides, legacyAdminRoleKey)
+		blob, _ := json.Marshal(overrides)
+		if err := supplierConfigSet(cfgSidebarOverrides, string(blob)); err != nil {
+			log.Printf("[migrate] sidebar overrides admin key: %v", err)
+		}
+	}
 	seedAdminUser()
 
 	// V2 schema + RBAC seed. Idempotent; safe to run on every startup.
@@ -5236,6 +5287,18 @@ func main() {
 	keyhubAPI.GET("/settings", requireRole(minAdminRole), handleKeyhubSettingsGet)
 	keyhubAPI.PUT("/settings", requireRole(minAdminRole), handleKeyhubSettingsSet)
 
+	// 供给台 (GYNH) proxy — key upload + own account list. Gated to
+	// supplier_gynh and admins; report-service holds ONE shared portal login
+	// server-side (see gynh.go) and scopes rows to the uploader.
+	gynhAPI := api.Group("/gynh", requireRoleOrSupplierGynh(minAdminRole))
+	gynhAPI.GET("/options", handleGynhOptions)
+	gynhAPI.GET("/accounts", handleGynhAccountList)
+	gynhAPI.POST("/accounts", handleGynhAccountCreate)
+	gynhAPI.GET("/usage", handleGynhUsage)
+	gynhAPI.POST("/tier-probe", handleGynhTierProbe)
+	gynhAPI.GET("/settings", requireRole(minAdminRole), handleGynhSettingsGet)
+	gynhAPI.PUT("/settings", requireRole(minAdminRole), handleGynhSettingsSet)
+
 	// CC Max (Claude subscription) onboarding — suppliers authorize their own
 	// Claude accounts through their own socks5 and upload them to the portal's
 	// claude lane (see ccmax.go). Handlers scope rows to the uploader; a
@@ -5377,7 +5440,7 @@ func main() {
 		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 		c.Abort()
 	}, handleTestKeys)
-	// Admin (role >= 10) gets the full user-list + create + delete +
+	// Admin (role >= 50) gets the full user-list + create + delete +
 	// disable/enable + password-reset surface. Each handler enforces the
 	// anti-escalation guard (callerCanManage / callerRole > body.Role) so
 	// admin can only touch users strictly below their own tier.
@@ -5436,7 +5499,7 @@ func main() {
 	// /pool-upload slim page. Admin+ (Key Capacity) and studio_operator
 	// (Pool Upload) both hit these; require admin or the horizontal
 	// operator role. Previous wiring was accidentally at
-	// minSuperAdminRole which 403'd role=10 admins.
+	// minSuperAdminRole which 403'd role=50 admins.
 	localPoolAPI := api.Group("", requireRoleOrStudioOperator(minAdminRole))
 	localPoolAPI.POST("/local-pool/enqueue", handleLocalPoolEnqueue)
 	localPoolAPI.GET("/local-pool/queue", handleLocalPoolList)
@@ -5445,7 +5508,7 @@ func main() {
 	// Pool config is read by any admin (they need to see the current
 	// throttle so the queue view + RPM readout make sense) but only
 	// super admin can change it — this is a system-wide setting and the
-	// supplier tier (role=10) shouldn't be able to widen the drip.
+	// admin tier (role=50) shouldn't be able to widen the drip.
 	adminAPI.GET("/local-pool/config", handleLocalPoolConfigGet)
 	superAPI.POST("/local-pool/config", handleLocalPoolConfigSet)
 	adminAPI.GET("/local-pool/rpm", handleLocalRPM)

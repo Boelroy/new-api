@@ -155,6 +155,18 @@ var builtinRoleSeeds = []builtinRoleSeed{
 		},
 	},
 	{
+		// Supplier GYNH: uploads keys to the 供给台 (GYNH) portal through the
+		// shared server-side login and sees only its own accounts. The gynh
+		// routes gate on the V1 numeric tier (minSupplierGynhRole); this V2
+		// grant keeps the catalog coherent.
+		Name:        RoleSupplierGynh,
+		DisplayName: "Supplier GYNH",
+		Level:       LevelSupplierGynh,
+		Permissions: []Permission{
+			{ActionGynhManage, ScopeOwnStudio},
+		},
+	},
+	{
 		Name:        RoleTester,
 		DisplayName: "Tester",
 		Level:       LevelTester,
@@ -312,6 +324,8 @@ func builtinRoleNameForLegacy(v1Role int) string {
 		return RoleSupplierCCMax
 	case minCCMaxManagerRole:
 		return RoleCCMaxManager
+	case minSupplierGynhRole:
+		return RoleSupplierGynh
 	case minStudioOperatorRole:
 		return RoleStudioOperator
 	case minTesterRole:

@@ -566,7 +566,10 @@ export const ROLE_PROJECT_ADMIN = 7
 export const ROLE_SUPPLIER_CCMAX = 8
 // ccmax_manager: read-only view of assigned supplier_ccmax users' CC Max accounts (v3 /ccmax).
 export const ROLE_CCMAX_MANAGER = 9
-export const ROLE_ADMIN = 10
+// supplier_gynh: 供给台 (GYNH) key upload + own accounts only (v3 /gynh).
+export const ROLE_SUPPLIER_GYNH = 11
+// Admin is 50 (the main service uses 10); 11-49 are horizontal roles.
+export const ROLE_ADMIN = 50
 export const ROLE_SUPER_ADMIN = 100
 
 export type AuthMe = {
@@ -959,6 +962,105 @@ export type KeyhubSettings = {
   configured: boolean
   // category_code → comma-separated models pre-filled on the upload page.
   default_models: Record<string, string>
+}
+
+// ---- 供给台 (GYNH) ----
+
+// Provider metadata from the portal's /me. shape decides which credential
+// fields the portal expects; only 'keyonly' providers fit the batch form.
+export type GynhProvider = {
+  shape: 'keyonly' | 'adc' | 'aws' | 'azure' | string
+  need_region: boolean
+  key_min_len: number
+  auto_select_all: boolean
+}
+
+export type GynhOptions = {
+  catalog: Record<string, string[]>
+  providers: Record<string, GynhProvider>
+  account_regions: { value: string; label: string }[]
+  mode: string
+  default_tpm: string
+  default_rpm: string
+}
+
+export type GynhAccountPayload = {
+  provider: string
+  account_type: number
+  models: string[]
+  api_key: string
+  tpm: string
+  rpm: string
+  remark?: string
+  region?: string
+  group_id?: string
+  url?: string
+}
+
+// A portal account row. uploader is only present for admins.
+export type GynhAccount = {
+  id: number
+  alias?: string
+  upstream_id?: number | null
+  provider: string
+  account_type?: number
+  model: string
+  remark?: string
+  key_prefix?: string
+  state: string
+  upstream_status?: { label?: string; tone?: string; raw?: string; offline_limited?: boolean } | null
+  last_error?: string
+  created_at?: string
+  uploader?: string
+}
+
+// One key's cumulative spend since upload (portal /key-spend) and its last-60s
+// rates. cny/usd are decimal strings; platforms is keyed by log platform.
+export type GynhUsageRow = {
+  id: number
+  alias?: string
+  upstream_id?: number | null
+  provider: string
+  created_at?: string
+  status?: { label?: string; tone?: string; offline_limited?: boolean } | null
+  platforms?: Record<string, { cny: string; usd: string }>
+  cny: string
+  usd: string
+  complete?: boolean
+  days_done?: number
+  days_expected?: number
+  error?: string
+  rpm?: number | null
+  tpm?: number | null
+  uploader?: string
+}
+
+export type GynhUsage = {
+  accounts: GynhUsageRow[]
+  rate: string
+  generated_at: number
+  realtime_at: number
+  totals: { cny: string; usd: string; keys: number }
+}
+
+// The gynh handlers answer errors as {"error": "..."}; request() throws the
+// raw body text, so unwrap it for display.
+export function apiErrorMessage(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e)
+  try {
+    const parsed = JSON.parse(raw) as { error?: string }
+    if (parsed.error) return parsed.error
+  } catch {
+    // not JSON — show as-is
+  }
+  return raw
+}
+
+export type GynhSettings = {
+  base_url: string
+  username: string
+  password_set: boolean
+  configured: boolean
 }
 
 function keyhubLogQueryString(q: KeyhubLogQuery): string {
@@ -2370,6 +2472,40 @@ export const api = {
     default_models?: Record<string, string>
   }) =>
     request<KeyhubSettings>('/api/keyhub/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  // ---- 供给台 (GYNH) proxy. report-service holds one shared portal login;
+  // the account list is scoped to the uploader server-side (admins see all).
+
+  gynhOptions: () => request<GynhOptions>('/api/gynh/options'),
+
+  gynhAccounts: () => request<{ accounts: GynhAccount[] }>('/api/gynh/accounts'),
+
+  // Uploads ONE key; the page loops over the batch.
+  gynhCreateAccount: (payload: GynhAccountPayload) =>
+    request<{ id: number; msg: string }>('/api/gynh/accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  gynhUsage: () => request<GynhUsage>('/api/gynh/usage'),
+
+  // Estimated OpenAI usage tier per key, by index (tier null = probe failed).
+  gynhTierProbe: (keys: string[]) =>
+    request<{ results: { tier: number | null; http_status: number; error?: string }[] }>('/api/gynh/tier-probe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keys }),
+    }),
+
+  getGynhSettings: () => request<GynhSettings>('/api/gynh/settings'),
+
+  setGynhSettings: (payload: { base_url?: string; username?: string; password?: string }) =>
+    request<GynhSettings>('/api/gynh/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),

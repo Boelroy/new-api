@@ -189,6 +189,24 @@ var v2SchemaStatements = []string{
 		PRIMARY KEY (remote_account_id, ds)
 	)`,
 
+	// -- 供给台 (GYNH) -------------------------------------------------------
+	// One row per key a report-service user uploaded through the shared GYNH
+	// portal login (gynh.go). The portal only knows its own supplier account,
+	// so uploaded_by is what scopes the list per user. remote_id is the
+	// portal-returned account id on success; portal_local_id is the portal's
+	// own record id, returned when a submit failed or is pending review.
+	`CREATE TABLE IF NOT EXISTS rs_gynh_account (
+		id              BIGSERIAL PRIMARY KEY,
+		uploaded_by     BIGINT NOT NULL,
+		provider        TEXT   NOT NULL,
+		models          TEXT   NOT NULL DEFAULT '',
+		remote_id       BIGINT NOT NULL DEFAULT 0,
+		portal_local_id BIGINT NOT NULL DEFAULT 0,
+		key_hint        TEXT   NOT NULL DEFAULT '',
+		created_at      BIGINT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_gynh_account_uploaded_by ON rs_gynh_account(uploaded_by)`,
+
 	// -- Model auto-cleanup ------------------------------------------------
 	// Append-only audit of the log-driven model auto-cleanup loop
 	// (model_cleanup.go): one row every time it strips a model from a

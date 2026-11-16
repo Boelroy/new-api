@@ -9,7 +9,9 @@ import KeyhubUsageLogs from './pages/KeyhubUsageLogs'
 import CCMaxAccounts from './pages/CCMaxAccounts'
 import CCMaxUsers from './pages/CCMaxUsers'
 import CCMaxSettlement from './pages/CCMaxSettlement'
-import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_CCMAX_MANAGER, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_02, ROLE_SUPPLIER_CCMAX } from './api'
+import GynhUpload from './pages/GynhUpload'
+import GynhUsage from './pages/GynhUsage'
+import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_CCMAX_MANAGER, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_02, ROLE_SUPPLIER_CCMAX, ROLE_SUPPLIER_GYNH } from './api'
 import { getCachedRole, loadRole } from './auth'
 import { APP_BASE } from './basePath'
 import { Toaster, ConfirmHost, PromptHost } from './components/feedback'
@@ -44,6 +46,9 @@ function DefaultLanding() {
   }
   if (role === ROLE_SUPPLIER_CCMAX || role === ROLE_CCMAX_MANAGER) {
     return <Navigate to="/ccmax" replace />
+  }
+  if (role === ROLE_SUPPLIER_GYNH) {
+    return <Navigate to="/gynh" replace />
   }
   return <Navigate to="/remote-channels" replace />
 }
@@ -129,6 +134,22 @@ export default function App() {
           element={
             <RoleGate allow={(r) => r >= ROLE_SUPER_ADMIN}>
               <CCMaxUsers />
+            </RoleGate>
+          }
+        />
+        <Route
+          path="/gynh"
+          element={
+            <RoleGate allow={(r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_GYNH}>
+              <GynhUpload />
+            </RoleGate>
+          }
+        />
+        <Route
+          path="/gynh-usage"
+          element={
+            <RoleGate allow={(r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_GYNH}>
+              <GynhUsage />
             </RoleGate>
           }
         />

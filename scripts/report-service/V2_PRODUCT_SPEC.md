@@ -472,7 +472,7 @@ CREATE INDEX ix_key_pool_hash_status ON rs_key_pool (key_hash, status);
 2. Seed 内置角色（4 个）+ 内置角色的默认权限点（按 §2.4）
 3. 把现有 `rs_auth_user.role` 值映射到内置角色，写入 `rs_user_role`：
    - role=100 → superadmin
-   - role=10 → admin
+   - role=50 → admin (was 10; migrated on startup)
    - role=5 → 自定义 tester 角色（seed 一份带 `testing.*` 权限点的角色，命名 `tester`）
    - role=2 → studio_operator
    - role=1 → user

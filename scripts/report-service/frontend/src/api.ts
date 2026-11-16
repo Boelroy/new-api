@@ -705,7 +705,10 @@ export const ROLE_PROJECT_ADMIN = 7
 export const ROLE_SUPPLIER_CCMAX = 8
 // ccmax_manager: read-only view of assigned supplier_ccmax users' CC Max accounts (v3 /ccmax).
 export const ROLE_CCMAX_MANAGER = 9
-export const ROLE_ADMIN = 10
+// supplier_gynh: 供给台 (GYNH) key upload + own accounts only (v3 /gynh).
+export const ROLE_SUPPLIER_GYNH = 11
+// Admin is 50 (the main service uses 10); 11-49 are horizontal roles.
+export const ROLE_ADMIN = 50
 export const ROLE_SUPER_ADMIN = 100
 
 export type AuthMe = {

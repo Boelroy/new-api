@@ -41,6 +41,7 @@ const (
 	RoleSupplier02           = "supplier_02"
 	RoleSupplierCCMax        = "supplier_ccmax"
 	RoleCCMaxManager         = "ccmax_manager"
+	RoleSupplierGynh         = "supplier_gynh"
 	RoleTester               = "tester"
 	RoleUser                 = "user"
 )
@@ -59,6 +60,7 @@ const (
 	LevelSupplier01           = 21
 	LevelStudioOperator       = 20
 	LevelTester               = 15
+	LevelSupplierGynh         = 12
 	LevelUser                 = 10
 )
 
@@ -114,6 +116,8 @@ const (
 
 	ActionCCMaxManage = "ccmax.manage"
 
+	ActionGynhManage = "gynh.manage"
+
 	ActionSystemConfig = "system.config"
 )
 
@@ -152,6 +156,7 @@ var actionCatalog = []struct {
 	{"supplier_account", ActionSupplierAccountManage, "Upload / view supplier account portal keys"},
 	{"keyhub", ActionKeyhubManage, "Upload keys + view usage on KHub (pd-maas)"},
 	{"ccmax", ActionCCMaxManage, "CC Max (Claude OAuth) onboarding + own usage"},
+	{"gynh", ActionGynhManage, "Upload keys to 供给台 (GYNH) + view own accounts"},
 	{"system", ActionSystemConfig, "System configuration"},
 }
 
@@ -225,6 +230,8 @@ var actionAllowedScopes = map[string]map[string]bool{
 	ActionKeyhubManage: {ScopeGlobal: true},
 	// CC Max: own uploads for suppliers, everything for admin.
 	ActionCCMaxManage: {ScopeOwnStudio: true, ScopeGlobal: true},
+	// 供给台 (GYNH): own uploads for suppliers, everything for admin.
+	ActionGynhManage: {ScopeOwnStudio: true, ScopeGlobal: true},
 }
 
 // IsAllowedActionScope returns whether (action, scope) is a sensible pair.
@@ -708,6 +715,8 @@ func legacyLevelForRole(v1Role int) int {
 		return LevelSupplierCCMax
 	case minCCMaxManagerRole:
 		return LevelCCMaxManager
+	case minSupplierGynhRole:
+		return LevelSupplierGynh
 	case minStudioOperatorRole:
 		return LevelStudioOperator
 	case minTesterRole:
