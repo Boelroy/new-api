@@ -99,6 +99,7 @@ export default function SupplierAccounts() {
   const [defaultRpm, setDefaultRpm] = useState(DEFAULT_RPM)
   const [remark, setRemark] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [submitProgress, setSubmitProgress] = useState('')
   const [submitMsg, setSubmitMsg] = useState<string | null>(null)
   const [submitErr, setSubmitErr] = useState<string | null>(null)
 
@@ -297,10 +298,14 @@ export default function SupplierAccounts() {
     const modelList = Array.from(selectedModels)
     if (!provider) return setSubmitErr('请选择厂商')
     if (modelList.length === 0) return setSubmitErr('请至少选择一个模型')
-    const key = apiKey.trim()
-    if (!key) return setSubmitErr('请填写 API Key')
-    if (selectedProvider && key.length < selectedProvider.key_min_len) {
-      return setSubmitErr(`API Key 长度至少 ${selectedProvider.key_min_len} 位`)
+    // One key per line = batch upload; every key shares the rest of the form.
+    const keys = Array.from(new Set(apiKey.split(/\r?\n/).map(k => k.trim()).filter(Boolean)))
+    if (keys.length === 0) return setSubmitErr('请填写 API Key')
+    if (selectedProvider) {
+      const shortIdx = keys.findIndex(k => k.length < selectedProvider.key_min_len)
+      if (shortIdx >= 0) {
+        return setSubmitErr(`第 ${shortIdx + 1} 个 API Key 长度不足 ${selectedProvider.key_min_len} 位`)
+      }
     }
     const urlVal = modelUrl.trim()
     if (isAzure) {
@@ -351,22 +356,46 @@ export default function SupplierAccounts() {
     if (tpmVal && !isNonNegInt(tpmVal)) return setSubmitErr('TPM 必须为非负整数')
     if (rpmVal && !isNonNegInt(rpmVal)) return setSubmitErr('RPM 必须为非负整数')
     setSubmitting(true)
+    // Sequential on purpose: the portal dedupes by key and rate-limits, and a
+    // per-key result list is what the operator needs to retry failures.
+    const okLines: string[] = []
+    const errLines: string[] = []
+    const failedKeys: string[] = []
     try {
-      const res = await api.supplierUploadAccount({
-        provider,
-        model: modelList.join(','),
-        api_key: key,
-        account_type: accountType,
-        tpm: tpmVal || undefined,
-        rpm: rpmVal || undefined,
-        remark: remark.trim() || undefined,
-        url: isAzure ? urlVal : undefined,
-        region: isAws ? regionValue : undefined,
-        aws_region: isAws ? awsRegionVal : undefined,
-        aws_project_id: isAws ? awsProjectVal : undefined,
-        arns: isAws ? arnMap : undefined,
-      })
-      setSubmitMsg(`${res.msg}（别名：${res.alias}）`)
+      for (const [i, key] of keys.entries()) {
+        setSubmitProgress(keys.length > 1 ? ` ${i + 1}/${keys.length}` : '')
+        const tail = key.length > 8 ? `…${key.slice(-8)}` : key
+        try {
+          const res = await api.supplierUploadAccount({
+            provider,
+            model: modelList.join(','),
+            api_key: key,
+            account_type: accountType,
+            tpm: tpmVal || undefined,
+            rpm: rpmVal || undefined,
+            remark: remark.trim() || undefined,
+            url: isAzure ? urlVal : undefined,
+            region: isAws ? regionValue : undefined,
+            aws_region: isAws ? awsRegionVal : undefined,
+            aws_project_id: isAws ? awsProjectVal : undefined,
+            arns: isAws ? arnMap : undefined,
+          })
+          okLines.push(keys.length > 1 ? `${tail}：${res.msg}（别名：${res.alias}）` : `${res.msg}（别名：${res.alias}）`)
+        } catch (e: any) {
+          errLines.push(keys.length > 1 ? `${tail}：${e?.message || String(e)}` : e?.message || String(e))
+          failedKeys.push(key)
+        }
+      }
+      if (okLines.length > 0) {
+        setSubmitMsg((keys.length > 1 ? `成功 ${okLines.length}/${keys.length}\n` : '') + okLines.join('\n'))
+      }
+      if (errLines.length > 0) {
+        // Keep the failed keys (and the rest of the form) so they can be retried.
+        setSubmitErr((keys.length > 1 ? `失败 ${errLines.length}/${keys.length}（失败的 Key 已保留在输入框）\n` : '') + errLines.join('\n'))
+        setApiKey(failedKeys.join('\n'))
+        if (okLines.length > 0) await loadAccounts()
+        return
+      }
       setApiKey('')
       setModelUrl('')
       setArns({})
@@ -381,6 +410,7 @@ export default function SupplierAccounts() {
       setSubmitErr(e?.message || String(e))
     } finally {
       setSubmitting(false)
+      setSubmitProgress('')
     }
   }
 
@@ -956,7 +986,7 @@ export default function SupplierAccounts() {
             </div>
           )}
 
-          <label className="block text-xs font-medium text-gray-600 mb-1">API Key *</label>
+          <label className="block text-xs font-medium text-gray-600 mb-1">API Key *（每行一个，多行即批量提交，其余配置共用）</label>
           <textarea
             value={apiKey}
             onChange={e => setApiKey(e.target.value)}
@@ -965,9 +995,9 @@ export default function SupplierAccounts() {
                 ? '请填写 Azure OpenAI 的 API Key'
                 : isAws
                   ? '请填写 Bedrock 长 API Key（ARN 方式）'
-                  : 'sk-xxxxxxxxxxxxxxxx'
+                  : 'sk-xxxxxxxxxxxxxxxx\nsk-yyyyyyyyyyyyyyyy'
             }
-            rows={2}
+            rows={4}
             className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm mb-3 font-mono"
           />
 
@@ -1095,10 +1125,10 @@ export default function SupplierAccounts() {
           />
 
           {submitErr && (
-            <div className="mb-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-md px-3 py-2">{submitErr}</div>
+            <div className="mb-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-md px-3 py-2 whitespace-pre-line break-all">{submitErr}</div>
           )}
           {submitMsg && (
-            <div className="mb-3 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs rounded-md px-3 py-2">{submitMsg}</div>
+            <div className="mb-3 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs rounded-md px-3 py-2 whitespace-pre-line break-all">{submitMsg}</div>
           )}
 
           <button
@@ -1106,7 +1136,7 @@ export default function SupplierAccounts() {
             disabled={submitting}
             className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-sm font-medium rounded-md px-3 py-2.5 transition-colors"
           >
-            {submitting ? '提交中…' : '提交账号'}
+            {submitting ? `提交中${submitProgress}…` : '提交账号'}
           </button>
         </section>
 
