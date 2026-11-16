@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import Layout from '../components/Layout'
 import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_01, ROLE_SUPPLIER_02, ROLE_SUPPLIER_CCMAX, ROLE_CCMAX_MANAGER, ROLE_SUPPLIER_GYNH, ROLE_TESTER, ROLE_USER, type AuthMe, type AuthUser } from '../api'
-import { confirmDialog } from '../components/feedback'
+import { confirmDialog, toast } from '../components/feedback'
 
 const ROLE_OPTIONS: { value: number; label: string }[] = [
   { value: ROLE_USER, label: 'User (All Keys only)' },
@@ -25,6 +25,37 @@ function roleLabel(role: number): string {
 function formatTime(epochSec: number): string {
   if (!epochSec) return '-'
   return new Date(epochSec * 1000).toLocaleString()
+}
+
+// generatePassword returns a random 16-character password for new accounts.
+// Look-alike characters (0/O, 1/l/I) are left out so it can be read aloud.
+function generatePassword(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  return Array.from(bytes, b => chars[b % chars.length]).join('')
+}
+
+// copyText copies to the clipboard. The dev host is plain http, where
+// navigator.clipboard is unavailable, so fall back to execCommand.
+async function copyText(text: string): Promise<boolean> {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text)
+      return true
+    } catch {
+      // fall through to the legacy path
+    }
+  }
+  const el = document.createElement('textarea')
+  el.value = text
+  el.setAttribute('readonly', '')
+  el.style.position = 'fixed'
+  el.style.opacity = '0'
+  document.body.appendChild(el)
+  el.select()
+  const ok = document.execCommand('copy')
+  document.body.removeChild(el)
+  return ok
 }
 
 // Sentinel selected value that triggers the "create new studio" prompt.
@@ -61,10 +92,13 @@ export default function Users() {
   const myRole = me?.role ?? 0
 
   const [newUsername, setNewUsername] = useState('')
-  const [newPassword, setNewPassword] = useState('')
+  const [newPassword, setNewPassword] = useState(generatePassword)
   const [newRole, setNewRole] = useState<number>(ROLE_USER)
   const [newStudio, setNewStudio] = useState('')
   const [creating, setCreating] = useState(false)
+  // Credentials of the account just created, shown until dismissed so the
+  // operator can copy them for the new user.
+  const [created, setCreated] = useState<{ username: string; password: string; studio: string } | null>(null)
 
   const [studios, setStudios] = useState<string[]>([])
 
@@ -104,14 +138,15 @@ export default function Users() {
     }
     setCreating(true)
     try {
-      await api.createUser({
+      const user = await api.createUser({
         username: newUsername.trim(),
         password: newPassword,
         role: newRole,
         studio: newStudio.trim(),
       })
+      setCreated({ username: user.username, password: newPassword, studio: user.studio })
       setNewUsername('')
-      setNewPassword('')
+      setNewPassword(generatePassword())
       setNewRole(ROLE_USER)
       setNewStudio('')
       await reload()
@@ -260,14 +295,24 @@ export default function Users() {
               onChange={e => setNewUsername(e.target.value)}
               autoComplete="off"
             />
-            <input
-              className="rounded-md border border-gray-300 px-3 py-2 text-sm"
-              placeholder="Password"
-              type="password"
-              value={newPassword}
-              onChange={e => setNewPassword(e.target.value)}
-              autoComplete="new-password"
-            />
+            <div className="flex gap-1">
+              <input
+                className="min-w-0 flex-1 rounded-md border border-gray-300 px-3 py-2 text-sm font-mono"
+                placeholder="Password"
+                value={newPassword}
+                onChange={e => setNewPassword(e.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <button
+                type="button"
+                title="Generate a new password"
+                onClick={() => setNewPassword(generatePassword())}
+                className="rounded-md border border-gray-300 px-2 text-xs text-gray-600 hover:bg-gray-50"
+              >
+                ↻
+              </button>
+            </div>
             <select
               className="rounded-md border border-gray-300 px-3 py-2 text-sm bg-white"
               value={newRole}
@@ -285,7 +330,7 @@ export default function Users() {
               value={newStudio}
               onChange={e => handleSelectNewStudio(e.target.value)}
             >
-              <option value="">Studio: (no access for user-tier)</option>
+              <option value="">Studio: (same as username)</option>
               {studios.map(s => <option key={s} value={s}>{s}</option>)}
               <option value={NEW_STUDIO_SENTINEL}>+ Create new studio…</option>
             </select>
@@ -300,11 +345,45 @@ export default function Users() {
           </div>
           <p className="text-xs text-gray-400 mt-2">
             Studio binds a User-role or Studio Operator account to channels
-            whose tag matches it. Without a studio binding, a User sees no
-            channels, and a Studio Operator can't batch-create (returns 400).
-            Admin / super admin ignore studio. Add new studios by creating
-            channels with that tag in Key Capacity → Batch create.
+            whose tag matches it. Left empty, a non-admin account gets its
+            username as its studio. Admin / super admin ignore studio. Add new
+            studios by creating channels with that tag in Key Capacity → Batch
+            create. The password is generated; edit it or press ↻ for another.
           </p>
+          {created && (
+            <div className="mt-3 flex flex-wrap items-center gap-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm">
+              <span className="text-green-800">Created</span>
+              <span>
+                Username <span className="font-mono">{created.username}</span>
+              </span>
+              <span>
+                Password <span className="font-mono">{created.password}</span>
+              </span>
+              {created.studio && (
+                <span>
+                  Studio <span className="font-mono">{created.studio}</span>
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={async () => {
+                  const ok = await copyText(`用户名：${created.username}\n密码：${created.password}`)
+                  if (ok) toast.success('已复制用户名和密码')
+                  else toast.error('复制失败，请手动复制')
+                }}
+                className="rounded-md bg-brand px-3 py-1 text-xs font-medium text-white hover:bg-brand-700"
+              >
+                Copy username &amp; password
+              </button>
+              <button
+                type="button"
+                onClick={() => setCreated(null)}
+                className="ml-auto text-xs text-gray-500 hover:text-gray-700"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
         </section>
         )}
 

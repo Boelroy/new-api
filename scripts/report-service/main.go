@@ -2234,6 +2234,11 @@ func handleUserCreate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 50, or 100"})
 		return
 	}
+	// A non-admin account created without a studio gets its own username as
+	// the studio, so it is scoped to itself instead of seeing nothing.
+	if body.Studio == "" && body.Role < minAdminRole {
+		body.Studio = body.Username
+	}
 	// Anti-escalation on create: an admin (non-super) can only mint accounts
 	// at a strictly lower tier. Super admin can create any tier.
 	callerRoleAny, _ := c.Get("role")
