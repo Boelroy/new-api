@@ -3896,6 +3896,11 @@ func handleRemoteCachedChannels(c *gin.Context) {
 	// channel id (the created id is reverse-looked-up by sha8 and may land on
 	// a stale duplicate — see the 3664→41294 case), which silently hid
 	// channels. Tag-based matching is immune to that drift.
+	//
+	// Some remotes drop the tag on channel create (profile "leo" keeps every
+	// tag empty), so an untagged mirror row falls back to the pending
+	// attribution. A tagged row is never claimed through that fallback, which
+	// keeps a drifted pending id from exposing another studio's channel.
 	q := `SELECT remote_channel_id, name, type, status, "group", tag,
 	             priority, weight, models, used_quota, created_time, updated_at
 	        FROM remote_channel_current
@@ -3907,7 +3912,7 @@ func handleRemoteCachedChannels(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "your account has no studio binding; ask an admin to bind one before viewing channels"})
 			return
 		}
-		q += " AND tag = $" + strconv.Itoa(len(args)+1)
+		q += " AND " + studioOwnedChannelCond("$"+strconv.Itoa(len(args)+1))
 		args = append(args, studio)
 	}
 	q += " ORDER BY remote_channel_id DESC"
@@ -5784,6 +5789,16 @@ func handleRemoteChannelUsageRange(c *gin.Context) {
 	})
 }
 
+// studioOwnedChannelCond is the remote_channel_current filter for the channels
+// a studio owns on the profile bound as $1: rows tagged with the studio, plus
+// untagged rows its pending queue created. studioParam is the placeholder
+// bound to the studio.
+func studioOwnedChannelCond(studioParam string) string {
+	return `(tag = ` + studioParam + ` OR (COALESCE(tag, '') = '' AND remote_channel_id IN (
+		SELECT remote_channel_id FROM remote_pending_key
+		 WHERE profile_id = $1 AND tag = ` + studioParam + ` AND remote_channel_id > 0)))`
+}
+
 // resolveUsageRangeChannelIDs enforces studio-operator scoping. If the
 // caller supplied channel_ids we intersect them with the operator's
 // owned set (same filter as handleRemoteCachedChannels); admin callers
@@ -5819,9 +5834,10 @@ func resolveUsageRangeChannelIDs(c *gin.Context, profileID int64, requested []in
 	// Match by the mirror's own tag (set to the studio at upload) instead of
 	// joining remote_pending_key by remote_channel_id — the pending attribution
 	// id can drift from the live channel id (see handleRemoteCachedChannels),
-	// which silently dropped channels from usage/test/delete scope.
+	// which silently dropped channels from usage/test/delete scope. Untagged
+	// rows fall back to the pending attribution (see handleRemoteCachedChannels).
 	rows, err := db.Query(
-		`SELECT remote_channel_id FROM remote_channel_current WHERE profile_id=$1 AND tag=$2`,
+		`SELECT remote_channel_id FROM remote_channel_current WHERE profile_id=$1 AND `+studioOwnedChannelCond("$2"),
 		profileID, studio,
 	)
 	if err != nil {

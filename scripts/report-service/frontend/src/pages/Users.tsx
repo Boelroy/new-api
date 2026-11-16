@@ -22,6 +22,14 @@ function roleLabel(role: number): string {
   return ROLE_OPTIONS.find(o => o.value === role)?.label ?? `Role ${role}`
 }
 
+// roleTabLabel drops the parenthesised description, e.g. "Admin".
+function roleTabLabel(role: number): string {
+  return roleLabel(role).split(' (')[0]
+}
+
+// Users tab: every account, or one role.
+type RoleTab = 'all' | number
+
 function formatTime(epochSec: number): string {
   if (!epochSec) return '-'
   return new Date(epochSec * 1000).toLocaleString()
@@ -83,6 +91,7 @@ export default function Users() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<number | null>(null)
+  const [roleTab, setRoleTab] = useState<RoleTab>('all')
 
   // Super admin gets full CRUD including role/studio edits and PATCH.
   // Admin+ can create/delete/disable/reset users strictly below their tier
@@ -272,6 +281,15 @@ export default function Users() {
     }
   }
 
+  // One tab per role that has accounts, highest tier first; a role left
+  // empty by an edit keeps its tab while selected.
+  const roleCounts = new Map<number, number>()
+  for (const u of users) roleCounts.set(u.role, (roleCounts.get(u.role) ?? 0) + 1)
+  const tabRoles = [...roleCounts.keys()]
+  if (roleTab !== 'all' && !roleCounts.has(roleTab)) tabRoles.push(roleTab)
+  tabRoles.sort((a, b) => b - a)
+  const visibleUsers = roleTab === 'all' ? users : users.filter(u => u.role === roleTab)
+
   return (
     <Layout
       title="Users"
@@ -389,7 +407,9 @@ export default function Users() {
 
         <section className="rounded-lg border border-gray-200 bg-white">
           <div className="border-b border-gray-100 px-4 py-3 flex items-center justify-between">
-            <h2 className="text-sm font-medium text-gray-900">All users</h2>
+            <h2 className="text-sm font-medium text-gray-900">
+              {roleTab === 'all' ? 'All users' : roleTabLabel(roleTab)}
+            </h2>
             <button
               type="button"
               onClick={reload}
@@ -397,6 +417,19 @@ export default function Users() {
             >
               Refresh
             </button>
+          </div>
+          <div className="flex flex-wrap border-b border-gray-200 px-2">
+            {(['all', ...tabRoles] as RoleTab[]).map(t => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setRoleTab(t)}
+                className={`px-3 py-2 text-sm border-b-2 -mb-px transition-colors ${roleTab === t ? 'border-brand text-brand font-semibold' : 'border-transparent text-gray-500 hover:text-gray-900'}`}
+              >
+                {t === 'all' ? 'All' : roleTabLabel(t)}
+                <span className="ml-1 text-xs text-gray-400">{t === 'all' ? users.length : roleCounts.get(t) ?? 0}</span>
+              </button>
+            ))}
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
@@ -415,9 +448,9 @@ export default function Users() {
               <tbody className="divide-y divide-gray-100">
                 {loading ? (
                   <tr><td colSpan={8} className="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
-                ) : users.length === 0 ? (
+                ) : visibleUsers.length === 0 ? (
                   <tr><td colSpan={8} className="px-4 py-6 text-center text-gray-400">No users yet.</td></tr>
-                ) : users.map(u => {
+                ) : visibleUsers.map(u => {
                   const isSelf = me?.user_id === u.id
                   const disabled = busyId === u.id
                   return (
