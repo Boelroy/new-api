@@ -69,7 +69,7 @@ function ConfigCard() {
 
   const toggles: { key: 'uploads' | 'priority' | 'stream_rise' | 'rate_limit_rise'; label: string }[] = [
     { key: 'uploads', label: '上号（谁上了几个号、OpenAI Tier）' },
-    { key: 'priority', label: '优先级调整（手动 + 429 调优 + 断流守卫）' },
+    { key: 'priority', label: '手动调整优先级' },
     { key: 'stream_rise', label: '断流上升' },
     { key: 'rate_limit_rise', label: '429 上升' },
   ]

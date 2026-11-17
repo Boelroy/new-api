@@ -4,8 +4,8 @@ package main
 // hear about without watching every page —
 //
 //   - 上号: who uploaded keys and, for local OpenAI keys, at which tier;
-//   - 优先级: who changed channel priorities (manual edits are recorded in
-//     rs_notify_event) and what the 429 tuner / stream guard did;
+//   - 优先级: who changed channel priorities by hand (recorded in
+//     rs_notify_event); the automatic schedulers are left out;
 //   - 断流上升 / 429 上升: a model's stream-failure or 429 rate in the last
 //     window against the window before it.
 //
@@ -361,55 +361,7 @@ func opsPriorityLines(ctx context.Context, from, to int64) ([]string, error) {
 		}
 	}
 	rows.Close()
-	lines := manual.render("个渠道")
-
-	var tuner []string
-	rows, err = db.QueryContext(ctx, `SELECT action, COUNT(*) FROM rs_channel_priority_event
-		WHERE NOT dry_run AND action <> 'error' AND created_at > $1 AND created_at <= $2 GROUP BY 1 ORDER BY 1`, from, to)
-	if err != nil {
-		return nil, err
-	}
-	actionLabel := map[string]string{"demote": "降级", "promote": "回升", "restore": "复位"}
-	for rows.Next() {
-		var action string
-		var n int64
-		if err := rows.Scan(&action, &n); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		tuner = append(tuner, fmt.Sprintf("%s %d", cmp.Or(actionLabel[action], action), n))
-	}
-	rows.Close()
-	if len(tuner) > 0 {
-		lines = append(lines, "· 429 自动调优："+strings.Join(tuner, "、"))
-	}
-
-	var guard opsLineAgg
-	rows, err = db.QueryContext(ctx, `SELECT model, COUNT(*) FROM rs_stream_guard_event
-		WHERE created_at > $1 AND created_at <= $2 GROUP BY 1 ORDER BY 2 DESC`, from, to)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var model string
-		var n int64
-		if err := rows.Scan(&model, &n); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		guard.add("断流守卫 下线/降级", n, model, n)
-	}
-	rows.Close()
-	lines = append(lines, guard.render("个")...)
-	var restored int64
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM rs_stream_guard_event
-		WHERE restored_at > $1 AND restored_at <= $2`, from, to).Scan(&restored); err != nil {
-		return nil, err
-	}
-	if restored > 0 {
-		lines = append(lines, fmt.Sprintf("· 断流守卫 恢复 %d 个", restored))
-	}
-	return lines, nil
+	return manual.render("个渠道"), nil
 }
 
 func opsClockRange(from, to int64) string {
