@@ -7,7 +7,9 @@ package main
 //   - 优先级: who changed channel priorities by hand (recorded in
 //     rs_notify_event); the automatic schedulers are left out;
 //   - 断流上升 / 429 上升: a model's stream-failure or 429 rate in the last
-//     window against the window before it.
+//     window against the window before it;
+//   - 用量变化: overall / per-model RPM dropping or jumping against the
+//     window before it.
 //
 // Every window (default 10 min) the leader compresses the uploads and
 // priority changes of that window into one digest message, and checks the
@@ -45,6 +47,14 @@ type opsNotifyConfig struct {
 	Priority      bool `json:"priority"`
 	StreamRise    bool `json:"stream_rise"`
 	RateLimitRise bool `json:"rate_limit_rise"`
+	// RPM change: overall and per-model successful requests per minute in the
+	// window against the baseline. A drop to (100-RPMDropPct)% or less, or a
+	// rise to RPMRisePct% or more, alerts when the busier side reaches
+	// RPMMinBase requests/min.
+	RPMChange  bool `json:"rpm_change"`
+	RPMDropPct int  `json:"rpm_drop_pct"`
+	RPMRisePct int  `json:"rpm_rise_pct"`
+	RPMMinBase int  `json:"rpm_min_base"`
 
 	// A rate has risen when the last window's rate is at least RisePct% of
 	// the rate over the BaselineMin minutes before it.
@@ -72,6 +82,7 @@ const (
 var opsNotifyDefaults = opsNotifyConfig{
 	Enabled: true, WindowMin: 10,
 	Uploads: true, Priority: true, StreamRise: true, RateLimitRise: true,
+	RPMChange: true, RPMDropPct: 50, RPMRisePct: 200, RPMMinBase: 30,
 	BaselineMin: 10, RisePct: 200,
 	StreamMinStreams: 50, StreamMinFailed: 10, StreamMinRatePct: 3,
 	RLMinCount: 30, RLMinRatePct: 5, DedupeMin: 60,
@@ -89,6 +100,9 @@ func (c opsNotifyConfig) clamp() opsNotifyConfig {
 	c.RLMinCount = clampInt(c.RLMinCount, 1, 1000000)
 	c.RLMinRatePct = clampInt(c.RLMinRatePct, 0, 100)
 	c.DedupeMin = clampInt(c.DedupeMin, 1, 7*24*60)
+	c.RPMDropPct = clampInt(c.RPMDropPct, 1, 100)
+	c.RPMRisePct = clampInt(c.RPMRisePct, 101, 100000)
+	c.RPMMinBase = clampInt(c.RPMMinBase, 1, 1000000)
 	return c
 }
 
@@ -614,6 +628,106 @@ func runOpsRiseCheck(ctx context.Context, cfg opsNotifyConfig, chk opsRiseCheck,
 	return b.String(), nil
 }
 
+// ---- RPM / spend change ----
+
+// rpmRow is one model's (or "全部") successful requests and quota in the
+// window and the baseline before it.
+type rpmRow struct {
+	Model     string
+	CurReq    int64
+	BaseReq   int64
+	CurQuota  int64
+	BaseQuota int64
+}
+
+// rpmVerdict returns the rows whose requests per minute dropped or rose past
+// the configured ratios, biggest RPM first. up tells which way each moved.
+func rpmVerdict(cfg opsNotifyConfig, rows []rpmRow) (hits []rpmRow, up []bool) {
+	for _, r := range rows {
+		cur := float64(r.CurReq) / float64(cfg.WindowMin)
+		base := float64(r.BaseReq) / float64(cfg.BaselineMin)
+		switch {
+		case base >= float64(cfg.RPMMinBase) && cur*100 <= base*float64(100-cfg.RPMDropPct):
+			hits, up = append(hits, r), append(up, false)
+		case cur >= float64(cfg.RPMMinBase) && cur*100 >= base*float64(cfg.RPMRisePct):
+			hits, up = append(hits, r), append(up, true)
+		}
+	}
+	return hits, up
+}
+
+func changePct(cur, base float64) string {
+	if base <= 0 {
+		return "新增"
+	}
+	d := (cur - base) * 100 / base
+	if d >= 0 {
+		return fmt.Sprintf("↑%.0f%%", d)
+	}
+	return fmt.Sprintf("↓%.0f%%", -d)
+}
+
+// runOpsRPMCheck returns the alert body, "" when no RPM moved (or every mover
+// alerted within the dedupe period). Both windows end opsNotifyDigestLag
+// before now: a request is logged when it finishes, so the last minute is
+// always short and would read as a drop.
+func runOpsRPMCheck(ctx context.Context, cfg opsNotifyConfig, now int64) (string, error) {
+	end := now - opsNotifyDigestLag
+	curStart := end - int64(cfg.WindowMin)*60
+	baseStart := curStart - int64(cfg.BaselineMin)*60
+	rows, err := db.QueryContext(ctx, `SELECT l.model_name, l.created_at >= $2, COUNT(*), COALESCE(SUM(l.quota), 0)
+		FROM logs l WHERE l.created_at >= $1 AND l.created_at < $3 AND l.type = 2 GROUP BY 1, 2`, baseStart, curStart, end)
+	if err != nil {
+		return "", err
+	}
+	all := rpmRow{Model: "全部"}
+	byModel := map[string]*rpmRow{}
+	for rows.Next() {
+		var model string
+		var cur bool
+		var n, quota int64
+		if err := rows.Scan(&model, &cur, &n, &quota); err != nil {
+			rows.Close()
+			return "", err
+		}
+		r := byModel[model]
+		if r == nil {
+			r = &rpmRow{Model: model}
+			byModel[model] = r
+		}
+		if cur {
+			r.CurReq, r.CurQuota = r.CurReq+n, r.CurQuota+quota
+			all.CurReq, all.CurQuota = all.CurReq+n, all.CurQuota+quota
+		} else {
+			r.BaseReq, r.BaseQuota = r.BaseReq+n, r.BaseQuota+quota
+			all.BaseReq, all.BaseQuota = all.BaseReq+n, all.BaseQuota+quota
+		}
+	}
+	rows.Close()
+	list := []rpmRow{all}
+	for _, r := range byModel {
+		list = append(list, *r)
+	}
+	slices.SortStableFunc(list[1:], func(a, b rpmRow) int {
+		return int(max(b.CurReq, b.BaseReq) - max(a.CurReq, a.BaseReq))
+	})
+
+	hits, up := rpmVerdict(cfg, list)
+	var b strings.Builder
+	for i, r := range hits {
+		dir := map[bool]string{true: "up", false: "down"}[up[i]]
+		if !opsAlertDue("rpm|"+dir+"|"+r.Model, time.Duration(cfg.DedupeMin)*time.Minute) {
+			continue
+		}
+		cur := float64(r.CurReq) / float64(cfg.WindowMin)
+		base := float64(r.BaseReq) / float64(cfg.BaselineMin)
+		curQ := float64(r.CurQuota) / float64(cfg.WindowMin)
+		baseQ := float64(r.BaseQuota) / float64(cfg.BaselineMin)
+		fmt.Fprintf(&b, "· %s RPM %.0f → %.0f %s，消耗 %s\n", r.Model, base, cur, changePct(cur, base), changePct(curQ, baseQ))
+	}
+	return strings.TrimRight(b.String(), "\n"), nil
+}
+
 // ---- Delivery + loop ----
 
 // deliverOpsMessage stores the message for the 通知 page and pushes it to
@@ -691,6 +805,15 @@ func runOpsNotifyTick(ctx context.Context, cfg opsNotifyConfig, force bool) (int
 		if body != "" {
 			title := fmt.Sprintf("【%s】最近 %d 分钟 vs 前 %d 分钟", chk.title, cfg.WindowMin, cfg.BaselineMin)
 			deliverOpsMessage(cfg, chk.kind, title, body)
+			sent++
+		}
+	}
+	if cfg.RPMChange {
+		if body, err := runOpsRPMCheck(ctx, cfg, now); err != nil {
+			errs = append(errs, fmt.Errorf("rpm: %w", err))
+		} else if body != "" {
+			title := fmt.Sprintf("【用量变化】最近 %d 分钟 vs 前 %d 分钟", cfg.WindowMin, cfg.BaselineMin)
+			deliverOpsMessage(cfg, "rpm_change", title, body)
 			sent++
 		}
 	}

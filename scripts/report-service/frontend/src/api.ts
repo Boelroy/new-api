@@ -652,6 +652,10 @@ export type OpsNotifyConfig = {
   priority: boolean
   stream_rise: boolean
   rate_limit_rise: boolean
+  rpm_change: boolean
+  rpm_drop_pct: number
+  rpm_rise_pct: number
+  rpm_min_base: number
   baseline_min: number
   rise_pct: number
   stream_min_streams: number
@@ -664,7 +668,7 @@ export type OpsNotifyConfig = {
 
 export type OpsNotifyMessage = {
   id: number
-  category: 'digest' | 'stream_rise' | 'rate_limit_rise' | string
+  category: 'digest' | 'stream_rise' | 'rate_limit_rise' | 'rpm_change' | string
   title: string
   body: string
   pushed: boolean

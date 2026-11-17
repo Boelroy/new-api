@@ -15,6 +15,7 @@ const CATEGORIES: { value: string; label: string; cls: string }[] = [
   { value: 'digest', label: '上号 / 优先级', cls: 'bg-blue-50 text-blue-700' },
   { value: 'stream_rise', label: '断流上升', cls: 'bg-rose-50 text-rose-700' },
   { value: 'rate_limit_rise', label: '429 上升', cls: 'bg-amber-50 text-amber-700' },
+  { value: 'rpm_change', label: '用量变化', cls: 'bg-violet-50 text-violet-700' },
 ]
 
 function fmtTime(unix: number): string {
@@ -67,11 +68,12 @@ function ConfigCard() {
 
   if (!cfg) return <Card className="p-5"><div className="text-xs text-gray-400">加载中…</div></Card>
 
-  const toggles: { key: 'uploads' | 'priority' | 'stream_rise' | 'rate_limit_rise'; label: string }[] = [
+  const toggles: { key: 'uploads' | 'priority' | 'stream_rise' | 'rate_limit_rise' | 'rpm_change'; label: string }[] = [
     { key: 'uploads', label: '上号（谁上了几个号、OpenAI Tier）' },
     { key: 'priority', label: '手动调整优先级' },
     { key: 'stream_rise', label: '断流上升' },
     { key: 'rate_limit_rise', label: '429 上升' },
+    { key: 'rpm_change', label: 'RPM / 消耗突降突升' },
   ]
   const webhookDirty = webhook.trim() !== cfg.webhook
   return (
@@ -125,6 +127,12 @@ function ConfigCard() {
           onSave={n => void save({ rl_min_count: n })} />
         <NumField key={`rr${rev}`} label="429：最低占比 (%)" value={cfg.rl_min_rate_pct} min={0} max={100}
           hint="429 / (成功 + 429)" onSave={n => void save({ rl_min_rate_pct: n })} />
+        <NumField key={`pd${rev}`} label="RPM：下降幅度 (%)" value={cfg.rpm_drop_pct} min={1} max={100}
+          hint="50 = 降到基线一半以下" onSave={n => void save({ rpm_drop_pct: n })} />
+        <NumField key={`pu${rev}`} label="RPM：上升倍数 (%)" value={cfg.rpm_rise_pct} min={101} max={100000}
+          hint="200 = 涨到基线 2 倍" onSave={n => void save({ rpm_rise_pct: n })} />
+        <NumField key={`pm${rev}`} label="RPM：最低 RPM" value={cfg.rpm_min_base} min={1} max={1000000}
+          hint="下降看基线、上升看当前，低于此值不报" onSave={n => void save({ rpm_min_base: n })} />
       </div>
       <p className="text-[11px] text-gray-400 mt-3">只在 leader 节点执行。没有新动态、没有上升时不发消息。</p>
     </Card>
@@ -166,7 +174,7 @@ export default function Notifications() {
   return (
     <Layout
       title="Notifications"
-      subtitle="上号、优先级调整按窗口汇总；断流率 / 429 占比相比基线上升时告警"
+      subtitle="上号、手动调优先级按窗口汇总；断流率 / 429 占比上升、RPM 突降突升时告警"
       actions={<Button size="sm" variant="outline" onClick={() => void runNow()} disabled={running}>{running ? '检查中…' : '立即汇总'}</Button>}
     >
       <div className="space-y-4">

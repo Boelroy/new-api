@@ -15,7 +15,7 @@ func TestRiseVerdict(t *testing.T) {
 		row  riseRow
 		want bool
 	}{
-		{"doubled", riseRow{"m", 500, 50, 3000, 150}, true},    // 10% vs 5%
+		{"doubled", riseRow{"m", 500, 50, 3000, 150}, true},      // 10% vs 5%
 		{"not doubled", riseRow{"m", 500, 40, 3000, 150}, false}, // 8% vs 5%
 		{"no baseline hits", riseRow{"m", 200, 10, 3000, 0}, true},
 		{"no baseline traffic", riseRow{"m", 200, 10, 0, 0}, true},
@@ -42,4 +42,31 @@ func TestOpsLineAggCompresses(t *testing.T) {
 		"· alice 本地 OpenAI 4 个：T4×2 T5×1 未测×1",
 		"· bob 远程 p1 Anthropic 5 个",
 	}, agg.render("个"))
+}
+
+// RPM alerts on a drop to half or a doubling, and only when the busier side
+// carries at least RPMMinBase requests per minute.
+func TestRPMVerdict(t *testing.T) {
+	cfg := opsNotifyDefaults // 10 min window + 10 min baseline, -50% / 200%, min 30 rpm
+	cases := []struct {
+		name string
+		row  rpmRow
+		want string
+	}{
+		{"steady", rpmRow{Model: "m", CurReq: 1000, BaseReq: 1100}, ""},
+		{"halved", rpmRow{Model: "m", CurReq: 500, BaseReq: 1000}, "down"},
+		{"stopped", rpmRow{Model: "m", CurReq: 0, BaseReq: 1000}, "down"},
+		{"small model halved", rpmRow{Model: "m", CurReq: 100, BaseReq: 290}, ""},
+		{"doubled", rpmRow{Model: "m", CurReq: 2000, BaseReq: 1000}, "up"},
+		{"new model", rpmRow{Model: "m", CurReq: 400, BaseReq: 0}, "up"},
+		{"small new model", rpmRow{Model: "m", CurReq: 200, BaseReq: 0}, ""},
+	}
+	for _, tc := range cases {
+		hits, up := rpmVerdict(cfg, []rpmRow{tc.row})
+		got := ""
+		if len(hits) == 1 {
+			got = map[bool]string{true: "up", false: "down"}[up[0]]
+		}
+		assert.Equal(t, tc.want, got, tc.name)
+	}
 }
