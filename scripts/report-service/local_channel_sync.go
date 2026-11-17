@@ -58,10 +58,14 @@ func channelTypeLabel(t int) string {
 	switch t {
 	case 1:
 		return "OpenAI"
+	case 3:
+		return "Azure"
 	case 14:
 		return "Anthropic"
 	case 24:
 		return "Gemini"
+	case 33:
+		return "AWS Bedrock"
 	case 41:
 		return "Vertex AI"
 	default:

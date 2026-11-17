@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"embed"
@@ -3535,6 +3536,20 @@ func handleBatchCreateChannels(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	createdIDs := make([]int64, len(results))
+	for i, r := range results {
+		createdIDs[i] = int64(r.ID)
+	}
+	recordOpsEvent(c, opsEventChannelCreate, opsChannelCreate{Studio: studio, Type: storedType, IDs: createdIDs})
+	// Probe OpenAI tiers now rather than on the next key-tier tick, so the
+	// 运维通知 digest can already say which tier the new keys are.
+	if storedType == 1 {
+		go func() {
+			if _, err := probeKeyTiers(context.Background(), `AND c.id = ANY($1)`, pq.Array(createdIDs)); err != nil {
+				log.Printf("[key-tier] probe new channels: %v", err)
+			}
+		}()
+	}
 	c.JSON(http.StatusOK, gin.H{"created": results, "count": len(results)})
 }
 
@@ -3695,6 +3710,24 @@ func handleBatchUpdateChannelPriority(c *gin.Context) {
 	// ANY($n) operator; passing a bare []int surfaces as
 	// "unsupported type []int, a slice of int".
 	ids := pq.Array(payload.ChannelIDs)
+	// Previous priorities, for the 运维通知 digest ("1001×28 → 5").
+	from := map[string]int64{}
+	prev, err := tx.Query(`SELECT priority, COUNT(*) FROM channels WHERE id = ANY($1) GROUP BY 1`, ids)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	for prev.Next() {
+		var prio sql.NullInt64
+		var n int64
+		if err := prev.Scan(&prio, &n); err != nil {
+			prev.Close()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		from[strconv.FormatInt(prio.Int64, 10)] = n
+	}
+	prev.Close()
 	res, err := tx.Exec(`UPDATE channels SET priority=$1 WHERE id = ANY($2)`, payload.Priority, ids)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("update channels: %v", err)})
@@ -3709,6 +3742,7 @@ func handleBatchUpdateChannelPriority(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	recordOpsEvent(c, opsEventPrioritySet, opsPrioritySet{To: int64(payload.Priority), Count: int(updated), From: from})
 	c.JSON(http.StatusOK, gin.H{"updated": updated, "priority": payload.Priority})
 }
 
@@ -5093,6 +5127,27 @@ func main() {
 		`ALTER TABLE rs_key_tier ADD COLUMN IF NOT EXISTS disabled_at BIGINT NOT NULL DEFAULT 0`,
 		`ALTER TABLE rs_key_tier ADD COLUMN IF NOT EXISTS main_model TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE rs_key_tier ADD COLUMN IF NOT EXISTS main_limit_tpm BIGINT NOT NULL DEFAULT 0`,
+		// 运维通知 (ops_notify.go): operator actions waiting for the next
+		// digest, and every message sent (the 通知 page).
+		`CREATE TABLE IF NOT EXISTS rs_notify_event (
+			id         BIGSERIAL PRIMARY KEY,
+			kind       TEXT   NOT NULL,
+			actor_id   BIGINT NOT NULL DEFAULT 0,
+			actor      TEXT   NOT NULL DEFAULT '',
+			detail     TEXT   NOT NULL DEFAULT '',
+			created_at BIGINT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_notify_event_kind_time ON rs_notify_event(kind, created_at)`,
+		`CREATE TABLE IF NOT EXISTS rs_notify_message (
+			id         BIGSERIAL PRIMARY KEY,
+			category   TEXT    NOT NULL,
+			title      TEXT    NOT NULL,
+			body       TEXT    NOT NULL,
+			pushed     BOOLEAN NOT NULL DEFAULT FALSE,
+			push_error TEXT    NOT NULL DEFAULT '',
+			created_at BIGINT  NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_notify_message_time ON rs_notify_message(created_at)`,
 	} {
 		if _, err = db.Exec(ddl); err != nil {
 			log.Fatalf("Failed to create table: %v", err)
@@ -5142,6 +5197,7 @@ func main() {
 	startChannelPriorityLoop()
 	startKeyTierLoop()
 	startStreamGuardLoop()
+	startOpsNotifyLoop()
 	startRemoteModelCooldownLoop()
 	startRemoteErrorLogSync()
 	startRemoteAutoDisableLoop()
@@ -5430,6 +5486,11 @@ func main() {
 	adminAPI.POST("/stream-guard/config", handleStreamGuardConfigSet)
 	adminAPI.GET("/stream-guard/events", handleStreamGuardEvents)
 	adminAPI.POST("/stream-guard/restore", handleStreamGuardRestore)
+	adminAPI.GET("/ops-notify/config", handleOpsNotifyConfigGet)
+	adminAPI.POST("/ops-notify/config", handleOpsNotifyConfigSet)
+	adminAPI.GET("/ops-notify/messages", handleOpsNotifyMessages)
+	adminAPI.POST("/ops-notify/run", handleOpsNotifyRun)
+	adminAPI.POST("/ops-notify/test", handleOpsNotifyTest)
 	// Key Tester: admin+, tester (role=5), studio_operator (role=2),
 	// remote_studio_operator (role=3), and project_admin (role=7). Tester
 	// is scoped to Key Tester + Provider Testing (see the testingAPI group

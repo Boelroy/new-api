@@ -15,6 +15,7 @@ import ErrorCenter from './pages/ErrorCenter'
 import ModelHealth from './pages/ModelHealth'
 import ModelCleanup from './pages/ModelCleanup'
 import Scheduling from './pages/Scheduling'
+import Notifications from './pages/Notifications'
 import RemoteChannels from './pages/RemoteChannels'
 import LocalChannelSync from './pages/LocalChannelSync'
 import LocalToRemoteSync from './pages/LocalToRemoteSync'
@@ -106,6 +107,7 @@ export default function App() {
         <Route path="/model-health" element={<RoleGate min={ROLE_ADMIN}><ModelHealth /></RoleGate>} />
         <Route path="/model-cleanup" element={<RoleGate min={ROLE_ADMIN}><ModelCleanup /></RoleGate>} />
         <Route path="/scheduling" element={<RoleGate min={ROLE_ADMIN}><Scheduling /></RoleGate>} />
+        <Route path="/notifications" element={<RoleGate min={ROLE_ADMIN}><Notifications /></RoleGate>} />
         <Route path="/channel-priority" element={<Navigate to="/scheduling?tab=priority" replace />} />
         <Route path="/remote-model-cooldown" element={<Navigate to="/scheduling?tab=cooldown" replace />} />
         <Route path="/testing" element={<RoleGate allow={r => r >= ROLE_SUPER_ADMIN || r === ROLE_TESTER}><ProviderTesting /></RoleGate>} />

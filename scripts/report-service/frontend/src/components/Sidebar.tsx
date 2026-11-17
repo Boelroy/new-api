@@ -17,7 +17,7 @@ const GROUP_LABELS: Record<SidebarGroup, string> = {
 const NAV_ORDER = [
   '/', '/profit', '/billing', '/cache', '/errors', '/model-health',
   '/keys', '/allkeys', '/tester', '/remote-channels', '/pool-upload',
-  '/local-sync', '/local-remote-sync', '/model-cleanup', '/scheduling', '/users', '/settings', '/testing',
+  '/local-sync', '/local-remote-sync', '/model-cleanup', '/scheduling', '/notifications', '/users', '/settings', '/testing',
   '/supplier-accounts',
 ]
 function navIndex(to: string): number {
@@ -44,6 +44,7 @@ const NAV_COLORS: Record<string, string> = {
   '/local-remote-sync': '#0EA5E9', // Local→Remote Sync — sky
   '/model-cleanup': '#DC2626', // Model Cleanup — red
   '/scheduling': '#EA580C', // Scheduling (cooldown / priority / stream guard) — orange-600
+  '/notifications': '#E11D48', // Notifications — rose-600
   '/users': '#8B5CF6',       // User — violet
   '/settings': '#64748B',    // Settings — slate
   '/testing': '#14B8A6',     // Provider Testing — teal
@@ -243,6 +244,17 @@ const SCHEDULING_ITEM: Item = {
   ),
 }
 
+// 运维通知: upload / priority digests and stream-failure / 429 rise alerts.
+const NOTIFICATIONS_ITEM: Item = {
+  to: '/notifications', label: 'Notifications', group: 'admin',
+  icon: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+      <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+    </svg>
+  ),
+}
+
 const USERS_ITEM: Item = {
   to: '/users', label: 'User', group: 'admin',
   icon: (
@@ -305,7 +317,7 @@ export function baselineItemsFor(role: number, flags: SidebarFlags): Item[] {
     const items: Item[] = [
       USAGE_REPORT_ITEM, BILLING_ITEM, CACHE_REPORT_ITEM, ERROR_CENTER_ITEM, MODEL_HEALTH_ITEM,
       KEY_CAPACITY_ITEM, ALL_KEYS_ITEM, KEY_TESTER_ITEM, REMOTE_CHANNELS_ITEM,
-      LOCAL_SYNC_ITEM, LOCAL_TO_REMOTE_SYNC_ITEM, MODEL_CLEANUP_ITEM, SCHEDULING_ITEM, USERS_ITEM,
+      LOCAL_SYNC_ITEM, LOCAL_TO_REMOTE_SYNC_ITEM, MODEL_CLEANUP_ITEM, SCHEDULING_ITEM, NOTIFICATIONS_ITEM, USERS_ITEM,
     ]
     if (showSupplier) items.push(SUPPLIER_ACCOUNTS_ITEM)
     if (role >= ROLE_SUPER_ADMIN) {

@@ -643,6 +643,35 @@ export type StreamGuardEvent = {
   model_present: boolean
 }
 
+// 运维通知 settings (report_config ops_notify_config).
+export type OpsNotifyConfig = {
+  enabled: boolean
+  webhook: string
+  window_min: number
+  uploads: boolean
+  priority: boolean
+  stream_rise: boolean
+  rate_limit_rise: boolean
+  baseline_min: number
+  rise_pct: number
+  stream_min_streams: number
+  stream_min_failed: number
+  stream_min_rate_pct: number
+  rl_min_count: number
+  rl_min_rate_pct: number
+  dedupe_min: number
+}
+
+export type OpsNotifyMessage = {
+  id: number
+  category: 'digest' | 'stream_rise' | 'rate_limit_rise' | string
+  title: string
+  body: string
+  pushed: boolean
+  push_error: string
+  created_at: number
+}
+
 // Operator-tunable stream guard settings (report_config stream_guard_config).
 export type StreamGuardConfig = {
   enabled: boolean
@@ -2101,6 +2130,22 @@ export const api = {
 
   keyTierGuardDisabled: () =>
     request<{ items: { channel_id: number; channel_name: string; channel_status: number; tier: number; limit_rpm: number; limit_tpm: number; disabled_at: number }[] }>('/api/key-tier-guard/disabled'),
+
+  opsNotifyConfig: () => request<OpsNotifyConfig>('/api/ops-notify/config'),
+
+  saveOpsNotifyConfig: (patch: Partial<OpsNotifyConfig>) =>
+    request<OpsNotifyConfig>('/api/ops-notify/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }),
+
+  opsNotifyMessages: (category?: string) =>
+    request<{ items: OpsNotifyMessage[] }>(`/api/ops-notify/messages${category ? `?category=${encodeURIComponent(category)}` : ''}`),
+
+  runOpsNotify: () => request<{ sent: number }>('/api/ops-notify/run', { method: 'POST' }),
+
+  testOpsNotify: () => request<{ ok: boolean }>('/api/ops-notify/test', { method: 'POST' }),
 
   streamGuardConfig: () => request<StreamGuardConfig>('/api/stream-guard/config'),
 

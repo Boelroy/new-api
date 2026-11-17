@@ -4670,6 +4670,7 @@ func handleRemoteChannelUpdate(c *gin.Context) {
 	// field was provided. Status goes through its own endpoint.
 	remoteChanged := body.Name != nil || body.Tag != nil ||
 		body.Priority != nil || body.Group != nil || body.Models != nil
+	var prevPriority *float64
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
 	defer cancel()
@@ -4695,6 +4696,10 @@ func handleRemoteChannelUpdate(c *gin.Context) {
 			current["tag"] = *body.Tag
 		}
 		if body.Priority != nil {
+			// new-api returns priority as a JSON number (decoded as float64).
+			if old, ok := current["priority"].(float64); ok && int64(old) != *body.Priority {
+				prevPriority = &old
+			}
 			current["priority"] = *body.Priority
 		}
 		if body.Group != nil {
@@ -4706,6 +4711,10 @@ func handleRemoteChannelUpdate(c *gin.Context) {
 		if err := remotePutChannel(ctx, host, token, userID, current); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "update: " + err.Error()})
 			return
+		}
+		if prevPriority != nil {
+			recordOpsEvent(c, opsEventPrioritySet, opsPrioritySet{ProfileID: body.ProfileID, To: *body.Priority, Count: 1,
+				From: map[string]int64{strconv.FormatInt(int64(*prevPriority), 10): 1}})
 		}
 	}
 	if body.Status != nil {
