@@ -27,6 +27,7 @@ import (
 	"log"
 	"maps"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -730,13 +731,95 @@ func runOpsRPMCheck(ctx context.Context, cfg opsNotifyConfig, now int64) (string
 
 // ---- Delivery + loop ----
 
+var opsCardHeader = map[string]struct{ icon, color string }{
+	"digest":          {"📋", "blue"},
+	"stream_rise":     {"⚠️", "red"},
+	"rate_limit_rise": {"🚦", "orange"},
+	"rpm_change":      {"📈", "violet"},
+}
+
+var (
+	larkMDEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;",
+		"*", "&#42;", "_", "&#95;", "~", "&sim;", "`", "&#96;")
+	opsChangeRe = regexp.MustCompile(`[↑↓]\d+%`)
+)
+
+// opsLarkMD escapes a body line for lark_md, bolds its first word (the
+// actor or model) and colours ↓N% red and ↑N% green.
+func opsLarkMD(line string) string {
+	first, rest, _ := strings.Cut(line, " ")
+	out := "**" + larkMDEscaper.Replace(first) + "**"
+	if rest != "" {
+		out += " " + larkMDEscaper.Replace(rest)
+	}
+	return opsChangeRe.ReplaceAllStringFunc(out, func(m string) string {
+		color := "green"
+		if strings.HasPrefix(m, "↓") {
+			color = "red"
+		}
+		return "<font color='" + color + "'>" + m + "</font>"
+	})
+}
+
+// opsLarkCard renders a stored message as a Lark interactive card: the
+// title in a coloured header, every section of the body as its own block
+// split by rules ("· " lines become bullets, indented lines grey detail),
+// and the 整体 summary plus the send time in the footer.
+func opsLarkCard(category, title, body string) map[string]any {
+	head := cmp.Or(opsCardHeader[category], opsCardHeader["digest"])
+	label, when := title, ""
+	if rest, ok := strings.CutPrefix(title, "【"); ok {
+		label, when, _ = strings.Cut(rest, "】")
+	}
+	var elements []any
+	var block []string
+	footer := []string{}
+	for line := range strings.SplitSeq(body, "\n") {
+		switch {
+		case strings.HasPrefix(line, "· "):
+			block = append(block, "• "+opsLarkMD(strings.TrimPrefix(line, "· ")))
+		case strings.HasPrefix(line, "  "):
+			block = append(block, "　　<font color='grey'>"+larkMDEscaper.Replace(strings.TrimSpace(line))+"</font>")
+		case strings.HasPrefix(line, "整体 "):
+			footer = append(footer, line)
+		case strings.TrimSpace(line) == "":
+		default:
+			if len(block) > 0 {
+				elements = append(elements, map[string]any{"tag": "div", "text": map[string]any{"tag": "lark_md", "content": strings.Join(block, "\n")}},
+					map[string]any{"tag": "hr"})
+				block = nil
+			}
+			block = append(block, "**"+larkMDEscaper.Replace(line)+"**")
+		}
+	}
+	if len(block) > 0 {
+		elements = append(elements, map[string]any{"tag": "div", "text": map[string]any{"tag": "lark_md", "content": strings.Join(block, "\n")}})
+	}
+	footer = append(footer, "report-service 运维通知 · "+time.Now().In(supplierPortalLoc).Format("01-02 15:04"))
+	elements = append(elements, map[string]any{"tag": "note", "elements": []any{
+		map[string]any{"tag": "plain_text", "content": strings.Join(footer, "  |  ")},
+	}})
+	headerText := head.icon + " " + label
+	if when != "" {
+		headerText += " · " + when
+	}
+	return map[string]any{
+		"msg_type": "interactive",
+		"card": map[string]any{
+			"config":   map[string]any{"wide_screen_mode": true},
+			"header":   map[string]any{"template": head.color, "title": map[string]any{"tag": "plain_text", "content": headerText}},
+			"elements": elements,
+		},
+	}
+}
+
 // deliverOpsMessage stores the message for the 通知 page and pushes it to
 // Lark when a webhook is set.
 func deliverOpsMessage(cfg opsNotifyConfig, category, title, body string) {
 	pushErr := ""
 	pushed := false
 	if cfg.Webhook != "" {
-		if err := postLark(cfg.Webhook, title+"\n"+body); err != nil {
+		if err := postLarkPayload(cfg.Webhook, opsLarkCard(category, title, body)); err != nil {
 			pushErr = err.Error()
 			log.Printf("[ops-notify] push %s: %v", category, err)
 		} else {
@@ -912,7 +995,7 @@ func handleOpsNotifyTest(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "webhook 未配置"})
 		return
 	}
-	if err := postLark(cfg.Webhook, "【运维通知】测试消息，webhook 可用"); err != nil {
+	if err := postLarkPayload(cfg.Webhook, opsLarkCard("digest", "【运维通知】测试消息", "· webhook 可用")); err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}

@@ -559,10 +559,16 @@ func sendLarkTo(webhook, msg string) {
 // statuses and Lark's own non-zero error codes, for callers that surface the
 // result (e.g. a "push now" button).
 func postLark(webhook, msg string) error {
-	body, _ := json.Marshal(map[string]any{
+	return postLarkPayload(webhook, map[string]any{
 		"msg_type": "text",
 		"content":  map[string]string{"text": msg},
 	})
+}
+
+// postLarkPayload posts any Lark bot message body (text, interactive card)
+// with the same error reporting as postLark.
+func postLarkPayload(webhook string, payload any) error {
+	body, _ := json.Marshal(payload)
 	resp, err := http.Post(webhook, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
