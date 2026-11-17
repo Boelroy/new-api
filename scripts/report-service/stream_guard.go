@@ -394,8 +394,9 @@ var (
 )
 
 // restoreStreamGuardEvent undoes one guard action: puts the model back on the
-// channel (channels.models + one ability row per channel group) and raises the
-// priority back to what it was before the event, if it is still lower. It
+// channel (channels.models + one ability row per channel group) and, for a
+// demotion, raises the priority back to what it was before the event, if it
+// is still lower. It
 // returns the channel's priority afterwards.
 func restoreStreamGuardEvent(ctx context.Context, id int64) (int64, error) {
 	tx, err := db.BeginTx(ctx, nil)
@@ -428,7 +429,13 @@ func restoreStreamGuardEvent(ctx context.Context, id int64) (int64, error) {
 		}
 		return 0, err
 	}
-	newPriority := max(priority.Int64, oldPriority)
+	// Only a demotion is undone on priority. A strip-only event (tier cooldown)
+	// never moved it, and its old_priority may be hours stale by now: raising
+	// to it would overwrite whatever an operator set in between.
+	newPriority := priority.Int64
+	if strings.Contains(action, "demote") {
+		newPriority = max(priority.Int64, oldPriority)
+	}
 	if strings.Contains(action, "strip_model") && !slices.Contains(csvSplitModels(models), model) {
 		if _, err := tx.ExecContext(ctx, `UPDATE channels SET models = $1 WHERE id = $2`,
 			csvJoinModels(append(csvSplitModels(models), model)), channelID); err != nil {
