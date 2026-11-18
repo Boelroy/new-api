@@ -206,11 +206,14 @@ func opsThirdPartySpend(ctx context.Context, day string, start, end time.Time) (
 		q.Set("start_timestamp", strconv.FormatInt(start.Unix(), 10))
 		q.Set("end_timestamp", strconv.FormatInt(end.Unix()-1, 10))
 		st, body, err := keyhubProxy(http.MethodGet, "/api/provider/keyhub-usage/dashboard/overview?"+q.Encode(), nil)
+		// The overview ignores the range for its summary (all-time); the
+		// per-day series carries the day. Amounts are decimal strings.
 		var env struct {
 			Data struct {
-				Summary struct {
-					RawCostUSD float64 `json:"raw_cost_usd"`
-				} `json:"summary"`
+				Series []struct {
+					UsageDate  string `json:"usage_date"`
+					RawCostUSD string `json:"raw_cost_usd"`
+				} `json:"series"`
 			} `json:"data"`
 		}
 		switch {
@@ -220,8 +223,12 @@ func opsThirdPartySpend(ctx context.Context, day string, start, end time.Time) (
 			notes = append(notes, "KHub 获取失败："+keyhubErr(body))
 		case json.Unmarshal(body, &env) != nil:
 			notes = append(notes, "KHub 返回无法解析")
-		case env.Data.Summary.RawCostUSD > 0:
-			items = append(items, opsSpendItem{name: "KHub", usd: env.Data.Summary.RawCostUSD})
+		default:
+			for _, p := range env.Data.Series {
+				if usd, _ := strconv.ParseFloat(p.RawCostUSD, 64); p.UsageDate == day && usd > 0 {
+					items = append(items, opsSpendItem{name: "KHub", usd: usd})
+				}
+			}
 		}
 	}
 
