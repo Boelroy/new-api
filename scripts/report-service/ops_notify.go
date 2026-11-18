@@ -11,8 +11,8 @@ package main
 //   - 用量变化: overall / per-model RPM dropping or jumping against the
 //     window before it.
 //
-// Every window (default 10 min) the leader compresses the uploads and
-// priority changes of that window into one digest message, and checks the
+// Every window (default 10 min) the leader compresses the uploads and the
+// priority changes of that window into one card each, and checks the
 // rates. A rise is reported once per model per dedupe period. Each message is
 // stored in rs_notify_message (the 通知 page) and, with a webhook set, pushed
 // to Lark.
@@ -222,13 +222,14 @@ func opsActor(name string, id int64) string {
 	return "未知用户"
 }
 
-func opsUploadLines(ctx context.Context, from, to int64) ([]string, error) {
+func opsUploadLines(ctx context.Context, from, to int64) ([]string, opsTotals, error) {
 	var agg opsLineAgg
+	totals := opsTotals{}
 
 	rows, err := db.QueryContext(ctx, `SELECT actor_id, actor, detail FROM rs_notify_event
 		WHERE kind = $1 AND created_at > $2 AND created_at <= $3 ORDER BY id`, opsEventChannelCreate, from, to)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	type created struct {
 		actor string
@@ -241,7 +242,7 @@ func opsUploadLines(ctx context.Context, from, to int64) ([]string, error) {
 		var name, raw string
 		if err := rows.Scan(&id, &name, &raw); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, nil, err
 		}
 		var ev opsChannelCreate
 		if json.Unmarshal([]byte(raw), &ev) != nil {
@@ -257,13 +258,13 @@ func opsUploadLines(ctx context.Context, from, to int64) ([]string, error) {
 	if len(openaiIDs) > 0 {
 		rows, err := db.QueryContext(ctx, `SELECT channel_id, tier FROM rs_key_tier WHERE channel_id = ANY($1) AND tier IS NOT NULL`, pq.Array(openaiIDs))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for rows.Next() {
 			var id, tier int64
 			if err := rows.Scan(&id, &tier); err != nil {
 				rows.Close()
-				return nil, err
+				return nil, nil, err
 			}
 			tiers[id] = tier
 		}
@@ -276,6 +277,7 @@ func opsUploadLines(ctx context.Context, from, to int64) ([]string, error) {
 		}
 		if cr.ev.Type != 1 {
 			agg.add(head, int64(len(cr.ev.IDs)), "", 0)
+			totals[channelTypeLabel(cr.ev.Type)] += int64(len(cr.ev.IDs))
 			continue
 		}
 		for _, id := range cr.ev.IDs {
@@ -285,6 +287,7 @@ func opsUploadLines(ctx context.Context, from, to int64) ([]string, error) {
 			}
 			agg.add(head, 1, part, 1)
 		}
+		totals[channelTypeLabel(cr.ev.Type)] += int64(len(cr.ev.IDs))
 	}
 
 	// Uploads the other flows already attribute to their uploader.
@@ -307,7 +310,7 @@ func opsUploadLines(ctx context.Context, from, to int64) ([]string, error) {
 	for _, src := range sources {
 		rows, err := db.QueryContext(ctx, src.query, from, to)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for rows.Next() {
 			var id, n int64
@@ -315,7 +318,7 @@ func opsUploadLines(ctx context.Context, from, to int64) ([]string, error) {
 			var chType int
 			if err := rows.Scan(&id, &name, &what, &chType, &n); err != nil {
 				rows.Close()
-				return nil, err
+				return nil, nil, err
 			}
 			head := opsActor(name, id) + " "
 			if src.label != "" {
@@ -326,13 +329,19 @@ func opsUploadLines(ctx context.Context, from, to int64) ([]string, error) {
 				head += " " + channelTypeLabel(chType)
 			}
 			agg.add(head, n, "", 0)
+			dest := strings.TrimPrefix(what, "远程 ")
+			if src.label == "CC Max" {
+				dest = src.label
+			}
+			totals[dest] += n
 		}
 		rows.Close()
 	}
-	return agg.render("个"), nil
+	return agg.render("个"), totals, nil
 }
 
-func opsPriorityLines(ctx context.Context, from, to int64) ([]string, error) {
+func opsPriorityLines(ctx context.Context, from, to int64) ([]string, int64, error) {
+	var total int64
 	profiles := map[int64]string{}
 	if rows, err := db.QueryContext(ctx, `SELECT id, name FROM remote_newapi_profile`); err == nil {
 		for rows.Next() {
@@ -349,14 +358,14 @@ func opsPriorityLines(ctx context.Context, from, to int64) ([]string, error) {
 	rows, err := db.QueryContext(ctx, `SELECT actor_id, actor, detail FROM rs_notify_event
 		WHERE kind = $1 AND created_at > $2 AND created_at <= $3 ORDER BY id`, opsEventPrioritySet, from, to)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	for rows.Next() {
 		var id int64
 		var name, raw string
 		if err := rows.Scan(&id, &name, &raw); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, 0, err
 		}
 		var ev opsPrioritySet
 		if json.Unmarshal([]byte(raw), &ev) != nil {
@@ -369,14 +378,16 @@ func opsPriorityLines(ctx context.Context, from, to int64) ([]string, error) {
 		head := fmt.Sprintf("%s %s → %d", opsActor(name, id), scope, ev.To)
 		if len(ev.From) == 0 {
 			manual.add(head, int64(ev.Count), "", 0)
+			total += int64(ev.Count)
 			continue
 		}
 		for prio, n := range ev.From {
 			manual.add(head, n, "原 "+prio, n)
+			total += n
 		}
 	}
 	rows.Close()
-	return manual.render("个渠道"), nil
+	return manual.render("个渠道"), total, nil
 }
 
 func opsClockRange(from, to int64) string {
@@ -384,41 +395,32 @@ func opsClockRange(from, to int64) string {
 	return f.Format("01-02 15:04") + "–" + t.Format("15:04")
 }
 
-func buildOpsDigest(ctx context.Context, cfg opsNotifyConfig, from, to int64) (string, error) {
-	type section struct {
-		title string
-		lines []string
-	}
-	var sections []section
-	if cfg.Uploads {
-		lines, err := opsUploadLines(ctx, from, to)
-		if err != nil {
-			return "", fmt.Errorf("uploads: %w", err)
+// opsTotals counts uploads per destination (OpenAI, CC Max, a remote
+// profile…) for the card title, e.g. "aaasl ×10 · OpenAI ×4".
+type opsTotals map[string]int64
+
+func (t opsTotals) String() string {
+	keys := slices.Collect(maps.Keys(t))
+	slices.SortFunc(keys, func(x, y string) int {
+		if t[x] != t[y] {
+			return int(t[y] - t[x])
 		}
-		sections = append(sections, section{"上号", lines})
+		return strings.Compare(x, y)
+	})
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = fmt.Sprintf("%s ×%d", k, t[k])
 	}
-	if cfg.Priority {
-		lines, err := opsPriorityLines(ctx, from, to)
-		if err != nil {
-			return "", fmt.Errorf("priority: %w", err)
-		}
-		sections = append(sections, section{"优先级", lines})
+	return strings.Join(parts, " · ")
+}
+
+// opsDigestBody joins digest lines, capped at opsDigestMaxLines, and ends
+// with the covered period (rendered in the card footer).
+func opsDigestBody(lines []string, from, to int64) string {
+	if len(lines) > opsDigestMaxLines {
+		lines = append(lines[:opsDigestMaxLines:opsDigestMaxLines], fmt.Sprintf("· …另 %d 条", len(lines)-opsDigestMaxLines))
 	}
-	var b strings.Builder
-	for _, s := range sections {
-		if len(s.lines) == 0 {
-			continue
-		}
-		b.WriteString(s.title + "\n")
-		for i, l := range s.lines {
-			if i == opsDigestMaxLines {
-				fmt.Fprintf(&b, "· …另 %d 条\n", len(s.lines)-i)
-				break
-			}
-			b.WriteString(l + "\n")
-		}
-	}
-	return strings.TrimRight(b.String(), "\n"), nil
+	return strings.Join(lines, "\n") + "\n时段 " + opsClockRange(from, to)
 }
 
 // ---- Rising stream-failure / 429 rates ----
@@ -732,6 +734,8 @@ func runOpsRPMCheck(ctx context.Context, cfg opsNotifyConfig, now int64) (string
 // ---- Delivery + loop ----
 
 var opsCardHeader = map[string]struct{ icon, color string }{
+	"upload":          {"🔑", "blue"},
+	"priority":        {"🎚️", "indigo"},
 	"digest":          {"📋", "blue"},
 	"stream_rise":     {"⚠️", "red"},
 	"rate_limit_rise": {"🚦", "orange"},
@@ -766,7 +770,7 @@ func opsLarkMD(line string) string {
 // split by rules ("· " lines become bullets, indented lines grey detail),
 // and the 整体 summary plus the send time in the footer.
 func opsLarkCard(category, title, body string) map[string]any {
-	head := cmp.Or(opsCardHeader[category], opsCardHeader["digest"])
+	head := cmp.Or(opsCardHeader[category], opsCardHeader["upload"])
 	label, when := title, ""
 	if rest, ok := strings.CutPrefix(title, "【"); ok {
 		label, when, _ = strings.Cut(rest, "】")
@@ -780,7 +784,7 @@ func opsLarkCard(category, title, body string) map[string]any {
 			block = append(block, "• "+opsLarkMD(strings.TrimPrefix(line, "· ")))
 		case strings.HasPrefix(line, "  "):
 			block = append(block, "　　<font color='grey'>"+larkMDEscaper.Replace(strings.TrimSpace(line))+"</font>")
-		case strings.HasPrefix(line, "整体 "):
+		case strings.HasPrefix(line, "整体 "), strings.HasPrefix(line, "时段 "):
 			footer = append(footer, line)
 		case strings.TrimSpace(line) == "":
 		default:
@@ -873,11 +877,21 @@ func runOpsNotifyTick(ctx context.Context, cfg opsNotifyConfig, force bool) (int
 	to := now - opsNotifyDigestLag
 	sent := 0
 	var errs []error
-	if body, err := buildOpsDigest(ctx, cfg, from, to); err != nil {
-		errs = append(errs, err)
-	} else if body != "" {
-		deliverOpsMessage(cfg, "digest", "【运维动态】"+opsClockRange(from, to), body)
-		sent++
+	if cfg.Uploads {
+		if lines, totals, err := opsUploadLines(ctx, from, to); err != nil {
+			errs = append(errs, fmt.Errorf("uploads: %w", err))
+		} else if len(lines) > 0 {
+			deliverOpsMessage(cfg, "upload", "【上号】"+totals.String(), opsDigestBody(lines, from, to))
+			sent++
+		}
+	}
+	if cfg.Priority {
+		if lines, total, err := opsPriorityLines(ctx, from, to); err != nil {
+			errs = append(errs, fmt.Errorf("priority: %w", err))
+		} else if len(lines) > 0 {
+			deliverOpsMessage(cfg, "priority", fmt.Sprintf("【优先级调整】%d 个渠道", total), opsDigestBody(lines, from, to))
+			sent++
+		}
 	}
 	for _, chk := range opsRiseChecks(cfg) {
 		body, err := runOpsRiseCheck(ctx, cfg, chk, now)
@@ -995,7 +1009,7 @@ func handleOpsNotifyTest(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "webhook 未配置"})
 		return
 	}
-	if err := postLarkPayload(cfg.Webhook, opsLarkCard("digest", "【运维通知】测试消息", "· webhook 可用")); err != nil {
+	if err := postLarkPayload(cfg.Webhook, opsLarkCard("upload", "【运维通知】测试消息", "· webhook 可用")); err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}

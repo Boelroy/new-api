@@ -12,7 +12,8 @@ import { NumField } from './ChannelPriority'
 
 const CATEGORIES: { value: string; label: string; cls: string }[] = [
   { value: '', label: '全部', cls: '' },
-  { value: 'digest', label: '上号 / 优先级', cls: 'bg-blue-50 text-blue-700' },
+  { value: 'upload', label: '上号', cls: 'bg-blue-50 text-blue-700' },
+  { value: 'priority', label: '优先级调整', cls: 'bg-indigo-50 text-indigo-700' },
   { value: 'stream_rise', label: '断流上升', cls: 'bg-rose-50 text-rose-700' },
   { value: 'rate_limit_rise', label: '429 上升', cls: 'bg-amber-50 text-amber-700' },
   { value: 'rpm_change', label: '用量变化', cls: 'bg-violet-50 text-violet-700' },

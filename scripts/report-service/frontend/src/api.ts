@@ -668,7 +668,7 @@ export type OpsNotifyConfig = {
 
 export type OpsNotifyMessage = {
   id: number
-  category: 'digest' | 'stream_rise' | 'rate_limit_rise' | 'rpm_change' | string
+  category: 'upload' | 'priority' | 'stream_rise' | 'rate_limit_rise' | 'rpm_change' | string
   title: string
   body: string
   pushed: boolean
