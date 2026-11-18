@@ -656,6 +656,8 @@ export type OpsNotifyConfig = {
   rpm_drop_pct: number
   rpm_rise_pct: number
   rpm_min_base: number
+  daily_spend: boolean
+  daily_spend_hour: number
   baseline_min: number
   rise_pct: number
   stream_min_streams: number
@@ -668,7 +670,7 @@ export type OpsNotifyConfig = {
 
 export type OpsNotifyMessage = {
   id: number
-  category: 'upload' | 'priority' | 'stream_rise' | 'rate_limit_rise' | 'rpm_change' | string
+  category: 'upload' | 'priority' | 'stream_rise' | 'rate_limit_rise' | 'rpm_change' | 'daily_spend' | string
   title: string
   body: string
   pushed: boolean
@@ -2148,6 +2150,8 @@ export const api = {
     request<{ items: OpsNotifyMessage[] }>(`/api/ops-notify/messages${category ? `?category=${encodeURIComponent(category)}` : ''}`),
 
   runOpsNotify: () => request<{ sent: number }>('/api/ops-notify/run', { method: 'POST' }),
+
+  pushOpsDailySpend: () => request<{ ok: boolean; title: string }>('/api/ops-notify/daily-spend', { method: 'POST' }),
 
   testOpsNotify: () => request<{ ok: boolean }>('/api/ops-notify/test', { method: 'POST' }),
 

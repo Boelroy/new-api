@@ -70,3 +70,10 @@ func TestRPMVerdict(t *testing.T) {
 		assert.Equal(t, tc.want, got, tc.name)
 	}
 }
+
+func TestFmtUSD(t *testing.T) {
+	assert.Equal(t, "$0.00", fmtUSD(0))
+	assert.Equal(t, "$999.50", fmtUSD(999.5))
+	assert.Equal(t, "$1,234,567.89", fmtUSD(1234567.891))
+	assert.Equal(t, "-$1,000.00", fmtUSD(-1000))
+}

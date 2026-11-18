@@ -5497,6 +5497,7 @@ func main() {
 	adminAPI.GET("/ops-notify/messages", handleOpsNotifyMessages)
 	adminAPI.POST("/ops-notify/run", handleOpsNotifyRun)
 	adminAPI.POST("/ops-notify/test", handleOpsNotifyTest)
+	adminAPI.POST("/ops-notify/daily-spend", handleOpsDailySpendPush)
 	// Key Tester: admin+, tester (role=5), studio_operator (role=2),
 	// remote_studio_operator (role=3), and project_admin (role=7). Tester
 	// is scoped to Key Tester + Provider Testing (see the testingAPI group

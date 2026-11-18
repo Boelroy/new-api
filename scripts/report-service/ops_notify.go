@@ -56,6 +56,10 @@ type opsNotifyConfig struct {
 	RPMDropPct int  `json:"rpm_drop_pct"`
 	RPMRisePct int  `json:"rpm_rise_pct"`
 	RPMMinBase int  `json:"rpm_min_base"`
+	// 每日消耗: yesterday's spend (主站 / remote / 第三方), sent once the
+	// UTC+8 clock reaches DailySpendHour.
+	DailySpend     bool `json:"daily_spend"`
+	DailySpendHour int  `json:"daily_spend_hour"`
 
 	// A rate has risen when the last window's rate is at least RisePct% of
 	// the rate over the BaselineMin minutes before it.
@@ -84,6 +88,7 @@ var opsNotifyDefaults = opsNotifyConfig{
 	Enabled: true, WindowMin: 10,
 	Uploads: true, Priority: true, StreamRise: true, RateLimitRise: true,
 	RPMChange: true, RPMDropPct: 50, RPMRisePct: 200, RPMMinBase: 30,
+	DailySpend: true, DailySpendHour: 10,
 	BaselineMin: 10, RisePct: 200,
 	StreamMinStreams: 50, StreamMinFailed: 10, StreamMinRatePct: 3,
 	RLMinCount: 30, RLMinRatePct: 5, DedupeMin: 60,
@@ -104,6 +109,7 @@ func (c opsNotifyConfig) clamp() opsNotifyConfig {
 	c.RPMDropPct = clampInt(c.RPMDropPct, 1, 100)
 	c.RPMRisePct = clampInt(c.RPMRisePct, 101, 100000)
 	c.RPMMinBase = clampInt(c.RPMMinBase, 1, 1000000)
+	c.DailySpendHour = clampInt(c.DailySpendHour, 0, 23)
 	return c
 }
 
@@ -740,6 +746,7 @@ var opsCardHeader = map[string]struct{ icon, color string }{
 	"stream_rise":     {"⚠️", "red"},
 	"rate_limit_rise": {"🚦", "orange"},
 	"rpm_change":      {"📈", "violet"},
+	"daily_spend":     {"💰", "green"},
 }
 
 var (
@@ -929,6 +936,11 @@ func startOpsNotifyLoop() {
 			if cfg := loadOpsNotifyConfig(); cfg.Enabled && IsLeader() {
 				if _, err := runOpsNotifyTick(context.Background(), cfg, false); err != nil {
 					log.Printf("[ops-notify] tick: %v", err)
+				}
+				if cfg.DailySpend {
+					if err := runOpsDailySpend(context.Background(), cfg); err != nil {
+						log.Printf("[ops-notify] daily spend: %v", err)
+					}
 				}
 			}
 			time.Sleep(30 * time.Second)

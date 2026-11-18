@@ -17,6 +17,7 @@ const CATEGORIES: { value: string; label: string; cls: string }[] = [
   { value: 'stream_rise', label: '断流上升', cls: 'bg-rose-50 text-rose-700' },
   { value: 'rate_limit_rise', label: '429 上升', cls: 'bg-amber-50 text-amber-700' },
   { value: 'rpm_change', label: '用量变化', cls: 'bg-violet-50 text-violet-700' },
+  { value: 'daily_spend', label: '每日消耗', cls: 'bg-emerald-50 text-emerald-700' },
 ]
 
 function fmtTime(unix: number): string {
@@ -69,12 +70,13 @@ function ConfigCard() {
 
   if (!cfg) return <Card className="p-5"><div className="text-xs text-gray-400">加载中…</div></Card>
 
-  const toggles: { key: 'uploads' | 'priority' | 'stream_rise' | 'rate_limit_rise' | 'rpm_change'; label: string }[] = [
+  const toggles: { key: 'uploads' | 'priority' | 'stream_rise' | 'rate_limit_rise' | 'rpm_change' | 'daily_spend'; label: string }[] = [
     { key: 'uploads', label: '上号（谁上了几个号、OpenAI Tier）' },
     { key: 'priority', label: '手动调整优先级' },
     { key: 'stream_rise', label: '断流上升' },
     { key: 'rate_limit_rise', label: '429 上升' },
     { key: 'rpm_change', label: 'RPM / 消耗突降突升' },
+    { key: 'daily_spend', label: '每日消耗（主站 / Remote / 第三方）' },
   ]
   const webhookDirty = webhook.trim() !== cfg.webhook
   return (
@@ -128,6 +130,8 @@ function ConfigCard() {
           onSave={n => void save({ rl_min_count: n })} />
         <NumField key={`rr${rev}`} label="429：最低占比 (%)" value={cfg.rl_min_rate_pct} min={0} max={100}
           hint="429 / (成功 + 429)" onSave={n => void save({ rl_min_rate_pct: n })} />
+        <NumField key={`ds${rev}`} label="每日消耗推送时间 (UTC+8 点)" value={cfg.daily_spend_hour} min={0} max={23}
+          hint="到点后推送前一天的消耗" onSave={n => void save({ daily_spend_hour: n })} />
         <NumField key={`pd${rev}`} label="RPM：下降幅度 (%)" value={cfg.rpm_drop_pct} min={1} max={100}
           hint="50 = 降到基线一半以下" onSave={n => void save({ rpm_drop_pct: n })} />
         <NumField key={`pu${rev}`} label="RPM：上升倍数 (%)" value={cfg.rpm_rise_pct} min={101} max={100000}
@@ -159,6 +163,19 @@ export default function Notifications() {
     return () => clearInterval(t)
   }, [load])
 
+  const pushDailySpend = async () => {
+    setRunning(true)
+    try {
+      const { title } = await api.pushOpsDailySpend()
+      toast.success(title)
+      await load()
+    } catch (e) {
+      toast.error(e)
+    } finally {
+      setRunning(false)
+    }
+  }
+
   const runNow = async () => {
     setRunning(true)
     try {
@@ -176,7 +193,12 @@ export default function Notifications() {
     <Layout
       title="Notifications"
       subtitle="上号、手动调优先级按窗口汇总；断流率 / 429 占比上升、RPM 突降突升时告警"
-      actions={<Button size="sm" variant="outline" onClick={() => void runNow()} disabled={running}>{running ? '检查中…' : '立即汇总'}</Button>}
+      actions={
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" onClick={() => void pushDailySpend()} disabled={running}>推送昨日消耗</Button>
+          <Button size="sm" variant="outline" onClick={() => void runNow()} disabled={running}>{running ? '检查中…' : '立即汇总'}</Button>
+        </div>
+      }
     >
       <div className="space-y-4">
         <ConfigCard />
