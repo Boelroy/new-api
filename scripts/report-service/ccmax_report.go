@@ -13,6 +13,7 @@ package main
 // roster keep counting through their last snapshot.
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,6 +48,16 @@ type ccmaxReport struct {
 	MonthCostRMB float64
 	FxRate       float64
 	From, To     time.Time
+	// Per uploader (rs_ccmax_account.uploaded_by), most month cost first;
+	// accounts not uploaded through report-service are "(未归属)".
+	ByUploader []ccmaxUploaderStat
+}
+
+type ccmaxUploaderStat struct {
+	Name         string
+	Total        int
+	Serving      int
+	MonthCostRMB float64
 }
 
 // ccmaxParseReportHours parses "10,22" into sorted, de-duplicated hours 0..23.
@@ -147,6 +158,61 @@ func ccmaxReportText(r ccmaxReport) string {
 	return b.String()
 }
 
+// ccmaxReportCard renders the report as a Lark card: the headline numbers in
+// two columns, then a per-uploader table.
+func ccmaxReportCard(r ccmaxReport) map[string]any {
+	const layout = "01-02 15:04"
+	fx := r.FxRate
+	if fx <= 0 {
+		fx = supplierDefaultFxRate
+	}
+	field := func(label, value string) map[string]any {
+		return map[string]any{"is_short": true, "text": map[string]any{"tag": "lark_md", "content": "**" + label + "**\n" + value}}
+	}
+	elements := []any{
+		map[string]any{"tag": "div", "fields": []any{
+			field("本月消耗", fmt.Sprintf("%s（¥%.2f）", fmtUSD(r.MonthCostRMB/fx), r.MonthCostRMB)),
+			field("账号", fmt.Sprintf("%d 个，正在跑 %d", r.Total, r.Serving)),
+			field("5 小时窗口平均", fmt.Sprintf("%.1f%%", r.FiveHourAvg*100)),
+			field("7 天窗口平均", fmt.Sprintf("%.1f%%", r.WeekAvg*100)),
+		}},
+	}
+	if len(r.ByUploader) > 0 {
+		rows := make([]any, len(r.ByUploader))
+		for i, u := range r.ByUploader {
+			rows[i] = map[string]any{"name": u.Name, "total": u.Total, "serving": u.Serving,
+				"usd": math.Round(u.MonthCostRMB/fx*100) / 100, "rmb": math.Round(u.MonthCostRMB*100) / 100}
+		}
+		num := func(name, title, symbol string, precision int) map[string]any {
+			col := map[string]any{"name": name, "display_name": title, "data_type": "number", "horizontal_align": "right"}
+			if symbol != "" {
+				col["format"] = map[string]any{"symbol": symbol, "precision": precision}
+			}
+			return col
+		}
+		elements = append(elements, map[string]any{"tag": "hr"}, map[string]any{
+			"tag": "table", "page_size": min(len(rows), 10), "row_height": "low",
+			"header_style": map[string]any{"bold": true, "background_style": "grey"},
+			"columns": []any{
+				map[string]any{"name": "name", "display_name": "上号人", "data_type": "text"},
+				num("total", "账号", "", 0), num("serving", "正在跑", "", 0),
+				num("usd", "本月 USD", "$", 2), num("rmb", "本月 RMB", "¥", 2),
+			},
+			"rows": rows,
+		})
+	}
+	elements = append(elements, map[string]any{"tag": "note", "elements": []any{map[string]any{"tag": "plain_text",
+		"content": fmt.Sprintf("统计区间 %s ~ %s（UTC+8）· 汇率 %g · 正在跑 = 线上 / 使用中 / 绑定完成", r.From.Format(layout), r.To.Format(layout), fx)}}})
+	return map[string]any{
+		"msg_type": "interactive",
+		"card": map[string]any{
+			"config":   map[string]any{"wide_screen_mode": true},
+			"header":   map[string]any{"template": "orange", "title": map[string]any{"tag": "plain_text", "content": "🤖 CC Max 账号统计 · " + r.To.Format(layout)}},
+			"elements": elements,
+		},
+	}
+}
+
 // ccmaxBuildReport loads the whole claude roster, records today's cost
 // snapshot and computes the report as of now.
 func ccmaxBuildReport(now time.Time) (ccmaxReport, error) {
@@ -160,6 +226,21 @@ func ccmaxBuildReport(now time.Time) (ccmaxReport, error) {
 	now = now.In(supplierPortalLoc)
 	r := ccmaxReport{From: ccmaxMonthStart(now), To: now, FxRate: supplierFxRate()}
 
+	owner := map[int64]string{}
+	if rows, err := db.Query(`SELECT a.remote_account_id, COALESCE(u.username, '#' || a.uploaded_by::text)
+		FROM rs_ccmax_account a LEFT JOIN rs_auth_user u ON u.id = a.uploaded_by`); err == nil {
+		for rows.Next() {
+			var id int64
+			var name string
+			if rows.Scan(&id, &name) == nil {
+				owner[id] = name
+			}
+		}
+		rows.Close()
+	}
+	byUploader := map[string]*ccmaxUploaderStat{}
+	accountUploader := map[int64]*ccmaxUploaderStat{}
+
 	current := map[int64]int64{}
 	var fiveSum, weekSum float64
 	for _, raw := range raws {
@@ -169,7 +250,16 @@ func ccmaxBuildReport(now time.Time) (ccmaxReport, error) {
 		}
 		r.Total++
 		current[row.ID] = int64(math.Round(row.CostRMB * 1e6))
+		name := cmp.Or(owner[row.ID], "(未归属)")
+		st := byUploader[name]
+		if st == nil {
+			st = &ccmaxUploaderStat{Name: name}
+			byUploader[name] = st
+		}
+		accountUploader[row.ID] = st
+		st.Total++
 		if slices.Contains(ccmaxServingStatuses, row.Status) {
+			st.Serving++
 			r.Serving++
 			fiveSum += row.FiveHourUsedPercent
 			weekSum += row.WeekUsedPercent
@@ -185,10 +275,22 @@ func ccmaxBuildReport(now time.Time) (ccmaxReport, error) {
 		return ccmaxReport{}, err
 	}
 	var monthMicro int64
-	for _, cost := range monthCosts {
+	for id, cost := range monthCosts {
 		monthMicro += cost
+		if st := accountUploader[id]; st != nil {
+			st.MonthCostRMB += float64(cost) / 1e6
+		}
 	}
 	r.MonthCostRMB = float64(monthMicro) / 1e6
+	for _, st := range byUploader {
+		r.ByUploader = append(r.ByUploader, *st)
+	}
+	slices.SortFunc(r.ByUploader, func(a, b ccmaxUploaderStat) int {
+		if c := cmp.Compare(b.MonthCostRMB, a.MonthCostRMB); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
 	return r, nil
 }
 
@@ -242,7 +344,7 @@ func startCCMaxReportLoop() {
 			if webhook == "" || !slices.Contains(ccmaxReportHours(), now.Hour()) {
 				continue
 			}
-			if err := postLark(webhook, ccmaxReportText(r)); err != nil {
+			if err := postLarkPayload(webhook, ccmaxReportCard(r)); err != nil {
 				log.Printf("[ccmax-report] push: %v", err)
 			}
 		}
@@ -314,7 +416,7 @@ func handleCCMaxReportPush(c *gin.Context) {
 		return
 	}
 	text := ccmaxReportText(r)
-	if err := postLark(webhook, text); err != nil {
+	if err := postLarkPayload(webhook, ccmaxReportCard(r)); err != nil {
 		c.JSON(http.StatusFailedDependency, gin.H{"error": err.Error(), "text": text})
 		return
 	}
