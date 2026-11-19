@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import Layout from '../components/Layout'
+import SupplierRecordLog from '../components/SupplierRecordLog'
 import { withBase } from '../basePath'
 import {
   api,
@@ -1268,6 +1269,8 @@ export default function SupplierAccounts() {
           )}
         </section>
       </div>
+
+      <SupplierRecordLog isAdmin={isAdmin} />
     </Layout>
   )
 }

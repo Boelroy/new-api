@@ -805,6 +805,8 @@ func handleSupplierAccountCreate(c *gin.Context) {
 // "2006-01-02 15:04" in the portal's local time.
 type portalAccount struct {
 	ID           int64  `json:"id"`
+	A1ID         int64  `json:"a1_id"`
+	A2ID         int64  `json:"a2_id"`
 	AccountAlias string `json:"account_alias"`
 	AccountType  int    `json:"account_type"`
 	APIKey       string `json:"api_key"`
@@ -921,16 +923,19 @@ func handleSupplierAccountSync(c *gin.Context) {
 		if _, err := db.Exec(
 			`INSERT INTO rs_supplier_account
 			   (uploaded_by, studio, provider, models, remote_account_id, alias,
-			    account_type, remark, key_last8, key_hash, created_at, updated_at)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+			    account_type, remark, key_last8, key_hash, created_at, updated_at,
+			    a1_id, a2_id)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 			 ON CONFLICT (remote_account_id) DO UPDATE SET
 			    studio=EXCLUDED.studio,
 			    provider=EXCLUDED.provider, models=EXCLUDED.models,
 			    alias=EXCLUDED.alias, account_type=EXCLUDED.account_type,
 			    remark=EXCLUDED.remark, key_last8=EXCLUDED.key_last8,
-			    key_hash=EXCLUDED.key_hash, updated_at=EXCLUDED.updated_at`,
+			    key_hash=EXCLUDED.key_hash, updated_at=EXCLUDED.updated_at,
+			    a1_id=EXCLUDED.a1_id, a2_id=EXCLUDED.a2_id`,
 			uid, a.SupplierName, a.Provider, a.Model, a.ID, a.AccountAlias,
 			a.AccountType, a.Remark, last8, keyHash, created, now,
+			a.A1ID, a.A2ID,
 		); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record account: " + err.Error()})
 			return

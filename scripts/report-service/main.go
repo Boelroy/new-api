@@ -5327,6 +5327,10 @@ func main() {
 	supplierAPI.GET("/accounts", handleSupplierAccountList)
 	supplierAPI.POST("/accounts", handleSupplierAccountCreate)
 	supplierAPI.POST("/metrics", handleSupplierMetrics)
+	// Portal usage log (使用日志查询); suppliers are limited to their own accounts.
+	supplierAPI.GET("/record-log/accounts", handleSupplierRecordLogAccounts)
+	supplierAPI.POST("/record-log/list", handleSupplierRecordLogList)
+	supplierAPI.POST("/record-log/aggregate", handleSupplierRecordLogAggregate)
 	// Sync the portal's account roster into the local table, and per-account
 	// USD quota config — admin-only (further restricts the group's gate).
 	supplierAPI.POST("/sync", requireRole(minAdminRole), handleSupplierAccountSync)

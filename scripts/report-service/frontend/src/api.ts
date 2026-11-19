@@ -838,6 +838,52 @@ export type SupplierSettings = {
   default_rpm: string
 }
 
+// 账号上号 使用日志 (portal 使用日志查询). Platform account ids: a1_id on 1.0,
+// a2_id on 2.0 (0 = not assigned yet).
+export type SupplierRecordLogAccount = {
+  id: number
+  provider: string
+  alias: string
+  remark: string
+  a1_id: number
+  a2_id: number
+  username?: string
+}
+
+export type SupplierRecordLogFilter = {
+  platform_type: '1.0' | '2.0'
+  start_time: string
+  end_time?: string
+  provider?: string
+  model?: string
+  account_id?: number
+}
+
+export type SupplierRecordLogRow = {
+  id: number
+  req_time: string
+  account_id: number
+  account_name: string
+  provider_name: string
+  model_name: string
+  stream: number
+  prompt_tokens: number
+  completion_tokens: number
+  // RMB.
+  cost: number
+  duration_ms: number
+  status_code: number
+  err_code: string
+  err_msg: string
+}
+
+export type SupplierRecordLogAggregate = {
+  cost_cny: number
+  rpm: number
+  tpm: number
+  fx_rate: number
+}
+
 export type SupplierMetric = {
   aid: number
   account_alias: string
@@ -2288,6 +2334,23 @@ export const api = {
     arns?: Record<string, string>
   }) =>
     request<{ id: number; alias: string; msg: string }>('/api/supplier-account/accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  supplierRecordLogAccounts: () =>
+    request<{ accounts: SupplierRecordLogAccount[] }>('/api/supplier-account/record-log/accounts'),
+
+  supplierRecordLogList: (payload: SupplierRecordLogFilter & { page: number; page_size: number }) =>
+    request<{ list: SupplierRecordLogRow[]; total: number }>('/api/supplier-account/record-log/list', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  supplierRecordLogAggregate: (payload: SupplierRecordLogFilter) =>
+    request<SupplierRecordLogAggregate>('/api/supplier-account/record-log/aggregate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),

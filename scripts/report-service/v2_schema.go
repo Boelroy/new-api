@@ -99,6 +99,10 @@ var v2SchemaStatements = []string{
 	// idempotent ALTER so existing deployments migrate on startup.
 	`ALTER TABLE rs_supplier_account ADD COLUMN IF NOT EXISTS quota_usd DOUBLE PRECISION NOT NULL DEFAULT 0`,
 	`ALTER TABLE rs_supplier_account ADD COLUMN IF NOT EXISTS quota_alerted_at BIGINT NOT NULL DEFAULT 0`,
+	// Platform account ids (portal a1_id / a2_id, 0 = not assigned yet): the
+	// portal's usage-log query filters by these, not by remote_account_id.
+	`ALTER TABLE rs_supplier_account ADD COLUMN IF NOT EXISTS a1_id BIGINT NOT NULL DEFAULT 0`,
+	`ALTER TABLE rs_supplier_account ADD COLUMN IF NOT EXISTS a2_id BIGINT NOT NULL DEFAULT 0`,
 
 	// -- CC Max (Claude OAuth) ----------------------------------------------
 	// Pending OAuth logins (ccmax.go). One row per authorize URL handed out;
