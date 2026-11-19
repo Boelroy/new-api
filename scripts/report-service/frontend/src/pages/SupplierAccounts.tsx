@@ -58,6 +58,23 @@ function todayStart(): string {
   return fmtLocal(d)
 }
 
+function validAccountProxyUrl(value: string): boolean {
+  // URL normalizes paths, empty ports and some whitespace. Check the literal
+  // authority first so validation describes exactly what we send to the portal.
+  const proxyAuthority = /^(?:https?|socks5h?):\/\/[^\s/?#\\]+\/?$/i
+  const invalidEscapeOrControl = /%(?![0-9a-f]{2})|[\x00-\x1f\x7f]/i
+  if (!proxyAuthority.test(value) || invalidEscapeOrControl.test(value) || /:\/?$/.test(value)) {
+    return false
+  }
+  try {
+    const url = new URL(value)
+    if (!url.hostname || url.port === '0') return false
+    return !url.protocol.startsWith('socks') || Boolean(url.port)
+  } catch {
+    return false
+  }
+}
+
 function statusBadge(status: string) {
   const label = STATUS_LABELS[status] || status || '—'
   const tone =
@@ -93,6 +110,8 @@ export default function SupplierAccounts() {
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set())
   const [modelSearch, setModelSearch] = useState('')
   const [apiKey, setApiKey] = useState('')
+  const [proxyUrl, setProxyUrl] = useState('')
+  const [proxyRegion, setProxyRegion] = useState('')
   // Azure model endpoint URL, shared by every selected model. resource_name is
   // derived from its first hostname label upstream.
   const [modelUrl, setModelUrl] = useState('')
@@ -318,6 +337,13 @@ export default function SupplierAccounts() {
         return setSubmitErr(`第 ${shortIdx + 1} 个 API Key 长度不足 ${selectedProvider.key_min_len} 位`)
       }
     }
+    const accountProxyUrl = proxyUrl.trim()
+    const accountProxyRegion = proxyRegion.trim()
+    if (accountProxyUrl || accountProxyRegion) {
+      if (!accountProxyUrl) return setSubmitErr('请填写代理地址')
+      if (!validAccountProxyUrl(accountProxyUrl)) return setSubmitErr('代理地址格式不正确，请检查协议、主机和端口')
+      if (!accountProxyRegion) return setSubmitErr('请填写代理的实际出口地区')
+    }
     const urlVal = modelUrl.trim()
     if (isAzure) {
       if (!urlVal) return setSubmitErr('请填写模型 URL')
@@ -381,6 +407,9 @@ export default function SupplierAccounts() {
             provider,
             model: modelList.join(','),
             api_key: key,
+            proxy_type: accountProxyUrl ? 'bind_custom' : undefined,
+            proxy_region: accountProxyRegion || undefined,
+            proxy_url: accountProxyUrl || undefined,
             account_type: accountType,
             tpm: tpmVal || undefined,
             rpm: rpmVal || undefined,
@@ -408,6 +437,8 @@ export default function SupplierAccounts() {
         return
       }
       setApiKey('')
+      setProxyUrl('')
+      setProxyRegion('')
       setModelUrl('')
       setArns({})
       setAwsRegion('')
@@ -968,7 +999,7 @@ export default function SupplierAccounts() {
         {/* ---- Submit form ---- */}
         <section className="bg-white border border-gray-200 rounded-lg p-4 sm:p-5 h-fit">
           <h2 className="text-base font-semibold mb-1">提交 API 账号</h2>
-          <p className="text-[11px] text-gray-400 mb-4">支持「仅 API Key」、Azure（API Key + 模型 URL）及 AWS（API Key + 各模型 ARN）类型厂商；代理统一按代理池处理。</p>
+          <p className="text-[11px] text-gray-400 mb-4">支持「仅 API Key」、Azure（API Key + 模型 URL）及 AWS（API Key + 各模型 ARN）类型厂商。</p>
 
           <label className="block text-xs font-medium text-gray-600 mb-1">厂商 *</label>
           <select
@@ -1107,6 +1138,30 @@ export default function SupplierAccounts() {
               </p>
             </>
           )}
+
+          <fieldset disabled={submitting} className="mb-3">
+            <legend className="text-xs font-medium text-gray-600 mb-1">账号代理（可选）</legend>
+            <p className="text-[11px] text-gray-500 mb-2">留空使用门户代理池。自定义代理时填写以下两项，批量录入时所有账号共用。</p>
+            <label htmlFor="supplier-proxy-url" className="block text-xs text-gray-600 mb-1">代理地址</label>
+            <input
+              id="supplier-proxy-url"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              value={proxyUrl}
+              onChange={e => setProxyUrl(e.target.value)}
+              placeholder="socks5://user:pass@host:1080"
+              className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm font-mono mb-2"
+            />
+            <label htmlFor="supplier-proxy-region" className="block text-xs text-gray-600 mb-1">代理出口地区</label>
+            <input
+              id="supplier-proxy-region"
+              value={proxyRegion}
+              onChange={e => setProxyRegion(e.target.value)}
+              placeholder="例如：美国"
+              className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm"
+            />
+          </fieldset>
 
           <label className="block text-xs font-medium text-gray-600 mb-1">账号类型</label>
           <select
