@@ -75,9 +75,10 @@ func bindSupplierRecordLogFilter(c *gin.Context) (supplierRecordLogFilter, bool)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "start_time must be YYYY-MM-DD HH:MM:SS"})
 		return f, false
 	}
-	// The portal rejects a request without end_time; default to now.
+	// The portal rejects a request without end_time; default to an hour ahead
+	// (same as the page default).
 	if f.EndTime == "" {
-		f.EndTime = time.Now().In(supplierPortalLoc).Format(time.DateTime)
+		f.EndTime = time.Now().Add(time.Hour).In(supplierPortalLoc).Format(time.DateTime)
 	} else {
 		if _, err := time.Parse(time.DateTime, f.EndTime); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "end_time must be YYYY-MM-DD HH:MM:SS"})

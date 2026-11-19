@@ -25,6 +25,11 @@ function todayStart(): string {
   return fmtLocal(d)
 }
 
+// Default query end: an hour ahead, so a long-open page still covers new logs.
+function hourAhead(): string {
+  return fmtLocal(new Date(Date.now() + 3600_000))
+}
+
 function fmtTime(s: string): string {
   const d = new Date(s)
   return Number.isNaN(d.getTime()) ? s : fmtLocal(d)
@@ -40,7 +45,7 @@ export default function SupplierRecordLog({ isAdmin }: { isAdmin: boolean }) {
   const [accountId, setAccountId] = useState('')
   const [accountSearch, setAccountSearch] = useState('')
   const [startTime, setStartTime] = useState(todayStart())
-  const [endTime, setEndTime] = useState(fmtLocal(new Date()))
+  const [endTime, setEndTime] = useState(hourAhead())
   const [model, setModel] = useState('')
   const [page, setPage] = useState(1)
 
@@ -104,7 +109,7 @@ export default function SupplierRecordLog({ isAdmin }: { isAdmin: boolean }) {
 
   function resetToToday() {
     setStartTime(todayStart())
-    setEndTime(fmtLocal(new Date()))
+    setEndTime(hourAhead())
   }
 
   const fx = agg?.fx_rate || 7.2
