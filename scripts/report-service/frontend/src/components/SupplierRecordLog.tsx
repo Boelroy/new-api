@@ -9,8 +9,9 @@ import {
 
 // 使用日志 — the portal's 「使用日志查询」 proxied through report-service.
 // The portal filters by one platform account id (ID1.0 / ID2.0). Suppliers can
-// only pick their own accounts (enforced server-side); admins may leave the
-// account empty to query every account of the shared supplier login.
+// only pick their own accounts (enforced server-side); 「全部账号」 means all of
+// their own accounts for a supplier (server fans out per account) and every
+// account of the shared supplier login for an admin.
 
 const PAGE_SIZE = 50
 
@@ -77,18 +78,14 @@ export default function SupplierRecordLog({ isAdmin }: { isAdmin: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [accounts, platform])
 
-  async function runQuery(nextPage: number) {
+  async function runQuery(nextPage: number, account = accountId) {
     setErr(null)
-    if (!isAdmin && !accountId) {
-      setErr('请选择账号')
-      return
-    }
     const filter: SupplierRecordLogFilter = {
       platform_type: platform,
       start_time: startTime.trim(),
       end_time: endTime.trim() || undefined,
       model: model.trim() || undefined,
-      account_id: accountId ? Number(accountId) : undefined,
+      account_id: account ? Number(account) : undefined,
     }
     setLoading(true)
     try {
@@ -113,14 +110,16 @@ export default function SupplierRecordLog({ isAdmin }: { isAdmin: boolean }) {
   }
 
   const fx = agg?.fx_rate || 7.2
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  // A supplier's all-accounts merge (agg.accounts set) only reaches 1000 rows deep.
+  const maxPages = agg?.accounts ? Math.floor(1000 / PAGE_SIZE) : Infinity
+  const pages = Math.max(1, Math.min(maxPages, Math.ceil(total / PAGE_SIZE)))
 
   return (
     <section className="bg-white border border-gray-200 rounded-lg p-4 sm:p-5">
       <div className="mb-4">
         <h2 className="text-base font-semibold">使用日志</h2>
         <p className="text-[11px] text-gray-400 mt-0.5">
-          号池逐条请求日志（实时）。{isAdmin ? '不选账号即查询全部账号。' : '只能查询你上传的账号。'}
+          号池逐条请求日志（实时）。{isAdmin ? '「全部账号」查询号池下全部账号。' : '只能查询你上传的账号；「全部账号」最多翻看最新 1000 条。'}
           {pendingCount > 0 && ` 有 ${pendingCount} 个账号号池尚未分配平台账号 ID，暂不可选。`}
         </p>
       </div>
@@ -153,7 +152,7 @@ export default function SupplierRecordLog({ isAdmin }: { isAdmin: boolean }) {
             onChange={e => setAccountId(e.target.value)}
             className="border border-gray-300 rounded-md px-2 py-1.5 text-xs w-72"
           >
-            <option value="">{isAdmin ? '全部账号' : '请选择账号'}</option>
+            <option value="">全部账号</option>
             {options.map(a => (
               <option key={a.id} value={platformId(a)}>
                 {platformId(a)} · {a.alias}{a.remark ? ` · ${a.remark}` : ''}{isAdmin && a.username ? ` · ${a.username}` : ''}
@@ -211,6 +210,37 @@ export default function SupplierRecordLog({ isAdmin }: { isAdmin: boolean }) {
             <div className="text-[10px] text-gray-400">TPM（近 1 分钟）</div>
             <div className="text-lg font-semibold tabular-nums">{agg.tpm.toLocaleString()}</div>
           </div>
+        </div>
+      )}
+
+      {agg?.accounts && agg.accounts.length > 0 && (
+        <div className="mb-4 overflow-x-auto max-h-72 overflow-y-auto border border-gray-200 rounded-md">
+          <table className="w-full text-xs border-collapse">
+            <thead className="sticky top-0 bg-white">
+              <tr className="text-left border-b border-gray-200">
+                <th className="py-1.5 px-3 mono-label">账号（{agg.accounts.length}，点击查看该号）</th>
+                <th className="py-1.5 px-3 mono-label text-right">用量</th>
+                <th className="py-1.5 px-3 mono-label text-right">RPM</th>
+                <th className="py-1.5 px-3 mono-label text-right">TPM</th>
+              </tr>
+            </thead>
+            <tbody>
+              {agg.accounts.map(a => (
+                <tr
+                  key={a.account_id}
+                  onClick={() => { setAccountId(String(a.account_id)); runQuery(1, String(a.account_id)) }}
+                  className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer"
+                >
+                  <td className="py-1.5 px-3">
+                    {a.alias} <span className="text-gray-400">· ID {a.account_id}</span>
+                  </td>
+                  <td className="py-1.5 px-3 text-right tabular-nums whitespace-nowrap">{fmtMoney(a.cost_cny, fx)}</td>
+                  <td className="py-1.5 px-3 text-right tabular-nums">{a.rpm.toLocaleString()}</td>
+                  <td className="py-1.5 px-3 text-right tabular-nums">{a.tpm.toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
