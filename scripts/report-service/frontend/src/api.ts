@@ -854,9 +854,9 @@ export type SupplierRecordLogFilter = {
   platform_type: '1.0' | '2.0'
   start_time: string
   end_time?: string
-  provider?: string
   model?: string
-  account_id?: number
+  // Platform account ids; empty = every account the caller may see.
+  account_ids?: number[]
 }
 
 export type SupplierRecordLogRow = {
@@ -866,7 +866,7 @@ export type SupplierRecordLogRow = {
   account_name: string
   provider_name: string
   model_name: string
-  stream: number
+  stream: boolean
   prompt_tokens: number
   completion_tokens: number
   // RMB.
@@ -877,11 +877,25 @@ export type SupplierRecordLogRow = {
   err_msg: string
 }
 
+export type SupplierRecordLogAccountSum = {
+  account_id: number
+  alias: string
+  requests: number
+  failed: number
+  cost_cny: number
+}
+
 export type SupplierRecordLogAggregate = {
   cost_cny: number
+  requests: number
+  failed: number
   rpm: number
   tpm: number
   fx_rate: number
+  // Unix time the local copy is synced up to (0 = never synced).
+  synced_to: number
+  // Per-account totals, highest cost first.
+  accounts: SupplierRecordLogAccountSum[]
 }
 
 export type SupplierMetric = {

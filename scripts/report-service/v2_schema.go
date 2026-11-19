@@ -103,6 +103,45 @@ var v2SchemaStatements = []string{
 	// portal's usage-log query filters by these, not by remote_account_id.
 	`ALTER TABLE rs_supplier_account ADD COLUMN IF NOT EXISTS a1_id BIGINT NOT NULL DEFAULT 0`,
 	`ALTER TABLE rs_supplier_account ADD COLUMN IF NOT EXISTS a2_id BIGINT NOT NULL DEFAULT 0`,
+	// Local mirror of the portal's request log (supplier_record_log.go), one
+	// row per portal log id per platform; pruned after the retention window.
+	`CREATE TABLE IF NOT EXISTS rs_supplier_record_log (
+		platform          TEXT   NOT NULL,
+		id                BIGINT NOT NULL,
+		req_time          BIGINT NOT NULL,
+		account_id        BIGINT NOT NULL,
+		account_name      TEXT   NOT NULL DEFAULT '',
+		provider          TEXT   NOT NULL DEFAULT '',
+		model             TEXT   NOT NULL DEFAULT '',
+		stream            BOOLEAN NOT NULL DEFAULT FALSE,
+		prompt_tokens     BIGINT NOT NULL DEFAULT 0,
+		completion_tokens BIGINT NOT NULL DEFAULT 0,
+		cost              DOUBLE PRECISION NOT NULL DEFAULT 0,
+		duration_ms       BIGINT NOT NULL DEFAULT 0,
+		status_code       INT    NOT NULL DEFAULT 0,
+		err_code          TEXT   NOT NULL DEFAULT '',
+		err_msg           TEXT   NOT NULL DEFAULT '',
+		caller            TEXT   NOT NULL DEFAULT '',
+		other             TEXT   NOT NULL DEFAULT '',
+		PRIMARY KEY (platform, id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_supplier_record_log_account_time ON rs_supplier_record_log(platform, account_id, req_time)`,
+	`CREATE INDEX IF NOT EXISTS idx_supplier_record_log_time ON rs_supplier_record_log(platform, req_time)`,
+	// Per (account, model, hour) totals of the log, kept beyond the detail
+	// retention for long-range usage queries.
+	`CREATE TABLE IF NOT EXISTS rs_supplier_record_log_hourly (
+		platform          TEXT   NOT NULL,
+		account_id        BIGINT NOT NULL,
+		model             TEXT   NOT NULL,
+		hour              BIGINT NOT NULL,
+		requests          BIGINT NOT NULL DEFAULT 0,
+		failed            BIGINT NOT NULL DEFAULT 0,
+		prompt_tokens     BIGINT NOT NULL DEFAULT 0,
+		completion_tokens BIGINT NOT NULL DEFAULT 0,
+		cost              DOUBLE PRECISION NOT NULL DEFAULT 0,
+		PRIMARY KEY (platform, account_id, model, hour)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_supplier_record_log_hourly_hour ON rs_supplier_record_log_hourly(platform, hour)`,
 
 	// -- CC Max (Claude OAuth) ----------------------------------------------
 	// Pending OAuth logins (ccmax.go). One row per authorize URL handed out;

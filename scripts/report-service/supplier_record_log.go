@@ -1,22 +1,30 @@
 package main
 
-// 账号上号 使用日志 — proxies the portal's WEB request-log endpoints
-// (/supplier/record-log-list + /supplier/record-log-aggregate, the portal's
-// 「使用日志查询」 page) through the shared supplierWeb login.
+// 账号上号 使用日志 — the portal's 「使用日志查询」 request log, mirrored locally.
 //
-// The portal filters by ONE platform account id — a1_id on platform 1.0, a2_id
-// on 2.0 — not by the portal account id we store as remote_account_id. Those
-// ids are kept on rs_supplier_account (filled by sync, and lazily by
-// refreshSupplierPlatformIDs). The shared login sees every account of the
-// supplier, so scoping is enforced here: suppliers must name one of their own
-// accounts; admins may leave the account empty to see everything.
+// The portal (WEB /supplier/record-log-list) filters by ONE platform account id
+// and ignores id lists, and each call takes ~1.4s, so querying a supplier's
+// accounts live does not scale. Instead a leader loop pulls the whole log of
+// the shared supplier login every minute (both platforms, no account filter)
+// into rs_supplier_record_log, and queries run against the local copy:
+//
+//   - account ids are platform ids (a1_id on 1.0, a2_id on 2.0), kept on
+//     rs_supplier_account (filled by sync, and lazily by
+//     refreshSupplierPlatformIDs);
+//   - suppliers may pick any subset of their own accounts (none = all of
+//     them); admins any account, or none for the whole log;
+//   - detail rows are kept supplierRecordLogRetentionDays; per (account, model,
+//     hour) totals in rs_supplier_record_log_hourly are kept for good and
+//     serve aggregate queries that start before the retention cutoff.
 
 import (
-	"database/sql"
+	"cmp"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,20 +34,26 @@ import (
 	"github.com/lib/pq"
 )
 
-// supplierRecordLogQuotaUnit converts the portal's integer quota (row `cost`,
-// aggregate `use_quota`) to RMB; the portal UI divides by the same 1e6.
+// supplierRecordLogQuotaUnit converts the portal's quota (row `cost`) to RMB;
+// the portal UI divides by the same 1e6.
 const supplierRecordLogQuotaUnit = 1e6
 
-type supplierRecordLogFilter struct {
-	PlatformType string `json:"platform_type"`
-	StartTime    string `json:"start_time"`
-	EndTime      string `json:"end_time"`
-	Provider     string `json:"provider"`
-	Model        string `json:"model"`
-	AccountID    int64  `json:"account_id"`
-	Page         int    `json:"page"`
-	PageSize     int    `json:"page_size"`
-}
+const (
+	supplierRecordLogRetentionDays = 30
+	// supplierRecordLogSlice bounds one pull window so a backfill or a
+	// catch-up after downtime proceeds in small steps (~3k rows at current
+	// traffic) instead of paging one huge window.
+	supplierRecordLogSlice = 10 * time.Minute
+	// supplierRecordLogOverlap re-reads the tail of the previous window; rows
+	// can land a little after their req_time and the portal pages by offset.
+	supplierRecordLogOverlap = 2 * time.Minute
+	// supplierRecordLogLag keeps the cursor this far behind now for the same
+	// reason, so the newest minute is always read again next tick.
+	supplierRecordLogLag      = time.Minute
+	supplierRecordLogPageSize = 100
+)
+
+var supplierRecordLogPlatforms = []string{"2.0", "1.0"}
 
 // supplierPlatformIDColumn maps a portal platform type to the
 // rs_supplier_account column holding that platform's account id.
@@ -53,179 +67,489 @@ func supplierPlatformIDColumn(platform string) string {
 	return ""
 }
 
-// bindSupplierRecordLogFilter validates the request and enforces ownership.
-// On failure it has already written the error response.
-func bindSupplierRecordLogFilter(c *gin.Context) (supplierRecordLogFilter, bool) {
-	var f supplierRecordLogFilter
-	if err := c.ShouldBindJSON(&f); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
-		return f, false
-	}
-	f.StartTime = strings.TrimSpace(f.StartTime)
-	f.EndTime = strings.TrimSpace(f.EndTime)
-	f.Provider = strings.TrimSpace(f.Provider)
-	f.Model = strings.TrimSpace(f.Model)
+func supplierRecordLogCursorKey(platform string) string {
+	return "supplier_record_log_cursor_" + platform
+}
 
-	col := supplierPlatformIDColumn(f.PlatformType)
-	if col == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "platform_type must be 1.0 or 2.0"})
-		return f, false
+// supplierRecordLogCursor is the unix time up to which the platform's log has
+// been pulled (0 = never).
+func supplierRecordLogCursor(platform string) int64 {
+	v, _ := strconv.ParseInt(supplierConfigGet(supplierRecordLogCursorKey(platform)), 10, 64)
+	return v
+}
+
+// ---- Sync loop ----
+
+func startSupplierRecordLogSync() {
+	if supplierAccountBaseURL == "" {
+		return
 	}
-	if _, err := time.Parse(time.DateTime, f.StartTime); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "start_time must be YYYY-MM-DD HH:MM:SS"})
-		return f, false
+	go func() {
+		time.Sleep(60 * time.Second)
+		var lastPrune time.Time
+		for {
+			behind := false
+			if IsLeader() && supplierWeb.configured() {
+				for _, platform := range supplierRecordLogPlatforms {
+					more, err := syncSupplierRecordLogSlice(platform)
+					if err != nil {
+						log.Printf("[supplier-record-log] sync %s: %v", platform, err)
+						continue
+					}
+					behind = behind || more
+				}
+				if time.Since(lastPrune) > 6*time.Hour {
+					pruneSupplierRecordLog()
+					lastPrune = time.Now()
+				}
+			}
+			if behind {
+				time.Sleep(time.Second)
+				continue
+			}
+			time.Sleep(time.Minute)
+		}
+	}()
+}
+
+// supplierRecordLogPortalRow is one row of the portal record-log list.
+type supplierRecordLogPortalRow struct {
+	ID               int64           `json:"id"`
+	ReqTime          string          `json:"req_time"`
+	AccountID        int64           `json:"account_id"`
+	AccountName      string          `json:"account_name"`
+	ProviderName     string          `json:"provider_name"`
+	ModelName        string          `json:"model_name"`
+	Stream           int             `json:"stream"`
+	PromptTokens     int64           `json:"prompt_tokens"`
+	CompletionTokens int64           `json:"completion_tokens"`
+	Cost             float64         `json:"cost"`
+	DurationMS       int64           `json:"duration_ms"`
+	StatusCode       int             `json:"status_code"`
+	ErrCode          string          `json:"err_code"`
+	ErrMsg           string          `json:"err_msg"`
+	Caller           string          `json:"caller"`
+	Other            json.RawMessage `json:"other"`
+}
+
+// syncSupplierRecordLogSlice pulls one window of a platform's log and advances
+// its cursor. Returns true while the cursor is still more than a slice behind
+// (backfill / catch-up), so the loop continues without waiting.
+func syncSupplierRecordLogSlice(platform string) (bool, error) {
+	now := time.Now()
+	cursor := supplierRecordLogCursor(platform)
+	if cursor == 0 {
+		// First run: start from the beginning of yesterday (portal time).
+		y := now.In(supplierPortalLoc).AddDate(0, 0, -1)
+		cursor = time.Date(y.Year(), y.Month(), y.Day(), 0, 0, 0, 0, supplierPortalLoc).Unix()
 	}
-	// The portal rejects a request without end_time; default to an hour ahead
-	// (same as the page default).
-	if f.EndTime == "" {
-		f.EndTime = time.Now().Add(time.Hour).In(supplierPortalLoc).Format(time.DateTime)
-	} else {
-		if _, err := time.Parse(time.DateTime, f.EndTime); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "end_time must be YYYY-MM-DD HH:MM:SS"})
-			return f, false
+	from := time.Unix(cursor, 0).Add(-supplierRecordLogOverlap)
+	to := time.Unix(min(cursor+int64(supplierRecordLogSlice/time.Second), now.Unix()), 0)
+
+	window := map[string]any{
+		"platform_type": platform,
+		"start_time":    from.In(supplierPortalLoc).Format(time.DateTime),
+		"end_time":      to.In(supplierPortalLoc).Format(time.DateTime),
+	}
+	for start := 0; ; start += supplierRecordLogPageSize {
+		payload := map[string]any{"start": start, "limit": supplierRecordLogPageSize}
+		for k, v := range window {
+			payload[k] = v
+		}
+		reqBytes, _ := json.Marshal(payload)
+		status, body, err := supplierWeb.proxy(http.MethodPost, "/supplier-account/api/supplier/record-log-list", reqBytes)
+		if err != nil {
+			return false, err
+		}
+		if status != http.StatusOK {
+			return false, errors.New(supplierErr(body))
+		}
+		var page struct {
+			List []supplierRecordLogPortalRow `json:"list"`
+		}
+		if err := json.Unmarshal(body, &page); err != nil {
+			return false, fmt.Errorf("unexpected upstream response: %w", err)
+		}
+		if err := upsertSupplierRecordLogRows(platform, page.List); err != nil {
+			return false, err
+		}
+		if len(page.List) < supplierRecordLogPageSize {
+			break
 		}
 	}
-	if f.AccountID < 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid account_id"})
-		return f, false
+	if err := rebuildSupplierRecordLogHourly(platform, from.Unix(), to.Unix()); err != nil {
+		return false, err
 	}
 
-	if callerIsSupplierAdmin(c) {
-		return f, true
+	next := min(to.Unix(), now.Add(-supplierRecordLogLag).Unix())
+	if next > cursor {
+		if err := supplierConfigSet(supplierRecordLogCursorKey(platform), strconv.FormatInt(next, 10)); err != nil {
+			return false, err
+		}
 	}
-	if f.AccountID == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "请选择账号"})
-		return f, false
+	return now.Unix()-next > int64(supplierRecordLogSlice/time.Second), nil
+}
+
+func upsertSupplierRecordLogRows(platform string, rows []supplierRecordLogPortalRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	const cols = 17
+	var sb strings.Builder
+	sb.WriteString(`INSERT INTO rs_supplier_record_log
+	  (platform, id, req_time, account_id, account_name, provider, model, stream,
+	   prompt_tokens, completion_tokens, cost, duration_ms, status_code, err_code,
+	   err_msg, caller, other) VALUES `)
+	args := make([]any, 0, len(rows)*cols)
+	for i, r := range rows {
+		reqTime, err := time.Parse(time.RFC3339, r.ReqTime)
+		if err != nil {
+			return fmt.Errorf("row %d: bad req_time %q", r.ID, r.ReqTime)
+		}
+		other := ""
+		if len(r.Other) > 0 && string(r.Other) != "null" {
+			other = string(r.Other)
+		}
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString("(")
+		for j := range cols {
+			if j > 0 {
+				sb.WriteString(",")
+			}
+			fmt.Fprintf(&sb, "$%d", i*cols+j+1)
+		}
+		sb.WriteString(")")
+		args = append(args, platform, r.ID, reqTime.Unix(), r.AccountID, r.AccountName,
+			r.ProviderName, r.ModelName, r.Stream != 0, r.PromptTokens, r.CompletionTokens,
+			r.Cost, r.DurationMS, r.StatusCode, r.ErrCode, r.ErrMsg, r.Caller, other)
+	}
+	// Rows are re-read by the overlap; refresh the mutable fields in case the
+	// portal finalized usage after the first read.
+	sb.WriteString(` ON CONFLICT (platform, id) DO UPDATE SET
+	   prompt_tokens=EXCLUDED.prompt_tokens, completion_tokens=EXCLUDED.completion_tokens,
+	   cost=EXCLUDED.cost, duration_ms=EXCLUDED.duration_ms, status_code=EXCLUDED.status_code,
+	   err_code=EXCLUDED.err_code, err_msg=EXCLUDED.err_msg, other=EXCLUDED.other`)
+	_, err := db.Exec(sb.String(), args...)
+	return err
+}
+
+// supplierRecordLogFailedSQL marks a failed request the way the portal UI does:
+// an error message, or a non-200 status.
+const supplierRecordLogFailedSQL = `(err_msg <> '' OR (status_code > 0 AND status_code <> 200))`
+
+// rebuildSupplierRecordLogHourly recomputes the hourly totals of every hour the
+// window [from, to] touches from the detail rows.
+func rebuildSupplierRecordLogHourly(platform string, from, to int64) error {
+	hourFrom := from / 3600 * 3600
+	hourTo := to / 3600 * 3600
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM rs_supplier_record_log_hourly WHERE platform=$1 AND hour BETWEEN $2 AND $3`,
+		platform, hourFrom, hourTo); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO rs_supplier_record_log_hourly
+	    (platform, account_id, model, hour, requests, failed, prompt_tokens, completion_tokens, cost)
+	  SELECT platform, account_id, model, req_time / 3600 * 3600, COUNT(*),
+	         COUNT(*) FILTER (WHERE `+supplierRecordLogFailedSQL+`),
+	         SUM(prompt_tokens), SUM(completion_tokens), SUM(cost)
+	    FROM rs_supplier_record_log
+	   WHERE platform=$1 AND req_time >= $2 AND req_time < $3
+	   GROUP BY platform, account_id, model, req_time / 3600 * 3600`,
+		platform, hourFrom, hourTo+3600); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func pruneSupplierRecordLog() {
+	cutoff := time.Now().AddDate(0, 0, -supplierRecordLogRetentionDays).Unix()
+	res, err := db.Exec(`DELETE FROM rs_supplier_record_log WHERE req_time < $1`, cutoff)
+	if err != nil {
+		log.Printf("[supplier-record-log] prune: %v", err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("[supplier-record-log] pruned %d rows older than %d days", n, supplierRecordLogRetentionDays)
+	}
+}
+
+// ---- Queries (local) ----
+
+type supplierRecordLogQuery struct {
+	PlatformType string  `json:"platform_type"`
+	StartTime    string  `json:"start_time"`
+	EndTime      string  `json:"end_time"`
+	Model        string  `json:"model"`
+	AccountIDs   []int64 `json:"account_ids"`
+	Page         int     `json:"page"`
+	PageSize     int     `json:"page_size"`
+
+	start, end int64
+	// scoped means AccountIDs restricts the query (always for suppliers).
+	scoped bool
+}
+
+// bindSupplierRecordLogQuery validates the request and resolves the account
+// scope. On failure it has already written the error response.
+func bindSupplierRecordLogQuery(c *gin.Context) (supplierRecordLogQuery, bool) {
+	var q supplierRecordLogQuery
+	if err := c.ShouldBindJSON(&q); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return q, false
+	}
+	col := supplierPlatformIDColumn(q.PlatformType)
+	if col == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "platform_type must be 1.0 or 2.0"})
+		return q, false
+	}
+	start, err := time.ParseInLocation(time.DateTime, strings.TrimSpace(q.StartTime), supplierPortalLoc)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "start_time must be YYYY-MM-DD HH:MM:SS"})
+		return q, false
+	}
+	end := time.Now().Add(time.Hour)
+	if s := strings.TrimSpace(q.EndTime); s != "" {
+		if end, err = time.ParseInLocation(time.DateTime, s, supplierPortalLoc); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "end_time must be YYYY-MM-DD HH:MM:SS"})
+			return q, false
+		}
+	}
+	q.start, q.end = start.Unix(), end.Unix()
+	q.Model = strings.TrimSpace(q.Model)
+	q.AccountIDs = slices.DeleteFunc(q.AccountIDs, func(id int64) bool { return id <= 0 })
+
+	if callerIsSupplierAdmin(c) {
+		q.scoped = len(q.AccountIDs) > 0
+		return q, true
 	}
 	uidAny, _ := c.Get("user_id")
 	uid, _ := uidAny.(int64)
-	var one int
-	err := db.QueryRow(`SELECT 1 FROM rs_supplier_account WHERE uploaded_by=$1 AND `+col+`=$2 LIMIT 1`, uid, f.AccountID).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "只能查询自己上传的账号"})
-		return f, false
-	}
+	rows, err := db.Query(`SELECT `+col+` FROM rs_supplier_account WHERE uploaded_by=$1 AND `+col+` > 0`, uid)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return f, false
+		return q, false
 	}
-	return f, true
+	defer rows.Close()
+	own := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return q, false
+		}
+		own = append(own, id)
+	}
+	if len(own) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "没有可查询的账号"})
+		return q, false
+	}
+	for _, id := range q.AccountIDs {
+		if !slices.Contains(own, id) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "只能查询自己上传的账号"})
+			return q, false
+		}
+	}
+	if len(q.AccountIDs) == 0 {
+		q.AccountIDs = own
+	}
+	q.scoped = true
+	return q, true
 }
 
-// portalPayload builds the portal request body, sending optional filters only
-// when set (the portal UI does the same).
-func (f supplierRecordLogFilter) portalPayload() map[string]any {
-	p := map[string]any{"platform_type": f.PlatformType, "start_time": f.StartTime}
-	if f.EndTime != "" {
-		p["end_time"] = f.EndTime
+// where builds the shared filter over table columns platform / account_id /
+// model plus a time column, returning the clause and its args.
+func (q supplierRecordLogQuery) where(timeCol string, from, to int64) (string, []any) {
+	clause := `platform=$1 AND ` + timeCol + ` >= $2 AND ` + timeCol + ` <= $3`
+	args := []any{q.PlatformType, from, to}
+	if q.scoped {
+		args = append(args, pq.Array(q.AccountIDs))
+		clause += fmt.Sprintf(` AND account_id = ANY($%d)`, len(args))
 	}
-	if f.Provider != "" {
-		p["provider"] = f.Provider
+	if q.Model != "" {
+		args = append(args, q.Model)
+		clause += fmt.Sprintf(` AND model = $%d`, len(args))
 	}
-	if f.Model != "" {
-		p["model"] = f.Model
-	}
-	if f.AccountID > 0 {
-		p["account_id"] = f.AccountID
-	}
-	return p
-}
-
-// supplierRecordLogCall POSTs to a portal record-log endpoint and returns the
-// body, writing the error response itself on failure.
-func supplierRecordLogCall(c *gin.Context, path string, payload map[string]any) ([]byte, bool) {
-	reqBytes, _ := json.Marshal(payload)
-	status, body, err := supplierWeb.proxy(http.MethodPost, "/supplier-account/api/supplier/"+path, reqBytes)
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-		return nil, false
-	}
-	if status == http.StatusForbidden {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "号池未开通使用日志查询：" + supplierErr(body)})
-		return nil, false
-	}
-	if status != http.StatusOK {
-		c.JSON(http.StatusBadGateway, gin.H{"error": supplierErr(body)})
-		return nil, false
-	}
-	return body, true
+	return clause, args
 }
 
 func handleSupplierRecordLogList(c *gin.Context) {
-	f, ok := bindSupplierRecordLogFilter(c)
+	q, ok := bindSupplierRecordLogQuery(c)
 	if !ok {
 		return
 	}
-	page := max(f.Page, 1)
-	pageSize := f.PageSize
+	page := max(q.Page, 1)
+	pageSize := q.PageSize
 	if pageSize <= 0 || pageSize > 100 {
 		pageSize = 50
 	}
-	payload := f.portalPayload()
-	payload["start"] = (page - 1) * pageSize
-	payload["limit"] = pageSize
+	where, args := q.where("req_time", q.start, q.end)
 
-	body, ok := supplierRecordLogCall(c, "record-log-list", payload)
-	if !ok {
+	var total int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM rs_supplier_record_log WHERE `+where, args...).Scan(&total); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	var parsed struct {
-		List  []map[string]any `json:"list"`
-		Total int64            `json:"total"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "unexpected upstream response"})
+	args = append(args, pageSize, (page-1)*pageSize)
+	rows, err := db.Query(fmt.Sprintf(`SELECT id, req_time, account_id, account_name, provider, model, stream,
+	        prompt_tokens, completion_tokens, cost, duration_ms, status_code, err_code, err_msg, other
+	   FROM rs_supplier_record_log WHERE %s
+	  ORDER BY req_time DESC, id DESC LIMIT $%d OFFSET $%d`, where, len(args)-1, len(args)), args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	defer rows.Close()
+
 	isAdmin := callerIsSupplierAdmin(c)
-	for _, row := range parsed.List {
-		// Same masking as the account list: the supplier/company name never
-		// leaves the server.
-		if name, ok := row["account_name"].(string); ok {
-			row["account_name"] = maskSupplierAlias(name)
+	list := make([]gin.H, 0, pageSize)
+	for rows.Next() {
+		var (
+			id, reqTime, accountID, prompt, completion, durationMS int64
+			accountName, provider, model, errCode, errMsg, other   string
+			stream                                                 bool
+			cost                                                   float64
+			statusCode                                             int
+		)
+		if err := rows.Scan(&id, &reqTime, &accountID, &accountName, &provider, &model, &stream,
+			&prompt, &completion, &cost, &durationMS, &statusCode, &errCode, &errMsg, &other); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
 		}
-		delete(row, "supplier_name")
+		row := gin.H{
+			"id":                id,
+			"req_time":          time.Unix(reqTime, 0).In(supplierPortalLoc).Format(time.RFC3339),
+			"account_id":        accountID,
+			"account_name":      maskSupplierAlias(accountName),
+			"provider_name":     provider,
+			"model_name":        model,
+			"stream":            stream,
+			"prompt_tokens":     prompt,
+			"completion_tokens": completion,
+			"cost":              cost / supplierRecordLogQuotaUnit,
+			"duration_ms":       durationMS,
+			"status_code":       statusCode,
+			"err_code":          errCode,
+			"err_msg":           errMsg,
+		}
 		// `other` carries the portal's per-request price breakdown.
-		if !isAdmin {
-			delete(row, "other")
+		if isAdmin && other != "" {
+			row["other"] = json.RawMessage(other)
 		}
-		if cost, ok := row["cost"].(float64); ok {
-			row["cost"] = cost / supplierRecordLogQuotaUnit
-		}
+		list = append(list, row)
 	}
-	if parsed.List == nil {
-		parsed.List = []map[string]any{}
-	}
-	c.JSON(http.StatusOK, gin.H{"list": parsed.List, "total": parsed.Total, "page": page, "page_size": pageSize})
+	c.JSON(http.StatusOK, gin.H{"list": list, "total": total, "page": page, "page_size": pageSize})
+}
+
+type supplierRecordLogAccountSum struct {
+	AccountID int64   `json:"account_id"`
+	Alias     string  `json:"alias"`
+	Requests  int64   `json:"requests"`
+	Failed    int64   `json:"failed"`
+	CostCNY   float64 `json:"cost_cny"`
 }
 
 func handleSupplierRecordLogAggregate(c *gin.Context) {
-	f, ok := bindSupplierRecordLogFilter(c)
+	q, ok := bindSupplierRecordLogQuery(c)
 	if !ok {
 		return
 	}
-	payload := f.portalPayload()
-	payload["metrics"] = []string{"use_quota", "rpm", "tpm"}
-	body, ok := supplierRecordLogCall(c, "record-log-aggregate", payload)
-	if !ok {
+
+	// Detail rows cover the retention window; older starts read the hourly
+	// totals (hour granularity).
+	var sumSQL string
+	var args []any
+	if q.start >= time.Now().AddDate(0, 0, -supplierRecordLogRetentionDays).Unix() {
+		where, a := q.where("req_time", q.start, q.end)
+		sumSQL = `SELECT account_id, COUNT(*), COUNT(*) FILTER (WHERE ` + supplierRecordLogFailedSQL + `), COALESCE(SUM(cost), 0)
+		            FROM rs_supplier_record_log WHERE ` + where + ` GROUP BY account_id`
+		args = a
+	} else {
+		where, a := q.where("hour", q.start/3600*3600, q.end)
+		sumSQL = `SELECT account_id, SUM(requests), SUM(failed), SUM(cost)
+		            FROM rs_supplier_record_log_hourly WHERE ` + where + ` GROUP BY account_id`
+		args = a
+	}
+	rows, err := db.Query(sumSQL, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	// use_quota arrives as a decimal string, rpm/tpm as numbers.
-	var parsed struct {
-		UseQuota json.Number `json:"use_quota"`
-		RPM      float64     `json:"rpm"`
-		TPM      float64     `json:"tpm"`
+	defer rows.Close()
+	accounts := make([]supplierRecordLogAccountSum, 0)
+	var total supplierRecordLogAccountSum
+	for rows.Next() {
+		var a supplierRecordLogAccountSum
+		var cost float64
+		if err := rows.Scan(&a.AccountID, &a.Requests, &a.Failed, &cost); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		a.CostCNY = cost / supplierRecordLogQuotaUnit
+		total.Requests += a.Requests
+		total.Failed += a.Failed
+		total.CostCNY += a.CostCNY
+		accounts = append(accounts, a)
 	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "unexpected upstream response"})
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	quota, _ := strconv.ParseFloat(parsed.UseQuota.String(), 64)
+
+	// Label accounts with their (masked) local alias, falling back to the
+	// portal's account name for accounts that are not in the local table.
+	col := supplierPlatformIDColumn(q.PlatformType)
+	ids := make([]int64, len(accounts))
+	for i, a := range accounts {
+		ids[i] = a.AccountID
+	}
+	aliases := make(map[int64]string, len(ids))
+	if aliasRows, err := db.Query(`SELECT `+col+`, alias FROM rs_supplier_account WHERE `+col+` = ANY($1)`, pq.Array(ids)); err == nil {
+		for aliasRows.Next() {
+			var id int64
+			var alias string
+			if aliasRows.Scan(&id, &alias) == nil {
+				aliases[id] = alias
+			}
+		}
+		aliasRows.Close()
+	}
+	for i := range accounts {
+		if alias, ok := aliases[accounts[i].AccountID]; ok {
+			accounts[i].Alias = maskSupplierAlias(alias)
+		}
+	}
+	slices.SortStableFunc(accounts, func(a, b supplierRecordLogAccountSum) int {
+		return cmp.Compare(b.CostCNY, a.CostCNY)
+	})
+
+	// RPM / TPM over the last synced minute (the copy trails real time by the
+	// sync lag, so "now" would read low).
+	syncedTo := supplierRecordLogCursor(q.PlatformType)
+	var rpm, tpm int64
+	if syncedTo > 0 {
+		where, a := q.where("req_time", syncedTo-60, syncedTo)
+		if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(prompt_tokens + completion_tokens), 0)
+		                         FROM rs_supplier_record_log WHERE `+where, a...).Scan(&rpm, &tpm); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"cost_cny": quota / supplierRecordLogQuotaUnit,
-		"rpm":      parsed.RPM,
-		"tpm":      parsed.TPM,
-		"fx_rate":  supplierFxRate(),
+		"cost_cny":  total.CostCNY,
+		"requests":  total.Requests,
+		"failed":    total.Failed,
+		"rpm":       rpm,
+		"tpm":       tpm,
+		"fx_rate":   supplierFxRate(),
+		"synced_to": syncedTo,
+		"accounts":  accounts,
 	})
 }
 
