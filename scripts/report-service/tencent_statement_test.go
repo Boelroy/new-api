@@ -1,19 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xuri/excelize/v2"
 )
 
 func tencentFloat(v float64) *float64 { return &v }
@@ -249,9 +253,9 @@ func TestTencentSchemaIdempotent(t *testing.T) {
 	}
 }
 
-// The three sources are read for exactly the Beijing month: usage an hour
-// before or after it stays out.
-func TestTencentLoadSources(t *testing.T) {
+// tencentSeedOctober loads the schema and synthetic October 2026 usage of
+// every platform, with usage an hour before and after the Beijing month.
+func tencentSeedOctober(t *testing.T) {
 	tencentTestDB(t)
 	for _, ddl := range append(append([]string{}, v2SchemaStatements...), tencentSchemaStatements...) {
 		_, err := db.Exec(ddl)
@@ -290,7 +294,12 @@ func TestTencentLoadSources(t *testing.T) {
 		_, err := db.Exec(s)
 		require.NoError(t, err, "%.80s", s)
 	}
+}
 
+// The three sources are read for exactly the Beijing month: usage an hour
+// before or after it stays out.
+func TestTencentLoadSources(t *testing.T) {
+	tencentSeedOctober(t)
 	start, end, err := tencentMonthRange("2026-10")
 	require.NoError(t, err)
 	sources, warnings, err := loadTencentSources(start, end)
@@ -319,4 +328,186 @@ func TestTencentLoadSources(t *testing.T) {
 		"2026-10|proxy|3001|gpt-5":                        {7, 1, 7, 50.75, "newapi proxy - carol"},
 		"2026-10|proxy|3002|ch-b":                         {2, 1, 2, 14.5, "newapi proxy - carol"},
 	}, got)
+}
+
+func tencentTestRouter() *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	registerTencentRoutes(r.Group("/api", func(c *gin.Context) { c.Set("role", minSuperAdminRole) }))
+	return r
+}
+
+func tencentDo(t *testing.T, r *gin.Engine, method, path string) (int, map[string]any) {
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(method, path, nil))
+	var body map[string]any
+	if strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	}
+	return w.Code, body
+}
+
+func tencentSnapshotTotal(t *testing.T, r *gin.Engine) (string, float64) {
+	code, body := tencentDo(t, r, http.MethodGet, "/api/tencent/statements/2026-10")
+	require.Equal(t, http.StatusOK, code, body)
+	total := 0.0
+	for _, l := range body["lines"].([]any) {
+		total += l.(map[string]any)["official_usd"].(float64)
+	}
+	return body["statement"].(map[string]any)["status"].(string), tencentRound(total, 2)
+}
+
+// 生成 → draft follows the source data on 重新生成 → 确认 freezes it: later
+// source changes do not reach it and regenerating is refused.
+func TestTencentSnapshotLifecycle(t *testing.T) {
+	tencentSeedOctober(t)
+	r := tencentTestRouter()
+	mid := time.Date(2026, 10, 20, 12, 0, 0, 0, billingExportZone).Unix()
+	addUsage := func(cny int) {
+		_, err := db.Exec(`INSERT INTO rs_supplier_record_log_hourly (platform, account_id, model, hour, cost) VALUES ('2.0', 501, 'gpt-5', $1, $2)
+			ON CONFLICT (platform, account_id, model, hour) DO UPDATE SET cost = rs_supplier_record_log_hourly.cost + EXCLUDED.cost`, mid, cny*1_000_000)
+		require.NoError(t, err)
+	}
+
+	code, _ := tencentDo(t, r, http.MethodPost, "/api/tencent/statements/2026-10/regenerate")
+	assert.Equal(t, http.StatusNotFound, code, "regenerate before generate")
+	code, _ = tencentDo(t, r, http.MethodPost, "/api/tencent/statements/2026-10/generate")
+	require.Equal(t, http.StatusOK, code)
+	status, total := tencentSnapshotTotal(t, r)
+	assert.Equal(t, tencentStatementDraft, status)
+	assert.Equal(t, 40.0, total) // 11 + 14 + 2.86 + 2.14 + 1 + 7 + 2
+	code, _ = tencentDo(t, r, http.MethodPost, "/api/tencent/statements/2026-10/generate")
+	assert.Equal(t, http.StatusConflict, code, "generate twice")
+
+	addUsage(70) // +10 USD at 7
+	_, total = tencentSnapshotTotal(t, r)
+	assert.Equal(t, 40.0, total, "a draft only changes when regenerated")
+	code, _ = tencentDo(t, r, http.MethodPost, "/api/tencent/statements/2026-10/regenerate")
+	require.Equal(t, http.StatusOK, code)
+	_, total = tencentSnapshotTotal(t, r)
+	assert.Equal(t, 50.0, total)
+
+	code, _ = tencentDo(t, r, http.MethodPost, "/api/tencent/statements/2026-10/confirm")
+	require.Equal(t, http.StatusOK, code)
+	code, _ = tencentDo(t, r, http.MethodPost, "/api/tencent/statements/2026-10/confirm")
+	assert.Equal(t, http.StatusConflict, code, "confirm twice")
+
+	addUsage(700)
+	_, err := db.Exec(`UPDATE rs_tencent_month_param SET fx_rate = 6.5 WHERE month = '2026-10'`)
+	require.NoError(t, err)
+	code, body := tencentDo(t, r, http.MethodPost, "/api/tencent/statements/2026-10/regenerate")
+	assert.Equal(t, http.StatusConflict, code, body)
+	status, total = tencentSnapshotTotal(t, r)
+	assert.Equal(t, tencentStatementConfirmed, status)
+	assert.Equal(t, 50.0, total, "a confirmed month ignores later source and parameter changes")
+
+	// Exports read the snapshot: one supplier, or everyone in one file.
+	for path, rows := range map[string]int{
+		"/api/tencent/statements/2026-10/export":                     8,
+		"/api/tencent/statements/2026-10/export?supplier=Proxy%20Co": 3,
+	} {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		require.Equal(t, http.StatusOK, w.Code, path)
+		f, err := excelize.OpenReader(bytes.NewReader(w.Body.Bytes()))
+		require.NoError(t, err)
+		got, err := f.GetRows(tencentLinesSheet)
+		require.NoError(t, err)
+		assert.Len(t, got, rows, path) // header + lines
+		f.Close()
+	}
+	code, _ = tencentDo(t, r, http.MethodGet, "/api/tencent/statements/2026-10/export?supplier=nobody")
+	assert.Equal(t, http.StatusNotFound, code)
+}
+
+// The export follows the template: sheet order, headers, number formats,
+// and J / L / summary totals as formulas that evaluate to the statement's
+// own amounts.
+func TestTencentStatementWorkbook(t *testing.T) {
+	month := time.Date(2026, 10, 1, 0, 0, 0, 0, billingExportZone)
+	rows := []tencentSourceRow{
+		{Platform: tencentPlatformThirdParty, UserID: 1, Username: "alice", Studio: "Studio A", AccountID: 1001, KeyLast8: "abcd1234", Provider: "openai", Model: "gpt-5", CostCNY: 77},
+		{Platform: tencentPlatformThirdParty, UserID: 1, Username: "alice", Studio: "Studio A", AccountID: 1002, Provider: "aws", Model: "claude-sonnet-5-5", CostCNY: 14},
+		{Platform: tencentPlatformCCMax, UserID: 1, Username: "alice", Studio: "Studio A", AccountID: 2001, Model: "claude-opus-5-5", CostCNY: 20},
+		{Platform: tencentPlatformProxy, UserID: 3, Username: "carol", Studio: "Proxy Co", AccountID: 3001, Model: "gpt-5", CostUSD: 7},
+	}
+	lines, summary := buildTencentStatement(rows, tencentStatementParams{
+		Month: month, FxRate: 7, RefFxRate: 7.25,
+		Suppliers: map[tencentSupplierParamKey]tencentSupplierParam{{1, tencentPlatformAll}: {DiscountPct: tencentFloat(88)}},
+		Flags:     map[string]tencentLineFlag{"2026-10|third_party|1002|claude-sonnet-5-5": {RMBPriced: true}},
+	})
+	f, err := tencentStatementWorkbook(lines)
+	require.NoError(t, err)
+	var buf bytes.Buffer
+	require.NoError(t, f.Write(&buf))
+	f, err = excelize.OpenReader(&buf)
+	require.NoError(t, err)
+	defer f.Close()
+
+	assert.Equal(t, []string{tencentSummarySheet, tencentLinesSheet}, f.GetSheetList())
+	header, err := f.GetRows(tencentLinesSheet)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"供应商名称", "账单月份", "模型厂商名称", "模型名称", "账号ID", "key", "付给官方的费用（不区分币种）", "税率",
+		"对应折扣", "腾讯支付金额（不区分币种）", "参考汇率\nhttps://www.kylc.com/huilv/d-boc-usd.html", "开票金额（RMB/元）", "官方导出的账单名称", "来源系统 / 上号人"}, header[0])
+	header, err = f.GetRows(tencentSummarySheet)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"供应商名称", "账单月份", "模型厂商名称", "付给官方的费用（不区分币种）", "开票金额（RMB/元）", "备注"}, header[0])
+
+	numFmt := func(sheet, cell string) string {
+		id, err := f.GetCellStyle(sheet, cell)
+		require.NoError(t, err)
+		st, err := f.GetStyle(id)
+		require.NoError(t, err)
+		if st.CustomNumFmt != nil {
+			return *st.CustomNumFmt
+		}
+		return strconv.Itoa(st.NumFmt)
+	}
+	assert.Equal(t, `#,##0.00" USD"`, numFmt(tencentLinesSheet, "G2"))
+	assert.Equal(t, `#,##0.00" USD"`, numFmt(tencentLinesSheet, "J2"))
+	assert.Equal(t, "9", numFmt(tencentLinesSheet, "I2")) // built-in 0%
+	assert.Equal(t, "4", numFmt(tencentLinesSheet, "L2")) // built-in #,##0.00
+	assert.Equal(t, `#,##0.00" RMB"`, numFmt(tencentSummarySheet, "D2"))
+
+	for i, l := range lines {
+		r := i + 2
+		j, err := f.GetCellFormula(tencentLinesSheet, fmt.Sprintf("J%d", r))
+		require.NoError(t, err)
+		assert.Equal(t, fmt.Sprintf("ROUND(G%d*I%d,2)", r, r), j)
+		want := fmt.Sprintf("ROUND(J%d*K%d,2)", r, r)
+		if l.RMBPriced {
+			want = fmt.Sprintf("J%d", r)
+		}
+		lf, err := f.GetCellFormula(tencentLinesSheet, fmt.Sprintf("L%d", r))
+		require.NoError(t, err)
+		assert.Equal(t, want, lf, l.LineKey)
+		for col, expect := range map[string]float64{"J": l.TencentUSD, "L": l.InvoiceRMB} {
+			v, err := f.CalcCellValue(tencentLinesSheet, fmt.Sprintf("%s%d", col, r), excelize.Options{RawCellValue: true})
+			require.NoError(t, err)
+			got, err := strconv.ParseFloat(v, 64)
+			require.NoError(t, err)
+			assert.InDelta(t, expect, got, 1e-9, "%s%d %s", col, r, l.LineKey)
+		}
+	}
+
+	require.Len(t, summary, 4)
+	d, err := f.GetCellFormula(tencentSummarySheet, "D2")
+	require.NoError(t, err)
+	assert.Equal(t, `SUMIFS('API账单'!$G$2:$G$5,'API账单'!$A$2:$A$5,$A2,'API账单'!$B$2:$B$5,$B2,'API账单'!$C$2:$C$5,$C2,'API账单'!$N$2:$N$5,"newapi proxy*")`, d)
+	for i, s := range summary {
+		r := i + 2
+		source, err := f.GetCellValue(tencentSummarySheet, fmt.Sprintf("F%d", r))
+		require.NoError(t, err)
+		assert.Equal(t, s.Source, source)
+		for col, expect := range map[string]float64{"D": s.OfficialUSD, "E": s.InvoiceRMB} {
+			v, err := f.CalcCellValue(tencentSummarySheet, fmt.Sprintf("%s%d", col, r), excelize.Options{RawCellValue: true})
+			require.NoError(t, err)
+			got, err := strconv.ParseFloat(v, 64)
+			require.NoError(t, err)
+			assert.InDelta(t, expect, got, 1e-9, "%s%d %s/%s", col, r, s.Vendor, s.Source)
+		}
+	}
+	// Studio A has third_party and ccmax Anthropic rows; the prefix keeps
+	// them apart.
+	assert.Contains(t, []string{summary[1].Source, summary[2].Source}, "ccmax")
 }

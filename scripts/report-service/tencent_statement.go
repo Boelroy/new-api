@@ -111,6 +111,49 @@ var tencentSchemaStatements = []string{
 		updated_at BIGINT  NOT NULL,
 		updated_by BIGINT  NOT NULL DEFAULT 0
 	)`,
+	// Month-end snapshots (tencent_statement_export.go). A month is a draft
+	// until confirmed; a confirmed month no longer follows the source data.
+	// params holds the supplier parameters, line flags and vendor rules the
+	// lines were built with (JSON); the rates are columns.
+	`CREATE TABLE IF NOT EXISTS rs_tencent_statement (
+		month        TEXT PRIMARY KEY,
+		status       TEXT   NOT NULL,
+		fx_rate      DOUBLE PRECISION NOT NULL,
+		ref_fx_rate  DOUBLE PRECISION NOT NULL,
+		params       TEXT   NOT NULL DEFAULT '{}',
+		warnings     TEXT   NOT NULL DEFAULT '[]',
+		generated_at BIGINT NOT NULL,
+		generated_by BIGINT NOT NULL DEFAULT 0,
+		confirmed_at BIGINT NOT NULL DEFAULT 0,
+		confirmed_by BIGINT NOT NULL DEFAULT 0
+	)`,
+	`CREATE TABLE IF NOT EXISTS rs_tencent_statement_line (
+		month         TEXT    NOT NULL,
+		seq           INT     NOT NULL,
+		line_key      TEXT    NOT NULL,
+		platform      TEXT    NOT NULL,
+		user_id       BIGINT  NOT NULL,
+		supplier      TEXT    NOT NULL,
+		bill_month    INT     NOT NULL,
+		vendor        TEXT    NOT NULL,
+		model         TEXT    NOT NULL,
+		account_id    TEXT    NOT NULL,
+		key_col       TEXT    NOT NULL DEFAULT '',
+		official_usd  DOUBLE PRECISION NOT NULL,
+		tax_rate      TEXT    NOT NULL DEFAULT '',
+		discount      DOUBLE PRECISION NOT NULL,
+		tencent_usd   DOUBLE PRECISION NOT NULL,
+		ref_fx_rate   DOUBLE PRECISION NOT NULL,
+		invoice_rmb   DOUBLE PRECISION NOT NULL,
+		bill_name     TEXT    NOT NULL DEFAULT '',
+		source        TEXT    NOT NULL,
+		cost_cny      DOUBLE PRECISION NOT NULL DEFAULT 0,
+		cost_usd      DOUBLE PRECISION NOT NULL DEFAULT 0,
+		rmb_priced    BOOLEAN NOT NULL DEFAULT FALSE,
+		discount_from TEXT    NOT NULL DEFAULT '',
+		PRIMARY KEY (month, line_key)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_tencent_statement_line_seq ON rs_tencent_statement_line(month, seq)`,
 }
 
 // initTencentSchema applies the 腾讯一站 DDLs. Idempotent; fatal on failure
@@ -391,15 +434,25 @@ func buildTencentStatement(rows []tencentSourceRow, p tencentStatementParams) ([
 		)
 	})
 
+	return lines, tencentSummarize(lines)
+}
+
+// tencentSummarize builds the 「汇总表」 rows of statement lines: G and L
+// summed per supplier × month × vendor × source platform, the grouping the
+// exported SUMIFS formulas reproduce.
+func tencentSummarize(lines []tencentLine) []tencentSummaryRow {
 	type summaryKey struct {
-		supplier, vendor, source string
+		supplier string
+		month    int
+		vendor   string
+		source   string
 	}
 	sums := map[summaryKey]*tencentSummaryRow{}
 	for _, l := range lines {
-		k := summaryKey{l.Supplier, l.Vendor, tencentSourcePrefix[l.Platform]}
+		k := summaryKey{l.Supplier, l.BillMonth, l.Vendor, tencentSourcePrefix[l.Platform]}
 		s, ok := sums[k]
 		if !ok {
-			s = &tencentSummaryRow{Supplier: k.supplier, BillMonth: l.BillMonth, Vendor: k.vendor, Source: k.source}
+			s = &tencentSummaryRow{Supplier: k.supplier, BillMonth: k.month, Vendor: k.vendor, Source: k.source}
 			sums[k] = s
 		}
 		s.OfficialUSD += l.OfficialUSD
@@ -413,9 +466,10 @@ func buildTencentStatement(rows []tencentSourceRow, p tencentStatementParams) ([
 		summary = append(summary, *s)
 	}
 	slices.SortFunc(summary, func(a, b tencentSummaryRow) int {
-		return cmp.Or(cmp.Compare(a.Supplier, b.Supplier), cmp.Compare(a.Vendor, b.Vendor), cmp.Compare(a.Source, b.Source))
+		return cmp.Or(cmp.Compare(a.Supplier, b.Supplier), cmp.Compare(a.BillMonth, b.BillMonth),
+			cmp.Compare(a.Vendor, b.Vendor), cmp.Compare(a.Source, b.Source))
 	})
-	return lines, summary
+	return summary
 }
 
 // loadTencentSources reads every platform's usage in the Beijing month
@@ -661,6 +715,21 @@ func tencentCallerID(c *gin.Context) int64 {
 	return uid
 }
 
+// tencentLiveStatement builds the Beijing month [start, end) statement from
+// the current source data and parameters.
+func tencentLiveStatement(start, end time.Time) (tencentStatementParams, gin.H, []tencentLine, []string, error) {
+	params, paramFrom, err := loadTencentStatementParams(start)
+	if err != nil {
+		return params, nil, nil, nil, err
+	}
+	sources, warnings, err := loadTencentSources(start, end)
+	if err != nil {
+		return params, nil, nil, nil, err
+	}
+	lines, _ := buildTencentStatement(sources, params)
+	return params, paramFrom, lines, warnings, nil
+}
+
 // handleTencentStatement previews a month's statement (default: last month)
 // from live source data, optionally for one supplier user or platform.
 func handleTencentStatement(c *gin.Context) {
@@ -680,20 +749,15 @@ func handleTencentStatement(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown platform"})
 		return
 	}
-	params, paramFrom, err := loadTencentStatementParams(start)
+	params, paramFrom, lines, warnings, err := tencentLiveStatement(start, end)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	sources, warnings, err := loadTencentSources(start, end)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	sources = slices.DeleteFunc(sources, func(r tencentSourceRow) bool {
-		return (userID > 0 && r.UserID != userID) || (platform != "" && r.Platform != platform)
+	lines = slices.DeleteFunc(lines, func(l tencentLine) bool {
+		return (userID > 0 && l.UserID != userID) || (platform != "" && l.Platform != platform)
 	})
-	lines, summary := buildTencentStatement(sources, params)
+	summary := tencentSummarize(lines)
 	c.JSON(http.StatusOK, gin.H{
 		"month":            start.Format("2006-01"),
 		"bill_month":       int(start.Month()),
@@ -1039,4 +1103,10 @@ func registerTencentRoutes(api *gin.RouterGroup) {
 	g.PUT("/vendors", handleTencentVendorsSet)
 	g.GET("/settings", handleTencentSettingsGet)
 	g.PUT("/settings", handleTencentSettingsSet)
+	g.GET("/statements", handleTencentStatementList)
+	g.GET("/statements/:month", handleTencentStatementGet)
+	g.POST("/statements/:month/generate", handleTencentStatementWrite(false))
+	g.POST("/statements/:month/regenerate", handleTencentStatementWrite(true))
+	g.POST("/statements/:month/confirm", handleTencentStatementConfirm)
+	g.GET("/statements/:month/export", handleTencentStatementExport)
 }
