@@ -724,3 +724,210 @@ func TestTencentUserCreate(t *testing.T) {
 		assert.Equal(t, http.StatusOK, tencentLoginGates(t, r, username, "Secret-123456")[gate], roleName)
 	}
 }
+
+// tencentLarkStub records card pushes and answers like Lark, or with an
+// HTTP error while fail is set.
+type tencentLarkStub struct {
+	srv   *httptest.Server
+	cards []map[string]any
+	fail  bool
+}
+
+func newTencentLarkStub(t *testing.T) *tencentLarkStub {
+	s := &tencentLarkStub{}
+	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var card map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&card)
+		s.cards = append(s.cards, card)
+		if s.fail {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok"}`))
+	}))
+	t.Cleanup(s.srv.Close)
+	return s
+}
+
+// The card carries the snapshot's per supplier × platform totals and the
+// export link; a failed send is recorded; the schedule pushes last month once
+// (the claim survives restarts) and not at all when switched off.
+func TestTencentStatementPush(t *testing.T) {
+	tencentSeedOctober(t)
+	r := tencentTestRouter()
+	lark := newTencentLarkStub(t)
+	require.NoError(t, supplierConfigSet(cfgTencentPushWebhook, lark.srv.URL))
+	require.NoError(t, supplierConfigSet(cfgTencentPublicURL, "https://rs.example"))
+
+	// No snapshot yet: the push generates the draft it links to.
+	code, body := tencentPushJSON(t, r, `{"month":"2026-10"}`)
+	require.Equal(t, http.StatusOK, code, body)
+	require.Len(t, lark.cards, 1)
+	card := lark.cards[0]["card"].(map[string]any)
+	assert.Equal(t, "📑 腾讯对账单 · 2026-10", card["header"].(map[string]any)["title"].(map[string]any)["content"])
+
+	_, snap := tencentDo(t, r, http.MethodGet, "/api/tencent/statements/2026-10")
+	assert.Equal(t, tencentStatementDraft, snap["statement"].(map[string]any)["status"])
+	type total struct {
+		Lines    int
+		USD, RMB float64
+	}
+	want := map[string]total{}
+	for _, raw := range snap["lines"].([]any) {
+		l := raw.(map[string]any)
+		k := l["supplier"].(string) + "/" + tencentSourcePrefix[l["platform"].(string)]
+		sum := want[k]
+		sum.Lines++
+		sum.USD = tencentRound(sum.USD+l["official_usd"].(float64), 2)
+		sum.RMB = tencentRound(sum.RMB+l["invoice_rmb"].(float64), 2)
+		want[k] = sum
+	}
+	got := map[string]total{}
+	var button string
+	for _, raw := range card["elements"].([]any) {
+		el := raw.(map[string]any)
+		switch el["tag"] {
+		case "table":
+			for _, rr := range el["rows"].([]any) {
+				row := rr.(map[string]any)
+				got[row["supplier"].(string)+"/"+row["platform"].(string)] = total{int(row["lines"].(float64)), row["usd"].(float64), row["rmb"].(float64)}
+			}
+		case "action":
+			button = el["actions"].([]any)[0].(map[string]any)["url"].(string)
+		}
+	}
+	assert.Equal(t, want, got)
+	assert.Equal(t, map[string]total{
+		"Proxy Co/newapi proxy": {2, 9, 65.25},
+		"Studio A/third_party":  {2, 25, 84.18},
+		"bob/ccmax":             {3, 6, 39.15},
+	}, got)
+	assert.Equal(t, "https://rs.example/api/tencent/statements/2026-10/export", button)
+
+	lark.fail = true
+	code, body = tencentPushJSON(t, r, `{"month":"2026-10"}`)
+	assert.Equal(t, http.StatusFailedDependency, code, body)
+	_, logs := tencentDo(t, r, http.MethodGet, "/api/tencent/push-logs?kind=statement")
+	latest := logs["list"].([]any)[0].(map[string]any)
+	assert.Equal(t, false, latest["ok"])
+	assert.Equal(t, "manual", latest["trigger"])
+	assert.Equal(t, "2026-10", latest["month"])
+	assert.Contains(t, latest["error"], "lark HTTP 500")
+	assert.Len(t, logs["list"], 2)
+	lark.fail = false
+
+	// Schedule: day 2 at 10:00 Beijing time by default.
+	bj := func(m time.Month, d, h, min int) time.Time {
+		return time.Date(2026, m, d, h, min, 0, 0, billingExportZone)
+	}
+	sent := len(lark.cards)
+	claimed, err := tencentStatementScheduleTick(bj(11, 2, 9, 59))
+	require.NoError(t, err)
+	assert.False(t, claimed, "before the hour")
+	for _, at := range []time.Time{bj(11, 2, 10, 0), bj(11, 2, 11, 0), bj(11, 20, 3, 0)} {
+		claimed, err = tencentStatementScheduleTick(at)
+		require.NoError(t, err)
+		assert.Equal(t, at.Equal(bj(11, 2, 10, 0)), claimed, at.String())
+	}
+	assert.Len(t, lark.cards, sent+1, "October goes out once")
+	assert.Equal(t, "2026-10", supplierConfigGet(cfgTencentPushMonth))
+
+	require.NoError(t, supplierConfigSet(cfgTencentPushEnabled, "0"))
+	claimed, err = tencentStatementScheduleTick(bj(12, 2, 10, 0))
+	require.NoError(t, err)
+	assert.False(t, claimed, "switched off")
+	assert.Len(t, lark.cards, sent+1)
+	assert.Equal(t, "2026-10", supplierConfigGet(cfgTencentPushMonth))
+	require.NoError(t, supplierConfigSet(cfgTencentPushEnabled, "1"))
+	claimed, err = tencentStatementScheduleTick(bj(12, 3, 8, 0))
+	require.NoError(t, err)
+	assert.True(t, claimed, "a late check still sends the month")
+	assert.Equal(t, "2026-11", supplierConfigGet(cfgTencentPushMonth))
+	_, logs = tencentDo(t, r, http.MethodGet, "/api/tencent/push-logs")
+	assert.Equal(t, "schedule", logs["list"].([]any)[0].(map[string]any)["trigger"])
+}
+
+func tencentPushJSON(t *testing.T, r *gin.Engine, body string) (int, string) {
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/tencent/statement-push", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	return w.Code, w.Body.String()
+}
+
+// /push-settings writes the keys the owning pages read and shows what they
+// write.
+func TestTencentPushSettingsInterop(t *testing.T) {
+	tencentTestDB(t)
+	for _, ddl := range append(append([]string{}, v2SchemaStatements...), tencentSchemaStatements...) {
+		_, err := db.Exec(ddl)
+		require.NoError(t, err)
+	}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	api := r.Group("/api", func(c *gin.Context) { c.Set("role", minSuperAdminRole) })
+	registerTencentRoutes(api)
+	api.GET("/ccmax/report/settings", handleCCMaxReportSettingsGet)
+	api.PUT("/ccmax/report/settings", handleCCMaxReportSettingsSet)
+	api.GET("/proxy-report/settings", handleProxyReportSettingsGet)
+	api.PUT("/proxy-report/settings", handleProxyReportSettingsSet)
+	api.GET("/ops-notify/config", handleOpsNotifyConfigGet)
+	api.POST("/ops-notify/config", handleOpsNotifyConfigSet)
+	api.GET("/supplier-account/settings", handleSupplierSettingsGet)
+	call := func(method, path, body string) (int, map[string]any) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(w, req)
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return w.Code, out
+	}
+
+	code, got := call(http.MethodPut, "/api/tencent/push-settings", `{
+		"statement": {"webhook": "https://lark.example/stmt", "enabled": false, "day": 5, "hour": 9, "base_url": "https://rs.example/"},
+		"supplier_quota_webhook": "https://lark.example/quota",
+		"ccmax_report": {"webhook": "https://lark.example/ccmax", "hours": "9, 21"},
+		"proxy_report": {"webhook": "https://lark.example/proxy", "hours": "8"},
+		"ops_daily_spend": {"enabled": true, "webhook": "https://lark.example/ops", "daily_spend": true, "daily_spend_hour": 7}}`)
+	require.Equal(t, http.StatusOK, code, got)
+	assert.Equal(t, map[string]any{"webhook": "https://lark.example/stmt", "enabled": false, "day": 5.0, "hour": 9.0, "base_url": "https://rs.example"}, got["statement"])
+	assert.Equal(t, map[string]any{"webhook_set": true, "webhook_last4": "uota"}, got["supplier_quota"])
+
+	_, ccmax := call(http.MethodGet, "/api/ccmax/report/settings", "")
+	assert.Equal(t, "https://lark.example/ccmax", ccmax["webhook"])
+	assert.Equal(t, "9,21", ccmax["hours"])
+	_, proxy := call(http.MethodGet, "/api/proxy-report/settings", "")
+	assert.Equal(t, "https://lark.example/proxy", proxy["webhook"])
+	assert.Equal(t, "8", proxy["hours"])
+	_, ops := call(http.MethodGet, "/api/ops-notify/config", "")
+	assert.Equal(t, true, ops["daily_spend"])
+	assert.Equal(t, 7.0, ops["daily_spend_hour"])
+	assert.Equal(t, "https://lark.example/ops", ops["webhook"])
+	assert.Equal(t, true, ops["uploads"], "other ops fields keep their values")
+	_, supplier := call(http.MethodGet, "/api/supplier-account/settings", "")
+	assert.Equal(t, "uota", supplier["quota_webhook_last4"])
+
+	// Changes made on the owning pages show up here.
+	code, _ = call(http.MethodPut, "/api/ccmax/report/settings", `{"hours":"10"}`)
+	require.Equal(t, http.StatusOK, code)
+	code, _ = call(http.MethodPut, "/api/proxy-report/settings", `{"webhook":""}`)
+	require.Equal(t, http.StatusOK, code)
+	code, _ = call(http.MethodPost, "/api/ops-notify/config", `{"daily_spend_hour":11}`)
+	require.Equal(t, http.StatusOK, code)
+	_, got = call(http.MethodGet, "/api/tencent/push-settings", "")
+	assert.Equal(t, map[string]any{"webhook": "https://lark.example/ccmax", "hours": "10"}, got["ccmax_report"])
+	assert.Equal(t, map[string]any{"webhook": "", "hours": "8"}, got["proxy_report"])
+	assert.Equal(t, 11.0, got["ops_daily_spend"].(map[string]any)["daily_spend_hour"])
+
+	// One invalid field rejects the request before anything is written.
+	for _, bad := range []string{
+		`{"statement": {"webhook": "https://lark.example/new", "day": 29}}`,
+		`{"statement": {"webhook": "https://lark.example/new"}, "ccmax_report": {"webhook": "http://insecure.example"}}`,
+		`{"statement": {"webhook": "https://lark.example/new"}, "proxy_report": {"hours": "25"}}`,
+	} {
+		code, _ := call(http.MethodPut, "/api/tencent/push-settings", bad)
+		assert.Equal(t, http.StatusBadRequest, code, bad)
+	}
+	assert.Equal(t, "https://lark.example/stmt", loadTencentPushSchedule().Webhook)
+}

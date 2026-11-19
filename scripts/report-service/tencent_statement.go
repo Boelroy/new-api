@@ -154,6 +154,20 @@ var tencentSchemaStatements = []string{
 		PRIMARY KEY (month, line_key)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_tencent_statement_line_seq ON rs_tencent_statement_line(month, seq)`,
+	// Push attempts (tencent_push.go): kind statement for now; trigger is
+	// manual or schedule; detail is the pushed totals (JSON).
+	`CREATE TABLE IF NOT EXISTS rs_tencent_push_log (
+		id         BIGSERIAL PRIMARY KEY,
+		kind       TEXT    NOT NULL,
+		trigger    TEXT    NOT NULL,
+		month      TEXT    NOT NULL DEFAULT '',
+		ok         BOOLEAN NOT NULL,
+		error      TEXT    NOT NULL DEFAULT '',
+		detail     TEXT    NOT NULL DEFAULT '{}',
+		created_at BIGINT  NOT NULL,
+		created_by BIGINT  NOT NULL DEFAULT 0
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_tencent_push_log_kind ON rs_tencent_push_log(kind, id DESC)`,
 }
 
 // initTencentSchema applies the 腾讯一站 DDLs. Idempotent; fatal on failure
@@ -1103,6 +1117,10 @@ func registerTencentRoutes(api *gin.RouterGroup) {
 	g.PUT("/vendors", handleTencentVendorsSet)
 	g.GET("/settings", handleTencentSettingsGet)
 	g.PUT("/settings", handleTencentSettingsSet)
+	g.POST("/statement-push", handleTencentStatementPush)
+	g.GET("/push-logs", handleTencentPushLogs)
+	g.GET("/push-settings", handleTencentPushSettingsGet)
+	g.PUT("/push-settings", handleTencentPushSettingsSet)
 	g.GET("/users", handleTencentUserList)
 	g.POST("/users", handleTencentUserCreate)
 	g.GET("/statements", handleTencentStatementList)

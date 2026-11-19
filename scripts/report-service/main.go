@@ -5723,6 +5723,7 @@ func main() {
 	supplierWeb.startRefresher()
 	ccmaxWeb.startRefresher()
 	startCCMaxReportLoop()
+	startTencentStatementPushLoop()
 
 	// SPA — serve for all non-API routes
 	r.NoRoute(spaHandler())
