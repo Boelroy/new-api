@@ -1,31 +1,29 @@
 package main
 
 // 腾讯一站 · 月对账: the monthly statement in the layout of the customer
-// template's 「API账单」 (columns A–N) and 「汇总表」 sheets, built from the
-// three platforms report-service already mirrors:
+// template's 「API账单」 (columns A–N, one row per account) and 「汇总表」
+// sheets, summed from three sources:
 //
-//   - third_party: rs_supplier_record_log_hourly (portal quota, CNY) per
-//     account × model, joined to rs_supplier_account by platform account id;
-//   - ccmax: rs_ccmax_daily_bill (CNY), split per model through
-//     rs_ccmax_daily_bill_model where the portal bill carried the model;
+//   - third_party (账号上号 / 老台子): the portal WEB bill/query of the month
+//     for every non-claude account on the portal roster (/supplier/accounts),
+//     cost in RMB; the local rs_supplier_account only names the uploader.
+//   - ccmax: rs_ccmax_daily_bill (the same portal bill, pulled daily for the
+//     CC Max accounts), RMB, models from rs_ccmax_daily_bill_model.
 //   - proxy: proxy_channel_ownership × the upstream newapi's channel
 //     used_quota growth (remote_channel_snapshot of the configured remote
-//     profile, the same source as /api/billing/remote-tag-usage). Snapshots
-//     carry no model, so a proxy channel is billed as one row; its quota is
-//     USD already.
+//     profile, the source of /api/billing/remote-tag-usage); USD already.
 //
-// Months are Beijing calendar months. Every business rule that is not settled
-// yet (FX rates, discount, tax rate, RMB-priced rows, bill names, vendor
-// naming, proxy upstream) is a setting under /api/tencent/*, super admin only.
+// G is USD: RMB costs are divided by the month's rate (default the system
+// supplier_fx_rate). Months are Beijing calendar months. The month's rate,
+// reference rate (K), discount (I) and tax rate (H) are the only inputs, set
+// per month under /api/tencent/params/months, super admin only.
 
 import (
 	"cmp"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"maps"
 	"math"
 	"net/http"
 	"slices"
@@ -34,31 +32,36 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 )
 
 const (
 	tencentPlatformThirdParty = "third_party"
 	tencentPlatformCCMax      = "ccmax"
 	tencentPlatformProxy      = "proxy"
-	// tencentPlatformAll keys a supplier parameter that applies to every
-	// platform of the supplier unless a platform row overrides it.
-	tencentPlatformAll = "*"
 
-	// tencentCCMaxFallbackModel names CC Max cost whose portal bill carried no
-	// model (days pulled before per-model storage, or a portal without it).
+	// tencentCCMaxFallbackModel is column D for CC Max accounts whose bill
+	// carried no model (days pulled before per-model storage).
 	tencentCCMaxFallbackModel = "Claude（CC Max 订阅）"
+	// tencentDefaultTaxRate is column H unless the month sets another.
+	tencentDefaultTaxRate = "含票"
+	// tencentPortalBillDays is how far back the portal keeps bills.
+	tencentPortalBillDays = 90
 
 	cfgTencentProxyProfileID = "tencent_proxy_profile_id"
-	cfgTencentVendorMap      = "tencent_vendor_map"
 
 	// tencentProxyQuotaPerUSD is newapi's quota unit (500,000 quota = 1 USD).
 	tencentProxyQuotaPerUSD = 500000
 )
 
+// tencentNow is the clock that bounds the portal bill query (today, and the
+// portal's retention); tests pin it.
+var tencentNow = time.Now
+
 var tencentPlatforms = []string{tencentPlatformThirdParty, tencentPlatformCCMax, tencentPlatformProxy}
 
-// tencentSourcePrefix is the template's column N prefix per platform; the
-// summary sheet's SUMIFS match on it.
+// tencentSourcePrefix is column N per platform; the summary sheet's SUMIFS
+// match it as a prefix ("third_party*").
 var tencentSourcePrefix = map[string]string{
 	tencentPlatformThirdParty: "third_party",
 	tencentPlatformCCMax:      "ccmax",
@@ -79,9 +82,11 @@ var tencentSummaryHeaders = []string{
 }
 
 var tencentSchemaStatements = []string{
-	// Per-month FX rates. fx_rate is the CNY÷rate divisor for column G (NULL =
-	// the system supplier_fx_rate at statement time); ref_fx_rate is column K,
-	// the BOC USD rate entered by hand (NULL = the column G rate).
+	// Per-month statement inputs. fx_rate is the RMB÷rate divisor for column G
+	// (NULL = the system supplier_fx_rate at statement time); ref_fx_rate is
+	// column K, the BOC USD rate entered by hand (NULL = the column G rate);
+	// discount is column I as a fraction (NULL = the 上号 default discount);
+	// tax_rate is column H (NULL = 含票).
 	`CREATE TABLE IF NOT EXISTS rs_tencent_month_param (
 		month       TEXT PRIMARY KEY,
 		fx_rate     DOUBLE PRECISION,
@@ -90,31 +95,12 @@ var tencentSchemaStatements = []string{
 		updated_at  BIGINT NOT NULL,
 		updated_by  BIGINT NOT NULL DEFAULT 0
 	)`,
-	// Per supplier (rs_auth_user) × platform discount (percent, NULL = fall
-	// through) and tax rate (column H, free text as in the template).
-	// platform '*' applies to all platforms of the supplier.
-	`CREATE TABLE IF NOT EXISTS rs_tencent_supplier_param (
-		user_id      BIGINT NOT NULL,
-		platform     TEXT   NOT NULL,
-		discount_pct DOUBLE PRECISION,
-		tax_rate     TEXT   NOT NULL DEFAULT '',
-		updated_at   BIGINT NOT NULL,
-		updated_by   BIGINT NOT NULL DEFAULT 0,
-		PRIMARY KEY (user_id, platform)
-	)`,
-	// Per statement row overrides, keyed by tencentLineKey: RMB-priced rows
-	// (L = J) and column M, the official bill name.
-	`CREATE TABLE IF NOT EXISTS rs_tencent_line_flag (
-		line_key   TEXT PRIMARY KEY,
-		rmb_priced BOOLEAN NOT NULL DEFAULT FALSE,
-		bill_name  TEXT    NOT NULL DEFAULT '',
-		updated_at BIGINT  NOT NULL,
-		updated_by BIGINT  NOT NULL DEFAULT 0
-	)`,
+	`ALTER TABLE rs_tencent_month_param ADD COLUMN IF NOT EXISTS discount DOUBLE PRECISION`,
+	`ALTER TABLE rs_tencent_month_param ADD COLUMN IF NOT EXISTS tax_rate TEXT`,
 	// Month-end snapshots (tencent_statement_export.go). A month is a draft
 	// until confirmed; a confirmed month no longer follows the source data.
-	// params holds the supplier parameters, line flags and vendor rules the
-	// lines were built with (JSON); the rates are columns.
+	// params holds the discount and tax rate the lines were built with (JSON);
+	// the rates are columns.
 	`CREATE TABLE IF NOT EXISTS rs_tencent_statement (
 		month        TEXT PRIMARY KEY,
 		status       TEXT   NOT NULL,
@@ -127,6 +113,8 @@ var tencentSchemaStatements = []string{
 		confirmed_at BIGINT NOT NULL DEFAULT 0,
 		confirmed_by BIGINT NOT NULL DEFAULT 0
 	)`,
+	// One row per statement line (A–N plus the source amounts). rmb_priced
+	// and discount_from are left over from the first version and unused.
 	`CREATE TABLE IF NOT EXISTS rs_tencent_statement_line (
 		month         TEXT    NOT NULL,
 		seq           INT     NOT NULL,
@@ -180,76 +168,55 @@ func initTencentSchema() {
 	}
 }
 
-// tencentSourceRow is one platform's month usage of one account (proxy: one
-// channel) and model, before any statement parameter is applied.
+// tencentSourceRow is one account's (proxy: one channel's) month cost on one
+// platform, before the month's parameters are applied.
 type tencentSourceRow struct {
 	Platform  string
 	UserID    int64
-	Username  string
-	Studio    string
-	AccountID int64
-	KeyLast8  string
-	Provider  string
-	Model     string
+	Supplier  string // column A
+	AccountID int64  // column E
+	Vendor    string // column C
+	Models    []string
+	Label     string // column F
 	CostCNY   float64
 	CostUSD   float64
-	// UploadDiscountPct is the discount the account was uploaded with, the
-	// fallback when no supplier parameter sets one.
-	UploadDiscountPct *float64
 }
 
-type tencentSupplierParamKey struct {
-	UserID   int64
-	Platform string
-}
-
-type tencentSupplierParam struct {
-	DiscountPct *float64
-	TaxRate     string
-}
-
-type tencentLineFlag struct {
-	RMBPriced bool
-	BillName  string
-}
-
+// tencentStatementParams are a month's statement inputs.
 type tencentStatementParams struct {
-	Month     time.Time
-	FxRate    float64
-	RefFxRate float64
-	Suppliers map[tencentSupplierParamKey]tencentSupplierParam
-	Flags     map[string]tencentLineFlag
-	VendorMap map[string]string
+	Month     time.Time `json:"-"`
+	FxRate    float64   `json:"fx_rate"`
+	RefFxRate float64   `json:"ref_fx_rate"`
+	Discount  float64   `json:"discount"`
+	TaxRate   string    `json:"tax_rate"`
 }
 
 // tencentLine is one 「API账单」 row; the json names of A–N follow the
 // template column order.
 type tencentLine struct {
-	LineKey      string  `json:"line_key"`
-	Platform     string  `json:"platform"`
-	UserID       int64   `json:"user_id"`
-	Supplier     string  `json:"supplier"`     // A
-	BillMonth    int     `json:"bill_month"`   // B
-	Vendor       string  `json:"vendor"`       // C
-	Model        string  `json:"model"`        // D
-	AccountID    string  `json:"account_id"`   // E
-	Key          string  `json:"key"`          // F
-	OfficialUSD  float64 `json:"official_usd"` // G
-	TaxRate      string  `json:"tax_rate"`     // H
-	Discount     float64 `json:"discount"`     // I, a fraction (0.88)
-	TencentUSD   float64 `json:"tencent_usd"`  // J
-	RefFxRate    float64 `json:"ref_fx_rate"`  // K
-	InvoiceRMB   float64 `json:"invoice_rmb"`  // L
-	BillName     string  `json:"bill_name"`    // M
-	Source       string  `json:"source"`       // N
-	CostCNY      float64 `json:"cost_cny"`
-	CostUSD      float64 `json:"cost_usd"`
-	RMBPriced    bool    `json:"rmb_priced"`
-	DiscountFrom string  `json:"discount_from"`
+	LineKey     string  `json:"line_key"`
+	Platform    string  `json:"platform"`
+	UserID      int64   `json:"user_id"`
+	Supplier    string  `json:"supplier"`     // A
+	BillMonth   int     `json:"bill_month"`   // B
+	Vendor      string  `json:"vendor"`       // C
+	Model       string  `json:"model"`        // D
+	AccountID   string  `json:"account_id"`   // E
+	Key         string  `json:"key"`          // F
+	OfficialUSD float64 `json:"official_usd"` // G
+	TaxRate     string  `json:"tax_rate"`     // H
+	Discount    float64 `json:"discount"`     // I, a fraction (0.88)
+	TencentUSD  float64 `json:"tencent_usd"`  // J = ROUND(G×I, 2)
+	RefFxRate   float64 `json:"ref_fx_rate"`  // K
+	InvoiceRMB  float64 `json:"invoice_rmb"`  // L = J×K
+	BillName    string  `json:"bill_name"`    // M
+	Source      string  `json:"source"`       // N
+	CostCNY     float64 `json:"cost_cny"`
+	CostUSD     float64 `json:"cost_usd"`
 }
 
 // tencentSummaryRow is one 「汇总表」 row: G and L summed per supplier ×
-// month × vendor × source platform.
+// month × vendor × source.
 type tencentSummaryRow struct {
 	Supplier    string  `json:"supplier"`
 	BillMonth   int     `json:"bill_month"`
@@ -267,11 +234,6 @@ func tencentRound(x float64, n int) float64 {
 	return math.Round(x*p+math.Copysign(1e-7, x)) / p
 }
 
-// tencentLineKey identifies a statement row across rebuilds, for its flags.
-func tencentLineKey(month time.Time, platform string, accountID int64, model string) string {
-	return fmt.Sprintf("%s|%s|%d|%s", month.Format("2006-01"), platform, accountID, model)
-}
-
 // tencentMonthRange parses a YYYY-MM month into its Beijing [start, end).
 func tencentMonthRange(month string) (time.Time, time.Time, error) {
 	start, err := time.ParseInLocation("2006-01", strings.TrimSpace(month), billingExportZone)
@@ -281,161 +243,35 @@ func tencentMonthRange(month string) (time.Time, time.Time, error) {
 	return start, start.AddDate(0, 1, 0), nil
 }
 
-// tencentDefaultVendorRules map a lowercase model / provider substring to the
-// statement's vendor name (column C). Checked in order, model first.
-var tencentDefaultVendorRules = []struct{ match, vendor string }{
-	{"claude", "Anthropic"},
-	{"anthropic", "Anthropic"},
-	{"gpt", "OpenAI"},
-	{"openai", "OpenAI"},
-	{"chatgpt", "OpenAI"},
-	{"codex", "OpenAI"},
-	{"dall-e", "OpenAI"},
-	{"whisper", "OpenAI"},
-	{"tts-", "OpenAI"},
-	{"text-embedding", "OpenAI"},
-	{"sora", "OpenAI"},
-	{"azure", "OpenAI"},
-	{"gemini", "Google"},
-	{"imagen", "Google"},
-	{"veo", "Google"},
-	{"vertex", "Google"},
-	{"google", "Google"},
-	{"deepseek", "DeepSeek"},
-	{"grok", "xAI"},
-	{"xai", "xAI"},
-	{"qwen", "Alibaba"},
-	{"qwq", "Alibaba"},
-	{"dashscope", "Alibaba"},
-	{"glm", "Zhipu"},
-	{"zhipu", "Zhipu"},
-	{"kimi", "Moonshot"},
-	{"moonshot", "Moonshot"},
-	{"doubao", "ByteDance"},
-	{"volc", "ByteDance"},
-	{"llama", "Meta"},
-	{"mistral", "Mistral"},
-	{"minimax", "MiniMax"},
-	{"bedrock", "Anthropic"},
-	{"aws", "Anthropic"},
-}
-
-// tencentVendor names the model vendor of a row. Custom rules (lowercase
-// substring → vendor, longest first) win over the defaults; OpenAI's
-// o-series ids have no distinctive substring and are matched by prefix.
-func tencentVendor(model, provider string, custom map[string]string) string {
-	model = strings.ToLower(strings.TrimSpace(model))
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	keys := slices.Collect(maps.Keys(custom))
-	slices.SortFunc(keys, func(a, b string) int {
-		return cmp.Or(cmp.Compare(len(b), len(a)), cmp.Compare(a, b))
-	})
-	for _, subject := range []string{model, provider} {
-		if subject == "" {
-			continue
-		}
-		for _, k := range keys {
-			if k != "" && strings.Contains(subject, strings.ToLower(k)) {
-				return custom[k]
-			}
-		}
-		for _, r := range tencentDefaultVendorRules {
-			if strings.Contains(subject, r.match) {
-				return r.vendor
-			}
-		}
-		if len(subject) >= 2 && subject[0] == 'o' && subject[1] >= '1' && subject[1] <= '9' {
-			return "OpenAI"
-		}
-	}
-	if provider != "" {
-		return provider
-	}
-	return "未知"
-}
-
-// buildTencentStatement applies the month parameters to the source rows and
-// returns the 「API账单」 rows and the 「汇总表」 rows. Rows with the same line
-// key are merged first.
+// buildTencentStatement applies the month parameters to the source rows (one
+// per platform account) and returns the 「API账单」 and 「汇总表」 rows.
 func buildTencentStatement(rows []tencentSourceRow, p tencentStatementParams) ([]tencentLine, []tencentSummaryRow) {
-	merged := map[string]*tencentSourceRow{}
-	order := []string{}
+	lines := make([]tencentLine, 0, len(rows))
 	for _, r := range rows {
-		model := r.Model
-		if r.Platform == tencentPlatformCCMax && strings.TrimSpace(model) == "" {
-			model = tencentCCMaxFallbackModel
-		}
-		key := tencentLineKey(p.Month, r.Platform, r.AccountID, model)
-		if m, ok := merged[key]; ok {
-			m.CostCNY += r.CostCNY
-			m.CostUSD += r.CostUSD
-			continue
-		}
-		r.Model = model
-		merged[key] = &r
-		order = append(order, key)
-	}
-
-	lines := make([]tencentLine, 0, len(order))
-	for _, key := range order {
-		r := merged[key]
-		flag := p.Flags[key]
-		platformParam, hasPlatform := p.Suppliers[tencentSupplierParamKey{r.UserID, r.Platform}]
-		allParam, hasAll := p.Suppliers[tencentSupplierParamKey{r.UserID, tencentPlatformAll}]
-
-		discountPct, discountFrom := 100.0, "default"
-		switch {
-		case hasPlatform && platformParam.DiscountPct != nil:
-			discountPct, discountFrom = *platformParam.DiscountPct, "supplier_platform"
-		case hasAll && allParam.DiscountPct != nil:
-			discountPct, discountFrom = *allParam.DiscountPct, "supplier"
-		case r.UploadDiscountPct != nil:
-			discountPct, discountFrom = *r.UploadDiscountPct, "upload"
-		}
-		taxRate := allParam.TaxRate
-		if hasPlatform && platformParam.TaxRate != "" {
-			taxRate = platformParam.TaxRate
-		}
-
-		// G is what the platform cost in the row's billing currency: USD
-		// (CNY ÷ the month rate) normally, CNY for a row priced in RMB.
-		official := r.CostUSD + r.CostCNY/p.FxRate
-		if flag.RMBPriced {
-			official = r.CostCNY + r.CostUSD*p.FxRate
-		}
-		g := tencentRound(official, 2)
-		j := tencentRound(g*discountPct/100, 2)
-		l := tencentRound(j*p.RefFxRate, 2)
-		if flag.RMBPriced {
-			l = j
-		}
-
-		keyCol := ""
-		if r.Platform == tencentPlatformThirdParty && r.KeyLast8 != "" {
-			keyCol = "****" + r.KeyLast8
-		}
+		account := strconv.FormatInt(r.AccountID, 10)
+		g := tencentRound(r.CostUSD+r.CostCNY/p.FxRate, 2)
+		j := tencentRound(g*p.Discount, 2)
 		lines = append(lines, tencentLine{
-			LineKey:      key,
-			Platform:     r.Platform,
-			UserID:       r.UserID,
-			Supplier:     cmp.Or(strings.TrimSpace(r.Studio), r.Username),
-			BillMonth:    int(p.Month.Month()),
-			Vendor:       tencentVendor(r.Model, r.Provider, p.VendorMap),
-			Model:        r.Model,
-			AccountID:    strconv.FormatInt(r.AccountID, 10),
-			Key:          keyCol,
-			OfficialUSD:  g,
-			TaxRate:      taxRate,
-			Discount:     discountPct / 100,
-			TencentUSD:   j,
-			RefFxRate:    p.RefFxRate,
-			InvoiceRMB:   l,
-			BillName:     flag.BillName,
-			Source:       tencentSourcePrefix[r.Platform] + " - " + r.Username,
-			CostCNY:      r.CostCNY,
-			CostUSD:      r.CostUSD,
-			RMBPriced:    flag.RMBPriced,
-			DiscountFrom: discountFrom,
+			LineKey:     fmt.Sprintf("%s|%s|%s", p.Month.Format("2006-01"), r.Platform, account),
+			Platform:    r.Platform,
+			UserID:      r.UserID,
+			Supplier:    r.Supplier,
+			BillMonth:   int(p.Month.Month()),
+			Vendor:      r.Vendor,
+			Model:       strings.Join(r.Models, ", "),
+			AccountID:   account,
+			Key:         r.Label,
+			OfficialUSD: g,
+			TaxRate:     p.TaxRate,
+			Discount:    p.Discount,
+			TencentUSD:  j,
+			RefFxRate:   p.RefFxRate,
+			// J has 2 decimals and K at most 4, so 6 keep J×K exact.
+			InvoiceRMB: tencentRound(j*p.RefFxRate, 6),
+			BillName:   r.Vendor + "+" + account + "+" + r.Supplier,
+			Source:     tencentSourcePrefix[r.Platform],
+			CostCNY:    r.CostCNY,
+			CostUSD:    r.CostUSD,
 		})
 	}
 	slices.SortStableFunc(lines, func(a, b tencentLine) int {
@@ -443,17 +279,16 @@ func buildTencentStatement(rows []tencentSourceRow, p tencentStatementParams) ([
 			cmp.Compare(a.Supplier, b.Supplier),
 			cmp.Compare(slices.Index(tencentPlatforms, a.Platform), slices.Index(tencentPlatforms, b.Platform)),
 			cmp.Compare(a.Vendor, b.Vendor),
+			cmp.Compare(len(a.AccountID), len(b.AccountID)),
 			cmp.Compare(a.AccountID, b.AccountID),
-			cmp.Compare(a.Model, b.Model),
 		)
 	})
-
 	return lines, tencentSummarize(lines)
 }
 
 // tencentSummarize builds the 「汇总表」 rows of statement lines: G and L
-// summed per supplier × month × vendor × source platform, the grouping the
-// exported SUMIFS formulas reproduce.
+// summed per supplier × month × vendor × source, the grouping the exported
+// SUMIFS formulas reproduce.
 func tencentSummarize(lines []tencentLine) []tencentSummaryRow {
 	type summaryKey struct {
 		supplier string
@@ -463,7 +298,7 @@ func tencentSummarize(lines []tencentLine) []tencentSummaryRow {
 	}
 	sums := map[summaryKey]*tencentSummaryRow{}
 	for _, l := range lines {
-		k := summaryKey{l.Supplier, l.BillMonth, l.Vendor, tencentSourcePrefix[l.Platform]}
+		k := summaryKey{l.Supplier, l.BillMonth, l.Vendor, l.Source}
 		s, ok := sums[k]
 		if !ok {
 			s = &tencentSummaryRow{Supplier: k.supplier, BillMonth: k.month, Vendor: k.vendor, Source: k.source}
@@ -481,95 +316,44 @@ func tencentSummarize(lines []tencentLine) []tencentSummaryRow {
 	}
 	slices.SortFunc(summary, func(a, b tencentSummaryRow) int {
 		return cmp.Or(cmp.Compare(a.Supplier, b.Supplier), cmp.Compare(a.BillMonth, b.BillMonth),
-			cmp.Compare(a.Vendor, b.Vendor), cmp.Compare(a.Source, b.Source))
+			cmp.Compare(slices.Index(tencentPlatforms, tencentPlatformOfSource(a.Source)), slices.Index(tencentPlatforms, tencentPlatformOfSource(b.Source))),
+			cmp.Compare(a.Vendor, b.Vendor))
 	})
 	return summary
 }
 
-// loadTencentSources reads every platform's usage in the Beijing month
-// [start, end). Warnings name usage that could not be billed.
+func tencentPlatformOfSource(source string) string {
+	for p, s := range tencentSourcePrefix {
+		if s == source {
+			return p
+		}
+	}
+	return ""
+}
+
+// tencentAccountLabel is column F of a portal account: its alias, then *** and
+// the last five characters of its key, as the template shows them.
+func tencentAccountLabel(alias, apiKey string) string {
+	alias, apiKey = strings.TrimSpace(alias), strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return alias
+	}
+	tail := []rune(apiKey)
+	return strings.TrimSpace(alias + " ***" + string(tail[max(0, len(tail)-5):]))
+}
+
+// loadTencentSources reads every platform's cost in the Beijing month
+// [start, end). Warnings name cost that could not be billed or may be partial.
 func loadTencentSources(start, end time.Time) ([]tencentSourceRow, []string, error) {
-	out := []tencentSourceRow{}
-	warnings := []string{}
-
-	// third_party: the hourly portal log, cost = quota / 1e6 CNY. Log rows
-	// carry the platform account id (a1_id on 1.0, a2_id on 2.0).
-	uploadDiscount, _ := strconv.ParseFloat(supplierAccountDiscount(), 64)
-	rows, err := db.Query(`
-		SELECT sa.uploaded_by, COALESCE(u.username, ''), COALESCE(u.studio, ''), sa.remote_account_id,
-		       sa.key_last8, sa.provider, sa.account_type, h.model, SUM(h.cost)
-		  FROM rs_supplier_record_log_hourly h
-		  JOIN rs_supplier_account sa
-		    ON h.account_id <> 0
-		   AND h.account_id = CASE h.platform WHEN '1.0' THEN sa.a1_id WHEN '2.0' THEN sa.a2_id END
-		  LEFT JOIN rs_auth_user u ON u.id = sa.uploaded_by
-		 WHERE h.hour >= $1 AND h.hour < $2
-		 GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
-		HAVING SUM(h.cost) > 0`, start.Unix(), end.Unix())
+	out, warnings, err := loadTencentThirdPartyRows(start, end, tencentNow())
 	if err != nil {
-		return nil, nil, fmt.Errorf("third_party usage: %w", err)
+		return nil, nil, fmt.Errorf("third_party bill: %w", err)
 	}
-	for rows.Next() {
-		r := tencentSourceRow{Platform: tencentPlatformThirdParty}
-		var accountType int
-		var quota float64
-		if err := rows.Scan(&r.UserID, &r.Username, &r.Studio, &r.AccountID, &r.KeyLast8, &r.Provider, &accountType, &r.Model, &quota); err != nil {
-			rows.Close()
-			return nil, nil, err
-		}
-		r.CostCNY = quota / supplierRecordLogQuotaUnit
-		// 普通号 are uploaded at the admin default discount; 速刷号 carry none.
-		if accountType == 0 && uploadDiscount > 0 {
-			r.UploadDiscountPct = &uploadDiscount
-		}
-		out = append(out, r)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, nil, err
-	}
-	var orphanQuota float64
-	if err := db.QueryRow(`
-		SELECT COALESCE(SUM(h.cost), 0) FROM rs_supplier_record_log_hourly h
-		 WHERE h.hour >= $1 AND h.hour < $2
-		   AND NOT EXISTS (SELECT 1 FROM rs_supplier_account sa WHERE h.account_id <> 0
-		         AND h.account_id = CASE h.platform WHEN '1.0' THEN sa.a1_id WHEN '2.0' THEN sa.a2_id END)`,
-		start.Unix(), end.Unix()).Scan(&orphanQuota); err != nil {
-		return nil, nil, err
-	}
-	if orphanQuota > 0 {
-		warnings = append(warnings, fmt.Sprintf("third_party: ¥%.2f 用量的门户账号不在本地上号表，未出账", orphanQuota/supplierRecordLogQuotaUnit))
-	}
-
-	// ccmax: per-model bill rows where stored, else the day's total.
-	rows, err = db.Query(`
-		SELECT a.uploaded_by, COALESCE(u.username, ''), COALESCE(u.studio, ''), a.remote_account_id,
-		       COALESCE(m.model, ''), SUM(COALESCE(m.cost_micro, b.cost_micro))
-		  FROM rs_ccmax_daily_bill b
-		  JOIN rs_ccmax_account a ON a.remote_account_id = b.remote_account_id
-		  LEFT JOIN rs_auth_user u ON u.id = a.uploaded_by
-		  LEFT JOIN rs_ccmax_daily_bill_model m ON m.remote_account_id = b.remote_account_id AND m.ds = b.ds
-		 WHERE b.ds >= $1::date AND b.ds < $2::date
-		 GROUP BY 1, 2, 3, 4, 5
-		HAVING SUM(COALESCE(m.cost_micro, b.cost_micro)) > 0`,
-		start.Format("2006-01-02"), end.Format("2006-01-02"))
+	ccmaxRows, err := loadTencentCCMaxRows(start, end)
 	if err != nil {
-		return nil, nil, fmt.Errorf("ccmax usage: %w", err)
+		return nil, nil, fmt.Errorf("ccmax bill: %w", err)
 	}
-	for rows.Next() {
-		r := tencentSourceRow{Platform: tencentPlatformCCMax, Provider: "claude"}
-		var micro int64
-		if err := rows.Scan(&r.UserID, &r.Username, &r.Studio, &r.AccountID, &r.Model, &micro); err != nil {
-			rows.Close()
-			return nil, nil, err
-		}
-		r.CostCNY = float64(micro) / 1e6
-		out = append(out, r)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, nil, err
-	}
+	out = append(out, ccmaxRows...)
 
 	// proxy: owned channels' used_quota growth over the month on the
 	// configured upstream profile.
@@ -592,6 +376,212 @@ func loadTencentSources(start, end time.Time) ([]tencentSourceRow, []string, err
 		warnings = append(warnings, proxyWarnings...)
 	}
 	return out, warnings, nil
+}
+
+// loadTencentThirdPartyRows bills every non-claude account on the 账号上号
+// portal roster with the portal's own bill of the month (WEB bill/query, RMB),
+// up to today; the portal only keeps tencentPortalBillDays of bills.
+func loadTencentThirdPartyRows(start, end, now time.Time) ([]tencentSourceRow, []string, error) {
+	if !supplierWeb.configured() {
+		return nil, []string{"third_party: 号池门户 WEB 登录未配置（SUPPLIER_ACCOUNT_*），账号上号未出账"}, nil
+	}
+	now = now.In(supplierPortalLoc)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, supplierPortalLoc)
+	from, to := start.In(supplierPortalLoc), end.AddDate(0, 0, -1).In(supplierPortalLoc)
+	if to.After(today) {
+		to = today
+	}
+	if to.Before(from) {
+		return nil, nil, nil
+	}
+	warnings := []string{}
+	if earliest := today.AddDate(0, 0, -tencentPortalBillDays); from.Before(earliest) {
+		warnings = append(warnings, fmt.Sprintf("third_party: 门户只保留近 %d 天账单，%s 之前的日期没有数据", tencentPortalBillDays, earliest.Format("2006-01-02")))
+	}
+
+	roster, err := fetchSupplierPortalAccounts()
+	if err != nil {
+		return nil, nil, err
+	}
+	accounts := map[int64]portalAccount{}
+	ids := []int64{}
+	for _, a := range roster {
+		if a.ID <= 0 || strings.EqualFold(strings.TrimSpace(a.Provider), "claude") {
+			continue
+		}
+		if _, ok := accounts[a.ID]; !ok {
+			ids = append(ids, a.ID)
+		}
+		accounts[a.ID] = a
+	}
+	if len(ids) == 0 {
+		return nil, warnings, nil
+	}
+	bill, err := portalBillQuery(supplierWeb, ids, from, to)
+	if err != nil {
+		return nil, nil, err
+	}
+	costs := map[int64]float64{}
+	models := map[int64][]string{}
+	for _, b := range bill {
+		if _, ok := accounts[b.AccountID]; !ok {
+			continue
+		}
+		costs[b.AccountID] += b.Cost
+		if b.Model != "" && !slices.Contains(models[b.AccountID], b.Model) {
+			models[b.AccountID] = append(models[b.AccountID], b.Model)
+		}
+	}
+
+	// Name the uploader from the local 上号 table where the account is there.
+	type owner struct {
+		userID           int64
+		username, studio string
+	}
+	owners := map[int64]owner{}
+	rows, err := db.Query(`
+		SELECT sa.remote_account_id, sa.uploaded_by, COALESCE(u.username, ''), COALESCE(u.studio, '')
+		  FROM rs_supplier_account sa
+		  LEFT JOIN rs_auth_user u ON u.id = sa.uploaded_by
+		 WHERE sa.remote_account_id = ANY($1)`, pq.Array(ids))
+	if err != nil {
+		return nil, nil, err
+	}
+	for rows.Next() {
+		var id int64
+		var o owner
+		if err := rows.Scan(&id, &o.userID, &o.username, &o.studio); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		owners[id] = o
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	out := []tencentSourceRow{}
+	unlinked := 0
+	for _, id := range ids {
+		cost := costs[id]
+		if cost <= 0 {
+			continue
+		}
+		a := accounts[id]
+		o, linked := owners[id]
+		if !linked {
+			unlinked++
+		}
+		ms := models[id]
+		if len(ms) == 0 {
+			for m := range strings.SplitSeq(a.Model, ",") {
+				if m = strings.TrimSpace(m); m != "" {
+					ms = append(ms, m)
+				}
+			}
+		}
+		slices.Sort(ms)
+		out = append(out, tencentSourceRow{
+			Platform:  tencentPlatformThirdParty,
+			UserID:    o.userID,
+			Supplier:  cmp.Or(strings.TrimSpace(o.studio), o.username, strings.TrimSpace(a.SupplierName), "未关联上号人"),
+			AccountID: id,
+			Vendor:    strings.TrimSpace(a.Provider),
+			Models:    ms,
+			Label:     tencentAccountLabel(a.AccountAlias, a.APIKey),
+			CostCNY:   cost,
+		})
+	}
+	if unlinked > 0 {
+		warnings = append(warnings, fmt.Sprintf("third_party: %d 个有账单的门户账号不在本地上号表，供应商名称取门户的供应商名", unlinked))
+	}
+	return out, warnings, nil
+}
+
+// loadTencentCCMaxRows bills each CC Max account with its stored daily bills
+// of the month (RMB).
+func loadTencentCCMaxRows(start, end time.Time) ([]tencentSourceRow, error) {
+	from, to := start.Format("2006-01-02"), end.Format("2006-01-02")
+	models := map[int64][]string{}
+	rows, err := db.Query(`
+		SELECT remote_account_id, model FROM rs_ccmax_daily_bill_model
+		 WHERE ds >= $1::date AND ds < $2::date AND model <> '' AND cost_micro > 0
+		 GROUP BY 1, 2 ORDER BY 1, 2`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var id int64
+		var model string
+		if err := rows.Scan(&id, &model); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		models[id] = append(models[id], model)
+	}
+	rows.Close()
+
+	rows, err = db.Query(`
+		SELECT a.remote_account_id, a.uploaded_by, COALESCE(u.username, ''), COALESCE(u.studio, ''),
+		       a.alias, a.account, SUM(b.cost_micro)
+		  FROM rs_ccmax_daily_bill b
+		  JOIN rs_ccmax_account a ON a.remote_account_id = b.remote_account_id
+		  LEFT JOIN rs_auth_user u ON u.id = a.uploaded_by
+		 WHERE b.ds >= $1::date AND b.ds < $2::date
+		 GROUP BY 1, 2, 3, 4, 5, 6
+		HAVING SUM(b.cost_micro) > 0`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []tencentSourceRow{}
+	for rows.Next() {
+		r := tencentSourceRow{Platform: tencentPlatformCCMax, Vendor: "claude"}
+		var username, studio, alias, account string
+		var micro int64
+		if err := rows.Scan(&r.AccountID, &r.UserID, &username, &studio, &alias, &account, &micro); err != nil {
+			return nil, err
+		}
+		r.Supplier = cmp.Or(strings.TrimSpace(studio), username)
+		r.Label = cmp.Or(strings.TrimSpace(alias), account)
+		r.Models = models[r.AccountID]
+		if len(r.Models) == 0 {
+			r.Models = []string{tencentCCMaxFallbackModel}
+		}
+		r.CostCNY = float64(micro) / 1e6
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// tencentProxyVendor names column C of a proxy channel from its newapi channel
+// type, telling Azure / Vertex channels serving Claude from the others.
+func tencentProxyVendor(channelType int, models string) string {
+	claude := strings.Contains(strings.ToLower(models), "claude")
+	switch channelType {
+	case 1:
+		return "openai"
+	case 3:
+		if claude {
+			return "azure-claude"
+		}
+		return "azure-openai"
+	case 14:
+		return "anthropic"
+	case 24:
+		return "gemini"
+	case 16, 26:
+		return "zhipu"
+	case 33:
+		return "aws-claude"
+	case 41:
+		if claude {
+			return "vertex-claude"
+		}
+		return "vertex-gemini"
+	}
+	return fmt.Sprintf("newapi-type-%d", channelType)
 }
 
 // loadTencentProxyRows bills each owned channel's used_quota growth between
@@ -620,7 +610,7 @@ func loadTencentProxyRows(profileID int64, start, end time.Time) ([]tencentSourc
 	}
 	rows, err := db.Query(`
 		SELECT o.user_id, COALESCE(u.username, ''), COALESCE(u.studio, ''), o.remote_channel_id,
-		       COALESCE(cc.name, ''), COALESCE(cc.models, ''),
+		       COALESCE(cc.name, ''), COALESCE(cc.type, 0), COALESCE(cc.models, ''),
 		       GREATEST(t.used_quota - COALESCE(f.used_quota, 0), 0)
 		  FROM proxy_channel_ownership o
 		  JOIN remote_channel_snapshot t
@@ -638,89 +628,56 @@ func loadTencentProxyRows(profileID int64, start, end time.Time) ([]tencentSourc
 	out := []tencentSourceRow{}
 	for rows.Next() {
 		r := tencentSourceRow{Platform: tencentPlatformProxy}
-		var name, models string
+		var username, studio, name, models string
+		var channelType int
 		var quota int64
-		if err := rows.Scan(&r.UserID, &r.Username, &r.Studio, &r.AccountID, &name, &models, &quota); err != nil {
+		if err := rows.Scan(&r.UserID, &username, &studio, &r.AccountID, &name, &channelType, &models, &quota); err != nil {
 			return nil, nil, err
 		}
-		// One row per channel: its model when it serves one, else its name.
-		models = strings.TrimSpace(models)
-		r.Model = cmp.Or(name, fmt.Sprintf("channel #%d", r.AccountID))
-		if models != "" && !strings.Contains(models, ",") {
-			r.Model = models
+		r.Supplier = cmp.Or(strings.TrimSpace(studio), username)
+		r.Vendor = tencentProxyVendor(channelType, models)
+		for m := range strings.SplitSeq(models, ",") {
+			if m = strings.TrimSpace(m); m != "" {
+				r.Models = append(r.Models, m)
+			}
 		}
-		r.Provider = models
+		r.Label = strings.TrimSpace(fmt.Sprintf("%s #%d", name, r.AccountID))
 		r.CostUSD = float64(quota) / tencentProxyQuotaPerUSD
 		out = append(out, r)
 	}
 	return out, warnings, rows.Err()
 }
 
-// loadTencentStatementParams reads the month's rates and every supplier
-// parameter, line flag and vendor rule.
+// loadTencentStatementParams reads the month's inputs and fills the defaults:
+// the system rate, K = the G rate, I = the 上号 default discount, H = 含票.
 func loadTencentStatementParams(month time.Time) (tencentStatementParams, gin.H, error) {
-	p := tencentStatementParams{
-		Month:     month,
-		Suppliers: map[tencentSupplierParamKey]tencentSupplierParam{},
-		Flags:     map[string]tencentLineFlag{},
-		VendorMap: tencentVendorMap(),
-	}
-	var fx, ref sql.NullFloat64
-	err := db.QueryRow(`SELECT fx_rate, ref_fx_rate FROM rs_tencent_month_param WHERE month = $1`, month.Format("2006-01")).Scan(&fx, &ref)
+	p := tencentStatementParams{Month: month}
+	var fx, ref, discount sql.NullFloat64
+	var tax sql.NullString
+	err := db.QueryRow(`SELECT fx_rate, ref_fx_rate, discount, tax_rate FROM rs_tencent_month_param WHERE month = $1`,
+		month.Format("2006-01")).Scan(&fx, &ref, &discount, &tax)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return p, nil, err
 	}
-	fxFrom, refFrom := "month", "month"
+	from := gin.H{"fx_rate_from": "month", "ref_fx_rate_from": "month", "discount_from": "month", "tax_rate_from": "month"}
 	p.FxRate = fx.Float64
 	if !fx.Valid || fx.Float64 <= 0 {
-		p.FxRate, fxFrom = supplierFxRate(), "system"
+		p.FxRate, from["fx_rate_from"] = supplierFxRate(), "system"
 	}
 	p.RefFxRate = ref.Float64
 	if !ref.Valid || ref.Float64 <= 0 {
-		p.RefFxRate, refFrom = p.FxRate, "fx_rate"
+		p.RefFxRate, from["ref_fx_rate_from"] = p.FxRate, "fx_rate"
 	}
-
-	rows, err := db.Query(`SELECT user_id, platform, discount_pct, tax_rate FROM rs_tencent_supplier_param`)
-	if err != nil {
-		return p, nil, err
+	p.Discount = discount.Float64
+	if !discount.Valid || discount.Float64 <= 0 {
+		pct, _ := strconv.ParseFloat(supplierAccountDiscount(), 64)
+		p.Discount, from["discount_from"] = cmp.Or(pct, 100)/100, "upload"
 	}
-	for rows.Next() {
-		var k tencentSupplierParamKey
-		var discount sql.NullFloat64
-		var sp tencentSupplierParam
-		if err := rows.Scan(&k.UserID, &k.Platform, &discount, &sp.TaxRate); err != nil {
-			rows.Close()
-			return p, nil, err
-		}
-		if discount.Valid {
-			sp.DiscountPct = &discount.Float64
-		}
-		p.Suppliers[k] = sp
+	p.TaxRate = tax.String
+	if !tax.Valid {
+		p.TaxRate, from["tax_rate_from"] = tencentDefaultTaxRate, "default"
 	}
-	rows.Close()
-
-	rows, err = db.Query(`SELECT line_key, rmb_priced, bill_name FROM rs_tencent_line_flag WHERE line_key LIKE $1`, month.Format("2006-01")+"|%")
-	if err != nil {
-		return p, nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var key string
-		var f tencentLineFlag
-		if err := rows.Scan(&key, &f.RMBPriced, &f.BillName); err != nil {
-			return p, nil, err
-		}
-		p.Flags[key] = f
-	}
-	return p, gin.H{"fx_rate_from": fxFrom, "ref_fx_rate_from": refFrom}, rows.Err()
-}
-
-func tencentVendorMap() map[string]string {
-	out := map[string]string{}
-	if raw := supplierConfigGet(cfgTencentVendorMap); raw != "" {
-		_ = json.Unmarshal([]byte(raw), &out)
-	}
-	return out
+	return p, from, nil
 }
 
 func tencentCallerID(c *gin.Context) int64 {
@@ -765,13 +722,12 @@ func handleTencentStatement(c *gin.Context) {
 	}
 	params, paramFrom, lines, warnings, err := tencentLiveStatement(start, end)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
 	lines = slices.DeleteFunc(lines, func(l tencentLine) bool {
 		return (userID > 0 && l.UserID != userID) || (platform != "" && l.Platform != platform)
 	})
-	summary := tencentSummarize(lines)
 	c.JSON(http.StatusOK, gin.H{
 		"month":            start.Format("2006-01"),
 		"bill_month":       int(start.Month()),
@@ -779,10 +735,14 @@ func handleTencentStatement(c *gin.Context) {
 		"fx_rate_from":     paramFrom["fx_rate_from"],
 		"ref_fx_rate":      params.RefFxRate,
 		"ref_fx_rate_from": paramFrom["ref_fx_rate_from"],
+		"discount":         params.Discount,
+		"discount_from":    paramFrom["discount_from"],
+		"tax_rate":         params.TaxRate,
+		"tax_rate_from":    paramFrom["tax_rate_from"],
 		"headers":          tencentStatementHeaders,
 		"summary_headers":  tencentSummaryHeaders,
 		"lines":            lines,
-		"summary":          summary,
+		"summary":          tencentSummarize(lines),
 		"warnings":         warnings,
 	})
 }
@@ -790,7 +750,7 @@ func handleTencentStatement(c *gin.Context) {
 // ---- Month parameters ----
 
 func handleTencentMonthParamList(c *gin.Context) {
-	rows, err := db.Query(`SELECT month, fx_rate, ref_fx_rate, note, updated_at FROM rs_tencent_month_param ORDER BY month DESC`)
+	rows, err := db.Query(`SELECT month, fx_rate, ref_fx_rate, discount, tax_rate, note, updated_at FROM rs_tencent_month_param ORDER BY month DESC`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -800,14 +760,17 @@ func handleTencentMonthParamList(c *gin.Context) {
 		Month     string   `json:"month"`
 		FxRate    *float64 `json:"fx_rate"`
 		RefFxRate *float64 `json:"ref_fx_rate"`
+		Discount  *float64 `json:"discount"`
+		TaxRate   *string  `json:"tax_rate"`
 		Note      string   `json:"note"`
 		UpdatedAt int64    `json:"updated_at"`
 	}
 	list := []item{}
 	for rows.Next() {
 		var it item
-		var fx, ref sql.NullFloat64
-		if err := rows.Scan(&it.Month, &fx, &ref, &it.Note, &it.UpdatedAt); err != nil {
+		var fx, ref, discount sql.NullFloat64
+		var tax sql.NullString
+		if err := rows.Scan(&it.Month, &fx, &ref, &discount, &tax, &it.Note, &it.UpdatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -817,18 +780,32 @@ func handleTencentMonthParamList(c *gin.Context) {
 		if ref.Valid {
 			it.RefFxRate = &ref.Float64
 		}
+		if discount.Valid {
+			it.Discount = &discount.Float64
+		}
+		if tax.Valid {
+			it.TaxRate = &tax.String
+		}
 		list = append(list, it)
 	}
-	c.JSON(http.StatusOK, gin.H{"list": list, "system_fx_rate": supplierFxRate()})
+	upload, _ := strconv.ParseFloat(supplierAccountDiscount(), 64)
+	c.JSON(http.StatusOK, gin.H{
+		"list":             list,
+		"system_fx_rate":   supplierFxRate(),
+		"default_discount": cmp.Or(upload, 100) / 100,
+		"default_tax_rate": tencentDefaultTaxRate,
+	})
 }
 
-// handleTencentMonthParamSet upserts a month's rates; null clears a rate back
-// to its default.
+// handleTencentMonthParamSet upserts a month's inputs; null clears one back to
+// its default.
 func handleTencentMonthParamSet(c *gin.Context) {
 	var body struct {
 		Month     string   `json:"month"`
 		FxRate    *float64 `json:"fx_rate"`
 		RefFxRate *float64 `json:"ref_fx_rate"`
+		Discount  *float64 `json:"discount"`
+		TaxRate   *string  `json:"tax_rate"`
 		Note      string   `json:"note"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
@@ -846,219 +823,29 @@ func handleTencentMonthParamSet(c *gin.Context) {
 			return
 		}
 	}
+	if body.Discount != nil && (*body.Discount <= 0 || *body.Discount > 1) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "折扣须在 0–1 之间（如 0.88）"})
+		return
+	}
+	if body.TaxRate != nil {
+		tax := strings.TrimSpace(*body.TaxRate)
+		body.TaxRate = &tax
+	}
 	if _, err := db.Exec(`
-		INSERT INTO rs_tencent_month_param (month, fx_rate, ref_fx_rate, note, updated_at, updated_by)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO rs_tencent_month_param (month, fx_rate, ref_fx_rate, discount, tax_rate, note, updated_at, updated_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (month) DO UPDATE SET fx_rate=EXCLUDED.fx_rate, ref_fx_rate=EXCLUDED.ref_fx_rate,
+		  discount=EXCLUDED.discount, tax_rate=EXCLUDED.tax_rate,
 		  note=EXCLUDED.note, updated_at=EXCLUDED.updated_at, updated_by=EXCLUDED.updated_by`,
-		start.Format("2006-01"), body.FxRate, body.RefFxRate, strings.TrimSpace(body.Note), time.Now().Unix(), tencentCallerID(c)); err != nil {
+		start.Format("2006-01"), body.FxRate, body.RefFxRate, body.Discount, body.TaxRate,
+		strings.TrimSpace(body.Note), time.Now().Unix(), tencentCallerID(c)); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-// ---- Supplier × platform parameters ----
-
-func handleTencentSupplierParamList(c *gin.Context) {
-	rows, err := db.Query(`
-		SELECT p.user_id, COALESCE(u.username, ''), COALESCE(u.studio, ''), p.platform, p.discount_pct, p.tax_rate, p.updated_at
-		  FROM rs_tencent_supplier_param p
-		  LEFT JOIN rs_auth_user u ON u.id = p.user_id
-		 ORDER BY 2, p.platform`)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	defer rows.Close()
-	type item struct {
-		UserID      int64    `json:"user_id"`
-		Username    string   `json:"username"`
-		Studio      string   `json:"studio"`
-		Platform    string   `json:"platform"`
-		DiscountPct *float64 `json:"discount_pct"`
-		TaxRate     string   `json:"tax_rate"`
-		UpdatedAt   int64    `json:"updated_at"`
-	}
-	list := []item{}
-	for rows.Next() {
-		var it item
-		var discount sql.NullFloat64
-		if err := rows.Scan(&it.UserID, &it.Username, &it.Studio, &it.Platform, &discount, &it.TaxRate, &it.UpdatedAt); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		if discount.Valid {
-			it.DiscountPct = &discount.Float64
-		}
-		list = append(list, it)
-	}
-	upload, _ := strconv.ParseFloat(supplierAccountDiscount(), 64)
-	c.JSON(http.StatusOK, gin.H{"list": list, "upload_discount_pct": upload, "platforms": append(slices.Clone(tencentPlatforms), tencentPlatformAll)})
-}
-
-func handleTencentSupplierParamSet(c *gin.Context) {
-	var body struct {
-		UserID      int64    `json:"user_id"`
-		Platform    string   `json:"platform"`
-		DiscountPct *float64 `json:"discount_pct"`
-		TaxRate     string   `json:"tax_rate"`
-	}
-	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
-		return
-	}
-	if body.Platform != tencentPlatformAll && !slices.Contains(tencentPlatforms, body.Platform) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown platform"})
-		return
-	}
-	if body.DiscountPct != nil && (*body.DiscountPct <= 0 || *body.DiscountPct > 100) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "折扣须在 0–100 之间（百分比）"})
-		return
-	}
-	var exists bool
-	if err := db.QueryRow(`SELECT EXISTS (SELECT 1 FROM rs_auth_user WHERE id = $1)`, body.UserID).Scan(&exists); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	if !exists {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "user not found"})
-		return
-	}
-	if _, err := db.Exec(`
-		INSERT INTO rs_tencent_supplier_param (user_id, platform, discount_pct, tax_rate, updated_at, updated_by)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (user_id, platform) DO UPDATE SET discount_pct=EXCLUDED.discount_pct, tax_rate=EXCLUDED.tax_rate,
-		  updated_at=EXCLUDED.updated_at, updated_by=EXCLUDED.updated_by`,
-		body.UserID, body.Platform, body.DiscountPct, strings.TrimSpace(body.TaxRate), time.Now().Unix(), tencentCallerID(c)); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
-}
-
-func handleTencentSupplierParamDelete(c *gin.Context) {
-	userID, err := strconv.ParseInt(c.Param("user_id"), 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user_id"})
-		return
-	}
-	if _, err := db.Exec(`DELETE FROM rs_tencent_supplier_param WHERE user_id = $1 AND platform = $2`, userID, c.Param("platform")); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
-}
-
-// ---- Line flags (RMB-priced rows, column M) ----
-
-func handleTencentLineFlagList(c *gin.Context) {
-	start, _, err := tencentMonthRange(c.Query("month"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	rows, err := db.Query(`SELECT line_key, rmb_priced, bill_name, updated_at FROM rs_tencent_line_flag WHERE line_key LIKE $1 ORDER BY line_key`,
-		start.Format("2006-01")+"|%")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	defer rows.Close()
-	type item struct {
-		LineKey   string `json:"line_key"`
-		RMBPriced bool   `json:"rmb_priced"`
-		BillName  string `json:"bill_name"`
-		UpdatedAt int64  `json:"updated_at"`
-	}
-	list := []item{}
-	for rows.Next() {
-		var it item
-		if err := rows.Scan(&it.LineKey, &it.RMBPriced, &it.BillName, &it.UpdatedAt); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		list = append(list, it)
-	}
-	c.JSON(http.StatusOK, gin.H{"list": list})
-}
-
-// handleTencentLineFlagSet stores a row's flags; a row back to the defaults
-// (not RMB-priced, no bill name) drops its record.
-func handleTencentLineFlagSet(c *gin.Context) {
-	var body struct {
-		LineKey   string `json:"line_key"`
-		RMBPriced bool   `json:"rmb_priced"`
-		BillName  string `json:"bill_name"`
-	}
-	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
-		return
-	}
-	parts := strings.SplitN(body.LineKey, "|", 4)
-	if len(parts) != 4 || !slices.Contains(tencentPlatforms, parts[1]) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid line_key"})
-		return
-	}
-	if _, _, err := tencentMonthRange(parts[0]); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid line_key"})
-		return
-	}
-	billName := strings.TrimSpace(body.BillName)
-	var err error
-	if !body.RMBPriced && billName == "" {
-		_, err = db.Exec(`DELETE FROM rs_tencent_line_flag WHERE line_key = $1`, body.LineKey)
-	} else {
-		_, err = db.Exec(`
-			INSERT INTO rs_tencent_line_flag (line_key, rmb_priced, bill_name, updated_at, updated_by)
-			VALUES ($1, $2, $3, $4, $5)
-			ON CONFLICT (line_key) DO UPDATE SET rmb_priced=EXCLUDED.rmb_priced, bill_name=EXCLUDED.bill_name,
-			  updated_at=EXCLUDED.updated_at, updated_by=EXCLUDED.updated_by`,
-			body.LineKey, body.RMBPriced, billName, time.Now().Unix(), tencentCallerID(c))
-	}
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
-}
-
-// ---- Vendor naming + settings ----
-
-func handleTencentVendorsGet(c *gin.Context) {
-	defaults := make([]gin.H, len(tencentDefaultVendorRules))
-	for i, r := range tencentDefaultVendorRules {
-		defaults[i] = gin.H{"match": r.match, "vendor": r.vendor}
-	}
-	c.JSON(http.StatusOK, gin.H{"custom": tencentVendorMap(), "defaults": defaults})
-}
-
-// handleTencentVendorsSet replaces the custom vendor rules (lowercase
-// substring → vendor name).
-func handleTencentVendorsSet(c *gin.Context) {
-	var body struct {
-		Custom map[string]string `json:"custom"`
-	}
-	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
-		return
-	}
-	clean := map[string]string{}
-	for k, v := range body.Custom {
-		k, v = strings.ToLower(strings.TrimSpace(k)), strings.TrimSpace(v)
-		if k == "" || v == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "匹配词和厂商名都不能为空"})
-			return
-		}
-		clean[k] = v
-	}
-	blob, _ := json.Marshal(clean)
-	if err := supplierConfigSet(cfgTencentVendorMap, string(blob)); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	handleTencentVendorsGet(c)
-}
+// ---- Settings ----
 
 func handleTencentSettingsGet(c *gin.Context) {
 	profileID, _ := strconv.ParseInt(supplierConfigGet(cfgTencentProxyProfileID), 10, 64)
@@ -1108,13 +895,6 @@ func registerTencentRoutes(api *gin.RouterGroup) {
 	g.GET("/statement", handleTencentStatement)
 	g.GET("/params/months", handleTencentMonthParamList)
 	g.PUT("/params/months", handleTencentMonthParamSet)
-	g.GET("/params/suppliers", handleTencentSupplierParamList)
-	g.PUT("/params/suppliers", handleTencentSupplierParamSet)
-	g.DELETE("/params/suppliers/:user_id/:platform", handleTencentSupplierParamDelete)
-	g.GET("/line-flags", handleTencentLineFlagList)
-	g.PUT("/line-flags", handleTencentLineFlagSet)
-	g.GET("/vendors", handleTencentVendorsGet)
-	g.PUT("/vendors", handleTencentVendorsSet)
 	g.GET("/settings", handleTencentSettingsGet)
 	g.PUT("/settings", handleTencentSettingsSet)
 	g.POST("/statement-push", handleTencentStatementPush)

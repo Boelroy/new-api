@@ -568,44 +568,33 @@ const (
 	ccmaxBillMaxDays = 90
 )
 
-// ccmaxSyncDailyBills pulls the bill of every locally recorded CC Max account
-// for the UTC+8 days [from, to] and replaces those days in
-// rs_ccmax_daily_bill, then advances the synced-through day.
-func ccmaxSyncDailyBills(from, to time.Time) error {
-	rows, err := db.Query(`SELECT remote_account_id FROM rs_ccmax_account ORDER BY remote_account_id`)
-	if err != nil {
-		return err
-	}
-	ids := []string{}
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		ids = append(ids, strconv.FormatInt(id, 10))
-	}
-	rows.Close()
+// portalBillRow is one row of the portal WEB bill/query: an account's cost
+// (RMB) on one UTC+8 day for one model (empty when the row names none).
+type portalBillRow struct {
+	AccountID int64
+	DS        string
+	Model     string
+	Cost      float64
+}
 
-	type key struct {
-		id int64
-		ds string
-	}
-	type modelKey struct {
-		key
-		model string
-	}
-	costs := map[key]float64{}
-	modelCosts := map[modelKey]float64{}
+// portalBillQuery reads the portal WEB bill (/bill/query, the call behind its
+// 账单查询 page) of the accounts for the UTC+8 days [from, to] through a login
+// session, ccmaxBillBatch ids per call.
+func portalBillQuery(s *portalWebSession, ids []int64, from, to time.Time) ([]portalBillRow, error) {
+	out := []portalBillRow{}
 	for batch := range slices.Chunk(ids, ccmaxBillBatch) {
+		parts := make([]string, len(batch))
+		for i, id := range batch {
+			parts[i] = strconv.FormatInt(id, 10)
+		}
 		path := fmt.Sprintf("/supplier-account/api/bill/query?account_ids=%s&start_ds=%s&end_ds=%s",
-			strings.Join(batch, ","), from.Format("20060102"), to.Format("20060102"))
-		status, body, err := ccmaxWeb.proxy(http.MethodGet, path, nil)
+			strings.Join(parts, ","), from.Format("20060102"), to.Format("20060102"))
+		status, body, err := s.proxy(http.MethodGet, path, nil)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if status != http.StatusOK {
-			return fmt.Errorf("bill query: %s", supplierErr(body))
+			return nil, fmt.Errorf("bill query: %s", supplierErr(body))
 		}
 		var parsed struct {
 			List []struct {
@@ -617,12 +606,51 @@ func ccmaxSyncDailyBills(from, to time.Time) error {
 			} `json:"list"`
 		}
 		if err := json.Unmarshal(body, &parsed); err != nil {
-			return fmt.Errorf("unexpected bill response: %w", err)
+			return nil, fmt.Errorf("unexpected bill response: %w", err)
 		}
 		for _, l := range parsed.List {
-			costs[key{l.AccountID, l.DS}] += l.Cost
-			modelCosts[modelKey{key{l.AccountID, l.DS}, strings.TrimSpace(cmp.Or(l.Model, l.ModelName))}] += l.Cost
+			out = append(out, portalBillRow{l.AccountID, l.DS, strings.TrimSpace(cmp.Or(l.Model, l.ModelName)), l.Cost})
 		}
+	}
+	return out, nil
+}
+
+// ccmaxSyncDailyBills pulls the bill of every locally recorded CC Max account
+// for the UTC+8 days [from, to] and replaces those days in
+// rs_ccmax_daily_bill, then advances the synced-through day.
+func ccmaxSyncDailyBills(from, to time.Time) error {
+	rows, err := db.Query(`SELECT remote_account_id FROM rs_ccmax_account ORDER BY remote_account_id`)
+	if err != nil {
+		return err
+	}
+	ids := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+
+	bill, err := portalBillQuery(ccmaxWeb, ids, from, to)
+	if err != nil {
+		return err
+	}
+	type key struct {
+		id int64
+		ds string
+	}
+	type modelKey struct {
+		key
+		model string
+	}
+	costs := map[key]float64{}
+	modelCosts := map[modelKey]float64{}
+	for _, l := range bill {
+		costs[key{l.AccountID, l.DS}] += l.Cost
+		modelCosts[modelKey{key{l.AccountID, l.DS}, l.Model}] += l.Cost
 	}
 
 	fromDS, toDS := from.Format("2006-01-02"), to.Format("2006-01-02")
