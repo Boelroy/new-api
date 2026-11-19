@@ -34,15 +34,10 @@ import (
 // aggregate `use_quota`) to RMB; the portal UI divides by the same 1e6.
 const supplierRecordLogQuotaUnit = 1e6
 
-// supplierRecordLogSlots caps in-flight portal record-log calls across the
-// whole service: each call takes ~1.4s and the portal answers 「请求过于频繁」
-// once roughly a dozen are in flight (6 sustained 69 calls cleanly on dev).
-var supplierRecordLogSlots = make(chan struct{}, 6)
-
 const (
-	// supplierRecordLogFanOutWorkers is how many accounts one all-accounts
-	// query works on at once; supplierRecordLogSlots is the real cap.
-	supplierRecordLogFanOutWorkers = 6
+	// supplierRecordLogFanOutWorkers bounds concurrent portal calls when a
+	// supplier queries all of their accounts.
+	supplierRecordLogFanOutWorkers = 8
 	// supplierRecordLogFanOutMaxRows caps how deep the merged all-accounts log
 	// can be paged: page N needs the newest N*page_size rows of every account.
 	supplierRecordLogFanOutMaxRows = 1000
@@ -173,26 +168,10 @@ func (f supplierRecordLogFilter) portalPayload(accountID int64) map[string]any {
 }
 
 // supplierRecordLogPost POSTs to a portal record-log endpoint and decodes the
-// JSON response into out. Throttled responses are retried with backoff.
+// JSON response into out.
 func supplierRecordLogPost(path string, payload map[string]any, out any) error {
 	reqBytes, _ := json.Marshal(payload)
-	var (
-		status int
-		body   []byte
-		err    error
-	)
-	for attempt := range 4 {
-		if attempt > 0 {
-			time.Sleep(time.Duration(1<<(attempt-1)) * time.Second)
-		}
-		supplierRecordLogSlots <- struct{}{}
-		status, body, err = supplierWeb.proxy(http.MethodPost, "/supplier-account/api/supplier/"+path, reqBytes)
-		<-supplierRecordLogSlots
-		throttled := err == nil && (status == http.StatusTooManyRequests || strings.Contains(string(body), "频繁"))
-		if !throttled {
-			break
-		}
-	}
+	status, body, err := supplierWeb.proxy(http.MethodPost, "/supplier-account/api/supplier/"+path, reqBytes)
 	if err != nil {
 		return err
 	}
