@@ -56,8 +56,9 @@ const (
 	// cfgTencentProxyProfileID picks the remote_newapi_profile that is
 	// newapi-proxy's upstream New API; proxy rows are queried through it.
 	cfgTencentProxyProfileID = "tencent_proxy_profile_id"
-	// tencentProxyConcurrency bounds parallel upstream channel queries.
-	tencentProxyConcurrency = 8
+	// tencentProxyConcurrency bounds parallel upstream channel queries; the
+	// dev upstream answers 429 to 8 at a time.
+	tencentProxyConcurrency = 2
 
 	// tencentProxyQuotaPerUSD is newapi's default quota unit (500,000 quota
 	// = 1 USD), used when the upstream /api/status does not say.
@@ -67,6 +68,10 @@ const (
 // tencentNow is the clock that bounds the portal bill query (today, and the
 // portal's retention); tests pin it.
 var tencentNow = time.Now
+
+// tencentProxyRetryWait is the first back-off after an upstream 429; tests
+// shorten it.
+var tencentProxyRetryWait = 2 * time.Second
 
 var tencentPlatforms = []string{tencentPlatformThirdParty, tencentPlatformCCMax, tencentPlatformProxy}
 
@@ -696,6 +701,14 @@ func loadTencentProxyRows(profileID int64, start, end, now time.Time) ([]tencent
 			q := url.Values{"type": {"2"}, "channel": {strconv.FormatInt(o.channelID, 10)},
 				"start_timestamp": {strconv.FormatInt(from, 10)}, "end_timestamp": {strconv.FormatInt(to, 10)}}
 			raw, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/stat", token, userID, q, nil)
+			// Back off and retry when the upstream rate-limits.
+			for wait := tencentProxyRetryWait; isRemoteRateLimited(err) && wait <= 8*tencentProxyRetryWait; wait *= 2 {
+				select {
+				case <-ctx.Done():
+				case <-time.After(wait):
+				}
+				raw, err = remoteDoJSON(ctx, http.MethodGet, host, "/api/log/stat", token, userID, q, nil)
+			}
 			if err == nil {
 				err = json.Unmarshal(raw, &stat)
 			}

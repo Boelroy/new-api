@@ -282,9 +282,13 @@ func tencentSeedOctober(t *testing.T) (*tencentPortal, *tencentUpstream) {
 		_, err := db.Exec(s)
 		require.NoError(t, err, "%.80s", s)
 	}
-	// Upstream: 250,000 quota per USD; #3003 fails, #3004 had no usage.
+	// Upstream: 250,000 quota per USD; #3001 is rate-limited twice, #3003
+	// fails, #3004 had no usage.
+	prevWait := tencentProxyRetryWait
+	tencentProxyRetryWait = time.Millisecond
+	t.Cleanup(func() { tencentProxyRetryWait = prevWait })
 	upstream := newTencentUpstream(t, 250000, map[int64]tencentUpstreamChannel{
-		3001: {Name: "ch-a", Type: 3, Models: "gpt-5", Quota: 1_750_000},
+		3001: {Name: "ch-a", Type: 3, Models: "gpt-5", Quota: 1_750_000, Limited: 2}, // billed after retries
 		3002: {Name: "ch-b", Type: 3, Models: "gpt-5,claude-x", Quota: 500_000},
 		3003: {Fail: true},
 		3004: {Name: "ch-idle", Type: 1, Models: "gpt-5"},
@@ -297,6 +301,8 @@ type tencentUpstreamChannel struct {
 	Type         int
 	Quota        int64
 	Fail         bool
+	// Limited answers 429 to that many log/stat calls before succeeding.
+	Limited int
 }
 
 // tencentUpstream stubs newapi-proxy's upstream New API admin endpoints and
@@ -320,13 +326,21 @@ func newTencentUpstream(t *testing.T, quotaPerUnit float64, channels map[int64]t
 		if rest, ok := strings.CutPrefix(r.URL.Path, "/api/channel/"); ok {
 			id, _ = strconv.ParseInt(rest, 10, 64)
 		}
+		mu.Lock()
 		ch := channels[id]
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/api/status":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"quota_per_unit": quotaPerUnit}})
 		case ch.Fail:
 			http.Error(w, "boom", http.StatusBadGateway)
+		case r.URL.Path == "/api/log/stat" && ch.Limited > 0:
+			mu.Lock()
+			ch.Limited--
+			channels[id] = ch
+			mu.Unlock()
+			http.Error(w, "", http.StatusTooManyRequests)
 		case r.URL.Path == "/api/log/stat":
 			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"quota": ch.Quota}})
 		case strings.HasPrefix(r.URL.Path, "/api/channel/"):
