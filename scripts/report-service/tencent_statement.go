@@ -1103,6 +1103,8 @@ func registerTencentRoutes(api *gin.RouterGroup) {
 	g.PUT("/vendors", handleTencentVendorsSet)
 	g.GET("/settings", handleTencentSettingsGet)
 	g.PUT("/settings", handleTencentSettingsSet)
+	g.GET("/users", handleTencentUserList)
+	g.POST("/users", handleTencentUserCreate)
 	g.GET("/statements", handleTencentStatementList)
 	g.GET("/statements/:month", handleTencentStatementGet)
 	g.POST("/statements/:month/generate", handleTencentStatementWrite(false))

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -18,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/xuri/excelize/v2"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func tencentFloat(v float64) *float64 { return &v }
@@ -229,7 +231,9 @@ func tencentTestDB(t *testing.T) {
 	// V1 tables live inline in main(); these copies carry the columns read.
 	for _, ddl := range []string{
 		`CREATE TABLE rs_auth_user (id BIGSERIAL PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL DEFAULT '',
-		   role INT NOT NULL DEFAULT 1, studio TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL DEFAULT 0)`,
+		   role INT NOT NULL DEFAULT 1, studio TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL DEFAULT 0,
+		   status INT NOT NULL DEFAULT 1, disabled_at BIGINT NOT NULL DEFAULT 0)`,
+		`CREATE TABLE rs_login_attempt (id BIGSERIAL PRIMARY KEY, username TEXT NOT NULL, ip TEXT NOT NULL, succeeded BOOLEAN NOT NULL, attempted_at BIGINT NOT NULL)`,
 		`CREATE TABLE report_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at BIGINT NOT NULL)`,
 		`CREATE TABLE remote_newapi_profile (id BIGSERIAL PRIMARY KEY)`,
 		`CREATE TABLE remote_channel_snapshot (profile_id BIGINT NOT NULL, remote_channel_id BIGINT NOT NULL, captured_at BIGINT NOT NULL,
@@ -510,4 +514,213 @@ func TestTencentStatementWorkbook(t *testing.T) {
 	// Studio A has third_party and ccmax Anthropic rows; the prefix keeps
 	// them apart.
 	assert.Contains(t, []string{summary[1].Source, summary[2].Source}, "ccmax")
+}
+
+// V2 supplier and CC Max roles are horizontal: their V1 gates match the exact
+// tier, so the V1 role must be that tier, not the nearest lower one.
+func TestLegacyV1RoleForLevel(t *testing.T) {
+	cases := map[int]int{
+		LevelSupplier01:           minSupplierRole,
+		LevelSupplier02:           minSupplierRole02,
+		LevelSupplierCCMax:        minSupplierCCMaxRole,
+		LevelCCMaxManager:         minCCMaxManagerRole,
+		LevelSupplierGynh:         minSupplierGynhRole,
+		LevelStudioOperator:       minStudioOperatorRole,
+		LevelRemoteStudioOperator: minRemoteStudioOperatorRole,
+		LevelProjectAdmin:         minProjectAdminRole,
+		LevelAdmin:                minAdminRole,
+		LevelSuperadmin:           minSuperAdminRole,
+		LevelTester:               minTesterRole,
+		LevelUser:                 minUserRole,
+	}
+	for level, want := range cases {
+		assert.Equal(t, want, legacyV1RoleForLevel(level), "level %d", level)
+	}
+}
+
+// tencentAuthRouter mounts the real login, the tencent + V2 routes and the
+// platform gates exactly as main() guards /api/supplier-account, /api/keyhub
+// and /api/ccmax.
+func tencentAuthRouter(t *testing.T) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	prevSecret, prevKey := jwtSecret, reportAPIKey
+	jwtSecret, reportAPIKey = []byte("tencent-test-secret"), "tencent-test-key"
+	t.Cleanup(func() { jwtSecret, reportAPIKey = prevSecret, prevKey })
+	r := gin.New()
+	r.POST("/api/login", handleLogin)
+	api := r.Group("/api", authMiddleware)
+	registerTencentRoutes(api)
+	ok := func(c *gin.Context) { c.Status(http.StatusOK) }
+	api.GET("/supplier-account/ping", requireRoleOrSupplier(minAdminRole), ok)
+	api.GET("/keyhub/ping", requireRoleOrSupplier02(minAdminRole), ok)
+	api.GET("/ccmax/ping", requireRoleOrCCMaxRoles(minSuperAdminRole), ok)
+	registerV2Routes(r)
+	return r
+}
+
+func tencentAdminJSON(t *testing.T, r *gin.Engine, method, path, body string) (int, string) {
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "tencent-test-key")
+	r.ServeHTTP(w, req)
+	return w.Code, w.Body.String()
+}
+
+// tencentLoginGates logs in with report-service's own /api/login and returns
+// which platform gates the session passes.
+func tencentLoginGates(t *testing.T, r *gin.Engine, username, password string) map[string]int {
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(fmt.Sprintf(`{"username":%q,"password":%q}`, username, password)))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	cookies := w.Result().Cookies()
+	require.NotEmpty(t, cookies)
+	out := map[string]int{}
+	for _, gate := range []string{"supplier-account", "keyhub", "ccmax"} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/"+gate+"/ping", nil)
+		req.AddCookie(cookies[0])
+		r.ServeHTTP(w, req)
+		out[gate] = w.Code
+	}
+	return out
+}
+
+// 统一新建用户: each platform role logs in and passes its platform's gate
+// (proxy: the row newapi-proxy's login reads), the manager link is written,
+// the generated password is returned once and never logged or listed.
+func TestTencentUserCreate(t *testing.T) {
+	tencentTestDB(t)
+	for _, ddl := range append(append([]string{}, v2SchemaStatements...), tencentSchemaStatements...) {
+		_, err := db.Exec(ddl)
+		require.NoError(t, err)
+	}
+	seedV2RBAC()
+	r := tencentAuthRouter(t)
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	type created struct {
+		ID       int64  `json:"id"`
+		Password string `json:"password"`
+	}
+	create := func(body string) (int, created) {
+		code, resp := tencentAdminJSON(t, r, http.MethodPost, "/api/tencent/users", body)
+		var c created
+		if code == http.StatusOK {
+			require.NoError(t, json.Unmarshal([]byte(resp), &c))
+		}
+		return code, c
+	}
+	code, manager := create(`{"username":"mgr1","studio":"Mgr Co","role":"ccmax_manager"}`)
+	require.Equal(t, http.StatusOK, code)
+
+	users := map[string]created{}
+	for _, tc := range []struct{ username, body string }{
+		{"sup1", `{"username":"sup1","studio":"Studio A","role":"supplier_01"}`},
+		{"sup2", `{"username":"sup2","studio":"Studio B","role":"supplier_02"}`},
+		{"cc1", fmt.Sprintf(`{"username":"cc1","studio":"CC Co","role":"supplier_ccmax","manager_id":%d}`, manager.ID)},
+		{"px1", `{"username":"px1","studio":"Proxy Co","role":"proxy"}`},
+	} {
+		code, u := create(tc.body)
+		require.Equal(t, http.StatusOK, code, tc.username)
+		require.Len(t, u.Password, 20)
+		users[tc.username] = u
+	}
+	users["mgr1"] = manager
+
+	for name, body := range map[string]string{
+		"duplicate username":        `{"username":"sup1","studio":"X","role":"supplier_01"}`,
+		"studio required":           `{"username":"nostudio","studio":"  ","role":"supplier_01"}`,
+		"unknown role":              `{"username":"bad1","studio":"X","role":"admin"}`,
+		"manager on non-CC Max":     fmt.Sprintf(`{"username":"bad2","studio":"X","role":"supplier_01","manager_id":%d}`, manager.ID),
+		"manager must be a manager": fmt.Sprintf(`{"username":"bad3","studio":"X","role":"supplier_ccmax","manager_id":%d}`, users["sup1"].ID),
+		"username charset / length": `{"username":"a b","studio":"X","role":"proxy"}`,
+	} {
+		code, _ := create(body)
+		want := http.StatusBadRequest
+		if name == "duplicate username" {
+			want = http.StatusConflict
+		}
+		assert.Equal(t, want, code, name)
+	}
+
+	var memberOf int64
+	require.NoError(t, db.QueryRow(`SELECT manager_id FROM rs_ccmax_manager_member WHERE member_id = $1`, users["cc1"].ID).Scan(&memberOf))
+	assert.Equal(t, manager.ID, memberOf)
+
+	forbidden, allowed := http.StatusForbidden, http.StatusOK
+	for name, want := range map[string]map[string]int{
+		"sup1": {"supplier-account": allowed, "keyhub": forbidden, "ccmax": forbidden},
+		"sup2": {"supplier-account": forbidden, "keyhub": allowed, "ccmax": forbidden},
+		"cc1":  {"supplier-account": forbidden, "keyhub": forbidden, "ccmax": allowed},
+		"mgr1": {"supplier-account": forbidden, "keyhub": forbidden, "ccmax": allowed},
+		"px1":  {"supplier-account": forbidden, "keyhub": forbidden, "ccmax": forbidden},
+	} {
+		assert.Equal(t, want, tencentLoginGates(t, r, name, users[name].Password), name)
+	}
+	// newapi-proxy's login: the row by username, enabled, bcrypt match.
+	var hash string
+	var status int
+	require.NoError(t, db.QueryRow(`SELECT password_hash, status FROM rs_auth_user WHERE username = 'px1'`).Scan(&hash, &status))
+	assert.Equal(t, 1, status)
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(hash), []byte(users["px1"].Password)))
+
+	// The V2 role is bound with the user.
+	var v2Role string
+	require.NoError(t, db.QueryRow(`SELECT r.name FROM rs_user_role ur JOIN rs_role r ON r.id = ur.role_id WHERE ur.user_id = $1`, users["sup2"].ID).Scan(&v2Role))
+	assert.Equal(t, RoleSupplier02, v2Role)
+
+	// The list carries per-platform counts and never a password or hash.
+	_, err := db.Exec(`INSERT INTO rs_supplier_account (uploaded_by, provider, remote_account_id, created_at, updated_at) VALUES ($1, 'openai', 9001, 0, 0)`, users["sup1"].ID)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE proxy_channel_ownership (remote_channel_id BIGINT PRIMARY KEY, user_id BIGINT NOT NULL, created_at BIGINT NOT NULL)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO proxy_channel_ownership VALUES (31, $1, 0), (32, $1, 0)`, users["px1"].ID)
+	require.NoError(t, err)
+	code, resp := tencentAdminJSON(t, r, http.MethodGet, "/api/tencent/users", "")
+	require.Equal(t, http.StatusOK, code)
+	var list struct {
+		List []tencentUserItem `json:"list"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(resp), &list))
+	byName := map[string]tencentUserItem{}
+	for _, u := range list.List {
+		byName[u.Username] = u
+	}
+	assert.Equal(t, int64(1), byName["sup1"].SupplierAccounts)
+	assert.Equal(t, int64(2), byName["px1"].ProxyChannels)
+	assert.Equal(t, "mgr1", byName["cc1"].ManagerUsername)
+	assert.Equal(t, int64(1), byName["mgr1"].Members)
+	assert.Equal(t, []string{tencentPlatformThirdParty}, byName["sup2"].Platforms)
+	assert.NotContains(t, resp, "password")
+	for _, u := range users {
+		assert.NotContains(t, resp, u.Password)
+		assert.NotContains(t, logs.String(), u.Password)
+	}
+	assert.Contains(t, logs.String(), "created supplier_01 user")
+
+	code, resp = tencentAdminJSON(t, r, http.MethodGet, "/api/tencent/users?platform=proxy", "")
+	require.Equal(t, http.StatusOK, code)
+	require.NoError(t, json.Unmarshal([]byte(resp), &list))
+	names := []string{}
+	for _, u := range list.List {
+		names = append(names, u.Username)
+	}
+	assert.Equal(t, []string{"px1"}, names)
+
+	// V2 user creation: supplier_01 / supplier_02 now land on their own V1
+	// tier and reach their platform.
+	for roleName, gate := range map[string]string{RoleSupplier01: "supplier-account", RoleSupplier02: "keyhub"} {
+		var roleID int64
+		require.NoError(t, db.QueryRow(`SELECT id FROM rs_role WHERE name = $1`, roleName).Scan(&roleID))
+		username := "v2-" + strings.ReplaceAll(roleName, "_", "-")
+		code, resp := tencentAdminJSON(t, r, http.MethodPost, "/api/v2/users",
+			fmt.Sprintf(`{"username":%q,"password":"Secret-123456","studio":"V2 Co","roles":[%d]}`, username, roleID))
+		require.Equal(t, http.StatusOK, code, resp)
+		assert.Equal(t, http.StatusOK, tencentLoginGates(t, r, username, "Secret-123456")[gate], roleName)
+	}
 }

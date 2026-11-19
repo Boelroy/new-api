@@ -25,9 +25,9 @@ import (
 
 type v2UserRow struct {
 	authUser
-	Roles       []int64 `json:"roles"`
-	MaxLevel    int     `json:"max_level"`
-	RoleNames   []string `json:"role_names"`
+	Roles     []int64  `json:"roles"`
+	MaxLevel  int      `json:"max_level"`
+	RoleNames []string `json:"role_names"`
 }
 
 // loadUserRoles fills the Roles slice + max level + names on a user row.
@@ -498,10 +498,24 @@ func v2HandleUserAssignRoles(c *gin.Context) {
 	c.JSON(http.StatusOK, row)
 }
 
-// legacyV1RoleForLevel picks the V1 numeric tier the closest to (but not
-// above) the given V2 level. Keeps the V1 `role` column in sync so V1
-// pages/routes remain usable.
+// legacyV1RoleForLevel picks the V1 numeric tier for the given V2 level.
+// Keeps the V1 `role` column in sync so V1 pages/routes remain usable.
+// Supplier and CC Max levels are horizontal roles whose V1 gates match the
+// exact tier, so they map one to one; the rest take the closest tier not
+// above the level.
 func legacyV1RoleForLevel(level int) int {
+	switch level {
+	case LevelSupplier01:
+		return minSupplierRole
+	case LevelSupplier02:
+		return minSupplierRole02
+	case LevelSupplierCCMax:
+		return minSupplierCCMaxRole
+	case LevelCCMaxManager:
+		return minCCMaxManagerRole
+	case LevelSupplierGynh:
+		return minSupplierGynhRole
+	}
 	switch {
 	case level >= LevelSuperadmin:
 		return minSuperAdminRole
