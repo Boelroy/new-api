@@ -2333,6 +2333,9 @@ export const api = {
     provider: string
     model: string
     api_key: string
+    proxy_type?: 'bind_custom'
+    proxy_region?: string
+    proxy_url?: string
     account_id?: string
     account_type?: number
     tpm?: string

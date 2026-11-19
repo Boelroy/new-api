@@ -39,12 +39,15 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
 )
@@ -604,6 +607,35 @@ func handleSupplierModels(c *gin.Context) {
 
 // ---- Upload (create account) — OpenAPI token ----
 
+// The portal receives the original URL, including any percent-encoded userinfo.
+// Keep parser errors local since they can include the entire URL.
+func validSupplierAccountProxyURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" || !slices.Contains([]string{"http", "https", "socks5", "socks5h"}, u.Scheme) {
+		return false
+	}
+	if strings.ContainsAny(raw, "?#") || strings.IndexFunc(raw, unicode.IsSpace) >= 0 {
+		return false
+	}
+	if path := u.EscapedPath(); path != "" && path != "/" {
+		return false
+	}
+	host := u.Hostname()
+	if strings.HasPrefix(u.Host, "[") {
+		ip, err := netip.ParseAddr(host)
+		if err != nil || !ip.Is6() {
+			return false
+		}
+	} else if strings.ContainsAny(host, "[]:") {
+		return false
+	}
+	if u.Port() == "" {
+		return !strings.HasSuffix(u.Host, ":") && (u.Scheme == "http" || u.Scheme == "https")
+	}
+	port, err := strconv.ParseUint(u.Port(), 10, 16)
+	return err == nil && port > 0
+}
+
 func handleSupplierAccountCreate(c *gin.Context) {
 	if supplierAccountBaseURL == "" {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "supplier account portal not configured"})
@@ -622,6 +654,9 @@ func handleSupplierAccountCreate(c *gin.Context) {
 		Tpm         string `json:"tpm"`
 		Rpm         string `json:"rpm"`
 		Remark      string `json:"remark"`
+		ProxyType   string `json:"proxy_type"`
+		ProxyRegion string `json:"proxy_region"`
+		ProxyURL    string `json:"proxy_url"`
 		// URL is the Azure model endpoint (e.g.
 		// https://<res>.cognitiveservices.azure.com/openai/...). Shared by every
 		// selected model; the portal extracts resource_name from its first
@@ -649,6 +684,9 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	body.Region = strings.TrimSpace(body.Region)
 	body.AWSRegion = strings.TrimSpace(body.AWSRegion)
 	body.AWSProjectID = strings.TrimSpace(body.AWSProjectID)
+	body.ProxyType = strings.TrimSpace(body.ProxyType)
+	body.ProxyRegion = strings.TrimSpace(body.ProxyRegion)
+	body.ProxyURL = strings.TrimSpace(body.ProxyURL)
 	if body.Provider == "" || body.Model == "" || body.APIKey == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider, model and api_key are required"})
 		return
@@ -690,6 +728,16 @@ func handleSupplierAccountCreate(c *gin.Context) {
 		"model":        body.Model,
 		"api_key":      body.APIKey,
 		"account_type": body.AccountType,
+	}
+	customProxy := body.ProxyType != "" || body.ProxyRegion != "" || body.ProxyURL != ""
+	if customProxy {
+		if body.ProxyType != "bind_custom" || body.ProxyRegion == "" || !validSupplierAccountProxyURL(body.ProxyURL) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "自定义代理需要填写有效的代理地址和出口地区"})
+			return
+		}
+		upstreamReq["proxy_type"] = body.ProxyType
+		upstreamReq["proxy_region"] = body.ProxyRegion
+		upstreamReq["proxy_url"] = body.ProxyURL
 	}
 	if body.AccountID != "" {
 		upstreamReq["account_id"] = body.AccountID
@@ -735,13 +783,24 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	// 502 body for its own HTML page and the portal's reason would be lost.
 	status, respBody, err := supplierProxy(http.MethodPost, "/supplier-account/api/openapi/accounts", effectiveOpenAPIToken(), reqBytes)
 	if err != nil {
-		log.Printf("[supplier-account] create %s/%s: %v", body.Provider, body.Model, err)
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "号池接口不可达: " + err.Error()})
+		message := "号池接口不可达"
+		if !customProxy {
+			message += ": " + err.Error()
+		}
+		log.Printf("[supplier-account] create %s/%s: %s", body.Provider, body.Model, message)
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": message})
 		return
 	}
 	if status < 200 || status >= 300 {
-		log.Printf("[supplier-account] create %s/%s: portal %d: %s", body.Provider, body.Model, status, supplierErr(respBody))
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": supplierErr(respBody)})
+		// Portal error bodies can echo the submitted proxy credentials.
+		var message string
+		if customProxy {
+			message = fmt.Sprintf("号池拒绝上号请求（HTTP %d）", status)
+		} else {
+			message = supplierErr(respBody)
+		}
+		log.Printf("[supplier-account] create %s/%s: portal %d: %s", body.Provider, body.Model, status, message)
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": message})
 		return
 	}
 	var upstream struct {
@@ -750,8 +809,12 @@ func handleSupplierAccountCreate(c *gin.Context) {
 		Msg   string `json:"msg"`
 	}
 	if err := json.Unmarshal(respBody, &upstream); err != nil || upstream.ID == 0 {
-		log.Printf("[supplier-account] create %s/%s: unexpected portal response: %s", body.Provider, body.Model, strings.TrimSpace(string(respBody)))
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "unexpected upstream response: " + strings.TrimSpace(string(respBody))})
+		message := "unexpected upstream response"
+		if !customProxy {
+			message += ": " + strings.TrimSpace(string(respBody))
+		}
+		log.Printf("[supplier-account] create %s/%s: %s", body.Provider, body.Model, message)
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": message})
 		return
 	}
 
@@ -786,12 +849,16 @@ func handleSupplierAccountCreate(c *gin.Context) {
 		uid, studio, body.Provider, body.Model, upstream.ID, upstream.Alias,
 		body.AccountType, body.Remark, last8, keyHash, now,
 	); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record account: " + err.Error()})
+		message := "failed to record account"
+		if !customProxy {
+			message += ": " + err.Error()
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": message})
 		return
 	}
 
 	msg := upstream.Msg
-	if msg == "" {
+	if customProxy || msg == "" {
 		msg = "提交成功"
 	}
 	c.JSON(http.StatusOK, gin.H{"id": upstream.ID, "alias": upstream.Alias, "msg": msg})
