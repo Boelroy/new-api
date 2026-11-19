@@ -163,9 +163,14 @@ func syncSupplierRecordLogSlice(platform string) (bool, error) {
 	from := time.Unix(cursor, 0).Add(-supplierRecordLogOverlap)
 	to := time.Unix(min(cursor+int64(supplierRecordLogSlice/time.Second), now.Unix()), 0)
 
+	began := time.Now()
+	supplierRecordLogStats.calls, supplierRecordLogStats.throttled = 0, 0
 	if err := pullSupplierRecordLogWindow(platform, from.Unix(), to.Unix()); err != nil {
 		return false, err
 	}
+	log.Printf("[supplier-record-log] %s %s~%s: %d calls, %d throttled, %s",
+		platform, from.In(supplierPortalLoc).Format(time.TimeOnly), to.In(supplierPortalLoc).Format(time.TimeOnly),
+		supplierRecordLogStats.calls, supplierRecordLogStats.throttled, time.Since(began).Round(time.Second))
 	if err := rebuildSupplierRecordLogHourly(platform, from.Unix(), to.Unix()); err != nil {
 		return false, err
 	}
@@ -195,6 +200,9 @@ const (
 
 var supplierRecordLogLastCall time.Time
 
+// supplierRecordLogStats counts sync calls for the per-slice log line.
+var supplierRecordLogStats struct{ calls, throttled int }
+
 // fetchSupplierRecordLogPage reads one page of a [from, to] window (unix
 // seconds, both ends inclusive in portal time) and the window's total. Only
 // the sync loop calls it, so the pacing state needs no lock.
@@ -213,8 +221,10 @@ func fetchSupplierRecordLogPage(platform string, from, to int64, start int) ([]s
 	)
 	for attempt := range supplierRecordLogThrottleRetries + 1 {
 		if attempt > 0 {
+			supplierRecordLogStats.throttled++
 			time.Sleep(supplierRecordLogThrottleWait)
 		}
+		supplierRecordLogStats.calls++
 		if wait := supplierRecordLogCallGap - time.Since(supplierRecordLogLastCall); wait > 0 {
 			time.Sleep(wait)
 		}
