@@ -209,6 +209,18 @@ var v2SchemaStatements = []string{
 		updated_at        BIGINT NOT NULL,
 		PRIMARY KEY (remote_account_id, ds)
 	)`,
+	// The same bill per model (model '' when the portal row carried none);
+	// written alongside rs_ccmax_daily_bill from the same pull. Days pulled
+	// before it existed have no rows here, and the monthly statement falls
+	// back to the day's total (tencent_statement.go).
+	`CREATE TABLE IF NOT EXISTS rs_ccmax_daily_bill_model (
+		remote_account_id BIGINT NOT NULL,
+		ds                DATE   NOT NULL,
+		model             TEXT   NOT NULL,
+		cost_micro        BIGINT NOT NULL,
+		updated_at        BIGINT NOT NULL,
+		PRIMARY KEY (remote_account_id, ds, model)
+	)`,
 	// Which days of a CC Max settlement party are settled. A party is a
 	// ccmax_manager (settles for all its members) or a supplier_ccmax user with
 	// no manager (ccmax_settlement.go). amount_micro is the bill when marked.

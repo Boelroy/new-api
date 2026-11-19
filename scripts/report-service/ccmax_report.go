@@ -591,7 +591,12 @@ func ccmaxSyncDailyBills(from, to time.Time) error {
 		id int64
 		ds string
 	}
+	type modelKey struct {
+		key
+		model string
+	}
 	costs := map[key]float64{}
+	modelCosts := map[modelKey]float64{}
 	for batch := range slices.Chunk(ids, ccmaxBillBatch) {
 		path := fmt.Sprintf("/supplier-account/api/bill/query?account_ids=%s&start_ds=%s&end_ds=%s",
 			strings.Join(batch, ","), from.Format("20060102"), to.Format("20060102"))
@@ -607,6 +612,8 @@ func ccmaxSyncDailyBills(from, to time.Time) error {
 				AccountID int64   `json:"account_id"`
 				DS        string  `json:"ds_text"`
 				Cost      float64 `json:"cost"`
+				Model     string  `json:"model"`
+				ModelName string  `json:"model_name"`
 			} `json:"list"`
 		}
 		if err := json.Unmarshal(body, &parsed); err != nil {
@@ -614,6 +621,7 @@ func ccmaxSyncDailyBills(from, to time.Time) error {
 		}
 		for _, l := range parsed.List {
 			costs[key{l.AccountID, l.DS}] += l.Cost
+			modelCosts[modelKey{key{l.AccountID, l.DS}, strings.TrimSpace(cmp.Or(l.Model, l.ModelName))}] += l.Cost
 		}
 	}
 
@@ -626,11 +634,22 @@ func ccmaxSyncDailyBills(from, to time.Time) error {
 	if _, err := tx.Exec(`DELETE FROM rs_ccmax_daily_bill WHERE ds BETWEEN $1 AND $2`, fromDS, toDS); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`DELETE FROM rs_ccmax_daily_bill_model WHERE ds BETWEEN $1 AND $2`, fromDS, toDS); err != nil {
+		return err
+	}
 	now := time.Now().Unix()
 	for k, cost := range costs {
 		if _, err := tx.Exec(
 			`INSERT INTO rs_ccmax_daily_bill (remote_account_id, ds, cost_micro, updated_at) VALUES ($1, $2, $3, $4)`,
 			k.id, k.ds, int64(math.Round(cost*1e6)), now,
+		); err != nil {
+			return err
+		}
+	}
+	for k, cost := range modelCosts {
+		if _, err := tx.Exec(
+			`INSERT INTO rs_ccmax_daily_bill_model (remote_account_id, ds, model, cost_micro, updated_at) VALUES ($1, $2, $3, $4, $5)`,
+			k.id, k.ds, k.model, int64(math.Round(cost*1e6)), now,
 		); err != nil {
 			return err
 		}

@@ -5176,6 +5176,7 @@ func main() {
 	// V2 schema + RBAC seed. Idempotent; safe to run on every startup.
 	initV2Schema()
 	seedV2RBAC()
+	initTencentSchema()
 
 	// Leader election must settle before the singleton schedulers start so a
 	// follower never fires an initial run. Synchronous first tick inside.
@@ -5539,6 +5540,8 @@ func main() {
 	superAPI.GET("/billing/remote-tag-usage", handleBillingRemoteTagUsage)
 	superAPI.GET("/billing/ccmax-usage", handleBillingCCMaxUsage)
 	superAPI.PATCH("/users/:id", handleUserUpdate)
+	// 腾讯一站 · 月对账 (tencent_statement.go), super admin only.
+	registerTencentRoutes(api)
 
 	// Remote New-API inspector. Admin (supplier tier) can view profiles
 	// and drive every channel-level operation (fetch, edit, pool upload,
