@@ -11,7 +11,8 @@ package main
 //   - ccmax: rs_ccmax_daily_bill (the same portal bill, pulled daily for the
 //     CC Max accounts), RMB, summed per supplier.
 //   - proxy: each proxy_channel_ownership channel's consume logs of the month
-//     on newapi-proxy's upstream New API (/api/log/stat), USD.
+//     on newapi-proxy's upstream New API (/api/log/stat), queried through the
+//     remote profile picked as that upstream, USD.
 //
 // G is USD: RMB costs are divided by the month's rate (default the system
 // supplier_fx_rate). Months are Beijing calendar months. The month's rate,
@@ -25,12 +26,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"net/http"
 	"net/url"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -54,12 +53,9 @@ const (
 	// tencentPortalBillDays is how far back the portal keeps bills.
 	tencentPortalBillDays = 90
 
-	// Upstream New API of newapi-proxy (report_config; env TENCENT_PROXY_UPSTREAM_*
-	// as fallback). The token is stored encrypted like remote profile tokens.
-	cfgTencentProxyUpstreamURL   = "tencent_proxy_upstream_url"
-	cfgTencentProxyUpstreamToken = "tencent_proxy_upstream_token"
-	cfgTencentProxyUpstreamUser  = "tencent_proxy_upstream_user"
-	cfgTencentProxyUpstreamSocks = "tencent_proxy_upstream_socks"
+	// cfgTencentProxyProfileID picks the remote_newapi_profile that is
+	// newapi-proxy's upstream New API; proxy rows are queried through it.
+	cfgTencentProxyProfileID = "tencent_proxy_profile_id"
 	// tencentProxyConcurrency bounds parallel upstream channel queries.
 	tencentProxyConcurrency = 8
 
@@ -382,14 +378,14 @@ func loadTencentSources(start, end time.Time) ([]tencentSourceRow, []string, err
 	if err := db.QueryRow(`SELECT to_regclass('proxy_channel_ownership') IS NOT NULL`).Scan(&hasOwnership); err != nil {
 		return nil, nil, err
 	}
-	up := loadTencentProxyUpstream()
+	profileID, _ := strconv.ParseInt(supplierConfigGet(cfgTencentProxyProfileID), 10, 64)
 	switch {
-	case up.URL == "" || up.Token == "":
-		warnings = append(warnings, "proxy: 未配置上游 New API 地址/令牌，New API Proxy 未出账")
+	case profileID <= 0:
+		warnings = append(warnings, "proxy: 未选择上游 New API 实例，New API Proxy 未出账")
 	case !hasOwnership:
 		warnings = append(warnings, "proxy: 数据库中没有 proxy_channel_ownership 表，New API Proxy 未出账")
 	default:
-		proxyRows, proxyWarnings, err := loadTencentProxyRows(up, start, end, tencentNow())
+		proxyRows, proxyWarnings, err := loadTencentProxyRows(profileID, start, end, tencentNow())
 		if err != nil {
 			return nil, nil, fmt.Errorf("proxy usage: %w", err)
 		}
@@ -626,77 +622,17 @@ func tencentProxyVendor(channelType int, models string) string {
 	return fmt.Sprintf("newapi-type-%d", channelType)
 }
 
-// tencentProxyUpstream is the upstream New API newapi-proxy forwards to:
-// report_config keys first, then the TENCENT_PROXY_UPSTREAM_* env.
-type tencentProxyUpstream struct {
-	URL    string
-	Token  string
-	User   string // optional New-Api-User header
-	Socks5 string // optional socks5:// / http:// proxy
-}
-
-func loadTencentProxyUpstream() tencentProxyUpstream {
-	token := os.Getenv("TENCENT_PROXY_UPSTREAM_TOKEN")
-	if enc := supplierConfigGet(cfgTencentProxyUpstreamToken); enc != "" {
-		if plain, err := decryptRemoteToken(enc); err == nil {
-			token = plain
-		} else {
-			log.Printf("[tencent] decrypt %s: %v", cfgTencentProxyUpstreamToken, err)
-		}
-	}
-	return tencentProxyUpstream{
-		URL:    strings.TrimRight(cmp.Or(strings.TrimSpace(supplierConfigGet(cfgTencentProxyUpstreamURL)), os.Getenv("TENCENT_PROXY_UPSTREAM_URL")), "/"),
-		Token:  strings.TrimSpace(token),
-		User:   cmp.Or(strings.TrimSpace(supplierConfigGet(cfgTencentProxyUpstreamUser)), os.Getenv("TENCENT_PROXY_UPSTREAM_USER")),
-		Socks5: cmp.Or(strings.TrimSpace(supplierConfigGet(cfgTencentProxyUpstreamSocks)), os.Getenv("TENCENT_PROXY_UPSTREAM_SOCKS")),
-	}
-}
-
-// getJSON GETs an upstream admin path with the same headers newapi-proxy
-// sends (Bearer token; New-Api-User when configured).
-func (u tencentProxyUpstream) getJSON(ctx context.Context, client *http.Client, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.URL+path, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+u.Token)
-	req.Header.Set("Content-Type", "application/json")
-	if u.User != "" {
-		req.Header.Set("New-Api-User", u.User)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: HTTP %d", strings.SplitN(path, "?", 2)[0], resp.StatusCode)
-	}
-	return json.Unmarshal(body, out)
-}
-
-func (u tencentProxyUpstream) client() (*http.Client, error) {
-	transport := &http.Transport{}
-	if u.Socks5 != "" {
-		proxyURL, err := url.Parse(u.Socks5)
-		if err != nil {
-			return nil, fmt.Errorf("代理地址无效: %w", err)
-		}
-		transport.Proxy = http.ProxyURL(proxyURL)
-	}
-	return &http.Client{Timeout: 30 * time.Second, Transport: transport}, nil
-}
-
 // loadTencentProxyRows bills each channel in proxy_channel_ownership with the
-// upstream's consume-log total of the Beijing month (/api/log/stat type=2,
-// up to now), quota ÷ the upstream's quota_per_unit = USD; name, type and
-// models come from /api/channel/:id. A channel whose request fails is left
-// out with a warning.
-func loadTencentProxyRows(up tencentProxyUpstream, start, end, now time.Time) ([]tencentSourceRow, []string, error) {
+// consume-log total of the Beijing month (/api/log/stat type=2, up to now) on
+// the remote profile of newapi-proxy's upstream, quota ÷ its quota_per_unit
+// = USD; name, type and models come from /api/channel/:id. Requests go
+// through remoteDoJSON, so the profile's token, user and proxy apply. A
+// channel whose request fails is left out with a warning.
+func loadTencentProxyRows(profileID int64, start, end, now time.Time) ([]tencentSourceRow, []string, error) {
+	host, userID, token, err := loadRemoteProfileByID(profileID)
+	if err != nil {
+		return nil, []string{fmt.Sprintf("proxy: 远端实例 #%d 不可用（%v），New API Proxy 未出账", profileID, err)}, nil
+	}
 	type owned struct {
 		channelID, userID int64
 		supplier          string
@@ -725,10 +661,6 @@ func loadTencentProxyRows(up tencentProxyUpstream, start, end, now time.Time) ([
 	if len(channels) == 0 {
 		return nil, nil, nil
 	}
-	client, err := up.client()
-	if err != nil {
-		return nil, []string{"proxy: " + err.Error() + "，New API Proxy 未出账"}, nil
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -738,7 +670,8 @@ func loadTencentProxyRows(up tencentProxyUpstream, start, end, now time.Time) ([
 		} `json:"data"`
 	}
 	quotaPerUnit := float64(tencentProxyQuotaPerUSD)
-	if err := up.getJSON(ctx, client, "/api/status", &status); err == nil && status.Data.QuotaPerUnit > 0 {
+	if raw, err := remoteDoRaw(ctx, http.MethodGet, host, "/api/status", token, userID, nil, nil); err == nil &&
+		json.Unmarshal(raw, &status) == nil && status.Data.QuotaPerUnit > 0 {
 		quotaPerUnit = status.Data.QuotaPerUnit
 	}
 	from, to := start.Unix(), min(end.Unix(), now.Unix())
@@ -758,40 +691,39 @@ func loadTencentProxyRows(up tencentProxyUpstream, start, end, now time.Time) ([
 			defer func() { <-sem }()
 			r := tencentSourceRow{Platform: tencentPlatformProxy, UserID: o.userID, Supplier: o.supplier, AccountID: o.channelID}
 			var stat struct {
-				Data struct {
-					Quota int64 `json:"quota"`
-				} `json:"data"`
+				Quota int64 `json:"quota"`
 			}
-			path := fmt.Sprintf("/api/log/stat?type=2&channel=%d&start_timestamp=%d&end_timestamp=%d", o.channelID, from, to)
-			if err := up.getJSON(ctx, client, path, &stat); err != nil {
+			q := url.Values{"type": {"2"}, "channel": {strconv.FormatInt(o.channelID, 10)},
+				"start_timestamp": {strconv.FormatInt(from, 10)}, "end_timestamp": {strconv.FormatInt(to, 10)}}
+			raw, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/stat", token, userID, q, nil)
+			if err == nil {
+				err = json.Unmarshal(raw, &stat)
+			}
+			if err != nil {
 				results[i] = result{err: err}
 				return
 			}
-			r.CostUSD = float64(stat.Data.Quota) / quotaPerUnit
-			if stat.Data.Quota <= 0 {
+			r.CostUSD = float64(stat.Quota) / quotaPerUnit
+			if stat.Quota <= 0 {
 				results[i] = result{row: r}
 				return
 			}
 			var ch struct {
-				Success bool `json:"success"`
-				Data    struct {
-					Name   string `json:"name"`
-					Type   int    `json:"type"`
-					Models string `json:"models"`
-				} `json:"data"`
-			}
-			if err := up.getJSON(ctx, client, fmt.Sprintf("/api/channel/%d", o.channelID), &ch); err != nil {
-				results[i] = result{err: err}
-				return
+				Name   string `json:"name"`
+				Type   int    `json:"type"`
+				Models string `json:"models"`
 			}
 			// A channel deleted upstream keeps its logs; bill it by id.
-			r.Vendor = tencentProxyVendor(ch.Data.Type, ch.Data.Models)
-			for m := range strings.SplitSeq(ch.Data.Models, ",") {
+			if raw, err := remoteDoJSON(ctx, http.MethodGet, host, fmt.Sprintf("/api/channel/%d", o.channelID), token, userID, nil, nil); err == nil {
+				_ = json.Unmarshal(raw, &ch)
+			}
+			r.Vendor = tencentProxyVendor(ch.Type, ch.Models)
+			for m := range strings.SplitSeq(ch.Models, ",") {
 				if m = strings.TrimSpace(m); m != "" {
 					r.Models = append(r.Models, m)
 				}
 			}
-			r.Label = strings.TrimSpace(fmt.Sprintf("%s #%d", ch.Data.Name, o.channelID))
+			r.Label = strings.TrimSpace(fmt.Sprintf("%s #%d", ch.Name, o.channelID))
 			results[i] = result{row: r}
 		}()
 	}
@@ -1009,92 +941,46 @@ func handleTencentMonthParamSet(c *gin.Context) {
 
 // ---- Settings ----
 
-// handleTencentSettingsGet shows the proxy upstream settings; the token is
-// never returned, only whether it is set and its last four characters, and a
-// proxy URL hides its password.
 func handleTencentSettingsGet(c *gin.Context) {
-	up := loadTencentProxyUpstream()
-	last4 := ""
-	if len(up.Token) > 4 {
-		last4 = up.Token[len(up.Token)-4:]
-	}
-	socks := up.Socks5
-	if u, err := url.Parse(socks); err == nil && socks != "" {
-		socks = u.Redacted()
-	}
+	profileID, _ := strconv.ParseInt(supplierConfigGet(cfgTencentProxyProfileID), 10, 64)
 	upload, _ := strconv.ParseFloat(supplierAccountDiscount(), 64)
 	c.JSON(http.StatusOK, gin.H{
-		"proxy_upstream": gin.H{
-			"url":         up.URL,
-			"token_set":   up.Token != "",
-			"token_last4": last4,
-			"user":        up.User,
-			"socks":       socks,
-		},
+		"proxy_profile_id":    profileID,
 		"system_fx_rate":      supplierFxRate(),
 		"upload_discount_pct": upload,
 	})
 }
 
-// handleTencentSettingsSet saves the proxy upstream settings. Omitted fields
-// stay; an empty token keeps the stored one (clear_token removes it).
+// handleTencentSettingsSet picks the remote profile that is newapi-proxy's
+// upstream New API (0 = none, proxy usage is not billed). The profile must
+// use the admin API: the seller API has no /api/log.
 func handleTencentSettingsSet(c *gin.Context) {
 	var body struct {
-		ProxyUpstream *struct {
-			URL        *string `json:"url"`
-			Token      *string `json:"token"`
-			ClearToken bool    `json:"clear_token"`
-			User       *string `json:"user"`
-			Socks      *string `json:"socks"`
-		} `json:"proxy_upstream"`
+		ProxyProfileID *int64 `json:"proxy_profile_id"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-	up := body.ProxyUpstream
-	if up == nil {
-		handleTencentSettingsGet(c)
-		return
-	}
-	writes := map[string]string{}
-	if up.URL != nil {
-		v := strings.TrimRight(strings.TrimSpace(*up.URL), "/")
-		if u, err := url.Parse(v); v != "" && (err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "上游地址须为 http(s)://host[:port]"})
-			return
+	if body.ProxyProfileID != nil {
+		id := max(*body.ProxyProfileID, 0)
+		if id > 0 {
+			var apiMode string
+			err := db.QueryRow(`SELECT api_mode FROM remote_newapi_profile WHERE id = $1`, id).Scan(&apiMode)
+			if errors.Is(err, sql.ErrNoRows) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "remote profile not found"})
+				return
+			}
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			if apiMode == remoteAPIModeSeller {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "该实例是 seller 模式，没有日志接口，不能用于 proxy 出账"})
+				return
+			}
 		}
-		writes[cfgTencentProxyUpstreamURL] = v
-	}
-	if up.User != nil {
-		v := strings.TrimSpace(*up.User)
-		if _, err := strconv.ParseInt(v, 10, 64); v != "" && err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "New-Api-User 须为数字用户 ID"})
-			return
-		}
-		writes[cfgTencentProxyUpstreamUser] = v
-	}
-	if up.Socks != nil {
-		v := strings.TrimSpace(*up.Socks)
-		if u, err := url.Parse(v); v != "" && (err != nil || !slices.Contains([]string{"socks5", "socks5h", "http", "https"}, u.Scheme) || u.Host == "") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "代理须为 socks5://、socks5h:// 或 http(s):// 地址"})
-			return
-		}
-		writes[cfgTencentProxyUpstreamSocks] = v
-	}
-	switch {
-	case up.ClearToken:
-		writes[cfgTencentProxyUpstreamToken] = ""
-	case up.Token != nil && strings.TrimSpace(*up.Token) != "":
-		enc, err := encryptRemoteToken(strings.TrimSpace(*up.Token))
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "encrypt token: " + err.Error()})
-			return
-		}
-		writes[cfgTencentProxyUpstreamToken] = enc
-	}
-	for k, v := range writes {
-		if err := supplierConfigSet(k, v); err != nil {
+		if err := supplierConfigSet(cfgTencentProxyProfileID, strconv.FormatInt(id, 10)); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}

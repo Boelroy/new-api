@@ -162,7 +162,9 @@ func tencentTestDB(t *testing.T) {
 		   status INT NOT NULL DEFAULT 1, disabled_at BIGINT NOT NULL DEFAULT 0)`,
 		`CREATE TABLE rs_login_attempt (id BIGSERIAL PRIMARY KEY, username TEXT NOT NULL, ip TEXT NOT NULL, succeeded BOOLEAN NOT NULL, attempted_at BIGINT NOT NULL)`,
 		`CREATE TABLE report_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at BIGINT NOT NULL)`,
-		`CREATE TABLE remote_newapi_profile (id BIGSERIAL PRIMARY KEY)`,
+		`CREATE TABLE remote_newapi_profile (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL DEFAULT '', host TEXT NOT NULL DEFAULT '',
+		   user_id BIGINT NOT NULL DEFAULT 0, access_token_enc TEXT NOT NULL DEFAULT '', proxy TEXT NOT NULL DEFAULT '',
+		   api_mode TEXT NOT NULL DEFAULT 'admin')`,
 		`CREATE TABLE remote_channel_snapshot (profile_id BIGINT NOT NULL, remote_channel_id BIGINT NOT NULL, captured_at BIGINT NOT NULL,
 		   used_quota BIGINT NOT NULL, status INT NOT NULL, PRIMARY KEY (profile_id, remote_channel_id, captured_at))`,
 		`CREATE TABLE remote_channel_current (profile_id BIGINT NOT NULL, remote_channel_id BIGINT NOT NULL, name TEXT NOT NULL DEFAULT '',
@@ -310,7 +312,7 @@ func newTencentUpstream(t *testing.T, quotaPerUnit float64, channels map[int64]t
 		mu.Lock()
 		u.requests = append(u.requests, r.Clone(context.Background()))
 		mu.Unlock()
-		if r.Header.Get("Authorization") != "Bearer upstream-token" {
+		if r.Header.Get("Authorization") != "upstream-token" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -334,11 +336,12 @@ func newTencentUpstream(t *testing.T, quotaPerUnit float64, channels map[int64]t
 		}
 	}))
 	t.Cleanup(srv.Close)
+	// The upstream is a remote profile, as on dev (ttttt).
 	enc, err := encryptRemoteToken("upstream-token")
 	require.NoError(t, err)
-	for k, v := range map[string]string{cfgTencentProxyUpstreamURL: srv.URL, cfgTencentProxyUpstreamToken: enc, cfgTencentProxyUpstreamUser: "1"} {
-		require.NoError(t, supplierConfigSet(k, v))
-	}
+	_, err = db.Exec(`INSERT INTO remote_newapi_profile (id, name, host, user_id, access_token_enc) VALUES (6, 'ttttt', $1, 1, $2)`, srv.URL, enc)
+	require.NoError(t, err)
+	require.NoError(t, supplierConfigSet(cfgTencentProxyProfileID, "6"))
 	return u
 }
 
@@ -351,15 +354,14 @@ func TestTencentLoadSources(t *testing.T) {
 	require.NoError(t, err)
 	sources, warnings, err := loadTencentSources(start, end)
 	require.NoError(t, err)
-	assert.Equal(t, []string{
-		"third_party: 1 个有账单的门户账号不在本地上号表，供应商名称取门户的供应商名",
-		"proxy: 渠道 #3003 取数失败（GET /api/log/stat: HTTP 502），未出账",
-	}, warnings)
+	require.Len(t, warnings, 2)
+	assert.Equal(t, "third_party: 1 个有账单的门户账号不在本地上号表，供应商名称取门户的供应商名", warnings[0])
+	assert.Regexp(t, `^proxy: 渠道 #3003 取数失败（.*502.*），未出账$`, warnings[1])
 	// Every upstream call carries newapi-proxy's headers; each channel's
 	// consume-log stat covers exactly the Beijing month.
 	stats := map[string]url.Values{}
 	for _, r := range upstream.requests {
-		assert.Equal(t, "Bearer upstream-token", r.Header.Get("Authorization"), r.URL.Path)
+		assert.Equal(t, "upstream-token", r.Header.Get("Authorization"), r.URL.Path)
 		assert.Equal(t, "1", r.Header.Get("New-Api-User"), r.URL.Path)
 		if r.URL.Path == "/api/log/stat" {
 			stats[r.URL.Query().Get("channel")] = r.URL.Query()
@@ -1032,10 +1034,12 @@ func TestTencentPushSettingsInterop(t *testing.T) {
 	assert.Equal(t, "https://lark.example/stmt", loadTencentPushSchedule().Webhook)
 }
 
-// The proxy upstream settings: the token is stored encrypted and only shown
-// masked; a proxy URL hides its password; bad values are refused.
-func TestTencentProxyUpstreamSettings(t *testing.T) {
+// The proxy upstream is picked among the remote profiles; a seller-mode
+// profile has no log API and is refused.
+func TestTencentProxyProfileSetting(t *testing.T) {
 	tencentTestDB(t)
+	_, err := db.Exec(`INSERT INTO remote_newapi_profile (id, name, host, api_mode) VALUES (6, 'ttttt', 'http://a', 'admin'), (9, 's', 'http://b', 'seller')`)
+	require.NoError(t, err)
 	r := tencentTestRouter()
 	put := func(body string) (int, map[string]any) {
 		w := httptest.NewRecorder()
@@ -1046,27 +1050,14 @@ func TestTencentProxyUpstreamSettings(t *testing.T) {
 		_ = json.Unmarshal(w.Body.Bytes(), &out)
 		return w.Code, out
 	}
-	code, got := put(`{"proxy_upstream":{"url":"http://43.0.0.1:3000/","token":"sk-secret-token-WXYZ","user":"1","socks":"socks5h://u:pw@10.0.0.1:1080"}}`)
+	code, got := put(`{"proxy_profile_id":6}`)
 	require.Equal(t, http.StatusOK, code, got)
-	assert.Equal(t, map[string]any{"url": "http://43.0.0.1:3000", "token_set": true, "token_last4": "WXYZ", "user": "1",
-		"socks": "socks5h://u:xxxxx@10.0.0.1:1080"}, got["proxy_upstream"])
-	assert.NotContains(t, supplierConfigGet(cfgTencentProxyUpstreamToken), "sk-secret")
-	assert.Equal(t, "sk-secret-token-WXYZ", loadTencentProxyUpstream().Token)
-
-	// An empty token keeps the stored one.
-	code, got = put(`{"proxy_upstream":{"token":"","socks":""}}`)
-	require.Equal(t, http.StatusOK, code)
-	assert.Equal(t, true, got["proxy_upstream"].(map[string]any)["token_set"])
-	assert.Equal(t, "", got["proxy_upstream"].(map[string]any)["socks"])
-	for _, bad := range []string{
-		`{"proxy_upstream":{"url":"ftp://x"}}`,
-		`{"proxy_upstream":{"user":"admin"}}`,
-		`{"proxy_upstream":{"socks":"ssh://x:1"}}`,
-	} {
-		code, _ := put(bad)
-		assert.Equal(t, http.StatusBadRequest, code, bad)
+	assert.Equal(t, 6.0, got["proxy_profile_id"])
+	for body, want := range map[string]int{`{"proxy_profile_id":9}`: http.StatusBadRequest, `{"proxy_profile_id":99}`: http.StatusBadRequest} {
+		code, _ := put(body)
+		assert.Equal(t, want, code, body)
 	}
-	code, got = put(`{"proxy_upstream":{"clear_token":true}}`)
+	code, got = put(`{"proxy_profile_id":0}`)
 	require.Equal(t, http.StatusOK, code)
-	assert.Equal(t, false, got["proxy_upstream"].(map[string]any)["token_set"])
+	assert.Equal(t, 0.0, got["proxy_profile_id"])
 }

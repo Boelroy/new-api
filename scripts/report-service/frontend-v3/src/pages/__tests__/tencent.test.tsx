@@ -208,10 +208,12 @@ function statementRoutes(snap: unknown) {
     'GET /api/tencent/statement?month=2026-10': preview([line({}), proxyLine, ccmaxLine]),
     'GET /api/tencent/statements/2026-10': snap,
     'GET /api/tencent/params/months': { list: [], system_fx_rate: 7.2, default_discount: 0.88, default_tax_rate: '含票' },
-    'GET /api/tencent/settings': {
-      proxy_upstream: { url: 'http://up.example:3000', token_set: true, token_last4: 'WXYZ', user: '1', socks: '' },
-      system_fx_rate: 7.2,
-      upload_discount_pct: 88,
+    'GET /api/tencent/settings': { proxy_profile_id: 0, system_fx_rate: 7.2, upload_discount_pct: 88 },
+    'GET /api/remote-newapi/profiles': {
+      profiles: [
+        { id: 1, name: 'aaaasl', host: 'http://a:3000', default_models: '', default_group: '' },
+        { id: 6, name: 'ttttt', host: 'http://43.172.95.125:3000', default_models: '', default_group: '' },
+      ],
     },
   }
 }
@@ -309,33 +311,20 @@ describe('腾讯一站 · 月对账', () => {
 })
 
 describe('腾讯一站 · 月对账 · proxy 上游', () => {
-  it('shows the token masked and sends a new token only when typed', async () => {
+  it('picks the upstream among the remote profiles', async () => {
     const user = userEvent.setup()
     const calls = mockApi({
       ...statementRoutes(404),
-      'PUT /api/tencent/settings': (body: any) => ({
-        proxy_upstream: { url: body.proxy_upstream.url, token_set: true, token_last4: 'ABCD', user: body.proxy_upstream.user, socks: '' },
-        system_fx_rate: 7.2,
-        upload_discount_pct: 88,
-      }),
+      'PUT /api/tencent/settings': (body: any) => ({ proxy_profile_id: body.proxy_profile_id, system_fx_rate: 7.2, upload_discount_pct: 88 }),
     })
     render(<TencentStatement />)
     await openOctober()
-    expect(await screen.findByText('管理令牌（已设置 …WXYZ）')).toBeInTheDocument()
-    expect(screen.getByLabelText('上游地址')).toHaveValue('http://up.example:3000')
-
-    await user.clear(screen.getByLabelText('上游地址'))
-    await user.type(screen.getByLabelText('上游地址'), 'http://43.0.0.1:3000')
+    await screen.findByRole('option', { name: 'ttttt（http://43.172.95.125:3000）' })
+    expect(screen.getByLabelText('上游实例')).toHaveValue('0')
+    await user.selectOptions(screen.getByLabelText('上游实例'), '6')
     await user.click(screen.getByRole('button', { name: '保存上游' }))
-    await waitFor(() => expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(1))
-    expect(calls.find((c) => c.method === 'PUT')?.body).toEqual({ proxy_upstream: { url: 'http://43.0.0.1:3000', user: '1' } })
-
-    await user.type(screen.getByLabelText('管理令牌'), 'new-token-ABCD')
-    await user.click(screen.getByRole('button', { name: '保存上游' }))
-    await waitFor(() => expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(2))
-    expect(calls.filter((c) => c.method === 'PUT')[1].body.proxy_upstream.token).toBe('new-token-ABCD')
-    expect(await screen.findByText('管理令牌（已设置 …ABCD）')).toBeInTheDocument()
-    expect(screen.getByLabelText('管理令牌')).toHaveValue('')
+    await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true))
+    expect(calls.find((c) => c.method === 'PUT')?.body).toEqual({ proxy_profile_id: 6 })
   })
 })
 
