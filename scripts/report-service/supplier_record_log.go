@@ -190,8 +190,8 @@ func syncSupplierRecordLogSlice(platform string) (bool, error) {
 
 const (
 	// supplierRecordLogCallGap paces sync calls: the portal answers
-	// 「请求过于频繁」 to back-to-back calls (~43/min sequential was fine).
-	supplierRecordLogCallGap = 1500 * time.Millisecond
+	// 「请求过于频繁」 to back-to-back calls (~75/min); ~40/min is fine.
+	supplierRecordLogCallGap = time.Second
 	// supplierRecordLogThrottleWait / Retries: on a throttled answer, wait and
 	// retry the same call instead of failing the whole slice.
 	supplierRecordLogThrottleWait    = 10 * time.Second
