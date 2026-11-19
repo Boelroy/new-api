@@ -2547,6 +2547,16 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  // Which remote profile is newapi-proxy's upstream New API (proxy rows).
+  tencentSettings: () => request<TencentSettings>('/api/tencent/settings'),
+
+  setTencentSettings: (proxyProfileId: number) =>
+    request<TencentSettings>('/api/tencent/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ proxy_profile_id: proxyProfileId }),
+    }),
+
   // 404 when the month has no snapshot yet.
   tencentSnapshot: (month: string) => request<TencentSnapshot>(`/api/tencent/statements/${month}`),
 
@@ -3100,4 +3110,10 @@ export type TencentPushSettingsUpdate = {
   ccmax_report?: { webhook?: string; hours?: string }
   proxy_report?: { webhook?: string; hours?: string }
   ops_daily_spend?: { enabled?: boolean; webhook?: string; daily_spend?: boolean; daily_spend_hour?: number }
+}
+
+export type TencentSettings = {
+  proxy_profile_id: number
+  system_fx_rate: number
+  upload_discount_pct: number
 }

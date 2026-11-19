@@ -4,7 +4,7 @@ import Layout from '../components/Layout'
 import { lastBeijingMonth } from '../lib/month'
 import { Badge, Button, Card, Input, Select } from '../components/ui'
 import { confirmDialog, toast } from '../components/feedback'
-import { api, type TencentLine, type TencentMonthParam, type TencentSnapshot, type TencentStatementPreview, type TencentSummaryRow } from '../api'
+import { api, type TencentLine, type TencentMonthParam, type TencentSnapshot, type TencentStatementPreview, type TencentSummaryRow, type RemoteProfile } from '../api'
 
 // 腾讯一站 · 月对账 — the month's bill itself: the 「汇总表」 and 「API账单」
 // sheets of the customer template (same columns), then 生成 → 草稿 → 确认
@@ -146,6 +146,7 @@ export default function TencentStatement() {
       </Card>
 
       <MonthParamsCard month={month} preview={preview} locked={status === 'confirmed'} onSaved={() => void load()} />
+      <ProxyUpstreamCard onSaved={() => void load()} />
     </Layout>
   )
 }
@@ -331,6 +332,62 @@ function MonthParamsCard(props: { month: string; preview: TencentStatementPrevie
         </Button>
       </div>
       <p className="text-xs text-muted-foreground">留空用默认值；已确认的月份不能再改。</p>
+    </Card>
+  )
+}
+
+// ProxyUpstreamCard picks the remote New API profile that newapi-proxy
+// forwards to; proxy rows query its consume logs with that profile's token.
+function ProxyUpstreamCard(props: { onSaved: () => void }) {
+  const [profiles, setProfiles] = useState<RemoteProfile[]>([])
+  const [selected, setSelected] = useState('0')
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    Promise.all([api.tencentSettings(), api.remoteProfiles()]).then(
+      ([settings, res]) => {
+        setProfiles(res.profiles)
+        setSelected(String(settings.proxy_profile_id))
+      },
+      (e) => toast.error(e),
+    )
+  }, [])
+
+  async function save() {
+    setSaving(true)
+    try {
+      const res = await api.setTencentSettings(Number(selected))
+      setSelected(String(res.proxy_profile_id))
+      toast.success('已保存')
+      props.onSaved()
+    } catch (e) {
+      toast.error(e)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Card className="mt-4 space-y-3 p-4">
+      <div className="text-sm font-semibold">New API proxy 上游</div>
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="space-y-1.5">
+          <span className="block text-xs font-medium text-muted-foreground">上游实例（远端 NewAPI 配置）</span>
+          <Select aria-label="上游实例" className="block" value={selected} onChange={(e) => setSelected(e.target.value)}>
+            <option value="0">未选择</option>
+            {profiles.map((p) => (
+              <option key={p.id} value={String(p.id)}>
+                {p.name}
+                {p.host ? `（${p.host}）` : ''}
+              </option>
+            ))}
+          </Select>
+        </label>
+        <Button disabled={saving} onClick={() => void save()}>
+          保存上游
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">按 proxy 渠道归属查该实例当月消费日志出账，地址、令牌、代理沿用该实例的配置。</p>
     </Card>
   )
 }

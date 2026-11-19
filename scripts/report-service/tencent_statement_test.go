@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -160,7 +162,9 @@ func tencentTestDB(t *testing.T) {
 		   status INT NOT NULL DEFAULT 1, disabled_at BIGINT NOT NULL DEFAULT 0)`,
 		`CREATE TABLE rs_login_attempt (id BIGSERIAL PRIMARY KEY, username TEXT NOT NULL, ip TEXT NOT NULL, succeeded BOOLEAN NOT NULL, attempted_at BIGINT NOT NULL)`,
 		`CREATE TABLE report_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at BIGINT NOT NULL)`,
-		`CREATE TABLE remote_newapi_profile (id BIGSERIAL PRIMARY KEY)`,
+		`CREATE TABLE remote_newapi_profile (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL DEFAULT '', host TEXT NOT NULL DEFAULT '',
+		   user_id BIGINT NOT NULL DEFAULT 0, access_token_enc TEXT NOT NULL DEFAULT '', proxy TEXT NOT NULL DEFAULT '',
+		   api_mode TEXT NOT NULL DEFAULT 'admin')`,
 		`CREATE TABLE remote_channel_snapshot (profile_id BIGINT NOT NULL, remote_channel_id BIGINT NOT NULL, captured_at BIGINT NOT NULL,
 		   used_quota BIGINT NOT NULL, status INT NOT NULL, PRIMARY KEY (profile_id, remote_channel_id, captured_at))`,
 		`CREATE TABLE remote_channel_current (profile_id BIGINT NOT NULL, remote_channel_id BIGINT NOT NULL, name TEXT NOT NULL DEFAULT '',
@@ -229,10 +233,10 @@ func newTencentPortal(t *testing.T, roster, bill []map[string]any) *tencentPorta
 	return p
 }
 
-// tencentSeedOctober loads the schema, a stub portal and synthetic October
-// 2026 cost of every platform, with cost a day before and after the Beijing
-// month.
-func tencentSeedOctober(t *testing.T) *tencentPortal {
+// tencentSeedOctober loads the schema, a stub portal, a stub upstream New API
+// and synthetic October 2026 cost of every platform, with cost a day before
+// and after the Beijing month.
+func tencentSeedOctober(t *testing.T) (*tencentPortal, *tencentUpstream) {
 	tencentTestDB(t)
 	for _, ddl := range append(append([]string{}, v2SchemaStatements...), tencentSchemaStatements...) {
 		_, err := db.Exec(ddl)
@@ -258,41 +262,116 @@ func tencentSeedOctober(t *testing.T) *tencentPortal {
 	}
 	for _, s := range []string{
 		`INSERT INTO rs_auth_user (id, username, studio) VALUES (1, 'alice', 'Studio A'), (2, 'bob', ''), (3, 'carol', 'Proxy Co')`,
-		`INSERT INTO remote_newapi_profile (id) VALUES (7)`,
 		`INSERT INTO rs_supplier_account (uploaded_by, provider, remote_account_id, key_last8, account_type, a2_id, created_at, updated_at)
 		   VALUES (1, 'anthropic', 1001, 'xxtegAA', 0, 501, 0, 0)`,
 		// The record log is no longer a statement source.
 		fmt.Sprintf(`INSERT INTO rs_supplier_record_log_hourly (platform, account_id, model, hour, cost) VALUES ('2.0', 501, 'gpt-5', %d, 9999e6)`, bj(2026, 10, 15, 12)),
-		`INSERT INTO rs_ccmax_account (uploaded_by, remote_account_id, alias, account, created_at) VALUES (2, 2001, 'cc-alias', 'cc@example.com', 0)`,
+		// bob runs two CC Max accounts: one statement row with their total.
+		`INSERT INTO rs_ccmax_account (uploaded_by, remote_account_id, alias, account, created_at) VALUES
+		   (2, 2001, 'cc-alias', 'cc@example.com', 0), (2, 2002, 'cc-2', 'cc2@example.com', 0)`,
 		`INSERT INTO rs_ccmax_daily_bill (remote_account_id, ds, cost_micro, updated_at) VALUES
-		   (2001, '2026-09-30', 100000000, 0), (2001, '2026-10-01', 35000000, 0), (2001, '2026-10-31', 7000000, 0), (2001, '2026-11-01', 9000000, 0)`,
+		   (2001, '2026-09-30', 100000000, 0), (2001, '2026-10-01', 35000000, 0), (2001, '2026-10-31', 7000000, 0), (2001, '2026-11-01', 9000000, 0),
+		   (2002, '2026-10-12', 7000000, 0)`,
 		`INSERT INTO rs_ccmax_daily_bill_model (remote_account_id, ds, model, cost_micro, updated_at) VALUES
-		   (2001, '2026-10-01', 'claude-opus-4-1', 20000000, 0), (2001, '2026-10-01', 'claude-sonnet-4-5', 15000000, 0)`,
+		   (2001, '2026-10-01', 'claude-opus-4-1', 20000000, 0), (2001, '2026-10-01', 'claude-sonnet-4-5', 15000000, 0),
+		   (2002, '2026-10-12', 'claude-haiku-4-5', 7000000, 0), (2002, '2026-10-12', 'claude-opus-4-1', 0, 0)`,
 		`CREATE TABLE proxy_channel_ownership (remote_channel_id BIGINT PRIMARY KEY, user_id BIGINT NOT NULL, created_at BIGINT NOT NULL)`,
-		`INSERT INTO proxy_channel_ownership VALUES (3001, 3, 0), (3002, 3, 0)`,
-		`INSERT INTO remote_channel_current (profile_id, remote_channel_id, name, type, models) VALUES (7, 3001, 'ch-a', 3, 'gpt-5'), (7, 3002, 'ch-b', 3, 'gpt-5,claude-x')`,
-		fmt.Sprintf(`INSERT INTO remote_channel_snapshot (profile_id, remote_channel_id, captured_at, used_quota, status) VALUES
-		   (7, 3001, %d, 1000000, 1), (7, 3001, %d, 4500000, 1), (7, 3002, %d, 1000000, 1), (7, 3001, %d, 99000000, 1)`,
-			bj(2026, 9, 30, 12), bj(2026, 10, 31, 20), bj(2026, 10, 31, 20), bj(2026, 11, 1, 1)),
-		`INSERT INTO report_config (key, value, updated_at) VALUES ('tencent_proxy_profile_id', '7', 0)`,
+		`INSERT INTO proxy_channel_ownership VALUES (3001, 3, 0), (3002, 3, 0), (3003, 3, 0), (3004, 3, 0)`,
 		`INSERT INTO rs_tencent_month_param (month, fx_rate, ref_fx_rate, updated_at) VALUES ('2026-10', 7, 7.25, 0)`,
 	} {
 		_, err := db.Exec(s)
 		require.NoError(t, err, "%.80s", s)
 	}
-	return portal
+	// Upstream: 250,000 quota per USD; #3003 fails, #3004 had no usage.
+	upstream := newTencentUpstream(t, 250000, map[int64]tencentUpstreamChannel{
+		3001: {Name: "ch-a", Type: 3, Models: "gpt-5", Quota: 1_750_000},
+		3002: {Name: "ch-b", Type: 3, Models: "gpt-5,claude-x", Quota: 500_000},
+		3003: {Fail: true},
+		3004: {Name: "ch-idle", Type: 1, Models: "gpt-5"},
+	})
+	return portal, upstream
+}
+
+type tencentUpstreamChannel struct {
+	Name, Models string
+	Type         int
+	Quota        int64
+	Fail         bool
+}
+
+// tencentUpstream stubs newapi-proxy's upstream New API admin endpoints and
+// records every request.
+type tencentUpstream struct {
+	requests []*http.Request
+}
+
+func newTencentUpstream(t *testing.T, quotaPerUnit float64, channels map[int64]tencentUpstreamChannel) *tencentUpstream {
+	u := &tencentUpstream{}
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		u.requests = append(u.requests, r.Clone(context.Background()))
+		mu.Unlock()
+		if r.Header.Get("Authorization") != "upstream-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		id, _ := strconv.ParseInt(r.URL.Query().Get("channel"), 10, 64)
+		if rest, ok := strings.CutPrefix(r.URL.Path, "/api/channel/"); ok {
+			id, _ = strconv.ParseInt(rest, 10, 64)
+		}
+		ch := channels[id]
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"quota_per_unit": quotaPerUnit}})
+		case ch.Fail:
+			http.Error(w, "boom", http.StatusBadGateway)
+		case r.URL.Path == "/api/log/stat":
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"quota": ch.Quota}})
+		case strings.HasPrefix(r.URL.Path, "/api/channel/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"name": ch.Name, "type": ch.Type, "models": ch.Models}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	// The upstream is a remote profile, as on dev (ttttt).
+	enc, err := encryptRemoteToken("upstream-token")
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO remote_newapi_profile (id, name, host, user_id, access_token_enc) VALUES (6, 'ttttt', $1, 1, $2)`, srv.URL, enc)
+	require.NoError(t, err)
+	require.NoError(t, supplierConfigSet(cfgTencentProxyProfileID, "6"))
+	return u
 }
 
 // The three sources give one row per account for exactly the Beijing month:
 // 3P from the portal's own bill of the roster's non-claude accounts, CC Max
 // from the stored daily bills, proxy from the channels' quota growth.
 func TestTencentLoadSources(t *testing.T) {
-	portal := tencentSeedOctober(t)
+	portal, upstream := tencentSeedOctober(t)
 	start, end, err := tencentMonthRange("2026-10")
 	require.NoError(t, err)
 	sources, warnings, err := loadTencentSources(start, end)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"third_party: 1 个有账单的门户账号不在本地上号表，供应商名称取门户的供应商名"}, warnings)
+	require.Len(t, warnings, 2)
+	assert.Equal(t, "third_party: 1 个有账单的门户账号不在本地上号表，供应商名称取门户的供应商名", warnings[0])
+	assert.Regexp(t, `^proxy: 渠道 #3003 取数失败（.*502.*），未出账$`, warnings[1])
+	// Every upstream call carries newapi-proxy's headers; each channel's
+	// consume-log stat covers exactly the Beijing month.
+	stats := map[string]url.Values{}
+	for _, r := range upstream.requests {
+		assert.Equal(t, "upstream-token", r.Header.Get("Authorization"), r.URL.Path)
+		assert.Equal(t, "1", r.Header.Get("New-Api-User"), r.URL.Path)
+		if r.URL.Path == "/api/log/stat" {
+			stats[r.URL.Query().Get("channel")] = r.URL.Query()
+		}
+	}
+	require.Len(t, stats, 4)
+	assert.Equal(t, url.Values{"type": {"2"}, "channel": {"3001"},
+		"start_timestamp": {strconv.FormatInt(start.Unix(), 10)}, "end_timestamp": {strconv.FormatInt(end.Unix(), 10)}}, stats["3001"])
+	assert.Equal(t, "1790784000", stats["3001"].Get("start_timestamp")) // 2026-10-01 00:00 UTC+8
+	assert.Equal(t, "1793462400", stats["3001"].Get("end_timestamp"))   // 2026-11-01 00:00 UTC+8
 	require.Len(t, portal.queries, 1)
 	assert.Equal(t, "1001,1002,1004", portal.queries[0].Get("account_ids"), "claude accounts are CC Max's")
 	assert.Equal(t, []string{"20261001", "20261031"}, []string{portal.queries[0].Get("start_ds"), portal.queries[0].Get("end_ds")})
@@ -317,8 +396,8 @@ func TestTencentLoadSources(t *testing.T) {
 			11, 9.68, 70.18, "anthropic+1001+Studio A", "third_party"},
 		"2026-10|third_party|1002": {"Portal Supplier", "azure-openai", "gpt-5", "azure-openai-X-1 ***KEY12",
 			2, 1.76, 12.76, "azure-openai+1002+Portal Supplier", "third_party"},
-		"2026-10|ccmax|2001": {"bob", "claude", "claude-opus-4-1, claude-sonnet-4-5", "cc-alias",
-			6, 5.28, 38.28, "claude+2001+bob", "ccmax"},
+		"2026-10|ccmax|bob": {"bob", "claude", "claude-haiku-4-5, claude-opus-4-1, claude-sonnet-4-5", "2 个账号",
+			7, 6.16, 44.66, "claude+bob", "ccmax"},
 		"2026-10|proxy|3001": {"Proxy Co", "azure-openai", "gpt-5", "ch-a #3001", 7, 6.16, 44.66, "azure-openai+3001+Proxy Co", "newapi proxy"},
 		"2026-10|proxy|3002": {"Proxy Co", "azure-claude", "gpt-5, claude-x", "ch-b #3002", 2, 1.76, 12.76, "azure-claude+3002+Proxy Co", "newapi proxy"},
 	}, got)
@@ -332,7 +411,7 @@ func TestTencentLoadSources(t *testing.T) {
 		{Supplier: "Proxy Co", BillMonth: 10, Vendor: "azure-claude", Source: "newapi proxy", OfficialUSD: 2, InvoiceRMB: 12.76, Lines: 1},
 		{Supplier: "Proxy Co", BillMonth: 10, Vendor: "azure-openai", Source: "newapi proxy", OfficialUSD: 7, InvoiceRMB: 44.66, Lines: 1},
 		{Supplier: "Studio A", BillMonth: 10, Vendor: "anthropic", Source: "third_party", OfficialUSD: 11, InvoiceRMB: 70.18, Lines: 1},
-		{Supplier: "bob", BillMonth: 10, Vendor: "claude", Source: "ccmax", OfficialUSD: 6, InvoiceRMB: 38.28, Lines: 1},
+		{Supplier: "bob", BillMonth: 10, Vendor: "claude", Source: "ccmax", OfficialUSD: 7, InvoiceRMB: 44.66, Lines: 1},
 	}, summary)
 
 	// The current month's bill runs to today; months beyond the portal's
@@ -380,7 +459,7 @@ func tencentSnapshotTotal(t *testing.T, r *gin.Engine) (string, float64) {
 // 生成 → draft follows the source data on 重新生成 → 确认 freezes it: later
 // source changes do not reach it and regenerating is refused.
 func TestTencentSnapshotLifecycle(t *testing.T) {
-	portal := tencentSeedOctober(t)
+	portal, _ := tencentSeedOctober(t)
 	r := tencentTestRouter()
 
 	code, _ := tencentDo(t, r, http.MethodPost, "/api/tencent/statements/2026-10/regenerate")
@@ -389,17 +468,17 @@ func TestTencentSnapshotLifecycle(t *testing.T) {
 	require.Equal(t, http.StatusOK, code)
 	status, total := tencentSnapshotTotal(t, r)
 	assert.Equal(t, tencentStatementDraft, status)
-	assert.Equal(t, 28.0, total) // 11 + 2 + 6 + 7 + 2
+	assert.Equal(t, 29.0, total) // 11 + 2 + 7 + 7 + 2
 	code, _ = tencentDo(t, r, http.MethodPost, "/api/tencent/statements/2026-10/generate")
 	assert.Equal(t, http.StatusConflict, code, "generate twice")
 
 	portal.bill = append(portal.bill, map[string]any{"account_id": 1002, "ds_text": "2026-10-20", "model": "gpt-5", "cost": 70.0}) // +10 USD at 7
 	_, total = tencentSnapshotTotal(t, r)
-	assert.Equal(t, 28.0, total, "a draft only changes when regenerated")
+	assert.Equal(t, 29.0, total, "a draft only changes when regenerated")
 	code, _ = tencentDo(t, r, http.MethodPost, "/api/tencent/statements/2026-10/regenerate")
 	require.Equal(t, http.StatusOK, code)
 	_, total = tencentSnapshotTotal(t, r)
-	assert.Equal(t, 38.0, total)
+	assert.Equal(t, 39.0, total)
 
 	code, _ = tencentDo(t, r, http.MethodPost, "/api/tencent/statements/2026-10/confirm")
 	require.Equal(t, http.StatusOK, code)
@@ -413,7 +492,7 @@ func TestTencentSnapshotLifecycle(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, code, body)
 	status, total = tencentSnapshotTotal(t, r)
 	assert.Equal(t, tencentStatementConfirmed, status)
-	assert.Equal(t, 38.0, total, "a confirmed month ignores later source and parameter changes")
+	assert.Equal(t, 39.0, total, "a confirmed month ignores later source and parameter changes")
 
 	// Exports read the snapshot: one supplier, or everyone in one file.
 	for path, rows := range map[string]int{
@@ -823,7 +902,7 @@ func TestTencentStatementPush(t *testing.T) {
 		"Portal Supplier/third_party": {1, 2, 12.76},
 		"Proxy Co/newapi proxy":       {2, 9, 57.42},
 		"Studio A/third_party":        {1, 11, 70.18},
-		"bob/ccmax":                   {1, 6, 38.28},
+		"bob/ccmax":                   {1, 7, 44.66},
 	}, got)
 	assert.Equal(t, "https://rs.example/api/tencent/statements/2026-10/export", button)
 
@@ -953,4 +1032,32 @@ func TestTencentPushSettingsInterop(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, code, bad)
 	}
 	assert.Equal(t, "https://lark.example/stmt", loadTencentPushSchedule().Webhook)
+}
+
+// The proxy upstream is picked among the remote profiles; a seller-mode
+// profile has no log API and is refused.
+func TestTencentProxyProfileSetting(t *testing.T) {
+	tencentTestDB(t)
+	_, err := db.Exec(`INSERT INTO remote_newapi_profile (id, name, host, api_mode) VALUES (6, 'ttttt', 'http://a', 'admin'), (9, 's', 'http://b', 'seller')`)
+	require.NoError(t, err)
+	r := tencentTestRouter()
+	put := func(body string) (int, map[string]any) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/api/tencent/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(w, req)
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return w.Code, out
+	}
+	code, got := put(`{"proxy_profile_id":6}`)
+	require.Equal(t, http.StatusOK, code, got)
+	assert.Equal(t, 6.0, got["proxy_profile_id"])
+	for body, want := range map[string]int{`{"proxy_profile_id":9}`: http.StatusBadRequest, `{"proxy_profile_id":99}`: http.StatusBadRequest} {
+		code, _ := put(body)
+		assert.Equal(t, want, code, body)
+	}
+	code, got = put(`{"proxy_profile_id":0}`)
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, 0.0, got["proxy_profile_id"])
 }
