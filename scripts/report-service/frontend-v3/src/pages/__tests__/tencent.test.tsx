@@ -176,6 +176,12 @@ const proxyLine = line({
   bill_name: 'azure-openai+3001+Proxy Co', source: 'newapi proxy',
 })
 
+// CC Max bills one row per supplier: no account id, F counts the accounts.
+const ccmaxLine = line({
+  line_key: '2026-10|ccmax|bob', platform: 'ccmax', supplier: 'bob', vendor: 'claude', model: 'claude-opus-4-1',
+  account_id: '', key: '2 个账号', official_usd: 7, tencent_usd: 6.16, invoice_rmb: 44.66, bill_name: 'claude+bob', source: 'ccmax',
+})
+
 function preview(lines: TencentLine[]): TencentStatementPreview {
   return {
     month: '2026-10', bill_month: 10, fx_rate: 7, fx_rate_from: 'month', ref_fx_rate: 7.25, ref_fx_rate_from: 'month',
@@ -199,9 +205,14 @@ function snapshot(status: 'draft' | 'confirmed', lines: TencentLine[]) {
 
 function statementRoutes(snap: unknown) {
   return {
-    'GET /api/tencent/statement?month=2026-10': preview([line({}), proxyLine]),
+    'GET /api/tencent/statement?month=2026-10': preview([line({}), proxyLine, ccmaxLine]),
     'GET /api/tencent/statements/2026-10': snap,
     'GET /api/tencent/params/months': { list: [], system_fx_rate: 7.2, default_discount: 0.88, default_tax_rate: '含票' },
+    'GET /api/tencent/settings': {
+      proxy_upstream: { url: 'http://up.example:3000', token_set: true, token_last4: 'WXYZ', user: '1', socks: '' },
+      system_fx_rate: 7.2,
+      upload_discount_pct: 88,
+    },
   }
 }
 
@@ -224,7 +235,11 @@ describe('腾讯一站 · 月对账', () => {
       'Studio A', '10', 'anthropic', 'claude-opus-4-1, claude-sonnet-4-5', '1001', 'anthropic-A-001 ***tegAA',
       '11.00 USD', '含票', '88%', '9.68 USD', '7.25', '70.18', 'anthropic+1001+Studio A', 'third_party',
     ])
-    expect(within(linesTable).getAllByRole('row')).toHaveLength(3)
+    const cc = within(linesTable).getByText('2 个账号').closest('tr')!
+    expect(within(cc).getAllByRole('cell').map((c) => c.textContent)).toEqual([
+      'bob', '10', 'claude', 'claude-opus-4-1', '', '2 个账号', '7.00 USD', '含票', '88%', '6.16 USD', '7.25', '44.66', 'claude+bob', 'ccmax',
+    ])
+    expect(within(linesTable).getAllByRole('row')).toHaveLength(4)
     expect(screen.getByText('未生成（实时预览）')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /导出全部 xlsx/ })).toBeDisabled()
     // No per-row editing any more.
@@ -290,6 +305,37 @@ describe('腾讯一站 · 月对账', () => {
       month: '2026-10', fx_rate: null, ref_fx_rate: 7.1, discount: 0.9, tax_rate: null,
     })
     await waitFor(() => expect(calls.filter((c) => c.url === '/api/tencent/statement?month=2026-10').length).toBeGreaterThanOrEqual(2))
+  })
+})
+
+describe('腾讯一站 · 月对账 · proxy 上游', () => {
+  it('shows the token masked and sends a new token only when typed', async () => {
+    const user = userEvent.setup()
+    const calls = mockApi({
+      ...statementRoutes(404),
+      'PUT /api/tencent/settings': (body: any) => ({
+        proxy_upstream: { url: body.proxy_upstream.url, token_set: true, token_last4: 'ABCD', user: body.proxy_upstream.user, socks: '' },
+        system_fx_rate: 7.2,
+        upload_discount_pct: 88,
+      }),
+    })
+    render(<TencentStatement />)
+    await openOctober()
+    expect(await screen.findByText('管理令牌（已设置 …WXYZ）')).toBeInTheDocument()
+    expect(screen.getByLabelText('上游地址')).toHaveValue('http://up.example:3000')
+
+    await user.clear(screen.getByLabelText('上游地址'))
+    await user.type(screen.getByLabelText('上游地址'), 'http://43.0.0.1:3000')
+    await user.click(screen.getByRole('button', { name: '保存上游' }))
+    await waitFor(() => expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(1))
+    expect(calls.find((c) => c.method === 'PUT')?.body).toEqual({ proxy_upstream: { url: 'http://43.0.0.1:3000', user: '1' } })
+
+    await user.type(screen.getByLabelText('管理令牌'), 'new-token-ABCD')
+    await user.click(screen.getByRole('button', { name: '保存上游' }))
+    await waitFor(() => expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(2))
+    expect(calls.filter((c) => c.method === 'PUT')[1].body.proxy_upstream.token).toBe('new-token-ABCD')
+    expect(await screen.findByText('管理令牌（已设置 …ABCD）')).toBeInTheDocument()
+    expect(screen.getByLabelText('管理令牌')).toHaveValue('')
   })
 })
 

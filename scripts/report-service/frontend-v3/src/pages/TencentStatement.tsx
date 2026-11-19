@@ -4,7 +4,7 @@ import Layout from '../components/Layout'
 import { lastBeijingMonth } from '../lib/month'
 import { Badge, Button, Card, Input, Select } from '../components/ui'
 import { confirmDialog, toast } from '../components/feedback'
-import { api, type TencentLine, type TencentMonthParam, type TencentSnapshot, type TencentStatementPreview, type TencentSummaryRow } from '../api'
+import { api, type TencentLine, type TencentMonthParam, type TencentSnapshot, type TencentStatementPreview, type TencentSummaryRow, type TencentSettings } from '../api'
 
 // 腾讯一站 · 月对账 — the month's bill itself: the 「汇总表」 and 「API账单」
 // sheets of the customer template (same columns), then 生成 → 草稿 → 确认
@@ -146,6 +146,7 @@ export default function TencentStatement() {
       </Card>
 
       <MonthParamsCard month={month} preview={preview} locked={status === 'confirmed'} onSaved={() => void load()} />
+      <ProxyUpstreamCard onSaved={() => void load()} />
     </Layout>
   )
 }
@@ -331,6 +332,95 @@ function MonthParamsCard(props: { month: string; preview: TencentStatementPrevie
         </Button>
       </div>
       <p className="text-xs text-muted-foreground">留空用默认值；已确认的月份不能再改。</p>
+    </Card>
+  )
+}
+
+// ProxyUpstreamCard sets where the New API proxy rows come from: the upstream
+// New API newapi-proxy forwards to, its admin token and an optional proxy.
+function ProxyUpstreamCard(props: { onSaved: () => void }) {
+  const [settings, setSettings] = useState<TencentSettings['proxy_upstream'] | null>(null)
+  const [form, setForm] = useState({ url: '', token: '', user: '', socks: '' })
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    api.tencentSettings().then(
+      (res) => {
+        setSettings(res.proxy_upstream)
+        setForm({ url: res.proxy_upstream.url, token: '', user: res.proxy_upstream.user, socks: res.proxy_upstream.socks })
+      },
+      (e) => toast.error(e),
+    )
+  }, [])
+
+  async function save() {
+    setSaving(true)
+    try {
+      // A masked proxy URL is sent back only when edited.
+      const res = await api.setTencentSettings({
+        url: form.url.trim(),
+        user: form.user.trim(),
+        ...(form.token.trim() ? { token: form.token.trim() } : {}),
+        ...(form.socks !== settings?.socks ? { socks: form.socks.trim() } : {}),
+      })
+      setSettings(res.proxy_upstream)
+      setForm({ ...form, token: '', socks: res.proxy_upstream.socks })
+      toast.success('已保存上游配置')
+      props.onSaved()
+    } catch (e) {
+      toast.error(e)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Card className="mt-4 space-y-3 p-4">
+      <div className="text-sm font-semibold">New API proxy 上游</div>
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="space-y-1.5">
+          <span className="block text-xs font-medium text-muted-foreground">上游地址</span>
+          <Input
+            aria-label="上游地址"
+            className="w-64"
+            value={form.url}
+            placeholder="http://host:3000"
+            onChange={(e) => setForm({ ...form, url: e.target.value })}
+          />
+        </label>
+        <label className="space-y-1.5">
+          <span className="block text-xs font-medium text-muted-foreground">
+            管理令牌{settings?.token_set ? `（已设置 …${settings.token_last4}）` : '（未设置）'}
+          </span>
+          <Input
+            aria-label="管理令牌"
+            type="password"
+            autoComplete="new-password"
+            className="w-56"
+            value={form.token}
+            placeholder={settings?.token_set ? '留空不修改' : ''}
+            onChange={(e) => setForm({ ...form, token: e.target.value })}
+          />
+        </label>
+        <label className="space-y-1.5">
+          <span className="block text-xs font-medium text-muted-foreground">New-Api-User（可选）</span>
+          <Input aria-label="New-Api-User" className="w-28" value={form.user} onChange={(e) => setForm({ ...form, user: e.target.value })} />
+        </label>
+        <label className="space-y-1.5">
+          <span className="block text-xs font-medium text-muted-foreground">代理（可选）</span>
+          <Input
+            aria-label="上游代理"
+            className="w-64"
+            value={form.socks}
+            placeholder="socks5h://user:pass@host:port"
+            onChange={(e) => setForm({ ...form, socks: e.target.value })}
+          />
+        </label>
+        <Button disabled={saving} onClick={() => void save()}>
+          保存上游
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">按 proxy 渠道归属查上游当月消费日志出账；与 newapi-proxy 的 REMOTE_URL / REMOTE_ADMIN_TOKEN 相同。</p>
     </Card>
   )
 }

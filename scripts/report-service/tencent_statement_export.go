@@ -189,9 +189,12 @@ func tencentStatementWorkbook(lines []tencentLine) (*excelize.File, error) {
 	for i, l := range lines {
 		suppliers[l.Supplier] = true
 		r := i + 2
-		account := any(l.AccountID)
+		// Per-supplier rows (CC Max) have no account id; E stays empty.
+		var account any
 		if n, err := strconv.ParseInt(l.AccountID, 10, 64); err == nil {
 			account = n
+		} else if l.AccountID != "" {
+			account = l.AccountID
 		}
 		values := []any{l.Supplier, l.BillMonth, l.Vendor, l.Model, account, l.Key, l.OfficialUSD, l.TaxRate, l.Discount, nil, l.RefFxRate, nil, l.BillName, l.Source}
 		for c, v := range values {

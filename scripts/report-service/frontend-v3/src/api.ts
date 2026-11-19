@@ -2547,6 +2547,18 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  // Upstream New API of newapi-proxy (proxy rows of the statement). The token
+  // is never returned, only whether it is set and its last 4 characters.
+  tencentSettings: () => request<TencentSettings>('/api/tencent/settings'),
+
+  // Omitted fields stay; an empty token keeps the stored one.
+  setTencentSettings: (proxyUpstream: { url?: string; token?: string; user?: string; socks?: string }) =>
+    request<TencentSettings>('/api/tencent/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ proxy_upstream: proxyUpstream }),
+    }),
+
   // 404 when the month has no snapshot yet.
   tencentSnapshot: (month: string) => request<TencentSnapshot>(`/api/tencent/statements/${month}`),
 
@@ -3100,4 +3112,10 @@ export type TencentPushSettingsUpdate = {
   ccmax_report?: { webhook?: string; hours?: string }
   proxy_report?: { webhook?: string; hours?: string }
   ops_daily_spend?: { enabled?: boolean; webhook?: string; daily_spend?: boolean; daily_spend_hour?: number }
+}
+
+export type TencentSettings = {
+  proxy_upstream: { url: string; token_set: boolean; token_last4: string; user: string; socks: string }
+  system_fx_rate: number
+  upload_discount_pct: number
 }
