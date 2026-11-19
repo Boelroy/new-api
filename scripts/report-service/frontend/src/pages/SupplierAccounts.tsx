@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import Layout from '../components/Layout'
 import SupplierRecordLog from '../components/SupplierRecordLog'
 import { withBase } from '../basePath'
@@ -70,7 +71,16 @@ function statusBadge(status: string) {
   return <span className={`inline-block px-2 py-0.5 rounded text-[11px] border ${tone}`}>{label}</span>
 }
 
+type Tab = 'accounts' | 'logs'
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: 'accounts', label: '账号上号' },
+  { id: 'logs', label: '使用日志' },
+]
+
 export default function SupplierAccounts() {
+  const [params, setParams] = useSearchParams()
+  const tab = (TABS.some(t => t.id === params.get('tab')) ? params.get('tab') : 'accounts') as Tab
   const [isAdmin, setIsAdmin] = useState(false)
   const [openapiReady, setOpenapiReady] = useState(true)
   const [providers, setProviders] = useState<SupplierProvider[]>([])
@@ -666,6 +676,25 @@ export default function SupplierAccounts() {
       title="账号上号 / 账号资源录入"
       subtitle={isAdmin ? '管理员视角：可见所有工作室的账号与用量' : '仅展示你上传的账号与实时用量'}
     >
+      <div className="flex items-center gap-1 border-b border-gray-200 mb-4">
+        {TABS.map(t => (
+          <button
+            key={t.id}
+            onClick={() => setParams({ tab: t.id }, { replace: true })}
+            className={`px-3 py-2 text-sm border-b-2 -mb-px transition-colors ${
+              tab === t.id
+                ? 'border-gray-900 text-gray-900 font-medium'
+                : 'border-transparent text-gray-500 hover:text-gray-800'
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'logs' && <SupplierRecordLog isAdmin={isAdmin} />}
+
+      {tab === 'accounts' && (<>
       {bootErr && (
         <div className="mb-4 bg-rose-50 border border-rose-200 text-rose-700 text-sm rounded-md px-3 py-2">
           加载厂商/模型失败：{bootErr}
@@ -1269,8 +1298,7 @@ export default function SupplierAccounts() {
           )}
         </section>
       </div>
-
-      <SupplierRecordLog isAdmin={isAdmin} />
+      </>)}
     </Layout>
   )
 }
