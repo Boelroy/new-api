@@ -22,7 +22,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -130,6 +132,21 @@ type supplierRecordLogPortalRow struct {
 	ErrMsg           string          `json:"err_msg"`
 	Caller           string          `json:"caller"`
 	Other            json.RawMessage `json:"other"`
+	// BillingDetail is where platform 1.0 puts the price breakdown.
+	BillingDetail json.RawMessage `json:"billing_detail"`
+	CreateTime    string          `json:"create_time"`
+}
+
+// key returns the row's portal id, or for platform 1.0 — whose rows all carry
+// id 0 — a stable hash of the fields that identify one request (both times
+// have millisecond precision).
+func (r supplierRecordLogPortalRow) key() int64 {
+	if r.ID != 0 {
+		return r.ID
+	}
+	h := fnv.New64a()
+	fmt.Fprintf(h, "%d|%s|%s|%s|%s", r.AccountID, r.ReqTime, r.CreateTime, r.ModelName, r.Caller)
+	return int64(h.Sum64() & math.MaxInt64)
 }
 
 // syncSupplierRecordLogSlice pulls one window of a platform's log and advances
@@ -196,6 +213,7 @@ func upsertSupplierRecordLogRows(platform string, rows []supplierRecordLogPortal
 	seen := make(map[int64]int, len(rows))
 	deduped := rows[:0:0]
 	for _, r := range rows {
+		r.ID = r.key()
 		if i, ok := seen[r.ID]; ok {
 			deduped[i] = r
 			continue
@@ -220,8 +238,11 @@ func upsertSupplierRecordLogRows(platform string, rows []supplierRecordLogPortal
 			return fmt.Errorf("row %d: bad req_time %q", r.ID, r.ReqTime)
 		}
 		other := ""
-		if len(r.Other) > 0 && string(r.Other) != "null" {
-			other = string(r.Other)
+		for _, raw := range []json.RawMessage{r.Other, r.BillingDetail} {
+			if len(raw) > 0 && string(raw) != "null" {
+				other = string(raw)
+				break
+			}
 		}
 		if i > 0 {
 			sb.WriteString(",")
