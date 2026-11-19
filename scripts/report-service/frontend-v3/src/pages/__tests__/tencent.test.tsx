@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import TencentUsers from '../TencentUsers'
 import TencentStatement from '../TencentStatement'
 import TencentPush from '../TencentPush'
-import type { TencentLine, TencentPushSettings, TencentStatementPreview } from '../../api'
+import { ConfirmHost } from '../../components/feedback'
+import type { TencentLine, TencentPushSettings, TencentStatementPreview, TencentUser } from '../../api'
 
 // The pages are tested without the app shell (header / sidebar fetch the
 // session and need the router + theme).
@@ -44,14 +45,53 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+function user(over: Partial<TencentUser>): TencentUser {
+  return {
+    id: 1, username: 'u', studio: 'S', role: 4, role_name: 'supplier_01', platforms: [], status: 1, created_at: 1,
+    supplier_accounts: 0, ccmax_accounts: 0, proxy_channels: 0, manager_id: 0, manager_username: '', members: 0,
+    ...over,
+  }
+}
+
 describe('腾讯一站 · 用户', () => {
-  it('validates the form, sends the platform role and shows the generated password once', async () => {
-    const user = userEvent.setup()
-    const calls = mockApi({
-      'GET /api/tencent/users': { list: [] },
-      'GET /api/tencent/users?platform=ccmax': {
-        list: [{ id: 9, username: 'mgr1', role: 9, status: 1, platforms: ['ccmax'] }],
+  it('lists only 老台子 and CCMax users with their tags and filters on those two', async () => {
+    const user_ = userEvent.setup()
+    mockApi({
+      'GET /api/tencent/users': {
+        list: [
+          user({ id: 1, username: 'old1', role: 4, role_name: 'supplier_01', supplier_accounts: 3 }),
+          user({ id: 2, username: 'cc1', role: 8, role_name: 'supplier_ccmax', ccmax_accounts: 2, manager_username: 'mgr1' }),
+          user({ id: 3, username: 'mgr1', role: 9, role_name: 'ccmax_manager', members: 1 }),
+          user({ id: 4, username: 'proxy1', role: 1, role_name: 'proxy', proxy_channels: 5 }),
+          user({ id: 5, username: 'khub1', role: 6, role_name: 'supplier_02' }),
+        ],
       },
+    })
+    render(<TencentUsers />)
+    await screen.findByText('old1')
+    expect(screen.queryByText('proxy1')).not.toBeInTheDocument()
+    expect(screen.queryByText('khub1')).not.toBeInTheDocument()
+    const tag = (name: string) => within(screen.getByText(name, { selector: 'td.font-mono' }).closest('tr')!).getAllByText(/^(老台子|CCMax|CCMax Manager)$/)[0].textContent
+    expect(tag('old1')).toBe('老台子')
+    expect(tag('cc1')).toBe('CCMax')
+    expect(tag('mgr1')).toBe('CCMax Manager')
+
+    const filter = screen.getByLabelText('筛选')
+    expect(within(filter).getAllByRole('option').map((o) => o.textContent)).toEqual(['全部', '老台子', 'CCMax'])
+    await user_.selectOptions(filter, 'old')
+    expect(screen.getByText('old1')).toBeInTheDocument()
+    expect(screen.queryByText('cc1')).not.toBeInTheDocument()
+    await user_.selectOptions(filter, 'ccmax')
+    expect(screen.queryByText('old1')).not.toBeInTheDocument()
+    expect(screen.getByText('cc1')).toBeInTheDocument()
+    expect(screen.getAllByText('mgr1').length).toBeGreaterThan(0)
+    expect(document.body.textContent).not.toContain('经理')
+  })
+
+  it('creates only the three roles, validates the form and shows the generated password once', async () => {
+    const user_ = userEvent.setup()
+    const calls = mockApi({
+      'GET /api/tencent/users': { list: [user({ id: 9, username: 'mgr1', role: 9, role_name: 'ccmax_manager' })] },
       'POST /api/tencent/users': (body: any) => ({
         id: 21,
         username: body.username,
@@ -63,22 +103,27 @@ describe('腾讯一站 · 用户', () => {
       }),
     })
     render(<TencentUsers />)
+    await screen.findByText('mgr1')
+    expect(within(screen.getByLabelText('角色')).getAllByRole('option').map((o) => o.textContent)).toEqual([
+      '老台子',
+      'CCMax 号商',
+      'CCMax Manager',
+    ])
     const create = screen.getByRole('button', { name: '创建' })
 
-    await user.type(screen.getByLabelText('用户名'), 'ab')
-    await user.click(create)
+    await user_.type(screen.getByLabelText('用户名'), 'ab')
+    await user_.click(create)
     expect(screen.getByRole('alert')).toHaveTextContent('用户名须为 3-32 位')
-    await user.clear(screen.getByLabelText('用户名'))
-    await user.type(screen.getByLabelText('用户名'), 'cc_user1')
-    await user.click(create)
+    await user_.clear(screen.getByLabelText('用户名'))
+    await user_.type(screen.getByLabelText('用户名'), 'cc_user1')
+    await user_.click(create)
     expect(screen.getByRole('alert')).toHaveTextContent('请填写供应商名称')
     expect(calls.filter((c) => c.method === 'POST')).toHaveLength(0)
 
-    await user.selectOptions(screen.getByLabelText('平台角色'), 'supplier_ccmax')
-    await screen.findByRole('option', { name: 'mgr1' })
-    await user.selectOptions(screen.getByLabelText('归属经理'), '9')
-    await user.type(screen.getByLabelText('供应商名称'), '  CC Co ')
-    await user.click(create)
+    await user_.selectOptions(screen.getByLabelText('角色'), 'supplier_ccmax')
+    await user_.selectOptions(screen.getByLabelText('归属 Manager'), '9')
+    await user_.type(screen.getByLabelText('供应商名称'), '  CC Co ')
+    await user_.click(create)
 
     await screen.findByText('Gen3ratedPassw0rdXyz')
     expect(calls.find((c) => c.method === 'POST')?.body).toEqual({
@@ -88,126 +133,114 @@ describe('腾讯一站 · 用户', () => {
       manager_id: 9,
     })
     expect(screen.getByText(/old-user/)).toBeInTheDocument()
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-
-    await user.click(screen.getByRole('button', { name: '我已保存' }))
+    await user_.click(screen.getByRole('button', { name: '我已保存' }))
     expect(screen.queryByText('Gen3ratedPassw0rdXyz')).not.toBeInTheDocument()
   })
 })
 
+// The template's header rows, as in 长河理想9月对账单-3.xlsx.
+const EXCEL_LINE_HEADERS = [
+  '供应商名称', '账单月份', '模型厂商名称', '模型名称', '账号ID', 'key', '付给官方的费用（不区分币种）', '税率', '对应折扣',
+  '腾讯支付金额（不区分币种）', '参考汇率\nhttps://www.kylc.com/huilv/d-boc-usd.html', '开票金额（RMB/元）', '官方导出的账单名称', '来源系统 / 上号人',
+]
+const EXCEL_SUMMARY_HEADERS = ['供应商名称', '账单月份', '模型厂商名称', '付给官方的费用（不区分币种）', '开票金额（RMB/元）', '备注']
+
 function line(over: Partial<TencentLine>): TencentLine {
   return {
-    line_key: '2026-10|third_party|1001|gpt-5',
+    line_key: '2026-10|third_party|1001',
     platform: 'third_party',
     user_id: 1,
     supplier: 'Studio A',
     bill_month: 10,
-    vendor: 'OpenAI',
-    model: 'gpt-5',
+    vendor: 'anthropic',
+    model: 'claude-opus-4-1, claude-sonnet-4-5',
     account_id: '1001',
-    key: '****abcd1234',
-    official_usd: 10,
-    tax_rate: '',
-    discount: 1,
-    tencent_usd: 10,
-    ref_fx_rate: 7.2,
-    invoice_rmb: 72,
-    bill_name: '',
-    source: 'third_party - alice',
-    cost_cny: 72,
+    key: 'anthropic-A-001 ***tegAA',
+    official_usd: 11,
+    tax_rate: '含票',
+    discount: 0.88,
+    tencent_usd: 9.68,
+    ref_fx_rate: 7.25,
+    invoice_rmb: 70.18,
+    bill_name: 'anthropic+1001+Studio A',
+    source: 'third_party',
+    cost_cny: 77,
     cost_usd: 0,
-    rmb_priced: false,
-    discount_from: 'default',
     ...over,
   }
 }
 
-function preview(fx: number, lines: TencentLine[]): TencentStatementPreview {
+const proxyLine = line({
+  line_key: '2026-10|proxy|3001', platform: 'proxy', supplier: 'Proxy Co', vendor: 'azure-openai', model: 'gpt-5',
+  account_id: '3001', key: 'ch-a #3001', official_usd: 7, tencent_usd: 6.16, invoice_rmb: 44.66,
+  bill_name: 'azure-openai+3001+Proxy Co', source: 'newapi proxy',
+})
+
+function preview(lines: TencentLine[]): TencentStatementPreview {
   return {
-    month: '2026-10',
-    bill_month: 10,
-    fx_rate: fx,
-    fx_rate_from: fx === 7.2 ? 'system' : 'month',
-    ref_fx_rate: fx,
-    ref_fx_rate_from: 'fx_rate',
-    headers: ['供应商名称', '账单月份', '模型厂商名称', '模型名称', '账号ID', 'key', '付给官方的费用（不区分币种）', '税率', '对应折扣',
-      '腾讯支付金额（不区分币种）', '参考汇率\nhttps://www.kylc.com/huilv/d-boc-usd.html', '开票金额（RMB/元）', '官方导出的账单名称', '来源系统 / 上号人'],
-    summary_headers: [],
-    lines,
-    summary: [...new Set(lines.map((l) => l.supplier))].map((s) => {
-      const ls = lines.filter((l) => l.supplier === s)
-      return {
-        supplier: s,
-        bill_month: 10,
-        vendor: ls[0].vendor,
-        source: ls[0].platform,
-        official_usd: ls.reduce((a, l) => a + l.official_usd, 0),
-        invoice_rmb: ls.reduce((a, l) => a + l.invoice_rmb, 0),
-        lines: ls.length,
-      }
-    }),
+    month: '2026-10', bill_month: 10, fx_rate: 7, fx_rate_from: 'month', ref_fx_rate: 7.25, ref_fx_rate_from: 'month',
+    discount: 0.88, discount_from: 'upload', tax_rate: '含票', tax_rate_from: 'default',
+    headers: [], summary_headers: [], lines,
+    summary: lines.map((l) => ({
+      supplier: l.supplier, bill_month: 10, vendor: l.vendor, source: l.source, official_usd: l.official_usd, invoice_rmb: l.invoice_rmb, lines: 1,
+    })),
     warnings: [],
   }
 }
 
-function statementRoutes(fx: () => number, snapshot: unknown) {
+function snapshot(status: 'draft' | 'confirmed', lines: TencentLine[]) {
+  const p = preview(lines)
   return {
-    'GET /api/tencent/statement?month=2026-10': () =>
-      preview(fx(), [
-        line({ official_usd: Math.round((72 / fx()) * 100) / 100 }),
-        line({ line_key: '2026-10|proxy|3001|gpt-5', platform: 'proxy', supplier: 'Proxy Co', user_id: 3, account_id: '3001', key: '' }),
-      ]),
-    'GET /api/tencent/params/months': { list: [], system_fx_rate: 7.2 },
-    'GET /api/tencent/params/suppliers': { list: [], upload_discount_pct: 88, platforms: [] },
-    'GET /api/tencent/statements/2026-10': snapshot,
+    statement: { month: '2026-10', status, fx_rate: 7, ref_fx_rate: 7.25, warnings: [], lines: lines.length, generated_at: 1, confirmed_at: 0 },
+    lines,
+    summary: p.summary,
+  }
+}
+
+function statementRoutes(snap: unknown) {
+  return {
+    'GET /api/tencent/statement?month=2026-10': preview([line({}), proxyLine]),
+    'GET /api/tencent/statements/2026-10': snap,
+    'GET /api/tencent/params/months': { list: [], system_fx_rate: 7.2, default_discount: 0.88, default_tax_rate: '含票' },
   }
 }
 
 // The page opens on last month; tests pin October 2026.
 async function openOctober() {
   fireEvent.change(screen.getByLabelText('账单月份'), { target: { value: '2026-10' } })
-  await screen.findAllByText('Studio A')
+  await screen.findAllByText('Proxy Co')
 }
 
 describe('腾讯一站 · 月对账', () => {
-  it('refreshes the preview after the month rate is saved', async () => {
-    const user = userEvent.setup()
-    let fx = 7.2
-    const calls = mockApi({
-      ...statementRoutes(() => fx, 404),
-      'PUT /api/tencent/params/months': (body: any) => {
-        fx = body.fx_rate
-        return { ok: true }
-      },
-    })
+  it('shows the bill as the template’s 汇总表 and API账单 columns, one row per account', async () => {
+    mockApi(statementRoutes(404))
     render(<TencentStatement />)
     await openOctober()
-    expect(screen.getAllByText('$10.00').length).toBeGreaterThan(0)
-
-    await user.type(screen.getByLabelText('系统汇率'), '7.5')
-    await user.click(screen.getByRole('button', { name: '保存汇率' }))
-
-    await waitFor(() => expect(screen.getAllByText('$9.60').length).toBeGreaterThan(0))
-    expect(calls.find((c) => c.method === 'PUT')?.body).toEqual({ month: '2026-10', fx_rate: 7.5, ref_fx_rate: null })
-    expect(calls.filter((c) => c.url === '/api/tencent/statement?month=2026-10').length).toBeGreaterThanOrEqual(2)
-    expect(screen.getByText(/系统汇率 7.5（本月设置）/)).toBeInTheDocument()
+    const [summaryTable, linesTable] = screen.getAllByRole('table')
+    expect(within(summaryTable).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(EXCEL_SUMMARY_HEADERS)
+    expect(within(linesTable).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(EXCEL_LINE_HEADERS)
+    const row = within(linesTable).getByText('1001').closest('tr')!
+    expect(within(row).getAllByRole('cell').map((c) => c.textContent)).toEqual([
+      'Studio A', '10', 'anthropic', 'claude-opus-4-1, claude-sonnet-4-5', '1001', 'anthropic-A-001 ***tegAA',
+      '11.00 USD', '含票', '88%', '9.68 USD', '7.25', '70.18', 'anthropic+1001+Studio A', 'third_party',
+    ])
+    expect(within(linesTable).getAllByRole('row')).toHaveLength(3)
+    expect(screen.getByText('未生成（实时预览）')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /导出全部 xlsx/ })).toBeDisabled()
+    // No per-row editing any more.
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
   })
 
   it('locks a confirmed month and links the exports to the snapshot', async () => {
     const user = userEvent.setup()
-    mockApi(
-      statementRoutes(() => 7.2, {
-        statement: { month: '2026-10', status: 'confirmed', fx_rate: 7.2, ref_fx_rate: 7.2, warnings: [], lines: 2, generated_at: 1, confirmed_at: 2 },
-        lines: [],
-        summary: [],
-      }),
-    )
+    mockApi(statementRoutes(snapshot('confirmed', [line({}), proxyLine])))
     render(<TencentStatement />)
     await openOctober()
     await screen.findByText('已确认')
 
     expect(screen.getByRole('button', { name: '重新生成' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '确认' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '保存参数' })).toBeDisabled()
     expect(screen.queryByRole('button', { name: '生成对账单' })).not.toBeInTheDocument()
     expect(screen.getByRole('link', { name: /导出全部 xlsx/ })).toHaveAttribute('href', '/api/tencent/statements/2026-10/export')
 
@@ -216,30 +249,58 @@ describe('腾讯一站 · 月对账', () => {
       'href',
       '/api/tencent/statements/2026-10/export?supplier=Studio%20A',
     )
+    expect(screen.queryByText('Proxy Co', { selector: 'td' })).not.toBeInTheDocument()
   })
 
-  it('offers generation for a month without a snapshot and keeps export disabled', async () => {
+  it('generates a draft, then confirms it', async () => {
     const user = userEvent.setup()
     const calls = mockApi({
-      ...statementRoutes(() => 7.2, 404),
-      'POST /api/tencent/statements/2026-10/generate': {
-        statement: { month: '2026-10', status: 'draft', fx_rate: 7.2, ref_fx_rate: 7.2, warnings: [], lines: 2, generated_at: 1, confirmed_at: 0 },
-        lines: [],
-        summary: [],
-      },
+      ...statementRoutes(404),
+      'POST /api/tencent/statements/2026-10/generate': snapshot('draft', [line({})]),
+      'POST /api/tencent/statements/2026-10/confirm': snapshot('confirmed', [line({})]),
+    })
+    render(<ConfirmHostAnd><TencentStatement /></ConfirmHostAnd>)
+    await openOctober()
+    await user.click(screen.getByRole('button', { name: '生成对账单' }))
+    await screen.findByText('草稿')
+    expect(screen.getByRole('button', { name: '重新生成' })).toBeEnabled()
+    expect(screen.getByRole('link', { name: /导出全部 xlsx/ })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '确认' }))
+    await user.click(await screen.findByRole('button', { name: '确认对账单' }))
+    await screen.findByText('已确认')
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(
+      expect.arrayContaining(['POST /api/tencent/statements/2026-10/generate', 'POST /api/tencent/statements/2026-10/confirm']),
+    )
+  })
+
+  it('saves the month’s rates, discount and tax rate and reloads the bill', async () => {
+    const user = userEvent.setup()
+    const calls = mockApi({
+      ...statementRoutes(404),
+      'PUT /api/tencent/params/months': { ok: true },
     })
     render(<TencentStatement />)
     await openOctober()
-    expect(screen.getByRole('button', { name: /导出全部 xlsx/ })).toBeDisabled()
-
-    await user.click(await screen.findByRole('button', { name: '生成对账单' }))
-    await screen.findByText('草稿')
-    expect(calls.some((c) => c.method === 'POST' && c.url === '/api/tencent/statements/2026-10/generate')).toBe(true)
-    expect(screen.getByRole('button', { name: '重新生成' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: '确认' })).toBeEnabled()
-    expect(screen.getByRole('link', { name: /导出全部 xlsx/ })).toBeInTheDocument()
+    await user.type(screen.getByLabelText('参考汇率（K）'), '7.1')
+    await user.type(screen.getByLabelText('折扣（I）'), '0.9')
+    await user.click(screen.getByRole('button', { name: '保存参数' }))
+    await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true))
+    expect(calls.find((c) => c.method === 'PUT')?.body).toEqual({
+      month: '2026-10', fx_rate: null, ref_fx_rate: 7.1, discount: 0.9, tax_rate: null,
+    })
+    await waitFor(() => expect(calls.filter((c) => c.url === '/api/tencent/statement?month=2026-10').length).toBeGreaterThanOrEqual(2))
   })
 })
+
+function ConfirmHostAnd(props: { children: ReactNode }) {
+  return (
+    <>
+      <ConfirmHost />
+      {props.children}
+    </>
+  )
+}
 
 const pushSettings: TencentPushSettings = {
   statement: { webhook: '', enabled: true, day: 2, hour: 10, base_url: '' },

@@ -2513,8 +2513,7 @@ export const api = {
 
   // ---- 腾讯一站 (super admin) ----
 
-  tencentUsers: (platform = '') =>
-    request<{ list: TencentUser[] }>(`/api/tencent/users${platform ? `?platform=${platform}` : ''}`),
+  tencentUsers: () => request<{ list: TencentUser[] }>('/api/tencent/users'),
 
   // The server generates the password and returns it only in this response.
   createTencentUser: (payload: { username: string; studio: string; role: TencentUserRole; manager_id?: number }) =>
@@ -2528,33 +2527,21 @@ export const api = {
   tencentStatementPreview: (month: string) =>
     request<TencentStatementPreview>(`/api/tencent/statement?month=${encodeURIComponent(month)}`),
 
-  tencentMonthParams: () => request<{ list: TencentMonthParam[]; system_fx_rate: number }>('/api/tencent/params/months'),
+  tencentMonthParams: () =>
+    request<{ list: TencentMonthParam[]; system_fx_rate: number; default_discount: number; default_tax_rate: string }>(
+      '/api/tencent/params/months',
+    ),
 
-  // null rates fall back to the defaults (system rate / the column G rate).
-  setTencentMonthParam: (payload: { month: string; fx_rate: number | null; ref_fx_rate: number | null; note?: string }) =>
+  // A month's statement inputs; null falls back to the default (system rate,
+  // K = the G rate, the 上号 discount, 含票).
+  setTencentMonthParam: (payload: {
+    month: string
+    fx_rate: number | null
+    ref_fx_rate: number | null
+    discount: number | null
+    tax_rate: string | null
+  }) =>
     request<{ ok: boolean }>('/api/tencent/params/months', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    }),
-
-  tencentSupplierParams: () =>
-    request<{ list: TencentSupplierParam[]; upload_discount_pct: number; platforms: string[] }>('/api/tencent/params/suppliers'),
-
-  // discount_pct is a percentage (88 = 88%); null falls through to the next default.
-  setTencentSupplierParam: (payload: { user_id: number; platform: string; discount_pct: number | null; tax_rate: string }) =>
-    request<{ ok: boolean }>('/api/tencent/params/suppliers', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    }),
-
-  deleteTencentSupplierParam: (userId: number, platform: string) =>
-    request<{ ok: boolean }>(`/api/tencent/params/suppliers/${userId}/${encodeURIComponent(platform)}`, { method: 'DELETE' }),
-
-  // A row back to the defaults (not RMB-priced, empty bill name) drops its record.
-  setTencentLineFlag: (payload: { line_key: string; rmb_priced: boolean; bill_name: string }) =>
-    request<{ ok: boolean }>('/api/tencent/line-flags', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -2965,7 +2952,8 @@ export type CCMaxSettings = {
 
 // ---- 腾讯一站 ----
 
-export type TencentUserRole = 'supplier_01' | 'supplier_02' | 'supplier_ccmax' | 'ccmax_manager' | 'proxy'
+// The roles 腾讯一站 creates: 老台子, CCMax 号商, CCMax Manager.
+export type TencentUserRole = 'supplier_01' | 'supplier_ccmax' | 'ccmax_manager'
 export type TencentPlatform = 'third_party' | 'ccmax' | 'proxy'
 
 export type TencentUser = {
@@ -2973,7 +2961,7 @@ export type TencentUser = {
   username: string
   studio: string
   role: number
-  role_name: TencentUserRole | ''
+  role_name: string
   platforms: TencentPlatform[]
   status: number
   created_at: number
@@ -3016,8 +3004,6 @@ export type TencentLine = {
   source: string
   cost_cny: number
   cost_usd: number
-  rmb_priced: boolean
-  discount_from: string
 }
 
 export type TencentSummaryRow = {
@@ -3037,6 +3023,10 @@ export type TencentStatementPreview = {
   fx_rate_from: string
   ref_fx_rate: number
   ref_fx_rate_from: string
+  discount: number
+  discount_from: string
+  tax_rate: string
+  tax_rate_from: string
   headers: string[]
   summary_headers: string[]
   lines: TencentLine[]
@@ -3048,17 +3038,9 @@ export type TencentMonthParam = {
   month: string
   fx_rate: number | null
   ref_fx_rate: number | null
+  discount: number | null
+  tax_rate: string | null
   note: string
-  updated_at: number
-}
-
-export type TencentSupplierParam = {
-  user_id: number
-  username: string
-  studio: string
-  platform: string
-  discount_pct: number | null
-  tax_rate: string
   updated_at: number
 }
 
