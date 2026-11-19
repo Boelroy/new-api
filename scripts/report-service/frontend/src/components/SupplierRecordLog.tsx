@@ -119,7 +119,7 @@ export default function SupplierRecordLog({ isAdmin }: { isAdmin: boolean }) {
       <div className="mb-4">
         <h2 className="text-base font-semibold">使用日志</h2>
         <p className="text-[11px] text-gray-400 mt-0.5">
-          号池逐条请求日志（实时）。{isAdmin ? '「全部账号」查询号池下全部账号。' : '只能查询你上传的账号；「全部账号」最多翻看最新 1000 条。'}
+          号池逐条请求日志（实时）。{isAdmin ? '「全部账号」查询号池下全部账号。' : '只能查询你上传的账号；「全部账号」需逐个账号查询（号多时约 10–30 秒），最多翻看最新 1000 条。'}
           {pendingCount > 0 && ` 有 ${pendingCount} 个账号号池尚未分配平台账号 ID，暂不可选。`}
         </p>
       </div>
@@ -188,7 +188,7 @@ export default function SupplierRecordLog({ isAdmin }: { isAdmin: boolean }) {
           disabled={loading}
           className="bg-brand hover:bg-brand-700 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 transition-colors"
         >
-          {loading ? '查询中…' : '查询'}
+          {loading ? (!accountId && !isAdmin ? '逐个账号查询中…' : '查询中…') : '查询'}
         </button>
       </div>
 
