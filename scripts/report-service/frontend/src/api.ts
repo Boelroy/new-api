@@ -877,22 +877,11 @@ export type SupplierRecordLogRow = {
   err_msg: string
 }
 
-export type SupplierRecordLogAccountSum = {
-  account_id: number
-  alias: string
-  cost_cny: number
-  rpm: number
-  tpm: number
-}
-
 export type SupplierRecordLogAggregate = {
   cost_cny: number
   rpm: number
   tpm: number
   fx_rate: number
-  // Per-account breakdown, present when a supplier queried all their accounts
-  // (sorted by cost, highest first).
-  accounts?: SupplierRecordLogAccountSum[]
 }
 
 export type SupplierMetric = {

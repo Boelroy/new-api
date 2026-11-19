@@ -5,22 +5,18 @@ package main
 // 「使用日志查询」 page) through the shared supplierWeb login.
 //
 // The portal filters by ONE platform account id — a1_id on platform 1.0, a2_id
-// on 2.0 — not by the portal account id we store as remote_account_id, and it
-// ignores account_ids lists. Those ids are kept on rs_supplier_account (filled
-// by sync, and lazily by refreshSupplierPlatformIDs). The shared login sees
-// every account of the supplier, so scoping is enforced here: a supplier names
-// one of their own accounts, or none to fan out over all of their own accounts;
-// admins may leave the account empty to see everything.
+// on 2.0 — not by the portal account id we store as remote_account_id. Those
+// ids are kept on rs_supplier_account (filled by sync, and lazily by
+// refreshSupplierPlatformIDs). The shared login sees every account of the
+// supplier, so scoping is enforced here: suppliers must name one of their own
+// accounts; admins may leave the account empty to see everything.
 
 import (
-	"cmp"
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,15 +30,6 @@ import (
 // aggregate `use_quota`) to RMB; the portal UI divides by the same 1e6.
 const supplierRecordLogQuotaUnit = 1e6
 
-const (
-	// supplierRecordLogFanOutWorkers bounds concurrent portal calls when a
-	// supplier queries all of their accounts.
-	supplierRecordLogFanOutWorkers = 8
-	// supplierRecordLogFanOutMaxRows caps how deep the merged all-accounts log
-	// can be paged: page N needs the newest N*page_size rows of every account.
-	supplierRecordLogFanOutMaxRows = 1000
-)
-
 type supplierRecordLogFilter struct {
 	PlatformType string `json:"platform_type"`
 	StartTime    string `json:"start_time"`
@@ -52,15 +39,6 @@ type supplierRecordLogFilter struct {
 	AccountID    int64  `json:"account_id"`
 	Page         int    `json:"page"`
 	PageSize     int    `json:"page_size"`
-
-	// fanOut lists the supplier's own accounts when they picked no account;
-	// each is queried separately and the results merged.
-	fanOut []supplierScopedAccount
-}
-
-type supplierScopedAccount struct {
-	ID    int64
-	Alias string
 }
 
 // supplierPlatformIDColumn maps a portal platform type to the
@@ -115,29 +93,12 @@ func bindSupplierRecordLogFilter(c *gin.Context) (supplierRecordLogFilter, bool)
 	if callerIsSupplierAdmin(c) {
 		return f, true
 	}
+	if f.AccountID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请选择账号"})
+		return f, false
+	}
 	uidAny, _ := c.Get("user_id")
 	uid, _ := uidAny.(int64)
-	if f.AccountID == 0 {
-		rows, err := db.Query(`SELECT `+col+`, alias FROM rs_supplier_account WHERE uploaded_by=$1 AND `+col+` > 0 ORDER BY id`, uid)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return f, false
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var a supplierScopedAccount
-			if err := rows.Scan(&a.ID, &a.Alias); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return f, false
-			}
-			f.fanOut = append(f.fanOut, a)
-		}
-		if len(f.fanOut) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "没有可查询的账号"})
-			return f, false
-		}
-		return f, true
-	}
 	var one int
 	err := db.QueryRow(`SELECT 1 FROM rs_supplier_account WHERE uploaded_by=$1 AND `+col+`=$2 LIMIT 1`, uid, f.AccountID).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -151,70 +112,43 @@ func bindSupplierRecordLogFilter(c *gin.Context) (supplierRecordLogFilter, bool)
 	return f, true
 }
 
-// portalPayload builds the portal request body for one account (0 = no account
-// filter), sending optional filters only when set (the portal UI does the same).
-func (f supplierRecordLogFilter) portalPayload(accountID int64) map[string]any {
-	p := map[string]any{"platform_type": f.PlatformType, "start_time": f.StartTime, "end_time": f.EndTime}
+// portalPayload builds the portal request body, sending optional filters only
+// when set (the portal UI does the same).
+func (f supplierRecordLogFilter) portalPayload() map[string]any {
+	p := map[string]any{"platform_type": f.PlatformType, "start_time": f.StartTime}
+	if f.EndTime != "" {
+		p["end_time"] = f.EndTime
+	}
 	if f.Provider != "" {
 		p["provider"] = f.Provider
 	}
 	if f.Model != "" {
 		p["model"] = f.Model
 	}
-	if accountID > 0 {
-		p["account_id"] = accountID
+	if f.AccountID > 0 {
+		p["account_id"] = f.AccountID
 	}
 	return p
 }
 
-// supplierRecordLogPost POSTs to a portal record-log endpoint and decodes the
-// JSON response into out.
-func supplierRecordLogPost(path string, payload map[string]any, out any) error {
+// supplierRecordLogCall POSTs to a portal record-log endpoint and returns the
+// body, writing the error response itself on failure.
+func supplierRecordLogCall(c *gin.Context, path string, payload map[string]any) ([]byte, bool) {
 	reqBytes, _ := json.Marshal(payload)
 	status, body, err := supplierWeb.proxy(http.MethodPost, "/supplier-account/api/supplier/"+path, reqBytes)
 	if err != nil {
-		return err
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return nil, false
 	}
 	if status == http.StatusForbidden {
-		return errors.New("号池未开通使用日志查询：" + supplierErr(body))
+		c.JSON(http.StatusBadGateway, gin.H{"error": "号池未开通使用日志查询：" + supplierErr(body)})
+		return nil, false
 	}
 	if status != http.StatusOK {
-		return errors.New(supplierErr(body))
+		c.JSON(http.StatusBadGateway, gin.H{"error": supplierErr(body)})
+		return nil, false
 	}
-	if err := json.Unmarshal(body, out); err != nil {
-		return errors.New("unexpected upstream response")
-	}
-	return nil
-}
-
-// supplierRecordLogFanOut runs fn for every index in [0,n) with bounded
-// concurrency and returns the first error.
-func supplierRecordLogFanOut(n int, fn func(i int) error) error {
-	sem := make(chan struct{}, supplierRecordLogFanOutWorkers)
-	var (
-		wg       sync.WaitGroup
-		mu       sync.Mutex
-		firstErr error
-	)
-	for i := range n {
-		sem <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer func() { <-sem; wg.Done() }()
-			if err := fn(i); err != nil {
-				mu.Lock()
-				firstErr = cmp.Or(firstErr, err)
-				mu.Unlock()
-			}
-		}()
-	}
-	wg.Wait()
-	return firstErr
-}
-
-type supplierRecordLogPage struct {
-	List  []map[string]any `json:"list"`
-	Total int64            `json:"total"`
+	return body, true
 }
 
 func handleSupplierRecordLogList(c *gin.Context) {
@@ -227,63 +161,24 @@ func handleSupplierRecordLogList(c *gin.Context) {
 	if pageSize <= 0 || pageSize > 100 {
 		pageSize = 50
 	}
+	payload := f.portalPayload()
+	payload["start"] = (page - 1) * pageSize
+	payload["limit"] = pageSize
 
-	var result supplierRecordLogPage
-	if len(f.fanOut) == 0 {
-		payload := f.portalPayload(f.AccountID)
-		payload["start"] = (page - 1) * pageSize
-		payload["limit"] = pageSize
-		if err := supplierRecordLogPost("record-log-list", payload, &result); err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-			return
-		}
-	} else {
-		// Merge: the newest page*pageSize rows of every account cover the
-		// requested page of the combined, time-ordered log.
-		need := page * pageSize
-		if need > supplierRecordLogFanOutMaxRows {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("全部账号最多查看前 %d 条，请选择单个账号查看更多", supplierRecordLogFanOutMaxRows)})
-			return
-		}
-		perAccount := make([]supplierRecordLogPage, len(f.fanOut))
-		err := supplierRecordLogFanOut(len(f.fanOut), func(i int) error {
-			acc := &perAccount[i]
-			for start := 0; start < need; start += 100 {
-				payload := f.portalPayload(f.fanOut[i].ID)
-				payload["start"] = start
-				payload["limit"] = min(100, need-start)
-				var chunk supplierRecordLogPage
-				if err := supplierRecordLogPost("record-log-list", payload, &chunk); err != nil {
-					return err
-				}
-				acc.Total = chunk.Total
-				acc.List = append(acc.List, chunk.List...)
-				if len(chunk.List) < min(100, need-start) {
-					break
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-			return
-		}
-		for _, acc := range perAccount {
-			result.Total += acc.Total
-			result.List = append(result.List, acc.List...)
-		}
-		// req_time is RFC3339 in one fixed zone, so it sorts as a string.
-		slices.SortStableFunc(result.List, func(a, b map[string]any) int {
-			ta, _ := a["req_time"].(string)
-			tb, _ := b["req_time"].(string)
-			return strings.Compare(tb, ta)
-		})
-		from := min((page-1)*pageSize, len(result.List))
-		result.List = result.List[from:min(from+pageSize, len(result.List))]
+	body, ok := supplierRecordLogCall(c, "record-log-list", payload)
+	if !ok {
+		return
 	}
-
+	var parsed struct {
+		List  []map[string]any `json:"list"`
+		Total int64            `json:"total"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "unexpected upstream response"})
+		return
+	}
 	isAdmin := callerIsSupplierAdmin(c)
-	for _, row := range result.List {
+	for _, row := range parsed.List {
 		// Same masking as the account list: the supplier/company name never
 		// leaves the server.
 		if name, ok := row["account_name"].(string); ok {
@@ -298,31 +193,10 @@ func handleSupplierRecordLogList(c *gin.Context) {
 			row["cost"] = cost / supplierRecordLogQuotaUnit
 		}
 	}
-	if result.List == nil {
-		result.List = []map[string]any{}
+	if parsed.List == nil {
+		parsed.List = []map[string]any{}
 	}
-	c.JSON(http.StatusOK, gin.H{"list": result.List, "total": result.Total, "page": page, "page_size": pageSize})
-}
-
-// supplierRecordLogSum is one aggregate result; use_quota arrives as a decimal
-// string, rpm/tpm as numbers.
-type supplierRecordLogSum struct {
-	UseQuota json.Number `json:"use_quota"`
-	RPM      float64     `json:"rpm"`
-	TPM      float64     `json:"tpm"`
-}
-
-func (s supplierRecordLogSum) costCNY() float64 {
-	quota, _ := strconv.ParseFloat(s.UseQuota.String(), 64)
-	return quota / supplierRecordLogQuotaUnit
-}
-
-type supplierRecordLogAccountSum struct {
-	AccountID int64   `json:"account_id"`
-	Alias     string  `json:"alias"`
-	CostCNY   float64 `json:"cost_cny"`
-	RPM       float64 `json:"rpm"`
-	TPM       float64 `json:"tpm"`
+	c.JSON(http.StatusOK, gin.H{"list": parsed.List, "total": parsed.Total, "page": page, "page_size": pageSize})
 }
 
 func handleSupplierRecordLogAggregate(c *gin.Context) {
@@ -330,56 +204,28 @@ func handleSupplierRecordLogAggregate(c *gin.Context) {
 	if !ok {
 		return
 	}
-	metrics := []string{"use_quota", "rpm", "tpm"}
-
-	if len(f.fanOut) == 0 {
-		payload := f.portalPayload(f.AccountID)
-		payload["metrics"] = metrics
-		var sum supplierRecordLogSum
-		if err := supplierRecordLogPost("record-log-aggregate", payload, &sum); err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"cost_cny": sum.costCNY(), "rpm": sum.RPM, "tpm": sum.TPM, "fx_rate": supplierFxRate()})
+	payload := f.portalPayload()
+	payload["metrics"] = []string{"use_quota", "rpm", "tpm"}
+	body, ok := supplierRecordLogCall(c, "record-log-aggregate", payload)
+	if !ok {
 		return
 	}
-
-	perAccount := make([]supplierRecordLogAccountSum, len(f.fanOut))
-	err := supplierRecordLogFanOut(len(f.fanOut), func(i int) error {
-		payload := f.portalPayload(f.fanOut[i].ID)
-		payload["metrics"] = metrics
-		var sum supplierRecordLogSum
-		if err := supplierRecordLogPost("record-log-aggregate", payload, &sum); err != nil {
-			return err
-		}
-		perAccount[i] = supplierRecordLogAccountSum{
-			AccountID: f.fanOut[i].ID,
-			Alias:     maskSupplierAlias(f.fanOut[i].Alias),
-			CostCNY:   sum.costCNY(),
-			RPM:       sum.RPM,
-			TPM:       sum.TPM,
-		}
-		return nil
-	})
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+	// use_quota arrives as a decimal string, rpm/tpm as numbers.
+	var parsed struct {
+		UseQuota json.Number `json:"use_quota"`
+		RPM      float64     `json:"rpm"`
+		TPM      float64     `json:"tpm"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "unexpected upstream response"})
 		return
 	}
-	var total supplierRecordLogAccountSum
-	for _, a := range perAccount {
-		total.CostCNY += a.CostCNY
-		total.RPM += a.RPM
-		total.TPM += a.TPM
-	}
-	slices.SortStableFunc(perAccount, func(a, b supplierRecordLogAccountSum) int {
-		return cmp.Compare(b.CostCNY, a.CostCNY)
-	})
+	quota, _ := strconv.ParseFloat(parsed.UseQuota.String(), 64)
 	c.JSON(http.StatusOK, gin.H{
-		"cost_cny": total.CostCNY,
-		"rpm":      total.RPM,
-		"tpm":      total.TPM,
+		"cost_cny": quota / supplierRecordLogQuotaUnit,
+		"rpm":      parsed.RPM,
+		"tpm":      parsed.TPM,
 		"fx_rate":  supplierFxRate(),
-		"accounts": perAccount,
 	})
 }
 
