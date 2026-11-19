@@ -11,6 +11,9 @@ import CCMaxUsers from './pages/CCMaxUsers'
 import CCMaxSettlement from './pages/CCMaxSettlement'
 import GynhUpload from './pages/GynhUpload'
 import GynhUsage from './pages/GynhUsage'
+import TencentUsers from './pages/TencentUsers'
+import TencentStatement from './pages/TencentStatement'
+import TencentPush from './pages/TencentPush'
 import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_CCMAX_MANAGER, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_02, ROLE_SUPPLIER_CCMAX, ROLE_SUPPLIER_GYNH } from './api'
 import { getCachedRole, loadRole } from './auth'
 import { APP_BASE } from './basePath'
@@ -150,6 +153,30 @@ export default function App() {
           element={
             <RoleGate allow={(r) => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_GYNH}>
               <GynhUsage />
+            </RoleGate>
+          }
+        />
+        <Route
+          path="/tencent-users"
+          element={
+            <RoleGate allow={(r) => r >= ROLE_SUPER_ADMIN}>
+              <TencentUsers />
+            </RoleGate>
+          }
+        />
+        <Route
+          path="/tencent-statement"
+          element={
+            <RoleGate allow={(r) => r >= ROLE_SUPER_ADMIN}>
+              <TencentStatement />
+            </RoleGate>
+          }
+        />
+        <Route
+          path="/tencent-push"
+          element={
+            <RoleGate allow={(r) => r >= ROLE_SUPER_ADMIN}>
+              <TencentPush />
             </RoleGate>
           }
         />

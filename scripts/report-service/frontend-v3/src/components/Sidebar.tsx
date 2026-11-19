@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { NavLink } from 'react-router-dom'
-import { Radio, Upload, BarChart3, ScrollText, KeyRound, BadgeCheck, Users, CalendarDays, PackagePlus, type LucideIcon } from 'lucide-react'
+import { Radio, Upload, BarChart3, ScrollText, KeyRound, BadgeCheck, Users, CalendarDays, PackagePlus, UserPlus, FileSpreadsheet, Send, type LucideIcon } from 'lucide-react'
 import { ROLE_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_CCMAX_MANAGER, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_02, ROLE_SUPPLIER_CCMAX, ROLE_SUPPLIER_GYNH } from '../api'
 import { getCachedRole, loadRole } from '../auth'
 import { cx } from './ui'
@@ -80,6 +80,16 @@ const GROUPS: NavGroup[] = [
         icon: Users,
         allow: (r) => r >= ROLE_SUPER_ADMIN,
       },
+    ],
+  },
+  {
+    // 腾讯一站: unified accounts, monthly statements and their pushes across
+    // 3P / CC Max / New API Proxy. Every /api/tencent/* route is super admin.
+    title: '腾讯一站',
+    items: [
+      { to: '/tencent-users', label: '用户', icon: UserPlus, allow: (r) => r >= ROLE_SUPER_ADMIN },
+      { to: '/tencent-statement', label: '月对账', icon: FileSpreadsheet, allow: (r) => r >= ROLE_SUPER_ADMIN },
+      { to: '/tencent-push', label: '推送', icon: Send, allow: (r) => r >= ROLE_SUPER_ADMIN },
     ],
   },
   {

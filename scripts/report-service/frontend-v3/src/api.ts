@@ -2510,6 +2510,85 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
+
+  // ---- 腾讯一站 (super admin) ----
+
+  tencentUsers: (platform = '') =>
+    request<{ list: TencentUser[] }>(`/api/tencent/users${platform ? `?platform=${platform}` : ''}`),
+
+  // The server generates the password and returns it only in this response.
+  createTencentUser: (payload: { username: string; studio: string; role: TencentUserRole; manager_id?: number }) =>
+    request<TencentCreatedUser>('/api/tencent/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  // Live preview of a month (YYYY-MM) from the current source data.
+  tencentStatementPreview: (month: string) =>
+    request<TencentStatementPreview>(`/api/tencent/statement?month=${encodeURIComponent(month)}`),
+
+  tencentMonthParams: () => request<{ list: TencentMonthParam[]; system_fx_rate: number }>('/api/tencent/params/months'),
+
+  // null rates fall back to the defaults (system rate / the column G rate).
+  setTencentMonthParam: (payload: { month: string; fx_rate: number | null; ref_fx_rate: number | null; note?: string }) =>
+    request<{ ok: boolean }>('/api/tencent/params/months', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  tencentSupplierParams: () =>
+    request<{ list: TencentSupplierParam[]; upload_discount_pct: number; platforms: string[] }>('/api/tencent/params/suppliers'),
+
+  // discount_pct is a percentage (88 = 88%); null falls through to the next default.
+  setTencentSupplierParam: (payload: { user_id: number; platform: string; discount_pct: number | null; tax_rate: string }) =>
+    request<{ ok: boolean }>('/api/tencent/params/suppliers', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  deleteTencentSupplierParam: (userId: number, platform: string) =>
+    request<{ ok: boolean }>(`/api/tencent/params/suppliers/${userId}/${encodeURIComponent(platform)}`, { method: 'DELETE' }),
+
+  // A row back to the defaults (not RMB-priced, empty bill name) drops its record.
+  setTencentLineFlag: (payload: { line_key: string; rmb_priced: boolean; bill_name: string }) =>
+    request<{ ok: boolean }>('/api/tencent/line-flags', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  // 404 when the month has no snapshot yet.
+  tencentSnapshot: (month: string) => request<TencentSnapshot>(`/api/tencent/statements/${month}`),
+
+  // generate: first snapshot (draft); regenerate: drafts only; confirm: draft → confirmed.
+  tencentSnapshotAction: (month: string, action: 'generate' | 'regenerate' | 'confirm') =>
+    request<TencentSnapshot>(`/api/tencent/statements/${month}/${action}`, { method: 'POST' }),
+
+  // xlsx download of a month's snapshot; supplier '' = every supplier in one file.
+  tencentExportUrl: (month: string, supplier = '') =>
+    withBase(`/api/tencent/statements/${month}/export${supplier ? `?supplier=${encodeURIComponent(supplier)}` : ''}`),
+
+  pushTencentStatement: (month: string) =>
+    request<{ month: string; status: string; rows: TencentPushRow[] }>('/api/tencent/statement-push', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ month }),
+    }),
+
+  tencentPushLogs: (limit = 50) => request<{ list: TencentPushLog[] }>(`/api/tencent/push-logs?limit=${limit}`),
+
+  tencentPushSettings: () => request<TencentPushSettings>('/api/tencent/push-settings'),
+
+  // Only the given sections / fields change; the others keep their stored values.
+  setTencentPushSettings: (payload: TencentPushSettingsUpdate) =>
+    request<TencentPushSettings>('/api/tencent/push-settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
 }
 
 // One stored credential and its resolved local-channel target. Mirrors the
@@ -2882,4 +2961,161 @@ export type CCMaxSettings = {
   password_set: boolean
   openapi_token_set: boolean
   openapi_token_last4: string
+}
+
+// ---- 腾讯一站 ----
+
+export type TencentUserRole = 'supplier_01' | 'supplier_02' | 'supplier_ccmax' | 'ccmax_manager' | 'proxy'
+export type TencentPlatform = 'third_party' | 'ccmax' | 'proxy'
+
+export type TencentUser = {
+  id: number
+  username: string
+  studio: string
+  role: number
+  role_name: TencentUserRole | ''
+  platforms: TencentPlatform[]
+  status: number
+  created_at: number
+  supplier_accounts: number
+  ccmax_accounts: number
+  proxy_channels: number
+  manager_id: number
+  manager_username: string
+  members: number
+}
+
+export type TencentCreatedUser = {
+  id: number
+  username: string
+  studio: string
+  role: TencentUserRole
+  manager_id: number
+  password: string
+  studio_shared_with: string[]
+}
+
+// One 「API账单」 row; supplier … source are template columns A–N.
+export type TencentLine = {
+  line_key: string
+  platform: TencentPlatform
+  user_id: number
+  supplier: string
+  bill_month: number
+  vendor: string
+  model: string
+  account_id: string
+  key: string
+  official_usd: number
+  tax_rate: string
+  discount: number
+  tencent_usd: number
+  ref_fx_rate: number
+  invoice_rmb: number
+  bill_name: string
+  source: string
+  cost_cny: number
+  cost_usd: number
+  rmb_priced: boolean
+  discount_from: string
+}
+
+export type TencentSummaryRow = {
+  supplier: string
+  bill_month: number
+  vendor: string
+  source: string
+  official_usd: number
+  invoice_rmb: number
+  lines: number
+}
+
+export type TencentStatementPreview = {
+  month: string
+  bill_month: number
+  fx_rate: number
+  fx_rate_from: string
+  ref_fx_rate: number
+  ref_fx_rate_from: string
+  headers: string[]
+  summary_headers: string[]
+  lines: TencentLine[]
+  summary: TencentSummaryRow[]
+  warnings: string[]
+}
+
+export type TencentMonthParam = {
+  month: string
+  fx_rate: number | null
+  ref_fx_rate: number | null
+  note: string
+  updated_at: number
+}
+
+export type TencentSupplierParam = {
+  user_id: number
+  username: string
+  studio: string
+  platform: string
+  discount_pct: number | null
+  tax_rate: string
+  updated_at: number
+}
+
+export type TencentSnapshot = {
+  statement: {
+    month: string
+    status: 'draft' | 'confirmed'
+    fx_rate: number
+    ref_fx_rate: number
+    warnings: string[] | null
+    lines: number
+    generated_at: number
+    confirmed_at: number
+  }
+  lines: TencentLine[]
+  summary: TencentSummaryRow[]
+}
+
+export type TencentPushRow = {
+  supplier: string
+  platform: string
+  lines: number
+  official_usd: number
+  invoice_rmb: number
+}
+
+export type TencentPushLog = {
+  id: number
+  kind: string
+  trigger: 'manual' | 'schedule'
+  month: string
+  ok: boolean
+  error: string
+  created_at: number
+}
+
+export type TencentStatementPushSettings = {
+  webhook: string
+  enabled: boolean
+  day: number
+  hour: number
+  base_url: string
+}
+
+export type TencentPushSettings = {
+  statement: TencentStatementPushSettings
+  statement_last_month: string
+  supplier_quota: { webhook_set: boolean; webhook_last4: string }
+  ccmax_report: { webhook: string; hours: string }
+  proxy_report: { webhook: string; hours: string }
+  ops_daily_spend: { enabled: boolean; webhook: string; daily_spend: boolean; daily_spend_hour: number }
+}
+
+export type TencentPushSettingsUpdate = {
+  statement?: Partial<TencentStatementPushSettings>
+  supplier_quota_webhook?: string
+  ccmax_report?: { webhook?: string; hours?: string }
+  proxy_report?: { webhook?: string; hours?: string }
+  ops_daily_spend?: { enabled?: boolean; webhook?: string; daily_spend?: boolean; daily_spend_hour?: number }
 }
