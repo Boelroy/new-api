@@ -191,6 +191,19 @@ func syncSupplierRecordLogSlice(platform string) (bool, error) {
 }
 
 func upsertSupplierRecordLogRows(platform string, rows []supplierRecordLogPortalRow) error {
+	// The portal can repeat an id within one page (seen on 1.0), and one
+	// upsert statement may not touch a row twice: keep the last copy.
+	seen := make(map[int64]int, len(rows))
+	deduped := rows[:0:0]
+	for _, r := range rows {
+		if i, ok := seen[r.ID]; ok {
+			deduped[i] = r
+			continue
+		}
+		seen[r.ID] = len(deduped)
+		deduped = append(deduped, r)
+	}
+	rows = deduped
 	if len(rows) == 0 {
 		return nil
 	}
