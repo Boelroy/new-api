@@ -163,36 +163,8 @@ func syncSupplierRecordLogSlice(platform string) (bool, error) {
 	from := time.Unix(cursor, 0).Add(-supplierRecordLogOverlap)
 	to := time.Unix(min(cursor+int64(supplierRecordLogSlice/time.Second), now.Unix()), 0)
 
-	window := map[string]any{
-		"platform_type": platform,
-		"start_time":    from.In(supplierPortalLoc).Format(time.DateTime),
-		"end_time":      to.In(supplierPortalLoc).Format(time.DateTime),
-	}
-	for start := 0; ; start += supplierRecordLogPageSize {
-		payload := map[string]any{"start": start, "limit": supplierRecordLogPageSize}
-		for k, v := range window {
-			payload[k] = v
-		}
-		reqBytes, _ := json.Marshal(payload)
-		status, body, err := supplierWeb.proxy(http.MethodPost, "/supplier-account/api/supplier/record-log-list", reqBytes)
-		if err != nil {
-			return false, err
-		}
-		if status != http.StatusOK {
-			return false, errors.New(supplierErr(body))
-		}
-		var page struct {
-			List []supplierRecordLogPortalRow `json:"list"`
-		}
-		if err := json.Unmarshal(body, &page); err != nil {
-			return false, fmt.Errorf("unexpected upstream response: %w", err)
-		}
-		if err := upsertSupplierRecordLogRows(platform, page.List); err != nil {
-			return false, err
-		}
-		if len(page.List) < supplierRecordLogPageSize {
-			break
-		}
+	if err := pullSupplierRecordLogWindow(platform, from.Unix(), to.Unix()); err != nil {
+		return false, err
 	}
 	if err := rebuildSupplierRecordLogHourly(platform, from.Unix(), to.Unix()); err != nil {
 		return false, err
@@ -205,6 +177,77 @@ func syncSupplierRecordLogSlice(platform string) (bool, error) {
 		}
 	}
 	return now.Unix()-next > int64(supplierRecordLogSlice/time.Second), nil
+}
+
+// supplierRecordLogSubWindowRows is the target row count of one sub-window;
+// below the portal's 100-row page so a window rarely needs a second split.
+const supplierRecordLogSubWindowRows = 80
+
+// fetchSupplierRecordLogPage reads one page of a [from, to] window (unix
+// seconds, both ends inclusive in portal time) and the window's total.
+func fetchSupplierRecordLogPage(platform string, from, to int64, start int) ([]supplierRecordLogPortalRow, int, error) {
+	reqBytes, _ := json.Marshal(map[string]any{
+		"platform_type": platform,
+		"start_time":    time.Unix(from, 0).In(supplierPortalLoc).Format(time.DateTime),
+		"end_time":      time.Unix(to, 0).In(supplierPortalLoc).Format(time.DateTime),
+		"start":         start,
+		"limit":         supplierRecordLogPageSize,
+	})
+	status, body, err := supplierWeb.proxy(http.MethodPost, "/supplier-account/api/supplier/record-log-list", reqBytes)
+	if err != nil {
+		return nil, 0, err
+	}
+	if status != http.StatusOK {
+		return nil, 0, errors.New(supplierErr(body))
+	}
+	var page struct {
+		List  []supplierRecordLogPortalRow `json:"list"`
+		Total int                          `json:"total"`
+	}
+	if err := json.Unmarshal(body, &page); err != nil {
+		return nil, 0, fmt.Errorf("unexpected upstream response: %w", err)
+	}
+	return page.List, page.Total, nil
+}
+
+// pullSupplierRecordLogWindow stores every row of [from, to]. Offset paging is
+// unreliable on the portal (rows sharing a second reorder between pages, so
+// deep paging skips some), so a window that does not fit one page is split
+// into sub-windows of ~supplierRecordLogSubWindowRows rows, recursively. Only
+// a single second with more rows than a page falls back to paging.
+func pullSupplierRecordLogWindow(platform string, from, to int64) error {
+	rows, total, err := fetchSupplierRecordLogPage(platform, from, to, 0)
+	if err != nil {
+		return err
+	}
+	if total <= len(rows) {
+		return upsertSupplierRecordLogRows(platform, rows)
+	}
+	if to <= from {
+		for start := len(rows); len(rows) > 0; start += len(rows) {
+			if err := upsertSupplierRecordLogRows(platform, rows); err != nil {
+				return err
+			}
+			if start >= total {
+				return nil
+			}
+			if rows, _, err = fetchSupplierRecordLogPage(platform, from, to, start); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	parts := int64(min((total+supplierRecordLogSubWindowRows-1)/supplierRecordLogSubWindowRows, int(to-from+1)))
+	parts = max(parts, 2)
+	step := (to - from + 1 + parts - 1) / parts
+	for lo := from; lo <= to; lo += step {
+		// Both bounds are inclusive at second granularity, so adjacent
+		// sub-windows tile the window exactly.
+		if err := pullSupplierRecordLogWindow(platform, lo, min(lo+step-1, to)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func upsertSupplierRecordLogRows(platform string, rows []supplierRecordLogPortalRow) error {
