@@ -48,21 +48,6 @@ type tencentStatementHeader struct {
 	ConfirmedBy int64    `json:"confirmed_by"`
 }
 
-// tencentSnapshotParams is the JSON kept in rs_tencent_statement.params:
-// everything besides the rates the lines were computed with.
-type tencentSnapshotParams struct {
-	Suppliers []tencentSnapshotSupplierParam `json:"suppliers"`
-	Flags     map[string]tencentLineFlag     `json:"flags"`
-	VendorMap map[string]string              `json:"vendor_map"`
-}
-
-type tencentSnapshotSupplierParam struct {
-	UserID      int64    `json:"user_id"`
-	Platform    string   `json:"platform"`
-	DiscountPct *float64 `json:"discount_pct"`
-	TaxRate     string   `json:"tax_rate"`
-}
-
 // tencentWriteSnapshot builds the month's statement from live data and
 // stores it as a draft. With regenerate it replaces an existing draft;
 // without, an existing snapshot of either status is left alone and reported.
@@ -72,11 +57,7 @@ func tencentWriteSnapshot(month time.Time, regenerate bool, by int64) error {
 	if err != nil {
 		return err
 	}
-	snap := tencentSnapshotParams{Flags: params.Flags, VendorMap: params.VendorMap}
-	for k, p := range params.Suppliers {
-		snap.Suppliers = append(snap.Suppliers, tencentSnapshotSupplierParam{k.UserID, k.Platform, p.DiscountPct, p.TaxRate})
-	}
-	paramsJSON, _ := json.Marshal(snap)
+	paramsJSON, _ := json.Marshal(params)
 	warningsJSON, _ := json.Marshal(warnings)
 	key := month.Format("2006-01")
 
@@ -115,11 +96,11 @@ func tencentWriteSnapshot(month time.Time, regenerate bool, by int64) error {
 		if _, err := tx.Exec(`
 			INSERT INTO rs_tencent_statement_line (month, seq, line_key, platform, user_id, supplier, bill_month, vendor, model,
 			  account_id, key_col, official_usd, tax_rate, discount, tencent_usd, ref_fx_rate, invoice_rmb, bill_name, source,
-			  cost_cny, cost_usd, rmb_priced, discount_from)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)`,
+			  cost_cny, cost_usd)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`,
 			key, i, l.LineKey, l.Platform, l.UserID, l.Supplier, l.BillMonth, l.Vendor, l.Model,
 			l.AccountID, l.Key, l.OfficialUSD, l.TaxRate, l.Discount, l.TencentUSD, l.RefFxRate, l.InvoiceRMB, l.BillName, l.Source,
-			l.CostCNY, l.CostUSD, l.RMBPriced, l.DiscountFrom); err != nil {
+			l.CostCNY, l.CostUSD); err != nil {
 			return err
 		}
 	}
@@ -144,7 +125,7 @@ func tencentLoadSnapshot(month, supplier string) (tencentStatementHeader, []tenc
 	_ = json.Unmarshal([]byte(warnings), &h.Warnings)
 	rows, err := db.Query(`
 		SELECT line_key, platform, user_id, supplier, bill_month, vendor, model, account_id, key_col, official_usd, tax_rate,
-		       discount, tencent_usd, ref_fx_rate, invoice_rmb, bill_name, source, cost_cny, cost_usd, rmb_priced, discount_from
+		       discount, tencent_usd, ref_fx_rate, invoice_rmb, bill_name, source, cost_cny, cost_usd
 		  FROM rs_tencent_statement_line
 		 WHERE month = $1 AND ($2 = '' OR supplier = $2)
 		 ORDER BY seq`, month, supplier)
@@ -157,7 +138,7 @@ func tencentLoadSnapshot(month, supplier string) (tencentStatementHeader, []tenc
 		var l tencentLine
 		if err := rows.Scan(&l.LineKey, &l.Platform, &l.UserID, &l.Supplier, &l.BillMonth, &l.Vendor, &l.Model, &l.AccountID, &l.Key,
 			&l.OfficialUSD, &l.TaxRate, &l.Discount, &l.TencentUSD, &l.RefFxRate, &l.InvoiceRMB, &l.BillName, &l.Source,
-			&l.CostCNY, &l.CostUSD, &l.RMBPriced, &l.DiscountFrom); err != nil {
+			&l.CostCNY, &l.CostUSD); err != nil {
 			return h, nil, err
 		}
 		lines = append(lines, l)
@@ -168,7 +149,9 @@ func tencentLoadSnapshot(month, supplier string) (tencentStatementHeader, []tenc
 
 // tencentStatementWorkbook lays lines out as the template: 「汇总表」 then
 // 「API账单」, same headers and number formats, with J, L and the summary
-// totals as formulas so edits to G / I / K in Excel carry through.
+// totals as the template's formulas so edits to G / I / K carry through.
+// The summary SUMIFS match vendor (C) and source prefix (N) as the template
+// does; a file with several suppliers also matches the supplier (A).
 func tencentStatementWorkbook(lines []tencentLine) (*excelize.File, error) {
 	f := excelize.NewFile()
 	if err := f.SetSheetName("Sheet1", tencentSummarySheet); err != nil {
@@ -178,15 +161,13 @@ func tencentStatementWorkbook(lines []tencentLine) (*excelize.File, error) {
 		return nil, err
 	}
 	usd := `#,##0.00" USD"`
-	summaryUSD := `#,##0.00" RMB"` // the template's own format on 汇总表 D
 	vendorFmt := `0_ `
 	styles := map[string]*excelize.Style{
-		"header":     {Font: &excelize.Font{Bold: true}, Alignment: &excelize.Alignment{WrapText: true, Vertical: "center"}},
-		"usd":        {CustomNumFmt: &usd},
-		"summaryUSD": {CustomNumFmt: &summaryUSD},
-		"vendor":     {CustomNumFmt: &vendorFmt},
-		"pct":        {NumFmt: 9}, // 0%
-		"amount":     {NumFmt: 4}, // #,##0.00
+		"header": {Font: &excelize.Font{Bold: true}, Alignment: &excelize.Alignment{WrapText: true, Vertical: "center"}},
+		"usd":    {CustomNumFmt: &usd},
+		"vendor": {CustomNumFmt: &vendorFmt},
+		"pct":    {NumFmt: 9}, // 0%
+		"amount": {NumFmt: 4}, // #,##0.00
 	}
 	ids := map[string]int{}
 	for name, s := range styles {
@@ -204,7 +185,9 @@ func tencentStatementWorkbook(lines []tencentLine) (*excelize.File, error) {
 			return nil, err
 		}
 	}
+	suppliers := map[string]bool{}
 	for i, l := range lines {
+		suppliers[l.Supplier] = true
 		r := i + 2
 		account := any(l.AccountID)
 		if n, err := strconv.ParseInt(l.AccountID, 10, 64); err == nil {
@@ -220,14 +203,10 @@ func tencentStatementWorkbook(lines []tencentLine) (*excelize.File, error) {
 				return nil, err
 			}
 		}
-		invoice := fmt.Sprintf("ROUND(J%d*K%d,2)", r, r)
-		if l.RMBPriced {
-			invoice = fmt.Sprintf("J%d", r)
-		}
 		if err := f.SetCellFormula(tencentLinesSheet, fmt.Sprintf("J%d", r), fmt.Sprintf("ROUND(G%d*I%d,2)", r, r)); err != nil {
 			return nil, err
 		}
-		if err := f.SetCellFormula(tencentLinesSheet, fmt.Sprintf("L%d", r), invoice); err != nil {
+		if err := f.SetCellFormula(tencentLinesSheet, fmt.Sprintf("L%d", r), fmt.Sprintf(`IF(J%d="","",J%d*K%d)`, r, r, r)); err != nil {
 			return nil, err
 		}
 	}
@@ -246,10 +225,8 @@ func tencentStatementWorkbook(lines []tencentLine) (*excelize.File, error) {
 			return nil, err
 		}
 	}
-	// SUMIFS over the detail sheet, matched on supplier, month, vendor and
-	// the column N source prefix.
 	col := func(c string) string {
-		return fmt.Sprintf("'%s'!$%s$2:$%s$%d", tencentLinesSheet, c, c, lastRow)
+		return fmt.Sprintf("'%s'!%s$2:%s$%d", tencentLinesSheet, c, c, lastRow)
 	}
 	summary := tencentSummarize(lines)
 	for i, s := range summary {
@@ -260,19 +237,19 @@ func tencentStatementWorkbook(lines []tencentLine) (*excelize.File, error) {
 				return nil, err
 			}
 		}
-		criteria := fmt.Sprintf("%s,$A%d,%s,$B%d,%s,$C%d,%s,\"%s*\"", col("A"), r, col("B"), r, col("C"), r, col("N"), s.Source)
+		criteria := fmt.Sprintf(`%s,C%d,%s,"%s*"`, col("C"), r, col("N"), s.Source)
+		if len(suppliers) > 1 {
+			criteria = fmt.Sprintf("%s,A%d,%s", col("A"), r, criteria)
+		}
 		if err := f.SetCellFormula(tencentSummarySheet, fmt.Sprintf("D%d", r), fmt.Sprintf("SUMIFS(%s,%s)", col("G"), criteria)); err != nil {
 			return nil, err
 		}
 		if err := f.SetCellFormula(tencentSummarySheet, fmt.Sprintf("E%d", r), fmt.Sprintf("SUMIFS(%s,%s)", col("L"), criteria)); err != nil {
 			return nil, err
 		}
-		if err := f.SetCellValue(tencentSummarySheet, fmt.Sprintf("F%d", r), s.Source); err != nil {
-			return nil, err
-		}
 	}
 	summaryLast := max(len(summary)+1, 2)
-	if err := f.SetCellStyle(tencentSummarySheet, "D2", fmt.Sprintf("D%d", summaryLast), ids["summaryUSD"]); err != nil {
+	if err := f.SetCellStyle(tencentSummarySheet, "D2", fmt.Sprintf("D%d", summaryLast), ids["usd"]); err != nil {
 		return nil, err
 	}
 	if err := f.SetCellStyle(tencentSummarySheet, "E2", fmt.Sprintf("E%d", summaryLast), ids["amount"]); err != nil {
@@ -287,9 +264,9 @@ func tencentStatementWorkbook(lines []tencentLine) (*excelize.File, error) {
 		width           float64
 	}{
 		{tencentSummarySheet, "A", "A", 22}, {tencentSummarySheet, "B", "C", 14}, {tencentSummarySheet, "D", "E", 22}, {tencentSummarySheet, "F", "F", 16},
-		{tencentLinesSheet, "A", "A", 22}, {tencentLinesSheet, "B", "C", 14}, {tencentLinesSheet, "D", "D", 26}, {tencentLinesSheet, "E", "F", 14},
-		{tencentLinesSheet, "G", "G", 18}, {tencentLinesSheet, "H", "I", 10}, {tencentLinesSheet, "J", "J", 18}, {tencentLinesSheet, "K", "K", 16},
-		{tencentLinesSheet, "L", "L", 16}, {tencentLinesSheet, "M", "M", 24}, {tencentLinesSheet, "N", "N", 30},
+		{tencentLinesSheet, "A", "A", 22}, {tencentLinesSheet, "B", "C", 14}, {tencentLinesSheet, "D", "D", 40}, {tencentLinesSheet, "E", "E", 12},
+		{tencentLinesSheet, "F", "F", 40}, {tencentLinesSheet, "G", "G", 18}, {tencentLinesSheet, "H", "I", 10}, {tencentLinesSheet, "J", "J", 18},
+		{tencentLinesSheet, "K", "K", 16}, {tencentLinesSheet, "L", "L", 16}, {tencentLinesSheet, "M", "M", 36}, {tencentLinesSheet, "N", "N", 16},
 	} {
 		if err := f.SetColWidth(w.sheet, w.from, w.to, w.width); err != nil {
 			return nil, err
