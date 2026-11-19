@@ -46,13 +46,17 @@ const (
 	// catch-up after downtime proceeds in small steps (~3k rows at current
 	// traffic) instead of paging one huge window.
 	supplierRecordLogSlice = 10 * time.Minute
-	// supplierRecordLogOverlap re-reads the tail of the previous window; rows
-	// can land a little after their req_time and the portal pages by offset.
-	supplierRecordLogOverlap = 2 * time.Minute
-	// supplierRecordLogLag keeps the cursor this far behind now for the same
-	// reason, so the newest minute is always read again next tick.
-	supplierRecordLogLag      = time.Minute
-	supplierRecordLogPageSize = 100
+	// Windows are on create_time (when the portal wrote the row), which the
+	// portal filters and sorts by. supplierRecordLogOverlap re-reads the tail
+	// of the previous window and supplierRecordLogLag keeps the cursor behind
+	// now, in case rows become visible a little after their create_time.
+	supplierRecordLogOverlap = 30 * time.Second
+	supplierRecordLogLag     = 30 * time.Second
+	// supplierRecordLogLongestRequest widens the hourly rebuild: a row's
+	// req_time (what the hours bucket by) precedes its create_time by the
+	// request's duration.
+	supplierRecordLogLongestRequest = 10 * time.Minute
+	supplierRecordLogPageSize       = 100
 )
 
 var supplierRecordLogPlatforms = []string{"2.0", "1.0"}
@@ -171,7 +175,7 @@ func syncSupplierRecordLogSlice(platform string) (bool, error) {
 	log.Printf("[supplier-record-log] %s %s~%s: %d calls, %d throttled, %s",
 		platform, from.In(supplierPortalLoc).Format(time.TimeOnly), to.In(supplierPortalLoc).Format(time.TimeOnly),
 		supplierRecordLogStats.calls, supplierRecordLogStats.throttled, time.Since(began).Round(time.Second))
-	if err := rebuildSupplierRecordLogHourly(platform, from.Unix(), to.Unix()); err != nil {
+	if err := rebuildSupplierRecordLogHourly(platform, from.Add(-supplierRecordLogLongestRequest).Unix(), to.Unix()); err != nil {
 		return false, err
 	}
 
@@ -183,10 +187,6 @@ func syncSupplierRecordLogSlice(platform string) (bool, error) {
 	}
 	return now.Unix()-next > int64(supplierRecordLogSlice/time.Second), nil
 }
-
-// supplierRecordLogSubWindowRows is the target row count of one sub-window;
-// below the portal's 100-row page so a window rarely needs a second split.
-const supplierRecordLogSubWindowRows = 80
 
 const (
 	// supplierRecordLogCallGap paces sync calls: the portal answers
@@ -250,42 +250,48 @@ func fetchSupplierRecordLogPage(platform string, from, to int64, start int) ([]s
 	return page.List, page.Total, nil
 }
 
-// pullSupplierRecordLogWindow stores every row of [from, to]. Offset paging is
-// unreliable on the portal (rows sharing a second reorder between pages, so
-// deep paging skips some), so a window that does not fit one page is split
-// into sub-windows of ~supplierRecordLogSubWindowRows rows, recursively. Only
-// a single second with more rows than a page falls back to paging.
+// pullSupplierRecordLogWindow stores every row whose create_time falls in
+// [from, to]. The portal filters and sorts (newest first) by create_time, but
+// offset paging over a live, second-granular log skips rows, so it pages by
+// keyset instead: after each page the window's upper bound moves to the
+// oldest create_time second seen (re-reading that second; the upsert dedupes).
+// Only a single second holding more than a page falls back to offset paging.
 func pullSupplierRecordLogWindow(platform string, from, to int64) error {
-	rows, total, err := fetchSupplierRecordLogPage(platform, from, to, 0)
-	if err != nil {
-		return err
-	}
-	if total <= len(rows) {
-		return upsertSupplierRecordLogRows(platform, rows)
-	}
-	if to <= from {
-		for start := len(rows); len(rows) > 0; start += len(rows) {
-			if err := upsertSupplierRecordLogRows(platform, rows); err != nil {
-				return err
-			}
-			if start >= total {
-				return nil
-			}
-			if rows, _, err = fetchSupplierRecordLogPage(platform, from, to, start); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	parts := int64(min((total+supplierRecordLogSubWindowRows-1)/supplierRecordLogSubWindowRows, int(to-from+1)))
-	parts = max(parts, 2)
-	step := (to - from + 1 + parts - 1) / parts
-	for lo := from; lo <= to; lo += step {
-		// Both bounds are inclusive at second granularity, so adjacent
-		// sub-windows tile the window exactly.
-		if err := pullSupplierRecordLogWindow(platform, lo, min(lo+step-1, to)); err != nil {
+	hi := to
+	for hi >= from {
+		rows, total, err := fetchSupplierRecordLogPage(platform, from, hi, 0)
+		if err != nil {
 			return err
 		}
+		if err := upsertSupplierRecordLogRows(platform, rows); err != nil {
+			return err
+		}
+		if total <= len(rows) {
+			return nil
+		}
+		oldest := hi
+		for _, r := range rows {
+			if t, err := time.Parse(time.RFC3339, r.CreateTime); err == nil {
+				oldest = min(oldest, t.Unix())
+			}
+		}
+		if oldest < hi {
+			hi = oldest
+			continue
+		}
+		for start := len(rows); ; start += supplierRecordLogPageSize {
+			page, _, err := fetchSupplierRecordLogPage(platform, hi, hi, start)
+			if err != nil {
+				return err
+			}
+			if err := upsertSupplierRecordLogRows(platform, page); err != nil {
+				return err
+			}
+			if len(page) < supplierRecordLogPageSize {
+				break
+			}
+		}
+		hi--
 	}
 	return nil
 }
