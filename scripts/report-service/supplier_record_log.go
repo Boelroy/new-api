@@ -183,8 +183,21 @@ func syncSupplierRecordLogSlice(platform string) (bool, error) {
 // below the portal's 100-row page so a window rarely needs a second split.
 const supplierRecordLogSubWindowRows = 80
 
+const (
+	// supplierRecordLogCallGap paces sync calls: the portal answers
+	// 「请求过于频繁」 to back-to-back calls (~43/min sequential was fine).
+	supplierRecordLogCallGap = 1500 * time.Millisecond
+	// supplierRecordLogThrottleWait / Retries: on a throttled answer, wait and
+	// retry the same call instead of failing the whole slice.
+	supplierRecordLogThrottleWait    = 10 * time.Second
+	supplierRecordLogThrottleRetries = 6
+)
+
+var supplierRecordLogLastCall time.Time
+
 // fetchSupplierRecordLogPage reads one page of a [from, to] window (unix
-// seconds, both ends inclusive in portal time) and the window's total.
+// seconds, both ends inclusive in portal time) and the window's total. Only
+// the sync loop calls it, so the pacing state needs no lock.
 func fetchSupplierRecordLogPage(platform string, from, to int64, start int) ([]supplierRecordLogPortalRow, int, error) {
 	reqBytes, _ := json.Marshal(map[string]any{
 		"platform_type": platform,
@@ -193,7 +206,24 @@ func fetchSupplierRecordLogPage(platform string, from, to int64, start int) ([]s
 		"start":         start,
 		"limit":         supplierRecordLogPageSize,
 	})
-	status, body, err := supplierWeb.proxy(http.MethodPost, "/supplier-account/api/supplier/record-log-list", reqBytes)
+	var (
+		status int
+		body   []byte
+		err    error
+	)
+	for attempt := range supplierRecordLogThrottleRetries + 1 {
+		if attempt > 0 {
+			time.Sleep(supplierRecordLogThrottleWait)
+		}
+		if wait := supplierRecordLogCallGap - time.Since(supplierRecordLogLastCall); wait > 0 {
+			time.Sleep(wait)
+		}
+		status, body, err = supplierWeb.proxy(http.MethodPost, "/supplier-account/api/supplier/record-log-list", reqBytes)
+		supplierRecordLogLastCall = time.Now()
+		if err != nil || (status != http.StatusTooManyRequests && !strings.Contains(string(body), "频繁")) {
+			break
+		}
+	}
 	if err != nil {
 		return nil, 0, err
 	}
