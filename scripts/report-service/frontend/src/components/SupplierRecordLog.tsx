@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   api,
   type SupplierRecordLogAccount,
@@ -39,6 +39,19 @@ function fmtMoney(cny: number, fx: number): string {
   return `$${(cny / fx).toFixed(2)} · ¥${cny.toFixed(2)}`
 }
 
+// Provider match key, the same rule the server applies (case and outer spaces
+// ignored), so `OpenAI` and `openai` are one type.
+function providerKey(p: string): string {
+  return p.trim().toLowerCase()
+}
+
+// Supplier / provider filters; '' = all. supplier is an uploaded_by user id.
+type OwnerFilter = { supplier: string; provider: string }
+
+function accountMatches(a: SupplierRecordLogAccount, f: OwnerFilter): boolean {
+  return (!f.supplier || String(a.uploaded_by) === f.supplier) && (!f.provider || providerKey(a.provider) === f.provider)
+}
+
 export default function SupplierRecordLog({ isAdmin }: { isAdmin: boolean }) {
   const [accounts, setAccounts] = useState<SupplierRecordLogAccount[]>([])
   const [platform, setPlatform] = useState<'1.0' | '2.0'>('2.0')
@@ -48,7 +61,12 @@ export default function SupplierRecordLog({ isAdmin }: { isAdmin: boolean }) {
   const [startTime, setStartTime] = useState(todayStart())
   const [endTime, setEndTime] = useState(hourAhead())
   const [model, setModel] = useState('')
+  // The supplier filter is admin-only; the server ignores it for suppliers.
+  const [owner, setOwner] = useState<OwnerFilter>({ supplier: '', provider: '' })
   const [page, setPage] = useState(1)
+  // Only the latest query may write results, so a slow earlier request cannot
+  // overwrite the outcome of a later filter change.
+  const querySeq = useRef(0)
 
   const [rows, setRows] = useState<SupplierRecordLogRow[]>([])
   const [total, setTotal] = useState(0)
@@ -64,9 +82,30 @@ export default function SupplierRecordLog({ isAdmin }: { isAdmin: boolean }) {
 
   const platformId = (a: SupplierRecordLogAccount) => (platform === '1.0' ? a.a1_id : a.a2_id)
 
-  const pickable = useMemo(() => accounts.filter(a => platformId(a) > 0),
+  const supplierOptions = useMemo(() => {
+    const seen = new Map<number, string>()
+    for (const a of accounts) {
+      if (!seen.has(a.uploaded_by)) {
+        seen.set(a.uploaded_by, [a.studio, a.username || `uid ${a.uploaded_by}`].filter(Boolean).join(' / '))
+      }
+    }
+    return [...seen].map(([id, label]) => ({ id, label }))
+  }, [accounts])
+
+  // One option per normalized provider, labelled with its first spelling.
+  const providerOptions = useMemo(() => {
+    const seen = new Map<string, string>()
+    for (const a of accounts) {
+      const key = providerKey(a.provider)
+      if (key && !seen.has(key)) seen.set(key, a.provider.trim())
+    }
+    return [...seen].map(([key, label]) => ({ key, label }))
+  }, [accounts])
+
+  // The account picker follows the supplier / provider filters.
+  const pickable = useMemo(() => accounts.filter(a => platformId(a) > 0 && accountMatches(a, owner)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [accounts, platform])
+    [accounts, platform, owner])
 
   const filtered = useMemo(() => {
     const q = accountSearch.trim().toLowerCase()
@@ -76,7 +115,7 @@ export default function SupplierRecordLog({ isAdmin }: { isAdmin: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pickable, accountSearch])
 
-  const pendingCount = accounts.length - pickable.length
+  const pendingCount = accounts.filter(a => platformId(a) <= 0).length
 
   function toggle(id: number) {
     setSelected(prev => {
@@ -91,7 +130,8 @@ export default function SupplierRecordLog({ isAdmin }: { isAdmin: boolean }) {
     setSelected(prev => new Set([...prev, ...filtered.map(platformId)]))
   }
 
-  async function runQuery(nextPage: number, ids: Set<number> = selected) {
+  async function runQuery(nextPage: number, ids: Set<number> = selected, f: OwnerFilter = owner) {
+    const seq = ++querySeq.current
     setErr(null)
     const filter: SupplierRecordLogFilter = {
       platform_type: platform,
@@ -99,6 +139,8 @@ export default function SupplierRecordLog({ isAdmin }: { isAdmin: boolean }) {
       end_time: endTime.trim() || undefined,
       model: model.trim() || undefined,
       account_ids: ids.size ? [...ids] : undefined,
+      uploaded_by: isAdmin && f.supplier ? Number(f.supplier) : undefined,
+      providers: f.provider ? [f.provider] : undefined,
     }
     setLoading(true)
     try {
@@ -106,15 +148,27 @@ export default function SupplierRecordLog({ isAdmin }: { isAdmin: boolean }) {
         api.supplierRecordLogList({ ...filter, page: nextPage, page_size: PAGE_SIZE }),
         nextPage === 1 ? api.supplierRecordLogAggregate(filter) : Promise.resolve(agg),
       ])
+      if (seq !== querySeq.current) return
       setRows(list.list)
       setTotal(list.total)
       setAgg(sum)
       setPage(nextPage)
     } catch (e: any) {
-      setErr(e?.message || String(e))
+      if (seq === querySeq.current) setErr(e?.message || String(e))
     } finally {
-      setLoading(false)
+      if (seq === querySeq.current) setLoading(false)
     }
+  }
+
+  // A filter change drops picked accounts it excludes and, once a query has
+  // run, re-queries so the list and the totals follow the filter.
+  function changeOwner(next: OwnerFilter) {
+    setOwner(next)
+    const keep = new Set(
+      accounts.filter(a => selected.has(platformId(a)) && accountMatches(a, next)).map(platformId),
+    )
+    setSelected(keep)
+    if (agg) void runQuery(1, keep, next)
   }
 
   function focusAccount(id: number) {
@@ -153,6 +207,34 @@ export default function SupplierRecordLog({ isAdmin }: { isAdmin: boolean }) {
           >
             <option value="2.0">2.0</option>
             <option value="1.0">1.0</option>
+          </select>
+        </div>
+        {isAdmin && (
+          <div>
+            <label className="block text-[10px] text-gray-400 mb-0.5">供应商</label>
+            <select
+              value={owner.supplier}
+              onChange={e => changeOwner({ ...owner, supplier: e.target.value })}
+              className="border border-gray-300 rounded-md px-2 py-1.5 text-xs"
+            >
+              <option value="">全部供应商</option>
+              {supplierOptions.map(s => (
+                <option key={s.id} value={String(s.id)}>{s.label}</option>
+              ))}
+            </select>
+          </div>
+        )}
+        <div>
+          <label className="block text-[10px] text-gray-400 mb-0.5">厂商类型</label>
+          <select
+            value={owner.provider}
+            onChange={e => changeOwner({ ...owner, provider: e.target.value })}
+            className="border border-gray-300 rounded-md px-2 py-1.5 text-xs"
+          >
+            <option value="">全部类型</option>
+            {providerOptions.map(p => (
+              <option key={p.key} value={p.key}>{p.label}</option>
+            ))}
           </select>
         </div>
         <div className="relative">

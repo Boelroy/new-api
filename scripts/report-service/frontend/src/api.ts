@@ -847,7 +847,10 @@ export type SupplierRecordLogAccount = {
   remark: string
   a1_id: number
   a2_id: number
+  uploaded_by: number
+  // Owner identity; admin-only (blank for suppliers).
   username?: string
+  studio?: string
 }
 
 export type SupplierRecordLogFilter = {
@@ -857,6 +860,10 @@ export type SupplierRecordLogFilter = {
   model?: string
   // Platform account ids; empty = every account the caller may see.
   account_ids?: number[]
+  // Owner filter, honored for admins only (the server pins suppliers to
+  // themselves). providers ignores case and outer spaces; empty = all.
+  uploaded_by?: number
+  providers?: string[]
 }
 
 export type SupplierRecordLogRow = {
