@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -149,6 +150,176 @@ func TestSupplierAccountCreate(t *testing.T) {
 		})
 	}
 }
+
+func TestSupplierMetricsFilterAndSummary(t *testing.T) {
+	previousDB, previousClient := db, supplierHTTPClient
+	previousOrigin, previousToken := supplierAccountBaseURL, supplierAccountToken
+	t.Cleanup(func() {
+		db, supplierHTTPClient = previousDB, previousClient
+		supplierAccountBaseURL, supplierAccountToken = previousOrigin, previousToken
+	})
+	supplierAccountBaseURL, supplierAccountToken = "https://portal.invalid", "fixture-token"
+
+	// Local accounts: remote id, alias, provider, owner. Account 104 has no
+	// metrics row and still counts as an account.
+	type account struct {
+		id       int64
+		provider string
+		owner    int64
+		username string
+		studio   string
+	}
+	all := []account{
+		{104, "openai", 7, "alice", "Studio A"},
+		{103, "openai", 8, "bob", "Studio B"},
+		{102, "claude", 7, "alice", "Studio A"},
+		{101, "openai", 7, "alice", "Studio A"},
+	}
+	alias := func(id int64) string { return "p-company-" + strconv.FormatInt(id, 10) }
+	// Portal metrics keyed by an internal aid; rows join back via alias.
+	type usage struct {
+		requests, prompt, completion int64
+		rate, costRMB                float64
+	}
+	portal := map[int64]usage{
+		101: {100, 1000, 500, 0.75, 10},
+		102: {50, 400, 200, 1.0, 5},
+		103: {10, 80, 40, 0.5, 2},
+	}
+
+	for _, tc := range []struct {
+		name       string
+		role       int
+		userID     int64
+		request    gin.H
+		wantArg    *int64  // The owner the account query must be scoped to.
+		dbOwner    *int64  // Rows the database holds for that scope (nil = all).
+		wantIDs    []int64 // Account ids sent to the portal.
+		wantTotal  string
+		wantByProv string
+		wantBySupp string
+	}{
+		{
+			name: "admin filters by supplier and provider", role: minAdminRole, userID: 1,
+			request: gin.H{"uploaded_by": 7, "providers": []string{" OpenAI"}},
+			wantArg: ptr[int64](7), dbOwner: ptr[int64](7), wantIDs: []int64{104, 101},
+			wantTotal:  `{"accounts":2,"requests":100,"prompt_tokens":1000,"completion_tokens":500,"cost":10,"success_rate":0.75}`,
+			wantByProv: `[{"provider":"openai","accounts":2,"requests":100,"prompt_tokens":1000,"completion_tokens":500,"cost":10,"success_rate":0.75}]`,
+			wantBySupp: `[{"uploaded_by":7,"username":"alice","studio":"Studio A","accounts":2,"requests":100,"prompt_tokens":1000,"completion_tokens":500,"cost":10,"success_rate":0.75}]`,
+		},
+		{
+			name: "admin without filters sees every account", role: minAdminRole, userID: 1,
+			request: gin.H{}, wantIDs: []int64{104, 103, 102, 101},
+			wantTotal:  `{"accounts":4,"requests":160,"prompt_tokens":1480,"completion_tokens":740,"cost":17,"success_rate":0.8125}`,
+			wantByProv: `[{"provider":"openai","accounts":3,"requests":110,"prompt_tokens":1080,"completion_tokens":540,"cost":12,"success_rate":0.7272727272727273},{"provider":"claude","accounts":1,"requests":50,"prompt_tokens":400,"completion_tokens":200,"cost":5,"success_rate":1}]`,
+			wantBySupp: `[{"uploaded_by":7,"username":"alice","studio":"Studio A","accounts":3,"requests":150,"prompt_tokens":1400,"completion_tokens":700,"cost":15,"success_rate":0.8333333333333334},{"uploaded_by":8,"username":"bob","studio":"Studio B","accounts":1,"requests":10,"prompt_tokens":80,"completion_tokens":40,"cost":2,"success_rate":0.5}]`,
+		},
+		{
+			name: "supplier asking for another owner gets only their own", role: 4, userID: 7,
+			request: gin.H{"uploaded_by": 8, "providers": []string{"claude"}},
+			wantArg: ptr[int64](7), dbOwner: ptr[int64](7), wantIDs: []int64{102},
+			wantTotal:  `{"accounts":1,"requests":50,"prompt_tokens":400,"completion_tokens":200,"cost":5,"success_rate":1}`,
+			wantByProv: `[{"provider":"claude","accounts":1,"requests":50,"prompt_tokens":400,"completion_tokens":200,"cost":5,"success_rate":1}]`,
+			wantBySupp: `[]`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = pool.Close() })
+			db = pool
+			rows := sqlmock.NewRows([]string{"remote_account_id", "alias", "provider", "uploaded_by", "username", "studio"})
+			for _, a := range all {
+				if tc.dbOwner == nil || a.owner == *tc.dbOwner {
+					rows.AddRow(a.id, alias(a.id), a.provider, a.owner, a.username, a.studio)
+				}
+			}
+			query := mock.ExpectQuery(`FROM rs_supplier_account a`)
+			if tc.wantArg != nil {
+				query.WithArgs(*tc.wantArg)
+			}
+			query.WillReturnRows(rows)
+
+			supplierHTTPClient = &http.Client{Transport: supplierPortalTransport(func(r *http.Request) (*http.Response, error) {
+				defer r.Body.Close()
+				var req struct {
+					AccountIDs []int64 `json:"account_ids"`
+				}
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+				assert.Equal(t, tc.wantIDs, req.AccountIDs)
+				items := []gin.H{}
+				for _, id := range req.AccountIDs {
+					u, ok := portal[id]
+					if !ok {
+						continue
+					}
+					if r.URL.Path == "/supplier-account/api/openapi/bill/query" {
+						items = append(items, gin.H{"id": id, "cost": u.costRMB})
+						continue
+					}
+					items = append(items, gin.H{
+						"aid": 9000 + id, "account_alias": alias(id), "status": "active",
+						"requests": u.requests, "prompt_tokens": u.prompt, "completion_tokens": u.completion,
+						"success_rate": u.rate,
+					})
+				}
+				key := "accounts"
+				if r.URL.Path == "/supplier-account/api/openapi/bill/query" {
+					key = "list"
+				}
+				encoded, err := json.Marshal(gin.H{key: items})
+				require.NoError(t, err)
+				w := httptest.NewRecorder()
+				_, _ = w.Write(encoded)
+				return w.Result(), nil
+			})}
+
+			encoded, err := json.Marshal(gin.H{"begin_time": "2026-11-01 00:00:00", "end_time": "2026-11-20 00:00:00"})
+			if len(tc.request) > 0 {
+				req := gin.H{"begin_time": "2026-11-01 00:00:00", "end_time": "2026-11-20 00:00:00"}
+				maps.Copy(req, tc.request)
+				encoded, err = json.Marshal(req)
+			}
+			require.NoError(t, err)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Set("role", tc.role)
+			c.Set("user_id", tc.userID)
+			c.Request = httptest.NewRequest(http.MethodPost, "/api/supplier-account/metrics", bytes.NewReader(encoded))
+			c.Request.Header.Set("Content-Type", "application/json")
+			handleSupplierMetrics(c)
+
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			var resp struct {
+				Accounts []supplierMetric `json:"accounts"`
+				Summary  struct {
+					Total      json.RawMessage `json:"total"`
+					ByProvider json.RawMessage `json:"by_provider"`
+					BySupplier json.RawMessage `json:"by_supplier"`
+				} `json:"summary"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			assert.JSONEq(t, tc.wantTotal, string(resp.Summary.Total))
+			assert.JSONEq(t, tc.wantByProv, string(resp.Summary.ByProvider))
+			assert.JSONEq(t, tc.wantBySupp, string(resp.Summary.BySupplier))
+
+			// The account rows keep their existing shape: re-keyed onto the
+			// remote id, alias masked, cost from the bill.
+			var rowRequests int64
+			for _, m := range resp.Accounts {
+				assert.Contains(t, tc.wantIDs, m.AID)
+				assert.Equal(t, "p-***-"+strconv.FormatInt(m.AID, 10), m.AccountAlias)
+				require.NotNil(t, m.Cost)
+				assert.InDelta(t, portal[m.AID].costRMB, *m.Cost, 1e-9)
+				rowRequests += *m.Requests
+			}
+			assert.Contains(t, tc.wantTotal, `"requests":`+strconv.FormatInt(rowRequests, 10)+`,`)
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
 
 func TestSupplierAccountProxyURL(t *testing.T) {
 	for _, address := range []string{
