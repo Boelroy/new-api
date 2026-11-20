@@ -1236,6 +1236,10 @@ func handleSupplierMetrics(c *gin.Context) {
 	var body struct {
 		BeginTime string `json:"begin_time"`
 		EndTime   string `json:"end_time"`
+		// Optional filters. uploaded_by is honored for admins only; a supplier
+		// is always scoped to their own uploads. Empty providers = all.
+		UploadedBy *int64   `json:"uploaded_by"`
+		Providers  []string `json:"providers"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
@@ -1250,28 +1254,35 @@ func handleSupplierMetrics(c *gin.Context) {
 
 	isAdmin := callerIsSupplierAdmin(c)
 
-	// Resolve the account id set this caller is allowed to query.
-	var (
-		idRows interface {
-			Next() bool
-			Scan(...any) error
-			Close() error
-		}
-		err error
-	)
-	if isAdmin {
-		r, e := db.Query(`SELECT remote_account_id, alias FROM rs_supplier_account ORDER BY id DESC`)
-		idRows, err = r, e
-	} else {
+	// Resolve the account set this caller is allowed to query. A supplier's
+	// uploaded_by filter is ignored: they are pinned to their own user id.
+	query := `SELECT a.remote_account_id, a.alias, a.provider, a.uploaded_by,
+	                 COALESCE(u.username, ''), a.studio
+	            FROM rs_supplier_account a
+	            LEFT JOIN rs_auth_user u ON u.id = a.uploaded_by`
+	var args []any
+	switch {
+	case !isAdmin:
 		uidAny, _ := c.Get("user_id")
 		uid, _ := uidAny.(int64)
-		r, e := db.Query(`SELECT remote_account_id, alias FROM rs_supplier_account WHERE uploaded_by=$1 ORDER BY id DESC`, uid)
-		idRows, err = r, e
+		query += ` WHERE a.uploaded_by=$1`
+		args = append(args, uid)
+	case body.UploadedBy != nil:
+		query += ` WHERE a.uploaded_by=$1`
+		args = append(args, *body.UploadedBy)
 	}
+	idRows, err := db.Query(query+` ORDER BY a.id DESC`, args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	providers := make([]string, 0, len(body.Providers))
+	for _, p := range body.Providers {
+		if p = strings.ToLower(strings.TrimSpace(p)); p != "" {
+			providers = append(providers, p)
+		}
+	}
+	accounts := make([]supplierMetricAccount, 0)
 	ids := make([]int64, 0)
 	// The portal returns metrics keyed by its own internal aid, which is NOT the
 	// account_id we query with (our remote_account_id). alias is the only field
@@ -1279,23 +1290,31 @@ func handleSupplierMetrics(c *gin.Context) {
 	aliasToRemoteID := make(map[string]int64)
 	for idRows.Next() {
 		var (
-			id    int64
+			acc   supplierMetricAccount
 			alias string
 		)
-		if err := idRows.Scan(&id, &alias); err != nil {
+		if err := idRows.Scan(&acc.RemoteAccountID, &alias, &acc.Provider, &acc.UploadedBy, &acc.Username, &acc.Studio); err != nil {
 			idRows.Close()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		ids = append(ids, id)
+		if len(providers) > 0 && !slices.Contains(providers, strings.ToLower(strings.TrimSpace(acc.Provider))) {
+			continue
+		}
+		accounts = append(accounts, acc)
+		ids = append(ids, acc.RemoteAccountID)
 		if alias != "" {
-			aliasToRemoteID[alias] = id
+			aliasToRemoteID[alias] = acc.RemoteAccountID
 		}
 	}
 	idRows.Close()
 
 	if len(ids) == 0 {
-		c.JSON(http.StatusOK, gin.H{"accounts": []supplierMetric{}})
+		c.JSON(http.StatusOK, gin.H{
+			"accounts": []supplierMetric{},
+			"summary":  summarizeSupplierMetrics(accounts, nil, isAdmin),
+			"fx_rate":  supplierFxRate(),
+		})
 		return
 	}
 
@@ -1304,7 +1323,126 @@ func handleSupplierMetrics(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"accounts": merged})
+	c.JSON(http.StatusOK, gin.H{
+		"accounts": merged,
+		"summary":  summarizeSupplierMetrics(accounts, merged, isAdmin),
+		"fx_rate":  supplierFxRate(),
+	})
+}
+
+// supplierMetricAccount is the local ownership/provider record of one account
+// in a metrics query, used to group the portal metrics.
+type supplierMetricAccount struct {
+	RemoteAccountID int64
+	Provider        string
+	UploadedBy      int64
+	Username        string
+	Studio          string
+}
+
+// supplierMetricTotals is the usage roll-up of a set of accounts. Cost is the
+// bill cost in RMB like each row's cost (null when no account had one);
+// SuccessRate is weighted by requests (null when there were none).
+type supplierMetricTotals struct {
+	Accounts         int      `json:"accounts"`
+	Requests         int64    `json:"requests"`
+	PromptTokens     int64    `json:"prompt_tokens"`
+	CompletionTokens int64    `json:"completion_tokens"`
+	Cost             *float64 `json:"cost"`
+	SuccessRate      *float64 `json:"success_rate"`
+
+	rateWeight  float64
+	rateWeights int64
+}
+
+func (t *supplierMetricTotals) add(m *supplierMetric) {
+	if m == nil {
+		return
+	}
+	if m.Requests != nil {
+		t.Requests += *m.Requests
+	}
+	if m.PromptTokens != nil {
+		t.PromptTokens += *m.PromptTokens
+	}
+	if m.CompletionTokens != nil {
+		t.CompletionTokens += *m.CompletionTokens
+	}
+	if m.Cost != nil {
+		cost := *m.Cost
+		if t.Cost != nil {
+			cost += *t.Cost
+		}
+		t.Cost = &cost
+	}
+	if m.SuccessRate != nil && m.Requests != nil && *m.Requests > 0 {
+		t.rateWeight += *m.SuccessRate * float64(*m.Requests)
+		t.rateWeights += *m.Requests
+		rate := t.rateWeight / float64(t.rateWeights)
+		t.SuccessRate = &rate
+	}
+}
+
+type supplierMetricSupplierTotals struct {
+	UploadedBy int64  `json:"uploaded_by"`
+	Username   string `json:"username"`
+	Studio     string `json:"studio"`
+	supplierMetricTotals
+}
+
+type supplierMetricProviderTotals struct {
+	Provider string `json:"provider"`
+	supplierMetricTotals
+}
+
+type supplierMetricSummary struct {
+	Total      supplierMetricTotals            `json:"total"`
+	BySupplier []*supplierMetricSupplierTotals `json:"by_supplier"`
+	ByProvider []*supplierMetricProviderTotals `json:"by_provider"`
+}
+
+// summarizeSupplierMetrics rolls the metrics of the queried accounts up into a
+// total plus per-supplier and per-provider subtotals; every account counts,
+// with or without a metrics row. The per-supplier table is admin-only, so a
+// supplier never sees owner identities. Groups keep the accounts' order.
+func summarizeSupplierMetrics(accounts []supplierMetricAccount, metrics []supplierMetric, withSuppliers bool) supplierMetricSummary {
+	byAID := make(map[int64]*supplierMetric, len(metrics))
+	for i := range metrics {
+		byAID[metrics[i].AID] = &metrics[i]
+	}
+	summary := supplierMetricSummary{
+		BySupplier: []*supplierMetricSupplierTotals{},
+		ByProvider: []*supplierMetricProviderTotals{},
+	}
+	suppliers := map[int64]*supplierMetricSupplierTotals{}
+	providers := map[string]*supplierMetricProviderTotals{}
+	for _, acc := range accounts {
+		m := byAID[acc.RemoteAccountID]
+		summary.Total.Accounts++
+		summary.Total.add(m)
+
+		p, ok := providers[acc.Provider]
+		if !ok {
+			p = &supplierMetricProviderTotals{Provider: acc.Provider}
+			providers[acc.Provider] = p
+			summary.ByProvider = append(summary.ByProvider, p)
+		}
+		p.Accounts++
+		p.add(m)
+
+		if !withSuppliers {
+			continue
+		}
+		s, ok := suppliers[acc.UploadedBy]
+		if !ok {
+			s = &supplierMetricSupplierTotals{UploadedBy: acc.UploadedBy, Username: acc.Username, Studio: acc.Studio}
+			suppliers[acc.UploadedBy] = s
+			summary.BySupplier = append(summary.BySupplier, s)
+		}
+		s.Accounts++
+		s.add(m)
+	}
+	return summary
 }
 
 // supplierQueryMetrics fetches realtime metrics for the given portal account

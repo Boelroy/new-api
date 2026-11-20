@@ -2,12 +2,15 @@ import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import Layout from '../components/Layout'
 import SupplierRecordLog from '../components/SupplierRecordLog'
+import SummaryCards from '../components/SummaryCards'
 import { withBase } from '../basePath'
 import {
   api,
   ROLE_ADMIN,
   type SupplierAccount,
   type SupplierMetric,
+  type SupplierMetricSummary,
+  type SupplierMetricTotals,
   type SupplierModel,
   type SupplierProvider,
   type SupplierProviderDefault,
@@ -95,6 +98,65 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'logs', label: '使用日志' },
 ]
 
+// Bill cost arrives in RMB; the page shows USD like the per-account column.
+function fmtUsd(costRMB: number | null, fxRate: number): string {
+  return costRMB != null ? `$${(costRMB / fxRate).toFixed(2)}` : '—'
+}
+
+// success_rate is already a percentage, as in the account rows.
+function fmtRate(rate: number | null): string {
+  return rate != null ? `${rate.toFixed(2)}%` : '—'
+}
+
+// Subtotal table for one grouping of the metrics summary (supplier or provider).
+function MetricTotalsTable({
+  title,
+  rows,
+  fxRate,
+}: {
+  title: string
+  rows: { key: string; label: string; totals: SupplierMetricTotals }[]
+  fxRate: number
+}) {
+  return (
+    <div className="border border-gray-200 rounded-md overflow-x-auto">
+      <div className="px-3 py-2 text-xs font-semibold border-b border-gray-200 bg-gray-50">{title}</div>
+      <table className="w-full text-xs border-collapse">
+        <thead>
+          <tr className="text-left border-b border-gray-200">
+            <th className="py-1.5 px-3 mono-label">名称</th>
+            <th className="py-1.5 px-3 mono-label text-right">账号</th>
+            <th className="py-1.5 px-3 mono-label text-right">请求数</th>
+            <th className="py-1.5 px-3 mono-label text-right">Prompt</th>
+            <th className="py-1.5 px-3 mono-label text-right">Completion</th>
+            <th className="py-1.5 px-3 mono-label text-right">成本($)</th>
+            <th className="py-1.5 px-3 mono-label text-right">成功率</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr>
+              <td colSpan={7} className="py-3 px-3 text-center text-gray-400">暂无数据</td>
+            </tr>
+          ) : (
+            rows.map(r => (
+              <tr key={r.key} className="border-b border-gray-100">
+                <td className="py-1.5 px-3">{r.label}</td>
+                <td className="py-1.5 px-3 text-right tabular-nums">{r.totals.accounts.toLocaleString()}</td>
+                <td className="py-1.5 px-3 text-right tabular-nums">{r.totals.requests.toLocaleString()}</td>
+                <td className="py-1.5 px-3 text-right tabular-nums">{r.totals.prompt_tokens.toLocaleString()}</td>
+                <td className="py-1.5 px-3 text-right tabular-nums">{r.totals.completion_tokens.toLocaleString()}</td>
+                <td className="py-1.5 px-3 text-right tabular-nums">{fmtUsd(r.totals.cost, fxRate)}</td>
+                <td className="py-1.5 px-3 text-right tabular-nums">{fmtRate(r.totals.success_rate)}</td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 export default function SupplierAccounts() {
   const [params, setParams] = useSearchParams()
   const tab = (TABS.some(t => t.id === params.get('tab')) ? params.get('tab') : 'accounts') as Tab
@@ -140,6 +202,11 @@ export default function SupplierAccounts() {
   const [endTime, setEndTime] = useState(fmtLocal(new Date()))
   const [loadingMetrics, setLoadingMetrics] = useState(false)
   const [metricsErr, setMetricsErr] = useState<string | null>(null)
+  // Usage filters ('' = all). The supplier filter is admin-only; the server
+  // ignores it for suppliers anyway. The list and the summary follow both.
+  const [filterSupplier, setFilterSupplier] = useState('')
+  const [filterProvider, setFilterProvider] = useState('')
+  const [summary, setSummary] = useState<SupplierMetricSummary | null>(null)
 
   // RMB->USD divisor (from the accounts response); cost/quota are shown in USD.
   const [fxRate, setFxRate] = useState(7.2)
@@ -216,6 +283,36 @@ export default function SupplierAccounts() {
       return ''
     }
   }, [modelUrl])
+
+  // Filter options come from the accounts the caller can see; providers also
+  // include the portal's list so a type with no accounts yet can be picked.
+  const supplierOptions = useMemo(() => {
+    const seen = new Map<number, string>()
+    for (const a of accounts) {
+      if (!seen.has(a.uploaded_by)) {
+        seen.set(a.uploaded_by, [a.studio, a.username || `uid ${a.uploaded_by}`].filter(Boolean).join(' / '))
+      }
+    }
+    return [...seen].map(([id, label]) => ({ id, label }))
+  }, [accounts])
+  const providerOptions = useMemo(() => {
+    const names = new Map<string, string>()
+    for (const name of [...providers.map(p => p.name), ...accounts.map(a => a.provider)]) {
+      const key = name.trim().toLowerCase()
+      if (key && !names.has(key)) names.set(key, name.trim())
+    }
+    return [...names.values()]
+  }, [providers, accounts])
+  // Same matching as the server: exact owner, provider case-insensitive.
+  const visibleAccounts = useMemo(
+    () =>
+      accounts.filter(
+        a =>
+          (!isAdmin || !filterSupplier || String(a.uploaded_by) === filterSupplier) &&
+          (!filterProvider || a.provider.trim().toLowerCase() === filterProvider.trim().toLowerCase()),
+      ),
+    [accounts, isAdmin, filterSupplier, filterProvider],
+  )
 
   async function loadAccounts() {
     try {
@@ -531,7 +628,7 @@ export default function SupplierAccounts() {
     }
   }
 
-  async function handleRefreshMetrics() {
+  async function handleRefreshMetrics(supplier = filterSupplier, provider = filterProvider) {
     setMetricsErr(null)
     setLoadingMetrics(true)
     // Always query up to "now" rather than the end-time picker value, so a
@@ -539,10 +636,17 @@ export default function SupplierAccounts() {
     const now = fmtLocal(new Date())
     setEndTime(now)
     try {
-      const res = await api.supplierMetrics({ begin_time: beginTime, end_time: now })
+      const res = await api.supplierMetrics({
+        begin_time: beginTime,
+        end_time: now,
+        uploaded_by: isAdmin && supplier ? Number(supplier) : undefined,
+        providers: provider ? [provider] : undefined,
+      })
       const map: Record<number, SupplierMetric> = {}
       for (const m of res.accounts || []) map[m.aid] = m
       setMetrics(map)
+      setSummary(res.summary ?? null)
+      if (typeof res.fx_rate === 'number' && res.fx_rate > 0) setFxRate(res.fx_rate)
     } catch (e: any) {
       setMetricsErr(e?.message || String(e))
     } finally {
@@ -1252,7 +1356,7 @@ export default function SupplierAccounts() {
                 </button>
               )}
               <button
-                onClick={handleRefreshMetrics}
+                onClick={() => handleRefreshMetrics()}
                 disabled={loadingMetrics}
                 className="bg-brand hover:bg-brand-700 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 transition-colors"
               >
@@ -1268,9 +1372,85 @@ export default function SupplierAccounts() {
             <div className="mb-3 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs rounded-md px-3 py-2">{syncMsg}</div>
           )}
 
+          {accounts.length > 0 && (
+            <div className="flex flex-wrap items-end gap-2 mb-3">
+              {isAdmin && (
+                <div>
+                  <label className="block text-[10px] text-gray-400 mb-0.5">供应商</label>
+                  <select
+                    value={filterSupplier}
+                    onChange={e => {
+                      setFilterSupplier(e.target.value)
+                      void handleRefreshMetrics(e.target.value, filterProvider)
+                    }}
+                    className="border border-gray-300 rounded-md px-2 py-1.5 text-xs bg-white"
+                  >
+                    <option value="">全部供应商</option>
+                    {supplierOptions.map(s => (
+                      <option key={s.id} value={String(s.id)}>{s.label}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div>
+                <label className="block text-[10px] text-gray-400 mb-0.5">厂商类型</label>
+                <select
+                  value={filterProvider}
+                  onChange={e => {
+                    setFilterProvider(e.target.value)
+                    void handleRefreshMetrics(filterSupplier, e.target.value)
+                  }}
+                  className="border border-gray-300 rounded-md px-2 py-1.5 text-xs bg-white"
+                >
+                  <option value="">全部类型</option>
+                  {providerOptions.map(p => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
+
+          {summary && accounts.length > 0 && (
+            <>
+              <SummaryCards
+                cards={[
+                  { label: '账号数', value: summary.total.accounts.toLocaleString() },
+                  { label: '请求数', value: summary.total.requests.toLocaleString() },
+                  { label: 'Prompt Tokens', value: summary.total.prompt_tokens.toLocaleString() },
+                  { label: 'Completion Tokens', value: summary.total.completion_tokens.toLocaleString() },
+                  { label: '成本($)', value: fmtUsd(summary.total.cost, fxRate) },
+                  { label: '成功率', value: fmtRate(summary.total.success_rate) },
+                ]}
+              />
+              <div className={`grid gap-3 mb-4 ${isAdmin ? 'lg:grid-cols-2' : ''}`}>
+                {isAdmin && (
+                  <MetricTotalsTable
+                    title="按供应商小计"
+                    fxRate={fxRate}
+                    rows={summary.by_supplier.map(s => ({
+                      key: String(s.uploaded_by),
+                      label: [s.studio, s.username || `uid ${s.uploaded_by}`].filter(Boolean).join(' / '),
+                      totals: s,
+                    }))}
+                  />
+                )}
+                <MetricTotalsTable
+                  title="按厂商类型小计"
+                  fxRate={fxRate}
+                  rows={summary.by_provider.map(p => ({ key: p.provider, label: p.provider || '—', totals: p }))}
+                />
+              </div>
+            </>
+          )}
+
           {accounts.length === 0 ? (
             <div className="text-sm text-gray-400 border border-dashed border-gray-200 rounded-md px-3 py-10 text-center">
               还没有提交记录，从左侧填写并提交第一条账号吧
+            </div>
+          ) : visibleAccounts.length === 0 ? (
+            <div className="text-sm text-gray-400 border border-dashed border-gray-200 rounded-md px-3 py-10 text-center">
+              当前筛选下没有账号
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -1290,7 +1470,7 @@ export default function SupplierAccounts() {
                   </tr>
                 </thead>
                 <tbody>
-                  {accounts.map(a => {
+                  {visibleAccounts.map(a => {
                     const m = metrics[a.remote_account_id]
                     const usdSpent = m?.cost != null ? m.cost / fxRate : null
                     const overQuota = a.quota_usd > 0 && usdSpent != null && usdSpent >= a.quota_usd
