@@ -1276,12 +1276,7 @@ func handleSupplierMetrics(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	providers := make([]string, 0, len(body.Providers))
-	for _, p := range body.Providers {
-		if p = strings.ToLower(strings.TrimSpace(p)); p != "" {
-			providers = append(providers, p)
-		}
-	}
+	providers := normalizeSupplierProviders(body.Providers)
 	accounts := make([]supplierMetricAccount, 0)
 	ids := make([]int64, 0)
 	// The portal returns metrics keyed by its own internal aid, which is NOT the
@@ -1298,7 +1293,7 @@ func handleSupplierMetrics(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		if len(providers) > 0 && !slices.Contains(providers, strings.ToLower(strings.TrimSpace(acc.Provider))) {
+		if !supplierProviderMatches(providers, acc.Provider) {
 			continue
 		}
 		accounts = append(accounts, acc)
@@ -1328,6 +1323,24 @@ func handleSupplierMetrics(c *gin.Context) {
 		"summary":  summarizeSupplierMetrics(accounts, merged, isAdmin),
 		"fx_rate":  supplierFxRate(),
 	})
+}
+
+// normalizeSupplierProviders turns a provider-type filter into match keys:
+// trimmed, lower-cased, blanks dropped. Empty result = every provider.
+func normalizeSupplierProviders(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, p := range in {
+		if p = strings.ToLower(strings.TrimSpace(p)); p != "" && !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// supplierProviderMatches reports whether an account's provider passes a
+// filter from normalizeSupplierProviders (case and outer spaces ignored).
+func supplierProviderMatches(filter []string, provider string) bool {
+	return len(filter) == 0 || slices.Contains(filter, strings.ToLower(strings.TrimSpace(provider)))
 }
 
 // supplierMetricAccount is the local ownership/provider record of one account

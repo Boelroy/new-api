@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
@@ -320,6 +322,146 @@ func TestSupplierMetricsFilterAndSummary(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func TestSupplierRecordLogFilters(t *testing.T) {
+	previousDB := db
+	t.Cleanup(func() { db = previousDB })
+
+	// Platform-2.0 ids and providers of user 7's accounts; user 8 owns 301.
+	ownedBy7 := [][]driver.Value{{int64(201), "openai"}, {int64(202), "claude"}, {int64(203), " OpenAI"}}
+	start := time.Now().Add(-time.Hour).In(supplierPortalLoc).Format(time.DateTime)
+
+	for _, tc := range []struct {
+		name    string
+		role    int
+		userID  int64
+		request gin.H
+		ownerQ  *int64 // Owner the account lookup must be scoped to (nil = no lookup).
+		wantIDs string // account_id = ANY(...) argument; "" = no account filter.
+		status  int
+	}{
+		{name: "admin by supplier and provider", role: minAdminRole, userID: 1,
+			request: gin.H{"uploaded_by": 7, "providers": []string{" OpenAI"}}, ownerQ: ptr[int64](7), wantIDs: "{201,203}", status: 200},
+		{name: "admin filters intersect picked accounts", role: minAdminRole, userID: 1,
+			request: gin.H{"uploaded_by": 7, "providers": []string{"openai"}, "account_ids": []int{203, 301}}, ownerQ: ptr[int64](7), wantIDs: "{203}", status: 200},
+		{name: "supplier asking for another owner gets only their own", role: 4, userID: 7,
+			request: gin.H{"uploaded_by": 8}, ownerQ: ptr[int64](7), wantIDs: "{201,202,203}", status: 200},
+		{name: "supplier picking another owner's account is refused", role: 4, userID: 7,
+			request: gin.H{"account_ids": []int{301}}, ownerQ: ptr[int64](7), status: 403},
+		{name: "admin without new params is unscoped", role: minAdminRole, userID: 1,
+			request: gin.H{}, status: 200},
+	} {
+		for _, endpoint := range []string{"list", "aggregate"} {
+			t.Run(tc.name+"/"+endpoint, func(t *testing.T) {
+				pool, mock, err := sqlmock.New()
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = pool.Close() })
+				db = pool
+				if tc.ownerQ != nil {
+					rows := sqlmock.NewRows([]string{"a2_id", "provider"})
+					for _, r := range ownedBy7 {
+						rows.AddRow(r...)
+					}
+					mock.ExpectQuery(`SELECT a2_id, provider FROM rs_supplier_account WHERE a2_id > 0 AND uploaded_by=\$1`).
+						WithArgs(*tc.ownerQ).WillReturnRows(rows)
+				}
+				// list and aggregate must share one filter.
+				filter := []driver.Value{"2.0", sqlmock.AnyArg(), sqlmock.AnyArg()}
+				if tc.wantIDs != "" {
+					filter = append(filter, tc.wantIDs)
+				}
+				if tc.status == 200 && endpoint == "list" {
+					mock.ExpectQuery(`SELECT COUNT\(\*\) FROM rs_supplier_record_log WHERE`).WithArgs(filter...).
+						WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+					mock.ExpectQuery(`(?s)FROM rs_supplier_record_log WHERE .* ORDER BY`).WithArgs(append(filter, 50, 0)...).
+						WillReturnRows(sqlmock.NewRows([]string{"id", "req_time", "account_id", "account_name", "provider", "model", "stream",
+							"prompt_tokens", "completion_tokens", "cost", "duration_ms", "status_code", "err_code", "err_msg", "other"}).
+							AddRow(1, time.Now().Unix(), 201, "openai-company-1", "openai", "m", false, 10, 5, 2e6, 100, 200, "", "", ""))
+				}
+				if tc.status == 200 && endpoint == "aggregate" {
+					mock.ExpectQuery(`(?s)FROM rs_supplier_record_log WHERE .* GROUP BY account_id`).WithArgs(filter...).
+						WillReturnRows(sqlmock.NewRows([]string{"account_id", "count", "failed", "cost"}).AddRow(201, 1, 0, 2e6))
+				}
+
+				body := gin.H{"platform_type": "2.0", "start_time": start}
+				maps.Copy(body, tc.request)
+				encoded, err := json.Marshal(body)
+				require.NoError(t, err)
+				w := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(w)
+				c.Set("role", tc.role)
+				c.Set("user_id", tc.userID)
+				c.Request = httptest.NewRequest(http.MethodPost, "/api/supplier-account/record-log/"+endpoint, bytes.NewReader(encoded))
+				c.Request.Header.Set("Content-Type", "application/json")
+				if endpoint == "list" {
+					handleSupplierRecordLogList(c)
+				} else {
+					handleSupplierRecordLogAggregate(c)
+				}
+
+				require.Equal(t, tc.status, w.Code, w.Body.String())
+				if tc.status == 200 && endpoint == "list" {
+					assert.Contains(t, w.Body.String(), `"total":1`)
+				}
+				if tc.status == 200 && endpoint == "aggregate" {
+					assert.Contains(t, w.Body.String(), `"requests":1`)
+				}
+				assert.NoError(t, mock.ExpectationsWereMet())
+			})
+		}
+	}
+}
+
+func TestSupplierRecordLogAccountsFilters(t *testing.T) {
+	previousDB := db
+	t.Cleanup(func() { db = previousDB })
+
+	for _, tc := range []struct {
+		name   string
+		role   int
+		userID int64
+		query  string
+		owner  int64
+		want   string
+	}{
+		{name: "admin narrows by supplier and provider", role: minAdminRole, userID: 1,
+			query: "?uploaded_by=7&providers=OpenAI", owner: 7,
+			want: `[{"id":1,"provider":"openai","alias":"a","remark":"","a1_id":11,"a2_id":21,"uploaded_by":7,"username":"alice","studio":"Studio A"},` +
+				`{"id":3,"provider":" OpenAI","alias":"c","remark":"","a1_id":13,"a2_id":23,"uploaded_by":7,"username":"alice","studio":"Studio A"}]`},
+		{name: "supplier ignores uploaded_by and loses owner names", role: 4, userID: 7,
+			query: "?uploaded_by=8&providers=claude,azure", owner: 7,
+			want: `[{"id":2,"provider":"claude","alias":"b","remark":"","a1_id":12,"a2_id":22,"uploaded_by":7}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = pool.Close() })
+			db = pool
+			rows := sqlmock.NewRows([]string{"id", "provider", "alias", "remark", "a1_id", "a2_id", "uploaded_by", "username", "studio"})
+			for i, p := range []string{"openai", "claude", " OpenAI"} {
+				id := int64(i + 1)
+				rows.AddRow(id, p, string(rune('a'+i)), "", 10+id, 20+id, int64(7), "alice", "Studio A")
+			}
+			mock.ExpectQuery(`FROM rs_supplier_account a\s+LEFT JOIN rs_auth_user u ON u.id = a.uploaded_by WHERE a.uploaded_by=\$1`).
+				WithArgs(tc.owner).WillReturnRows(rows)
+
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Set("role", tc.role)
+			c.Set("user_id", tc.userID)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/supplier-account/record-log/accounts"+tc.query, nil)
+			handleSupplierRecordLogAccounts(c)
+
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			var resp struct {
+				Accounts json.RawMessage `json:"accounts"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			assert.JSONEq(t, tc.want, string(resp.Accounts))
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
 
 func TestSupplierAccountProxyURL(t *testing.T) {
 	for _, address := range []string{
