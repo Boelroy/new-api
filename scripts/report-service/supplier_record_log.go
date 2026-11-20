@@ -410,11 +410,18 @@ type supplierRecordLogQuery struct {
 	EndTime      string  `json:"end_time"`
 	Model        string  `json:"model"`
 	AccountIDs   []int64 `json:"account_ids"`
-	Page         int     `json:"page"`
-	PageSize     int     `json:"page_size"`
+	// Optional filters over the local account table, resolved into
+	// AccountIDs. uploaded_by is honored for admins only; providers ignore
+	// case and outer spaces (empty = all).
+	UploadedBy *int64   `json:"uploaded_by"`
+	Providers  []string `json:"providers"`
+	Page       int      `json:"page"`
+	PageSize   int      `json:"page_size"`
 
 	start, end int64
-	// scoped means AccountIDs restricts the query (always for suppliers).
+	// scoped means AccountIDs restricts the query (always for suppliers, and
+	// for admins filtering by account, supplier or provider). An empty scoped
+	// set matches nothing.
 	scoped bool
 }
 
@@ -446,41 +453,68 @@ func bindSupplierRecordLogQuery(c *gin.Context) (supplierRecordLogQuery, bool) {
 	q.start, q.end = start.Unix(), end.Unix()
 	q.Model = strings.TrimSpace(q.Model)
 	q.AccountIDs = slices.DeleteFunc(q.AccountIDs, func(id int64) bool { return id <= 0 })
+	q.Providers = normalizeSupplierProviders(q.Providers)
 
-	if callerIsSupplierAdmin(c) {
+	isAdmin := callerIsSupplierAdmin(c)
+	if isAdmin && q.UploadedBy == nil && len(q.Providers) == 0 {
 		q.scoped = len(q.AccountIDs) > 0
 		return q, true
 	}
-	uidAny, _ := c.Get("user_id")
-	uid, _ := uidAny.(int64)
-	rows, err := db.Query(`SELECT `+col+` FROM rs_supplier_account WHERE uploaded_by=$1 AND `+col+` > 0`, uid)
+
+	// Resolve the owner scope (a supplier is pinned to themselves and their
+	// uploaded_by is ignored) into platform ids, then narrow by provider and
+	// by any picked accounts.
+	query := `SELECT ` + col + `, provider FROM rs_supplier_account WHERE ` + col + ` > 0`
+	var args []any
+	switch {
+	case !isAdmin:
+		uidAny, _ := c.Get("user_id")
+		uid, _ := uidAny.(int64)
+		query += ` AND uploaded_by=$1`
+		args = append(args, uid)
+	case q.UploadedBy != nil:
+		query += ` AND uploaded_by=$1`
+		args = append(args, *q.UploadedBy)
+	}
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return q, false
 	}
 	defer rows.Close()
 	own := make([]int64, 0)
+	matched := make([]int64, 0)
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var (
+			id       int64
+			provider string
+		)
+		if err := rows.Scan(&id, &provider); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return q, false
 		}
 		own = append(own, id)
-	}
-	if len(own) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "没有可查询的账号"})
-		return q, false
-	}
-	for _, id := range q.AccountIDs {
-		if !slices.Contains(own, id) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "只能查询自己上传的账号"})
-			return q, false
+		if supplierProviderMatches(q.Providers, provider) {
+			matched = append(matched, id)
 		}
 	}
-	if len(q.AccountIDs) == 0 {
-		q.AccountIDs = own
+	if !isAdmin {
+		if len(own) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "没有可查询的账号"})
+			return q, false
+		}
+		for _, id := range q.AccountIDs {
+			if !slices.Contains(own, id) {
+				c.JSON(http.StatusForbidden, gin.H{"error": "只能查询自己上传的账号"})
+				return q, false
+			}
+		}
 	}
+	if len(q.AccountIDs) > 0 {
+		picked := q.AccountIDs
+		matched = slices.DeleteFunc(matched, func(id int64) bool { return !slices.Contains(picked, id) })
+	}
+	q.AccountIDs = matched
 	q.scoped = true
 	return q, true
 }
@@ -683,25 +717,54 @@ type supplierRecordLogAccount struct {
 	Remark   string `json:"remark"`
 	A1ID     int64  `json:"a1_id"`
 	A2ID     int64  `json:"a2_id"`
-	Username string `json:"username,omitempty"`
+	// Owner identity for the admin supplier filter; username and studio are
+	// blank for suppliers.
+	UploadedBy int64  `json:"uploaded_by"`
+	Username   string `json:"username,omitempty"`
+	Studio     string `json:"studio,omitempty"`
 }
 
 // handleSupplierRecordLogAccounts lists the accounts the caller may pick in the
 // usage-log filter, with their platform account ids. Accounts still missing
 // both ids (fresh uploads) trigger a throttled refresh from the portal roster.
+// Optional query params narrow it like the log queries: uploaded_by (admins
+// only) and providers (repeated or comma-separated, case-insensitive).
 func handleSupplierRecordLogAccounts(c *gin.Context) {
 	isAdmin := callerIsSupplierAdmin(c)
 	uidAny, _ := c.Get("user_id")
 	uid, _ := uidAny.(int64)
+	var providers []string
+	for _, v := range c.QueryArray("providers") {
+		providers = append(providers, strings.Split(v, ",")...)
+	}
+	providers = normalizeSupplierProviders(providers)
+	owner := ""
+	if isAdmin {
+		owner = strings.TrimSpace(c.Query("uploaded_by"))
+	}
+	var ownerID int64
+	if owner != "" {
+		id, err := strconv.ParseInt(owner, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "uploaded_by must be a user id"})
+			return
+		}
+		ownerID = id
+	}
 
 	load := func() ([]supplierRecordLogAccount, bool, error) {
-		query := `SELECT a.id, a.provider, a.alias, a.remark, a.a1_id, a.a2_id, COALESCE(u.username, '')
+		query := `SELECT a.id, a.provider, a.alias, a.remark, a.a1_id, a.a2_id,
+		                 a.uploaded_by, COALESCE(u.username, ''), a.studio
 		            FROM rs_supplier_account a
 		            LEFT JOIN rs_auth_user u ON u.id = a.uploaded_by`
 		args := []any{}
-		if !isAdmin {
+		switch {
+		case !isAdmin:
 			query += ` WHERE a.uploaded_by=$1`
 			args = append(args, uid)
+		case owner != "":
+			query += ` WHERE a.uploaded_by=$1`
+			args = append(args, ownerID)
 		}
 		rows, err := db.Query(query+` ORDER BY a.id DESC`, args...)
 		if err != nil {
@@ -712,14 +775,18 @@ func handleSupplierRecordLogAccounts(c *gin.Context) {
 		missing := false
 		for rows.Next() {
 			var a supplierRecordLogAccount
-			if err := rows.Scan(&a.ID, &a.Provider, &a.Alias, &a.Remark, &a.A1ID, &a.A2ID, &a.Username); err != nil {
+			if err := rows.Scan(&a.ID, &a.Provider, &a.Alias, &a.Remark, &a.A1ID, &a.A2ID,
+				&a.UploadedBy, &a.Username, &a.Studio); err != nil {
 				return nil, false, err
 			}
 			if a.A1ID == 0 && a.A2ID == 0 {
 				missing = true
 			}
+			if !supplierProviderMatches(providers, a.Provider) {
+				continue
+			}
 			if !isAdmin {
-				a.Username = ""
+				a.Username, a.Studio = "", ""
 			}
 			a.Alias = maskSupplierAlias(a.Alias)
 			out = append(out, a)
