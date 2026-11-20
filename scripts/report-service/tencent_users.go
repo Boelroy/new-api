@@ -1,14 +1,17 @@
 package main
 
-// 腾讯一站 · 统一新建用户. One form creates the rs_auth_user login of any of the
-// three platforms; the platform role decides which existing gate lets it in:
+// 腾讯一站 · 统一新建用户. One form creates the rs_auth_user login of any of
+// Tencent's three platforms; the platform role decides which existing gate
+// lets it in:
 //
 //   - supplier_01 (role 4): /api/supplier-account (账号上号, requireRoleOrSupplier)
-//   - supplier_02 (role 6): /api/keyhub (requireRoleOrSupplier02)
 //   - supplier_ccmax (8) / ccmax_manager (9): /api/ccmax (requireRoleOrCCMaxRoles)
 //   - proxy (role 1): scripts/newapi-proxy logs in against rs_auth_user and
 //     only checks status + the bcrypt hash, never the role, so proxy users get
 //     the plain user tier, which opens nothing else beyond studio-scoped views.
+//
+// KHub (pd-maas, supplier_02 role 6) is not a Tencent platform: its users are
+// created on its own pages and are not counted as third_party here.
 //
 // studio is required: it is the statement's 供应商名称 (column A). As with CC
 // Max members the server generates the password, stores only its bcrypt hash
@@ -28,7 +31,6 @@ import (
 // tencentUserRoles maps the form's platform role to the rs_auth_user tier.
 var tencentUserRoles = map[string]int{
 	"supplier_01":    minSupplierRole,
-	"supplier_02":    minSupplierRole02,
 	"supplier_ccmax": minSupplierCCMaxRole,
 	"ccmax_manager":  minCCMaxManagerRole,
 	"proxy":          minUserRole,
@@ -37,7 +39,7 @@ var tencentUserRoles = map[string]int{
 // tencentPlatformRoles lists the tiers whose users belong to a platform; a
 // user owning proxy channels belongs to proxy whatever their tier.
 var tencentPlatformRoles = map[string][]int{
-	tencentPlatformThirdParty: {minSupplierRole, minSupplierRole02},
+	tencentPlatformThirdParty: {minSupplierRole},
 	tencentPlatformCCMax:      {minSupplierCCMaxRole, minCCMaxManagerRole},
 	tencentPlatformProxy:      {minUserRole},
 }
@@ -60,7 +62,7 @@ func handleTencentUserCreate(c *gin.Context) {
 	role, ok := tencentUserRoles[body.Role]
 	switch {
 	case !ok:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "role 须为 supplier_01 / supplier_02 / supplier_ccmax / ccmax_manager / proxy"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role 须为 supplier_01 / supplier_ccmax / ccmax_manager / proxy"})
 		return
 	case !ccmaxValidUsername(username):
 		c.JSON(http.StatusBadRequest, gin.H{"error": "用户名须为 3-32 位字母、数字、_ - ."})
