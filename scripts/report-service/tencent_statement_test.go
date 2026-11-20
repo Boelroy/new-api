@@ -736,7 +736,6 @@ func TestTencentUserCreate(t *testing.T) {
 	users := map[string]created{}
 	for _, tc := range []struct{ username, body string }{
 		{"sup1", `{"username":"sup1","studio":"Studio A","role":"supplier_01"}`},
-		{"sup2", `{"username":"sup2","studio":"Studio B","role":"supplier_02"}`},
 		{"cc1", fmt.Sprintf(`{"username":"cc1","studio":"CC Co","role":"supplier_ccmax","manager_id":%d}`, manager.ID)},
 		{"px1", `{"username":"px1","studio":"Proxy Co","role":"proxy"}`},
 	} {
@@ -751,6 +750,7 @@ func TestTencentUserCreate(t *testing.T) {
 		"duplicate username":        `{"username":"sup1","studio":"X","role":"supplier_01"}`,
 		"studio required":           `{"username":"nostudio","studio":"  ","role":"supplier_01"}`,
 		"unknown role":              `{"username":"bad1","studio":"X","role":"admin"}`,
+		"KHub is not Tencent":       `{"username":"sup2","studio":"Studio B","role":"supplier_02"}`,
 		"manager on non-CC Max":     fmt.Sprintf(`{"username":"bad2","studio":"X","role":"supplier_01","manager_id":%d}`, manager.ID),
 		"manager must be a manager": fmt.Sprintf(`{"username":"bad3","studio":"X","role":"supplier_ccmax","manager_id":%d}`, users["sup1"].ID),
 		"username charset / length": `{"username":"a b","studio":"X","role":"proxy"}`,
@@ -770,7 +770,6 @@ func TestTencentUserCreate(t *testing.T) {
 	forbidden, allowed := http.StatusForbidden, http.StatusOK
 	for name, want := range map[string]map[string]int{
 		"sup1": {"supplier-account": allowed, "keyhub": forbidden, "ccmax": forbidden},
-		"sup2": {"supplier-account": forbidden, "keyhub": allowed, "ccmax": forbidden},
 		"cc1":  {"supplier-account": forbidden, "keyhub": forbidden, "ccmax": allowed},
 		"mgr1": {"supplier-account": forbidden, "keyhub": forbidden, "ccmax": allowed},
 		"px1":  {"supplier-account": forbidden, "keyhub": forbidden, "ccmax": forbidden},
@@ -786,8 +785,8 @@ func TestTencentUserCreate(t *testing.T) {
 
 	// The V2 role is bound with the user.
 	var v2Role string
-	require.NoError(t, db.QueryRow(`SELECT r.name FROM rs_user_role ur JOIN rs_role r ON r.id = ur.role_id WHERE ur.user_id = $1`, users["sup2"].ID).Scan(&v2Role))
-	assert.Equal(t, RoleSupplier02, v2Role)
+	require.NoError(t, db.QueryRow(`SELECT r.name FROM rs_user_role ur JOIN rs_role r ON r.id = ur.role_id WHERE ur.user_id = $1`, users["sup1"].ID).Scan(&v2Role))
+	assert.Equal(t, RoleSupplier01, v2Role)
 
 	// The list carries per-platform counts and never a password or hash.
 	_, err := db.Exec(`INSERT INTO rs_supplier_account (uploaded_by, provider, remote_account_id, created_at, updated_at) VALUES ($1, 'openai', 9001, 0, 0)`, users["sup1"].ID)
@@ -795,6 +794,10 @@ func TestTencentUserCreate(t *testing.T) {
 	_, err = db.Exec(`CREATE TABLE proxy_channel_ownership (remote_channel_id BIGINT PRIMARY KEY, user_id BIGINT NOT NULL, created_at BIGINT NOT NULL)`)
 	require.NoError(t, err)
 	_, err = db.Exec(`INSERT INTO proxy_channel_ownership VALUES (31, $1, 0), (32, $1, 0)`, users["px1"].ID)
+	require.NoError(t, err)
+	// A KHub (supplier_02) user made on KHub's own pages belongs to no
+	// Tencent platform.
+	_, err = db.Exec(`INSERT INTO rs_auth_user (username, role, studio) VALUES ('khub1', $1, 'KHub Co')`, minSupplierRole02)
 	require.NoError(t, err)
 	code, resp := tencentAdminJSON(t, r, http.MethodGet, "/api/tencent/users", "")
 	require.Equal(t, http.StatusOK, code)
@@ -810,7 +813,11 @@ func TestTencentUserCreate(t *testing.T) {
 	assert.Equal(t, int64(2), byName["px1"].ProxyChannels)
 	assert.Equal(t, "mgr1", byName["cc1"].ManagerUsername)
 	assert.Equal(t, int64(1), byName["mgr1"].Members)
-	assert.Equal(t, []string{tencentPlatformThirdParty}, byName["sup2"].Platforms)
+	assert.Equal(t, []string{tencentPlatformThirdParty}, byName["sup1"].Platforms)
+	assert.Empty(t, byName["khub1"].Platforms)
+	assert.Empty(t, byName["khub1"].RoleName)
+	_, sup2Created := byName["sup2"]
+	assert.False(t, sup2Created, "supplier_02 is refused")
 	assert.NotContains(t, resp, "password")
 	for _, u := range users {
 		assert.NotContains(t, resp, u.Password)
