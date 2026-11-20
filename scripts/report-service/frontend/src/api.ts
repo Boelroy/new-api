@@ -910,6 +910,25 @@ export type SupplierMetric = {
   completion_tokens: number | null
 }
 
+// Usage roll-up of a set of accounts from /api/supplier-account/metrics.
+// cost is RMB like SupplierMetric.cost (null when no account had a bill);
+// success_rate is request-weighted, in the same percent unit as the rows.
+export type SupplierMetricTotals = {
+  accounts: number
+  requests: number
+  prompt_tokens: number
+  completion_tokens: number
+  cost: number | null
+  success_rate: number | null
+}
+
+export type SupplierMetricSummary = {
+  total: SupplierMetricTotals
+  // Admin-only; always empty for suppliers.
+  by_supplier: (SupplierMetricTotals & { uploaded_by: number; username: string; studio: string })[]
+  by_provider: (SupplierMetricTotals & { provider: string })[]
+}
+
 export type RemoteProfile = {
   id: number
   name: string
@@ -2373,8 +2392,10 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  supplierMetrics: (payload: { begin_time: string; end_time: string }) =>
-    request<{ accounts: SupplierMetric[] }>('/api/supplier-account/metrics', {
+  // uploaded_by is honored for admins only; the server pins suppliers to their
+  // own uploads. Empty/omitted providers = all.
+  supplierMetrics: (payload: { begin_time: string; end_time: string; uploaded_by?: number; providers?: string[] }) =>
+    request<{ accounts: SupplierMetric[]; summary?: SupplierMetricSummary; fx_rate?: number }>('/api/supplier-account/metrics', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
