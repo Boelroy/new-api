@@ -9,14 +9,12 @@ package main
 // same report_config keys their own pages use, so both stay in step.
 
 import (
-	"cmp"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -66,74 +64,58 @@ func loadTencentPushSchedule() tencentPushSchedule {
 	return s
 }
 
-// tencentPushRow is one card table row: a supplier's statement on one
-// platform.
+// tencentPushRow is one card table row: a vendor's G and L on the
+// statement, as on 汇总表.
 type tencentPushRow struct {
-	Supplier    string  `json:"supplier"`
-	Platform    string  `json:"platform"`
-	Lines       int     `json:"lines"`
-	OfficialUSD float64 `json:"official_usd"`
-	InvoiceRMB  float64 `json:"invoice_rmb"`
+	Vendor     string  `json:"vendor"`
+	Pricing    string  `json:"pricing"`
+	Lines      int     `json:"lines"`
+	Official   float64 `json:"official"`
+	InvoiceRMB float64 `json:"invoice_rmb"`
 }
 
-// tencentPushRows totals snapshot lines per supplier × platform.
-func tencentPushRows(lines []tencentLine) []tencentPushRow {
-	type key struct{ supplier, platform string }
-	sums := map[key]*tencentPushRow{}
-	for _, l := range lines {
-		k := key{l.Supplier, tencentSourcePrefix[l.Platform]}
-		r, ok := sums[k]
-		if !ok {
-			r = &tencentPushRow{Supplier: k.supplier, Platform: k.platform}
-			sums[k] = r
-		}
-		r.Lines++
-		r.OfficialUSD += l.OfficialUSD
-		r.InvoiceRMB += l.InvoiceRMB
+// tencentPushRows totals snapshot lines per vendor.
+func tencentPushRows(lines []tencentLine, cfg tencentMonthConfig) []tencentPushRow {
+	summary := tencentSummarize(lines, cfg)
+	out := make([]tencentPushRow, len(summary))
+	for i, s := range summary {
+		out[i] = tencentPushRow{Vendor: s.Vendor, Pricing: s.Pricing, Lines: s.Lines, Official: tencentRound(s.Official, 2), InvoiceRMB: s.InvoiceRMB}
 	}
-	out := make([]tencentPushRow, 0, len(sums))
-	for _, r := range sums {
-		r.OfficialUSD = tencentRound(r.OfficialUSD, 2)
-		r.InvoiceRMB = tencentRound(r.InvoiceRMB, 2)
-		out = append(out, *r)
-	}
-	slices.SortFunc(out, func(a, b tencentPushRow) int {
-		return cmp.Or(cmp.Compare(a.Supplier, b.Supplier), cmp.Compare(a.Platform, b.Platform))
-	})
 	return out
 }
 
-// tencentStatementCard renders a month's snapshot as a Lark card.
+// tencentStatementCard renders a month's snapshot as a Lark card: each
+// vendor's G (in its currency) and L, and the invoice total.
 func tencentStatementCard(h tencentStatementHeader, rows []tencentPushRow, downloadURL string) map[string]any {
 	status := map[string]string{tencentStatementDraft: "草稿", tencentStatementConfirmed: "已确认"}[h.Status]
-	var totalUSD, totalRMB float64
+	var totalRMB float64
 	lines := 0
 	tableRows := make([]any, len(rows))
 	for i, r := range rows {
-		totalUSD += r.OfficialUSD
 		totalRMB += r.InvoiceRMB
 		lines += r.Lines
-		tableRows[i] = map[string]any{"supplier": r.Supplier, "platform": r.Platform, "lines": r.Lines, "usd": r.OfficialUSD, "rmb": r.InvoiceRMB}
-	}
-	num := func(name, title, symbol string) map[string]any {
-		col := map[string]any{"name": name, "display_name": title, "data_type": "number", "horizontal_align": "right"}
-		if symbol != "" {
-			col["format"] = map[string]any{"symbol": symbol, "precision": 2}
+		currency := "RMB"
+		if r.Pricing == tencentPricingUSD {
+			currency = "USD"
 		}
-		return col
+		tableRows[i] = map[string]any{"vendor": r.Vendor, "lines": r.Lines,
+			"official": fmt.Sprintf("%.2f %s", r.Official, currency), "rmb": r.InvoiceRMB}
 	}
+	cfg := h.Meta.Config
 	elements := []any{
-		map[string]any{"tag": "markdown", "content": fmt.Sprintf("**%s 对账单**（%s）\n付给官方合计 **$%.2f** · 开票合计 **¥%.2f** · %d 行\n汇率 %g · 参考汇率 %g",
-			h.Month, status, tencentRound(totalUSD, 2), tencentRound(totalRMB, 2), lines, h.FxRate, h.RefFxRate)},
+		map[string]any{"tag": "markdown", "content": fmt.Sprintf("**%s %s公司对账单**（%s）\n开票金额合计 **¥%.2f** · %d 行\n中行汇率 %g（%s）· CCMax 除数 %g",
+			h.Month, cfg.Company, status, tencentRound(totalRMB, 2), lines, cfg.BOCRate, cfg.BOCRateDate, cfg.CCMaxDivisor)},
 	}
 	if len(tableRows) > 0 {
 		elements = append(elements, map[string]any{
 			"tag": "table", "page_size": min(len(tableRows), 10), "row_height": "low",
 			"header_style": map[string]any{"bold": true, "background_style": "grey"},
 			"columns": []any{
-				map[string]any{"name": "supplier", "display_name": "供应商", "data_type": "text"},
-				map[string]any{"name": "platform", "display_name": "平台", "data_type": "text"},
-				num("lines", "行数", ""), num("usd", "付给官方 G", "$"), num("rmb", "开票 L", "¥"),
+				map[string]any{"name": "vendor", "display_name": "模型厂商", "data_type": "text"},
+				map[string]any{"name": "lines", "display_name": "行数", "data_type": "number", "horizontal_align": "right"},
+				map[string]any{"name": "official", "display_name": "付给官方 G", "data_type": "text", "horizontal_align": "right"},
+				map[string]any{"name": "rmb", "display_name": "开票 L", "data_type": "number", "horizontal_align": "right",
+					"format": map[string]any{"symbol": "¥", "precision": 2}},
 			},
 			"rows": tableRows,
 		})
@@ -180,7 +162,7 @@ func tencentSendStatement(month time.Time, by int64) (tencentStatementHeader, []
 	if err != nil {
 		return h, nil, err
 	}
-	rows := tencentPushRows(lines)
+	rows := tencentPushRows(lines, h.Meta.Config)
 	download := ""
 	if s.BaseURL != "" {
 		download = s.BaseURL + "/api/tencent/statements/" + key + "/export"
