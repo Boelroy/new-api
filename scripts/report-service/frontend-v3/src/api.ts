@@ -2527,24 +2527,16 @@ export const api = {
   tencentStatementPreview: (month: string) =>
     request<TencentStatementPreview>(`/api/tencent/statement?month=${encodeURIComponent(month)}`),
 
-  tencentMonthParams: () =>
-    request<{ list: TencentMonthParam[]; system_fx_rate: number; default_discount: number; default_tax_rate: string }>(
-      '/api/tencent/params/months',
-    ),
+  // A month's statement config (its own, else the latest earlier month's,
+  // else the built-in October one); from says which.
+  tencentConfig: (month: string) => request<TencentConfigResponse>(`/api/tencent/config?month=${encodeURIComponent(month)}`),
 
-  // A month's statement inputs; null falls back to the default (system rate,
-  // K = the G rate, the 上号 discount, 含票).
-  setTencentMonthParam: (payload: {
-    month: string
-    fx_rate: number | null
-    ref_fx_rate: number | null
-    discount: number | null
-    tax_rate: string | null
-  }) =>
-    request<{ ok: boolean }>('/api/tencent/params/months', {
+  // Stores the whole config for the month; later months inherit it.
+  setTencentConfig: (month: string, config: TencentMonthConfig) =>
+    request<{ ok: boolean; config: TencentMonthConfig }>('/api/tencent/config', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ month, config }),
     }),
 
   // Which remote profile is newapi-proxy's upstream New API (proxy rows).
@@ -2564,9 +2556,9 @@ export const api = {
   tencentSnapshotAction: (month: string, action: 'generate' | 'regenerate' | 'confirm') =>
     request<TencentSnapshot>(`/api/tencent/statements/${month}/${action}`, { method: 'POST' }),
 
-  // xlsx download of a month's snapshot; supplier '' = every supplier in one file.
-  tencentExportUrl: (month: string, supplier = '') =>
-    withBase(`/api/tencent/statements/${month}/export${supplier ? `?supplier=${encodeURIComponent(supplier)}` : ''}`),
+  // xlsx download of a month's snapshot; vendor '' = the whole statement.
+  tencentExportUrl: (month: string, vendor = '') =>
+    withBase(`/api/tencent/statements/${month}/export${vendor ? `?vendor=${encodeURIComponent(vendor)}` : ''}`),
 
   pushTencentStatement: (month: string) =>
     request<{ month: string; status: string; rows: TencentPushRow[] }>('/api/tencent/statement-push', {
@@ -2993,73 +2985,87 @@ export type TencentCreatedUser = {
   studio_shared_with: string[]
 }
 
-// One 「API账单」 row; supplier … source are template columns A–N.
+export type TencentPricing = 'usd' | 'ccmax' | 'rmb'
+
+// One column C vendor's pricing on the statement.
+export type TencentVendorConfig = {
+  vendor: string
+  pricing: TencentPricing
+  discount: number | null // I as a fraction; null = not agreed yet
+  tax_text: string // H
+  note: string // 汇总表 备注
+  label: string // the discount's name in the parameter block
+}
+
+export type TencentMonthConfig = {
+  company: string // A
+  boc_rate: number // K: BOC USD selling rate
+  boc_rate_date: string // YYYY-MM-DD
+  ccmax_divisor: number
+  vendors: TencentVendorConfig[]
+}
+
+export type TencentConfigResponse = {
+  month: string
+  config: TencentMonthConfig
+  from: 'month' | 'inherit' | 'default'
+  inherited: string
+  default_rate_date: string
+  boc_rate_source_url: string
+}
+
+// One 「API账单」 row (template columns A–M). official / tencent / invoice_rmb
+// are G / J / L at full precision in the row's currency.
 export type TencentLine = {
   line_key: string
   platform: TencentPlatform
-  user_id: number
+  pricing: TencentPricing
   supplier: string
   bill_month: number
   vendor: string
   model: string
   account_id: string
   key: string
-  official_usd: number
+  official: number
   tax_rate: string
   discount: number
-  tencent_usd: number
+  tencent: number
   ref_fx_rate: number
   invoice_rmb: number
   bill_name: string
   source: string
-  cost_cny: number
-  cost_usd: number
 }
 
+// One 「汇总表」 row: a vendor's G and its L rounded to the cent.
 export type TencentSummaryRow = {
   supplier: string
   bill_month: number
   vendor: string
-  source: string
-  official_usd: number
+  pricing: TencentPricing
+  official: number
   invoice_rmb: number
+  note: string
+  source: string
   lines: number
 }
 
 export type TencentStatementPreview = {
   month: string
   bill_month: number
-  fx_rate: number
-  fx_rate_from: string
-  ref_fx_rate: number
-  ref_fx_rate_from: string
-  discount: number
-  discount_from: string
-  tax_rate: string
-  tax_rate_from: string
+  config: TencentMonthConfig
   headers: string[]
   summary_headers: string[]
   lines: TencentLine[]
   summary: TencentSummaryRow[]
+  total_invoice_rmb: number
   warnings: string[]
-}
-
-export type TencentMonthParam = {
-  month: string
-  fx_rate: number | null
-  ref_fx_rate: number | null
-  discount: number | null
-  tax_rate: string | null
-  note: string
-  updated_at: number
 }
 
 export type TencentSnapshot = {
   statement: {
     month: string
     status: 'draft' | 'confirmed'
-    fx_rate: number
-    ref_fx_rate: number
+    meta: { month: string; config: TencentMonthConfig; ccmax_first_account: number }
     warnings: string[] | null
     lines: number
     generated_at: number
@@ -3067,13 +3073,15 @@ export type TencentSnapshot = {
   }
   lines: TencentLine[]
   summary: TencentSummaryRow[]
+  total_invoice_rmb: number
 }
 
+// One Lark card row: a vendor's G (in its currency) and L.
 export type TencentPushRow = {
-  supplier: string
-  platform: string
+  vendor: string
+  pricing: TencentPricing
   lines: number
-  official_usd: number
+  official: number
   invoice_rmb: number
 }
 
