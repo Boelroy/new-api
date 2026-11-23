@@ -65,14 +65,23 @@ func (f *fakeRemoteChannelList) ServeHTTP(w http.ResponseWriter, r *http.Request
 // 429 backoff so a 60-page walk runs instantly.
 func remoteChannelMirrorFixture(t *testing.T) sqlmock.Sqlmock {
 	t.Helper()
-	prevDB, prevGap, prevBackoff := db, remoteChannelPageGap, remoteRateLimitBackoff
+	prevDB, prevGap := db, remoteChannelPageGap
+	prevBackoff, prevBackgroundBackoff := remoteRateLimitBackoff, remoteBackgroundRateLimitBackoff
 	pool, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	db = pool
 	remoteChannelPageGap = 0
-	remoteRateLimitBackoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	// Same step counts as production, millisecond waits.
+	remoteRateLimitBackoff = make([]time.Duration, len(prevBackoff))
+	remoteBackgroundRateLimitBackoff = make([]time.Duration, len(prevBackgroundBackoff))
+	for _, schedule := range [][]time.Duration{remoteRateLimitBackoff, remoteBackgroundRateLimitBackoff} {
+		for i := range schedule {
+			schedule[i] = time.Millisecond
+		}
+	}
 	t.Cleanup(func() {
-		db, remoteChannelPageGap, remoteRateLimitBackoff = prevDB, prevGap, prevBackoff
+		db, remoteChannelPageGap = prevDB, prevGap
+		remoteRateLimitBackoff, remoteBackgroundRateLimitBackoff = prevBackoff, prevBackgroundBackoff
 		pool.Close()
 	})
 	return mock
@@ -93,11 +102,15 @@ func TestIterateRemoteChannelsCollectsRemoteTotal(t *testing.T) {
 		total         int
 		rateLimitPage int
 		rateLimitHits int32
+		background    bool
 		wantRequests  int
 	}{
 		// 6000 channels is 60 pages: past the old 50-page / 5000-row cap.
 		{name: "more than fifty pages", total: 6000, wantRequests: 60},
 		{name: "rate limited page is retried", total: 250, rateLimitPage: 2, rateLimitHits: 2, wantRequests: 5},
+		// Five 429s in a row exhaust the interactive schedule (3 retries) but
+		// not the background one (6), so the background walk still finishes.
+		{name: "background sync outlasts a longer rate limit", total: 250, rateLimitPage: 2, rateLimitHits: 5, background: true, wantRequests: 8},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -107,7 +120,11 @@ func TestIterateRemoteChannelsCollectsRemoteTotal(t *testing.T) {
 			t.Cleanup(srv.Close)
 			expectProfileLookups(mock, tc.wantRequests)
 
-			channels, total, err := iterateRemoteChannels(context.Background(), srv.URL, "token", 1, 100, nil)
+			backoff := remoteRateLimitBackoff
+			if tc.background {
+				backoff = remoteBackgroundRateLimitBackoff
+			}
+			channels, total, err := iterateRemoteChannels(context.Background(), srv.URL, "token", 1, 100, nil, backoff)
 
 			require.NoError(t, err)
 			assert.Equal(t, int64(tc.total), total)
@@ -144,7 +161,7 @@ func TestMirrorRemoteChannelsDeletesOnlyAfterCompleteWalk(t *testing.T) {
 			t.Cleanup(srv.Close)
 			expectProfileLookups(mock, tc.wantRequests)
 
-			channels, total, walkErr := iterateRemoteChannels(context.Background(), srv.URL, "token", 1, 100, nil)
+			channels, total, walkErr := iterateRemoteChannels(context.Background(), srv.URL, "token", 1, 100, nil, remoteRateLimitBackoff)
 			require.Len(t, channels, tc.wantRows)
 			assert.Equal(t, tc.failPage != 0, walkErr != nil)
 
@@ -246,9 +263,10 @@ func TestRemoteChannelUsageRangeReportsFailedChannels(t *testing.T) {
 }
 
 // A refresh against a remote too large to walk in time answers 200 within its
-// budget with the newest pages upserted (no reconcile DELETE), and hands the
-// rest to one background full sync: a second refresh while that sync runs
-// does not start another.
+// budget with the newest pages upserted (no reconcile DELETE) and hands the
+// rest to a background full sync. While that sync runs, a second refresh
+// neither pages the remote nor starts another sync: it answers at once with
+// background=true and the last known total.
 func TestRemoteChannelsRefreshAnswersWithinBudget(t *testing.T) {
 	mock := remoteChannelMirrorFixture(t)
 	prevBudget, prevSync := remoteRefreshBudget, remoteProfileFullSync
@@ -259,43 +277,59 @@ func TestRemoteChannelsRefreshAnswersWithinBudget(t *testing.T) {
 		syncs.Add(1)
 		<-release
 	}
-	t.Cleanup(func() { remoteRefreshBudget, remoteProfileFullSync = prevBudget, prevSync })
+	const profileID = int64(11)
+	t.Cleanup(func() {
+		remoteRefreshBudget, remoteProfileFullSync = prevBudget, prevSync
+		remoteChannelLastTotal.Delete(profileID)
+	})
 
 	// Pages 1–2 arrive, page 3 hangs past the budget.
-	srv := httptest.NewServer(&fakeRemoteChannelList{total: 20000, hangPage: 3})
+	remote := &fakeRemoteChannelList{total: 20000, hangPage: 3}
+	srv := httptest.NewServer(remote)
 	t.Cleanup(srv.Close)
 
-	const profileID = int64(11)
-	for round := range 2 {
-		mock.ExpectQuery(regexp.QuoteMeta(`SELECT host, user_id, access_token_enc FROM remote_newapi_profile`)).
-			WithArgs(profileID).
-			WillReturnRows(sqlmock.NewRows([]string{"host", "user_id", "access_token_enc"}).AddRow(srv.URL, 1, ""))
-		expectProfileLookups(mock, 3)
-		mock.ExpectBegin()
-		mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO remote_channel_snapshot`)).WillReturnResult(sqlmock.NewResult(0, 200))
-		mock.ExpectCommit()
-		mock.ExpectBegin()
-		mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO remote_channel_current`)).WillReturnResult(sqlmock.NewResult(0, 200))
-		mock.ExpectCommit()
-
+	refresh := func() map[string]any {
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
 		c.Request = httptest.NewRequest(http.MethodPost, "/api/remote-newapi/channels/refresh?profile_id=11", nil)
 		began := time.Now()
 		handleRemoteChannelsRefresh(c)
-
-		assert.Less(t, time.Since(began), 2*time.Second, "round %d", round)
+		assert.Less(t, time.Since(began), 2*time.Second)
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		var out map[string]any
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
-		assert.Equal(t, float64(200), out["fetched"])
-		assert.Equal(t, float64(20000), out["total"])
-		assert.Equal(t, false, out["complete"])
-		assert.Equal(t, true, out["background"])
-		// Any DELETE would have failed the mirror write and turned this 500.
-		assert.NoError(t, mock.ExpectationsWereMet(), "round %d", round)
+		return out
 	}
-	assert.Equal(t, int32(1), syncs.Load(), "second refresh reuses the running background sync")
+
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT host, user_id, access_token_enc FROM remote_newapi_profile`)).
+		WithArgs(profileID).
+		WillReturnRows(sqlmock.NewRows([]string{"host", "user_id", "access_token_enc"}).AddRow(srv.URL, 1, ""))
+	expectProfileLookups(mock, 3)
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO remote_channel_snapshot`)).WillReturnResult(sqlmock.NewResult(0, 200))
+	mock.ExpectCommit()
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO remote_channel_current`)).WillReturnResult(sqlmock.NewResult(0, 200))
+	mock.ExpectCommit()
+
+	first := refresh()
+	assert.Equal(t, float64(200), first["fetched"])
+	assert.Equal(t, float64(20000), first["total"])
+	assert.Equal(t, false, first["complete"])
+	assert.Equal(t, true, first["background"])
+	// Any DELETE would have failed the mirror write and turned this 500.
+	require.NoError(t, mock.ExpectationsWereMet())
+	require.Equal(t, int32(3), remote.requests.Load())
+
+	// Background sync still running: no DB or remote work at all.
+	second := refresh()
+	assert.Equal(t, float64(0), second["fetched"])
+	assert.Equal(t, float64(20000), second["total"], "last known total")
+	assert.Equal(t, false, second["complete"])
+	assert.Equal(t, true, second["background"])
+	assert.NoError(t, mock.ExpectationsWereMet())
+	assert.Equal(t, int32(3), remote.requests.Load(), "second refresh does not page the remote")
+	assert.Equal(t, int32(1), syncs.Load(), "only one background sync")
 
 	close(release)
 	require.Eventually(t, func() bool {

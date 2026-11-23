@@ -1489,7 +1489,9 @@ export const api = {
   remoteChannelsRefresh: (profileID: number) =>
     // complete=false: the server ran out of its time budget, kept the newest
     // `fetched` channels and left the rest to a background full sync
-    // (background=true). Both are missing on older servers.
+    // (background=true). fetched=0 with background=true: a background sync
+    // was already running, so the server skipped paging the remote.
+    // complete/background are missing on older servers.
     request<{ ok: boolean; fetched: number; total: number; refreshed: number; complete?: boolean; background?: boolean }>(
       `/api/remote-newapi/channels/refresh?profile_id=${profileID}`,
       { method: 'POST' },
