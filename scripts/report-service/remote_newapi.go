@@ -5795,10 +5795,11 @@ func handleRemoteChannelUsageRange(c *gin.Context) {
 	}
 	if len(scopedIDs) == 0 {
 		c.JSON(http.StatusOK, gin.H{
-			"data":            map[string]int64{},
-			"total_used_usd":  0.0,
-			"start_timestamp": body.StartTS,
-			"end_timestamp":   body.EndTS,
+			"data":               map[string]int64{},
+			"failed_channel_ids": []int64{},
+			"total_used_usd":     0.0,
+			"start_timestamp":    body.StartTS,
+			"end_timestamp":      body.EndTS,
 		})
 		return
 	}
@@ -5820,6 +5821,7 @@ func handleRemoteChannelUsageRange(c *gin.Context) {
 	sort.Slice(scopedIDs, func(i, j int) bool { return scopedIDs[i] < scopedIDs[j] })
 
 	results := make(map[int64]int64, len(scopedIDs))
+	failed := make([]int64, 0)
 	var resultsMu sync.Mutex
 	sem := make(chan struct{}, usageRangeMaxConcurrent)
 	var wg sync.WaitGroup
@@ -5847,20 +5849,23 @@ func handleRemoteChannelUsageRange(c *gin.Context) {
 			q.Set("channel", idStr)
 			q.Set("start_timestamp", strconv.FormatInt(body.StartTS, 10))
 			q.Set("end_timestamp", strconv.FormatInt(body.EndTS, 10))
-			data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/stat", token, userID, q, nil)
-			if err != nil {
-				// One failure shouldn't blank the whole table; record 0.
-				resultsMu.Lock()
-				results[chID] = 0
-				resultsMu.Unlock()
-				return
-			}
 			var stat struct {
 				Quota int64 `json:"quota"`
 			}
-			if err := json.Unmarshal(data, &stat); err != nil {
+			err := remoteRetryRateLimited(ctx, func() error {
+				data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/stat", token, userID, q, nil)
+				if err != nil {
+					return err
+				}
+				return json.Unmarshal(data, &stat)
+			})
+			if err != nil {
+				// One failure shouldn't blank the whole table, but it must not
+				// read as "no usage" either: report it and leave it uncached
+				// so the next refresh asks the remote again.
+				log.Printf("[usage-range] profile %d channel %d: %v", body.ProfileID, chID, err)
 				resultsMu.Lock()
-				results[chID] = 0
+				failed = append(failed, chID)
 				resultsMu.Unlock()
 				return
 			}
@@ -5880,11 +5885,15 @@ func handleRemoteChannelUsageRange(c *gin.Context) {
 		dataOut[strconv.FormatInt(id, 10)] = q
 		totalRaw += q
 	}
+	slices.Sort(failed)
 	c.JSON(http.StatusOK, gin.H{
-		"data":            dataOut,
-		"total_used_usd":  float64(totalRaw) / usedQuotaPerUSD,
-		"start_timestamp": body.StartTS,
-		"end_timestamp":   body.EndTS,
+		"data": dataOut,
+		// Channels whose remote stat call failed are absent from data and
+		// from total_used_usd; the total only covers channels in data.
+		"failed_channel_ids": failed,
+		"total_used_usd":     float64(totalRaw) / usedQuotaPerUSD,
+		"start_timestamp":    body.StartTS,
+		"end_timestamp":      body.EndTS,
 	})
 }
 

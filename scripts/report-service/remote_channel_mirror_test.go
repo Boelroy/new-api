@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -159,4 +162,70 @@ func TestMirrorRemoteChannelsDeletesOnlyAfterCompleteWalk(t *testing.T) {
 			assert.NoError(t, mock.ExpectationsWereMet())
 		})
 	}
+}
+
+// usage-range retries a rate-limited /api/log/stat, reports channels whose
+// stat call still fails in failed_channel_ids instead of as 0 usage, and
+// does not cache the failure: the next refresh asks the remote again.
+func TestRemoteChannelUsageRangeReportsFailedChannels(t *testing.T) {
+	mock := remoteChannelMirrorFixture(t)
+	mock.MatchExpectationsInOrder(false)
+	var rateLimited atomic.Int32
+	statCalls := map[string]*atomic.Int32{"1": {}, "2": {}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ch := r.URL.Query().Get("channel")
+		statCalls[ch].Add(1)
+		switch {
+		case ch == "2":
+			http.Error(w, "upstream down", http.StatusBadGateway)
+		case rateLimited.Add(1) <= 2:
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"quota": 1_000_000}})
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	const profileID, start, end = int64(9), int64(1_700_000_000), int64(1_700_003_600)
+	t.Cleanup(func() {
+		usageRangeCacheMu.Lock()
+		for _, ch := range []int64{1, 2} {
+			delete(usageRangeCache, fmt.Sprintf("%d:%d:%d:%d", profileID, ch, start, end))
+		}
+		usageRangeCacheMu.Unlock()
+	})
+	call := func() map[string]any {
+		mock.ExpectQuery(regexp.QuoteMeta(`SELECT host, user_id, access_token_enc FROM remote_newapi_profile`)).
+			WithArgs(profileID).
+			WillReturnRows(sqlmock.NewRows([]string{"host", "user_id", "access_token_enc"}).AddRow(srv.URL, 1, ""))
+		payload, err := json.Marshal(map[string]any{
+			"profile_id": profileID, "start_timestamp": start, "end_timestamp": end, "channel_ids": []int64{2, 1},
+		})
+		require.NoError(t, err)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/remote-newapi/channels/usage-range", bytes.NewReader(payload))
+		c.Request.Header.Set("Content-Type", "application/json")
+		handleRemoteChannelUsageRange(c)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		var out map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+		return out
+	}
+
+	// First call: channel 1 → two 429s then success, channel 2 → one 502.
+	expectProfileLookups(mock, 4)
+	first := call()
+	assert.Equal(t, map[string]any{"1": float64(1_000_000)}, first["data"])
+	assert.Equal(t, []any{float64(2)}, first["failed_channel_ids"])
+	assert.InDelta(t, 2.0, first["total_used_usd"], 1e-9)
+
+	// Second call: channel 1 comes from cache, channel 2 is asked again.
+	expectProfileLookups(mock, 1)
+	second := call()
+	assert.Equal(t, first["data"], second["data"])
+	assert.Equal(t, []any{float64(2)}, second["failed_channel_ids"])
+	assert.Equal(t, int32(3), statCalls["1"].Load())
+	assert.Equal(t, int32(2), statCalls["2"].Load())
+	assert.NoError(t, mock.ExpectationsWereMet())
 }
