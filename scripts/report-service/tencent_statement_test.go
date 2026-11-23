@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1201,4 +1202,150 @@ func TestTencentProxyProfileSetting(t *testing.T) {
 	code, got = put(`{"proxy_profile_id":0}`)
 	require.Equal(t, http.StatusOK, code)
 	assert.Equal(t, 0.0, got["proxy_profile_id"])
+}
+
+// tencentFakeSources replaces the live source read for a test with one that
+// counts its calls and returns rows (blocking until release, when given).
+func tencentFakeSources(t *testing.T, rows []tencentSourceRow, release chan struct{}) *atomic.Int32 {
+	calls := &atomic.Int32{}
+	prev := tencentLoadSourcesFn
+	tencentLoadSourcesFn = func(start, end time.Time) ([]tencentSourceRow, int64, []string, error) {
+		calls.Add(1)
+		if release != nil {
+			<-release
+		}
+		return rows, 0, []string{"fake source"}, nil
+	}
+	t.Cleanup(func() { tencentLoadSourcesFn = prev })
+	return calls
+}
+
+// The preview prices the cached sources with the current config without
+// reading the sources live, and matches the live statement after a config
+// change.
+func TestTencentSourceCachePreview(t *testing.T) {
+	tencentSeedOctober(t)
+	r := tencentTestRouter()
+	month := time.Date(2026, 10, 1, 0, 0, 0, 0, billingExportZone)
+	ran, err := tencentRunSourceCompute(month)
+	require.NoError(t, err)
+	require.True(t, ran)
+
+	cfg := tencentDefaultMonthConfig()
+	cfg.BOCRate = 7.1
+	cfg.Vendors[3].Discount = tencentFloatPtr(0.5) // zhipu
+	raw, _ := json.Marshal(map[string]any{"month": "2026-10", "config": cfg})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/tencent/config", strings.NewReader(string(raw)))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	real := tencentLoadSourcesFn
+	calls := tencentFakeSources(t, nil, nil)
+	code, cached := tencentDo(t, r, http.MethodGet, "/api/tencent/statement?month=2026-10")
+	require.Equal(t, http.StatusOK, code, cached)
+	assert.Equal(t, int32(0), calls.Load(), "a cached month does not read the sources")
+	assert.Equal(t, "cache", cached["source"])
+	assert.Equal(t, false, cached["computing"])
+	assert.Positive(t, cached["computed_at"].(float64))
+
+	tencentLoadSourcesFn = real
+	code, live := tencentDo(t, r, http.MethodGet, "/api/tencent/statement?month=2026-10&live=1")
+	require.Equal(t, http.StatusOK, code, live)
+	assert.Equal(t, "live", live["source"])
+	require.NotEmpty(t, live["lines"])
+	for _, k := range []string{"lines", "summary", "total_invoice_rmb", "config"} {
+		assert.Equal(t, live[k], cached[k], k)
+	}
+	assert.Equal(t, 97.5*0.5/0.75, cached["summary"].([]any)[4].(map[string]any)["invoice_rmb"], "zhipu at the new discount")
+}
+
+// A month without a cache starts one background computation, however often
+// it is asked for, and answers computing until it is stored; a recompute is
+// refused while one runs.
+func TestTencentSourceCacheBackground(t *testing.T) {
+	tencentSeedOctober(t)
+	r := tencentTestRouter()
+	release := make(chan struct{})
+	calls := tencentFakeSources(t, []tencentSourceRow{
+		{Platform: tencentPlatformThirdParty, Vendor: "zhipu", Model: "glm-5.3", Account: "1", Cost: 100},
+	}, release)
+
+	for range 3 {
+		code, body := tencentDo(t, r, http.MethodGet, "/api/tencent/statement?month=2026-10")
+		require.Equal(t, http.StatusOK, code, body)
+		assert.Equal(t, true, body["computing"])
+		assert.Equal(t, float64(0), body["computed_at"])
+		assert.Empty(t, body["lines"])
+	}
+	code, body := tencentDo(t, r, http.MethodPost, "/api/tencent/statement/recompute?month=2026-10")
+	assert.Equal(t, http.StatusAccepted, code)
+	assert.Equal(t, false, body["started"], "already computing")
+	require.Eventually(t, func() bool { return calls.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
+	close(release)
+
+	require.Eventually(t, func() bool {
+		_, body := tencentDo(t, r, http.MethodGet, "/api/tencent/statement?month=2026-10")
+		return body["computing"] == false && len(body["lines"].([]any)) == 1
+	}, 5*time.Second, 20*time.Millisecond)
+	assert.Equal(t, int32(1), calls.Load(), "computed once")
+	_, body = tencentDo(t, r, http.MethodGet, "/api/tencent/statement?month=2026-10")
+	assert.Equal(t, 75.0, body["total_invoice_rmb"])
+	assert.Contains(t, body["warnings"], "fake source")
+
+	code, body = tencentDo(t, r, http.MethodPost, "/api/tencent/statement/recompute?month=2026-10")
+	assert.Equal(t, http.StatusAccepted, code)
+	assert.Equal(t, true, body["started"])
+	require.Eventually(t, func() bool {
+		cache, err := tencentLoadSourceCache(time.Date(2026, 10, 1, 0, 0, 0, 0, billingExportZone))
+		return err == nil && calls.Load() == 2 && !cache.computing(time.Now())
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+// The daily refresh runs once a day from its time on: last month and this
+// month while last month's bills settle, then this month only.
+func TestTencentSourceCacheDaily(t *testing.T) {
+	tencentSeedOctober(t)
+	var months []string
+	prev := tencentLoadSourcesFn
+	tencentLoadSourcesFn = func(start, end time.Time) ([]tencentSourceRow, int64, []string, error) {
+		months = append(months, start.Format("2006-01"))
+		return nil, 0, nil, nil
+	}
+	t.Cleanup(func() { tencentLoadSourcesFn = prev })
+	at := func(m time.Month, d, h, min int) time.Time {
+		return time.Date(2026, m, d, h, min, 0, 0, billingExportZone)
+	}
+
+	ran, err := tencentSourceCacheTick(at(11, 3, 3, 59))
+	require.NoError(t, err)
+	assert.False(t, ran, "before 04:00")
+	ran, err = tencentSourceCacheTick(at(11, 3, 4, 0))
+	require.NoError(t, err)
+	assert.True(t, ran)
+	assert.Equal(t, []string{"2026-10", "2026-11"}, months)
+	ran, err = tencentSourceCacheTick(at(11, 3, 23, 0))
+	require.NoError(t, err)
+	assert.False(t, ran, "once a day")
+
+	// After the settling days last month is computed once more (its cache is
+	// older than the 6th), then left alone.
+	months = nil
+	_, err = db.Exec(`UPDATE rs_tencent_source_cache SET computed_at = $1 WHERE month = '2026-10'`, at(11, 3, 4, 0).Unix())
+	require.NoError(t, err)
+	due, err := tencentSourceCacheMonthsDue(at(11, 20, 4, 0))
+	require.NoError(t, err)
+	assert.Len(t, due, 2)
+	_, err = db.Exec(`UPDATE rs_tencent_source_cache SET computed_at = $1 WHERE month = '2026-10'`, at(11, 6, 4, 0).Unix())
+	require.NoError(t, err)
+	due, err = tencentSourceCacheMonthsDue(at(11, 20, 4, 0))
+	require.NoError(t, err)
+	require.Len(t, due, 1)
+	assert.Equal(t, "2026-11", due[0].Format("2006-01"))
+
+	require.NoError(t, supplierConfigSet(cfgTencentSourceCacheTime, "off"))
+	ran, err = tencentSourceCacheTick(at(11, 21, 12, 0))
+	require.NoError(t, err)
+	assert.False(t, ran, "switched off")
 }

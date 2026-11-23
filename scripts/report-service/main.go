@@ -5724,6 +5724,7 @@ func main() {
 	ccmaxWeb.startRefresher()
 	startCCMaxReportLoop()
 	startTencentStatementPushLoop()
+	startTencentSourceCacheLoop()
 
 	// SPA — serve for all non-API routes
 	r.NoRoute(spaHandler())
