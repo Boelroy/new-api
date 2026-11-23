@@ -705,7 +705,15 @@ export default function RemoteChannelsStudio() {
     try {
       const res = await api.remoteChannelsRefresh(selectedID)
       await reloadChannels()
-      alert(`已从远端拉取 ${res.fetched} 条渠道`)
+      if (res.complete === false && res.fetched === 0) {
+        // A background full sync was already running; the server skipped
+        // paging so the two don't split the remote's rate limit.
+        alert('后台同步进行中（约几分钟），先显示已同步的渠道，稍后再点刷新')
+      } else if (res.complete === false) {
+        alert(`已刷新最新 ${res.fetched} 条，其余渠道后台同步中（约几分钟）`)
+      } else {
+        alert(`已从远端拉取 ${res.fetched} 条渠道`)
+      }
     } catch (e: any) {
       alert('获取用量失败: ' + (e?.message || e))
     } finally {

@@ -1423,13 +1423,20 @@ func fetchRemoteChannelPage(ctx context.Context, host, token string, userID int6
 // treat as incomplete.
 const remoteChannelMaxPages = 500
 
-// remoteChannelPageGap spaces consecutive list pages, and
-// remoteRateLimitBackoff is how long to wait before each retry of a call the
-// remote answered with 429. Remotes such as aaaasl rate-limit per IP, and a
-// full walk is dozens of pages. Variables so tests can shorten the waits.
+// remoteChannelPageGap spaces consecutive list pages, and the backoff
+// schedules are how long to wait before each retry of a call the remote
+// answered with 429. Remotes such as aaaasl rate-limit per IP, and a full
+// walk is hundreds of pages. remoteRateLimitBackoff is for calls someone is
+// waiting on; remoteBackgroundRateLimitBackoff is for the background full
+// sync, where outlasting the limit (~1 min per page at worst, well inside
+// its 10-minute timeout) beats giving up at page 131 of 205. Variables so
+// tests can shorten the waits.
 var (
-	remoteChannelPageGap   = 250 * time.Millisecond
-	remoteRateLimitBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+	remoteChannelPageGap             = 250 * time.Millisecond
+	remoteRateLimitBackoff           = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+	remoteBackgroundRateLimitBackoff = []time.Duration{
+		time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second,
+	}
 )
 
 // errRemoteChannelListFiltered marks a channel list fetched with filters:
@@ -1437,11 +1444,11 @@ var (
 // mirror.
 var errRemoteChannelListFiltered = errors.New("filtered channel list")
 
-// remoteRetryRateLimited runs call, retrying after each remoteRateLimitBackoff
-// step while the remote answers 429. Other errors, and a 429 after the last
-// step, are returned as is.
-func remoteRetryRateLimited(ctx context.Context, call func() error) error {
-	for _, wait := range remoteRateLimitBackoff {
+// remoteRetryRateLimited runs call, retrying after each backoff step while
+// the remote answers 429. Other errors, and a 429 after the last step, are
+// returned as is.
+func remoteRetryRateLimited(ctx context.Context, backoff []time.Duration, call func() error) error {
+	for _, wait := range backoff {
 		err := call()
 		if !isRemoteRateLimited(err) {
 			return err
@@ -1458,12 +1465,15 @@ func remoteRetryRateLimited(ctx context.Context, call func() error) error {
 // iterateRemoteChannels walks the remote's paginated /api/channel/ list
 // until it has the reported total, the remote runs out of pages, or the
 // remoteChannelMaxPages guard trips. Pages are spaced by
-// remoteChannelPageGap and 429s are retried with backoff. Channel IDs are
+// remoteChannelPageGap and 429s are retried on the given backoff schedule
+// (remoteRateLimitBackoff or remoteBackgroundRateLimitBackoff). Channel IDs are
 // de-duplicated, since a channel created mid-walk shifts later pages by one.
 // Returns whatever it managed to collect plus the reported total; on error
-// it also returns the partial list so callers can decide what to do. A
-// result shorter than total without an error means the walk was cut short.
-func iterateRemoteChannels(ctx context.Context, host, token string, userID int64, pageSize int, filters map[string]string) ([]remoteChannel, int64, error) {
+// it also returns the partial list so callers can decide what to do. When
+// ctx expires mid-walk the error wraps ctx.Err(), so a caller running on a
+// time budget keeps the newest pages it got. A result shorter than total
+// without an error means the walk was cut short by the page guard.
+func iterateRemoteChannels(ctx context.Context, host, token string, userID int64, pageSize int, filters map[string]string, backoff []time.Duration) ([]remoteChannel, int64, error) {
 	if pageSize <= 0 || pageSize > 200 {
 		pageSize = 100
 	}
@@ -1480,12 +1490,18 @@ func iterateRemoteChannels(ctx context.Context, host, token string, userID int64
 		}
 		var items []remoteChannel
 		var pageTotal int64
-		err := remoteRetryRateLimited(ctx, func() error {
+		err := remoteRetryRateLimited(ctx, backoff, func() error {
 			var err error
 			items, pageTotal, err = fetchRemoteChannelPage(ctx, host, token, userID, page, pageSize, filters)
 			return err
 		})
 		if err != nil {
+			// A page cut off by the caller's deadline reports the context
+			// error itself, so a time-budgeted caller can tell "out of time,
+			// here is what we have" from a remote failure.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				err = ctxErr
+			}
 			return all, total, fmt.Errorf("page %d: %w", page, err)
 		}
 		total = pageTotal
@@ -1513,15 +1529,28 @@ func iterateRemoteChannels(ctx context.Context, host, token string, userID int64
 	return all, total, nil
 }
 
+// remoteChannelLastTotal is the channel total each profile's remote last
+// reported (profileID → int64), for answers given without walking the list.
+var remoteChannelLastTotal sync.Map
+
 // mirrorRemoteChannels records one channel-list walk into both mirrors: a
 // remote_channel_snapshot point for the sparkline and remote_channel_current.
 // Channels missing from the list are deleted from current only when the walk
 // is known to be the remote's whole set — no error, no filter, and at least
 // the reported total collected. Anything less only upserts and logs why, so
 // channels the walk never reached (pages past a failure or the page guard)
-// stay visible to their studio instead of looking deleted upstream.
+// stay visible to their studio instead of looking deleted upstream. An empty
+// list is never trusted to wipe the profile's mirror: a remote answering
+// "0 channels" is far more likely misbehaving than emptied.
 func mirrorRemoteChannels(profileID int64, channels []remoteChannel, total int64, walkErr error) error {
 	if profileID <= 0 {
+		return nil
+	}
+	if total > 0 {
+		remoteChannelLastTotal.Store(profileID, total)
+	}
+	if walkErr == nil && len(channels) == 0 {
+		log.Printf("[remote-current] profile %d: remote returned no channels (total %d); mirror left unchanged", profileID, total)
 		return nil
 	}
 	complete := walkErr == nil && int64(len(channels)) >= total
@@ -1574,7 +1603,7 @@ func handleRemoteFetchChannels(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
 	defer cancel()
 
-	all, total, err := iterateRemoteChannels(ctx, host, token, userID, body.PageSize, filters)
+	all, total, err := iterateRemoteChannels(ctx, host, token, userID, body.PageSize, filters, remoteRateLimitBackoff)
 	// Interactive fetch also feeds both mirrors (sparkline snapshot + the
 	// remote_channel_current list page reloads render from). Async so a slow
 	// DB doesn't add HTTP latency; partial or filtered lists only upsert.
@@ -1773,29 +1802,23 @@ func upsertRemoteCurrent(profileID int64, channels []remoteChannel, reconcile bo
 		}
 	}
 
-	if !reconcile {
+	// An empty list never reconciles: it would wipe the profile's mirror.
+	if !reconcile || len(channels) == 0 {
 		return tx.Commit()
 	}
 	// Reconcile: delete rows for channels that are no longer on the remote.
 	// The id set is bound as one array parameter, so tens of thousands of
 	// channels stay a single statement.
-	if len(channels) > 0 {
-		ids := make([]int64, len(channels))
-		for i, ch := range channels {
-			ids[i] = ch.ID
-		}
-		if _, err := tx.Exec(
-			`DELETE FROM remote_channel_current
-			  WHERE profile_id=$1 AND NOT (remote_channel_id = ANY($2))`,
-			profileID, pq.Array(ids),
-		); err != nil {
-			return fmt.Errorf("reconcile delete: %v", err)
-		}
-	} else {
-		// Empty result — wipe everything for this profile.
-		if _, err := tx.Exec(`DELETE FROM remote_channel_current WHERE profile_id=$1`, profileID); err != nil {
-			return fmt.Errorf("reconcile wipe: %v", err)
-		}
+	ids := make([]int64, len(channels))
+	for i, ch := range channels {
+		ids[i] = ch.ID
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM remote_channel_current
+		  WHERE profile_id=$1 AND NOT (remote_channel_id = ANY($2))`,
+		profileID, pq.Array(ids),
+	); err != nil {
+		return fmt.Errorf("reconcile delete: %v", err)
 	}
 
 	return tx.Commit()
@@ -1885,41 +1908,58 @@ func syncAllRemoteProfilesOnce() {
 	rows.Close()
 
 	for _, p := range profiles {
-		remoteSnapshotInflightMu.Lock()
-		if remoteSnapshotInflight[p.id] {
-			remoteSnapshotInflightMu.Unlock()
-			log.Printf("[remote-snapshot] profile %d still in flight, skipping tick", p.id)
+		token, err := decryptRemoteToken(p.enc)
+		if err != nil {
+			log.Printf("[remote-snapshot] decrypt token for profile %d: %v", p.id, err)
 			continue
 		}
-		remoteSnapshotInflight[p.id] = true
-		remoteSnapshotInflightMu.Unlock()
-
-		go func(p prof) {
-			defer func() {
-				remoteSnapshotInflightMu.Lock()
-				delete(remoteSnapshotInflight, p.id)
-				remoteSnapshotInflightMu.Unlock()
-			}()
-			token, err := decryptRemoteToken(p.enc)
-			if err != nil {
-				log.Printf("[remote-snapshot] decrypt token for profile %d: %v", p.id, err)
-				return
-			}
-			// A full walk of a large remote is dozens of spaced pages plus
-			// possible 429 backoff; the in-flight guard above keeps a slow
-			// walk from overlapping the next tick.
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			channels, total, fetchErr := iterateRemoteChannels(ctx, p.host, token, p.userID, 100, nil)
-			if fetchErr != nil {
-				log.Printf("[remote-snapshot] fetch profile %d (%s): %v", p.id, p.host, fetchErr)
-			}
-			if err := mirrorRemoteChannels(p.id, channels, total, fetchErr); err != nil {
-				log.Printf("[remote-current] upsert profile %d: %v", p.id, err)
-			}
-			log.Printf("[remote-snapshot] profile %d: wrote %d of %d rows (fetch error=%t)", p.id, len(channels), total, fetchErr != nil)
-		}(p)
+		if !startRemoteProfileSync(p.id, p.host, p.userID, token) {
+			log.Printf("[remote-snapshot] profile %d still in flight, skipping tick", p.id)
+		}
 	}
+}
+
+// startRemoteProfileSync runs one full channel walk + mirror write for a
+// profile in the background, unless one is already in flight for it (the
+// cron tick and a budget-limited refresh share remoteSnapshotInflight).
+// Reports whether this call started it.
+func startRemoteProfileSync(profileID int64, host string, userID int64, token string) bool {
+	remoteSnapshotInflightMu.Lock()
+	if remoteSnapshotInflight[profileID] {
+		remoteSnapshotInflightMu.Unlock()
+		return false
+	}
+	remoteSnapshotInflight[profileID] = true
+	remoteSnapshotInflightMu.Unlock()
+
+	go func() {
+		defer func() {
+			remoteSnapshotInflightMu.Lock()
+			delete(remoteSnapshotInflight, profileID)
+			remoteSnapshotInflightMu.Unlock()
+		}()
+		remoteProfileFullSync(profileID, host, userID, token)
+	}()
+	return true
+}
+
+// remoteProfileFullSync walks a profile's whole channel list and writes both
+// mirrors. A variable so tests can observe startRemoteProfileSync without a
+// real walk.
+var remoteProfileFullSync = func(profileID int64, host string, userID int64, token string) {
+	// A full walk of a large remote is hundreds of spaced pages plus
+	// possible 429 backoff; the in-flight guard keeps a slow walk from
+	// overlapping the next tick or refresh.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	channels, total, fetchErr := iterateRemoteChannels(ctx, host, token, userID, 100, nil, remoteBackgroundRateLimitBackoff)
+	if fetchErr != nil {
+		log.Printf("[remote-snapshot] fetch profile %d (%s): %v", profileID, host, fetchErr)
+	}
+	if err := mirrorRemoteChannels(profileID, channels, total, fetchErr); err != nil {
+		log.Printf("[remote-current] upsert profile %d: %v", profileID, err)
+	}
+	log.Printf("[remote-snapshot] profile %d: wrote %d of %d rows (fetch error=%t)", profileID, len(channels), total, fetchErr != nil)
 }
 
 // startRemoteSnapshotPrune deletes snapshot rows older than the retention
@@ -4068,10 +4108,12 @@ func handleRemoteCachedChannels(c *gin.Context) {
 }
 
 // handleRemoteChannelsRefresh does what the 15-min snapshot cron does, on
-// demand: pull the full paginated channel list from the remote for the
-// given profile, write a snapshot row (for the sparkline), and UPSERT
-// the mirror so subsequent /channels/cached reads reflect fresh
-// used_quota. Studio operators call this from the "获取用量" button;
+// demand: pull the paginated channel list from the remote for the given
+// profile, write a snapshot row (for the sparkline), and UPSERT the mirror
+// so subsequent /channels/cached reads reflect fresh used_quota. The walk is
+// capped at remoteRefreshBudget; when it can't finish in time the newest
+// pages are upserted and a background full sync takes over the rest.
+// Studio operators call this from the "获取用量" button;
 // they still only *see* their own channels via the caller filter in
 // handleRemoteCachedChannels — this endpoint just refreshes the pool
 // the filter reads from.
@@ -4085,6 +4127,11 @@ var (
 	remoteChannelsRefreshInFlight   = map[int64]bool{}
 	remoteChannelsRefreshInFlightMu sync.Mutex
 )
+
+// remoteRefreshBudget bounds the synchronous part of a refresh so it answers
+// well inside the ~22s the client and front proxy wait. A variable so tests
+// can shorten it.
+var remoteRefreshBudget = 15 * time.Second
 
 func handleRemoteChannelsRefresh(c *gin.Context) {
 	profileID, err := strconv.ParseInt(c.Query("profile_id"), 10, 64)
@@ -4111,22 +4158,47 @@ func handleRemoteChannelsRefresh(c *gin.Context) {
 		remoteChannelsRefreshInFlightMu.Unlock()
 	}()
 
+	// A background full sync for this profile is already walking the list
+	// and filling the mirror. Paging the remote alongside it would only
+	// split the per-IP rate limit between the two and get both 429ed, so
+	// answer at once and let the caller re-read the mirror.
+	remoteSnapshotInflightMu.Lock()
+	syncing := remoteSnapshotInflight[profileID]
+	remoteSnapshotInflightMu.Unlock()
+	if syncing {
+		var total int64
+		if v, ok := remoteChannelLastTotal.Load(profileID); ok {
+			total = v.(int64)
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"ok":         true,
+			"complete":   false,
+			"background": true,
+			"fetched":    0,
+			"total":      total,
+			"refreshed":  time.Now().Unix(),
+		})
+		return
+	}
+
 	host, userID, token, err := loadRemoteProfileByID(profileID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// 90s cap matches handleRemoteFetchChannels — enough headroom for a
-	// slow remote paging through a few thousand channels; short enough
-	// that a stuck request doesn't tie up the endpoint forever.
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
+	// Walk from the newest page for at most remoteRefreshBudget, on a
+	// context of our own: the client/front proxy drops the request around
+	// 22s, and a large remote (aaaasl, ~200 pages) needs minutes. Whatever
+	// arrived in time is upserted and the rest goes to a background sync.
+	ctx, cancel := context.WithTimeout(context.Background(), remoteRefreshBudget)
 	defer cancel()
-	channels, total, err := iterateRemoteChannels(ctx, host, token, userID, 100, nil)
+	channels, total, err := iterateRemoteChannels(ctx, host, token, userID, 100, nil, remoteRateLimitBackoff)
+	outOfTime := errors.Is(err, context.DeadlineExceeded)
 	// Whatever was collected is upserted; the mirror only reconciles
 	// (deletes channels missing from the list) on a complete walk.
 	mirrorErr := mirrorRemoteChannels(profileID, channels, total, err)
-	if err != nil {
+	if err != nil && !outOfTime {
 		if mirrorErr != nil {
 			log.Printf("[remote-current] refresh partial upsert for profile %d: %v", profileID, mirrorErr)
 		}
@@ -4143,12 +4215,21 @@ func handleRemoteChannelsRefresh(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": mirrorErr.Error()})
 		return
 	}
+	complete := err == nil && int64(len(channels)) >= total
+	// background: a full sync for this profile is running, whether this
+	// refresh started it or a cron tick / earlier refresh already had.
+	background := false
+	if !complete {
+		startRemoteProfileSync(profileID, host, userID, token)
+		background = true
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"ok":        true,
-		"complete":  int64(len(channels)) >= total,
-		"fetched":   len(channels),
-		"total":     total,
-		"refreshed": time.Now().Unix(),
+		"ok":         true,
+		"complete":   complete,
+		"background": background,
+		"fetched":    len(channels),
+		"total":      total,
+		"refreshed":  time.Now().Unix(),
 	})
 }
 
@@ -4668,7 +4749,7 @@ func lookupRemoteChannelBySha(ctx context.Context, host, token string, userID in
 	if errors.Is(err, errRemoteSellerUnsupported) {
 		// Seller API has no search; a seller only sees its own channels, so
 		// walking the full list is cheap.
-		channels, _, err := iterateRemoteChannels(ctx, host, token, userID, 100, nil)
+		channels, _, err := iterateRemoteChannels(ctx, host, token, userID, 100, nil, remoteRateLimitBackoff)
 		if err != nil {
 			return 0, fmt.Errorf("list failed: %w", err)
 		}
@@ -5852,7 +5933,7 @@ func handleRemoteChannelUsageRange(c *gin.Context) {
 			var stat struct {
 				Quota int64 `json:"quota"`
 			}
-			err := remoteRetryRateLimited(ctx, func() error {
+			err := remoteRetryRateLimited(ctx, remoteRateLimitBackoff, func() error {
 				data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/stat", token, userID, q, nil)
 				if err != nil {
 					return err

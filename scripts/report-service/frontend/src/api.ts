@@ -1487,7 +1487,12 @@ export const api = {
   // used_quota now. Backend guards against concurrent refreshes per
   // profile — surface the 429 to the caller.
   remoteChannelsRefresh: (profileID: number) =>
-    request<{ ok: boolean; fetched: number; total: number; refreshed: number }>(
+    // complete=false: the server ran out of its time budget, kept the newest
+    // `fetched` channels and left the rest to a background full sync
+    // (background=true). fetched=0 with background=true: a background sync
+    // was already running, so the server skipped paging the remote.
+    // complete/background are missing on older servers.
+    request<{ ok: boolean; fetched: number; total: number; refreshed: number; complete?: boolean; background?: boolean }>(
       `/api/remote-newapi/channels/refresh?profile_id=${profileID}`,
       { method: 'POST' },
     ),
