@@ -22,10 +22,12 @@ import (
 
 // fakeRemoteChannelList serves /api/channel/ like new-api: newest channel
 // first, page_size clamped to 100. failPage answers 502; page rateLimitPage
-// answers 429 for its first rateLimitHits requests.
+// answers 429 for its first rateLimitHits requests; hangPage never answers
+// until the caller gives up.
 type fakeRemoteChannelList struct {
 	total         int
 	failPage      int
+	hangPage      int
 	rateLimitPage int
 	rateLimitHits int32
 	requests      atomic.Int32
@@ -36,6 +38,10 @@ func (f *fakeRemoteChannelList) ServeHTTP(w http.ResponseWriter, r *http.Request
 	page, _ := strconv.Atoi(r.URL.Query().Get("p"))
 	size, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
 	size = min(size, 100)
+	if page == f.hangPage {
+		<-r.Context().Done()
+		return
+	}
 	if page == f.failPage {
 		http.Error(w, "upstream down", http.StatusBadGateway)
 		return
@@ -237,4 +243,64 @@ func TestRemoteChannelUsageRangeReportsFailedChannels(t *testing.T) {
 	assert.Equal(t, int32(3), statCalls["1"].Load())
 	assert.Equal(t, int32(2), statCalls["2"].Load())
 	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// A refresh against a remote too large to walk in time answers 200 within its
+// budget with the newest pages upserted (no reconcile DELETE), and hands the
+// rest to one background full sync: a second refresh while that sync runs
+// does not start another.
+func TestRemoteChannelsRefreshAnswersWithinBudget(t *testing.T) {
+	mock := remoteChannelMirrorFixture(t)
+	prevBudget, prevSync := remoteRefreshBudget, remoteProfileFullSync
+	remoteRefreshBudget = 300 * time.Millisecond
+	var syncs atomic.Int32
+	release := make(chan struct{})
+	remoteProfileFullSync = func(int64, string, int64, string) {
+		syncs.Add(1)
+		<-release
+	}
+	t.Cleanup(func() { remoteRefreshBudget, remoteProfileFullSync = prevBudget, prevSync })
+
+	// Pages 1–2 arrive, page 3 hangs past the budget.
+	srv := httptest.NewServer(&fakeRemoteChannelList{total: 20000, hangPage: 3})
+	t.Cleanup(srv.Close)
+
+	const profileID = int64(11)
+	for round := range 2 {
+		mock.ExpectQuery(regexp.QuoteMeta(`SELECT host, user_id, access_token_enc FROM remote_newapi_profile`)).
+			WithArgs(profileID).
+			WillReturnRows(sqlmock.NewRows([]string{"host", "user_id", "access_token_enc"}).AddRow(srv.URL, 1, ""))
+		expectProfileLookups(mock, 3)
+		mock.ExpectBegin()
+		mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO remote_channel_snapshot`)).WillReturnResult(sqlmock.NewResult(0, 200))
+		mock.ExpectCommit()
+		mock.ExpectBegin()
+		mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO remote_channel_current`)).WillReturnResult(sqlmock.NewResult(0, 200))
+		mock.ExpectCommit()
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/remote-newapi/channels/refresh?profile_id=11", nil)
+		began := time.Now()
+		handleRemoteChannelsRefresh(c)
+
+		assert.Less(t, time.Since(began), 2*time.Second, "round %d", round)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		var out map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+		assert.Equal(t, float64(200), out["fetched"])
+		assert.Equal(t, float64(20000), out["total"])
+		assert.Equal(t, false, out["complete"])
+		assert.Equal(t, true, out["background"])
+		// Any DELETE would have failed the mirror write and turned this 500.
+		assert.NoError(t, mock.ExpectationsWereMet(), "round %d", round)
+	}
+	assert.Equal(t, int32(1), syncs.Load(), "second refresh reuses the running background sync")
+
+	close(release)
+	require.Eventually(t, func() bool {
+		remoteSnapshotInflightMu.Lock()
+		defer remoteSnapshotInflightMu.Unlock()
+		return !remoteSnapshotInflight[profileID]
+	}, time.Second, 10*time.Millisecond)
 }

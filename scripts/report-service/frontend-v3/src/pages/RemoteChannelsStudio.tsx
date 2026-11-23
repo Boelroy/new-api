@@ -801,7 +801,11 @@ export default function RemoteChannelsStudio() {
     try {
       const res = await api.remoteChannelsRefresh(selectedID)
       await reloadChannels()
-      toast.success(`已从远端拉取 ${res.fetched} 条渠道`)
+      if (res.complete === false) {
+        toast.success(`已刷新最新 ${res.fetched} 条，其余渠道后台同步中（约几分钟）`)
+      } else {
+        toast.success(`已从远端拉取 ${res.fetched} 条渠道`)
+      }
     } catch (e: any) {
       toast.error('获取用量失败: ' + (e?.message || e))
     } finally {
