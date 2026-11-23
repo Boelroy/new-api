@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 )
 
 // Remote new-api inspector: fetch channels + used_quota from an external
@@ -1415,41 +1417,134 @@ func fetchRemoteChannelPage(ctx context.Context, host, token string, userID int6
 	return arr, int64(len(arr)), nil
 }
 
-// handleRemoteFetchChannels iterates the remote's paginated channel list
-// exhaustively (up to a cap) and returns the flat list merged with local
-// operator metadata (quota_usd/note). The remote may have thousands of
-// channels; we cap at 5000 to avoid runaway calls.
-// iterateRemoteChannels walks the remote's paginated /api/channel/ list to
-// completion (up to 50 pages / 5000 channels — same hard cap as before).
+// remoteChannelMaxPages only guards against a remote that never stops
+// paging. It sits far above any real channel count (500 pages ≈ 50k
+// channels); a walk that hits it comes back short of total, which callers
+// treat as incomplete.
+const remoteChannelMaxPages = 500
+
+// remoteChannelPageGap spaces consecutive list pages, and
+// remoteRateLimitBackoff is how long to wait before each retry of a call the
+// remote answered with 429. Remotes such as aaaasl rate-limit per IP, and a
+// full walk is dozens of pages. Variables so tests can shorten the waits.
+var (
+	remoteChannelPageGap   = 250 * time.Millisecond
+	remoteRateLimitBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+)
+
+// errRemoteChannelListFiltered marks a channel list fetched with filters:
+// it is not the remote's whole channel set, so it must never reconcile the
+// mirror.
+var errRemoteChannelListFiltered = errors.New("filtered channel list")
+
+// remoteRetryRateLimited runs call, retrying after each remoteRateLimitBackoff
+// step while the remote answers 429. Other errors, and a 429 after the last
+// step, are returned as is.
+func remoteRetryRateLimited(ctx context.Context, call func() error) error {
+	for _, wait := range remoteRateLimitBackoff {
+		err := call()
+		if !isRemoteRateLimited(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(wait):
+		}
+	}
+	return call()
+}
+
+// iterateRemoteChannels walks the remote's paginated /api/channel/ list
+// until it has the reported total, the remote runs out of pages, or the
+// remoteChannelMaxPages guard trips. Pages are spaced by
+// remoteChannelPageGap and 429s are retried with backoff. Channel IDs are
+// de-duplicated, since a channel created mid-walk shifts later pages by one.
 // Returns whatever it managed to collect plus the reported total; on error
-// it also returns the partial list so callers can decide what to do.
-//
-// Extracted from handleRemoteFetchChannels so the background snapshot loop
-// can reuse the exact same pagination logic without going through gin.
+// it also returns the partial list so callers can decide what to do. A
+// result shorter than total without an error means the walk was cut short.
 func iterateRemoteChannels(ctx context.Context, host, token string, userID int64, pageSize int, filters map[string]string) ([]remoteChannel, int64, error) {
 	if pageSize <= 0 || pageSize > 200 {
 		pageSize = 100
 	}
-	const maxPages = 50
 	all := make([]remoteChannel, 0)
+	seen := make(map[int64]bool)
 	var total int64
-	for page := 1; page <= maxPages; page++ {
-		items, tot, err := fetchRemoteChannelPage(ctx, host, token, userID, page, pageSize, filters)
-		if err != nil {
-			return all, total, err
+	for page := 1; page <= remoteChannelMaxPages; page++ {
+		if page > 1 && remoteChannelPageGap > 0 {
+			select {
+			case <-ctx.Done():
+				return all, total, ctx.Err()
+			case <-time.After(remoteChannelPageGap):
+			}
 		}
-		total = tot
-		all = append(all, items...)
-		if len(items) < pageSize {
+		var items []remoteChannel
+		var pageTotal int64
+		err := remoteRetryRateLimited(ctx, func() error {
+			var err error
+			items, pageTotal, err = fetchRemoteChannelPage(ctx, host, token, userID, page, pageSize, filters)
+			return err
+		})
+		if err != nil {
+			return all, total, fmt.Errorf("page %d: %w", page, err)
+		}
+		total = pageTotal
+		for _, ch := range items {
+			if seen[ch.ID] {
+				continue
+			}
+			seen[ch.ID] = true
+			all = append(all, ch)
+		}
+		if len(items) == 0 {
 			break
 		}
-		if total > 0 && int64(len(all)) >= total {
+		// The remote may serve fewer rows than page_size asks for (new-api
+		// clamps it), so a short page only ends the walk when there is no
+		// total to go by.
+		if total > 0 {
+			if int64(len(all)) >= total {
+				break
+			}
+		} else if len(items) < pageSize {
 			break
 		}
 	}
 	return all, total, nil
 }
 
+// mirrorRemoteChannels records one channel-list walk into both mirrors: a
+// remote_channel_snapshot point for the sparkline and remote_channel_current.
+// Channels missing from the list are deleted from current only when the walk
+// is known to be the remote's whole set — no error, no filter, and at least
+// the reported total collected. Anything less only upserts and logs why, so
+// channels the walk never reached (pages past a failure or the page guard)
+// stay visible to their studio instead of looking deleted upstream.
+func mirrorRemoteChannels(profileID int64, channels []remoteChannel, total int64, walkErr error) error {
+	if profileID <= 0 {
+		return nil
+	}
+	complete := walkErr == nil && int64(len(channels)) >= total
+	if !complete {
+		reason := "fewer channels than remote total"
+		if walkErr != nil {
+			reason = walkErr.Error()
+		}
+		log.Printf("[remote-current] profile %d: incomplete channel list (%d of %d): %s; upsert only, no reconcile delete",
+			profileID, len(channels), total, reason)
+		if len(channels) == 0 {
+			return nil
+		}
+	}
+	if err := writeRemoteSnapshot(profileID, channels); err != nil {
+		log.Printf("[remote-snapshot] write profile %d: %v", profileID, err)
+	}
+	return upsertRemoteCurrent(profileID, channels, complete)
+}
+
+// handleRemoteFetchChannels iterates the remote's paginated channel list
+// exhaustively and returns the flat list merged with local operator
+// metadata (quota_usd/note).
 func handleRemoteFetchChannels(c *gin.Context) {
 	var body struct {
 		ProfileID   int64  `json:"profile_id,omitempty"`
@@ -1480,6 +1575,20 @@ func handleRemoteFetchChannels(c *gin.Context) {
 	defer cancel()
 
 	all, total, err := iterateRemoteChannels(ctx, host, token, userID, body.PageSize, filters)
+	// Interactive fetch also feeds both mirrors (sparkline snapshot + the
+	// remote_channel_current list page reloads render from). Async so a slow
+	// DB doesn't add HTTP latency; partial or filtered lists only upsert.
+	if body.ProfileID > 0 && len(all) > 0 {
+		walkErr := err
+		if walkErr == nil && (body.Group != "" || body.Status != "" || body.Type != "") {
+			walkErr = errRemoteChannelListFiltered
+		}
+		go func(pid int64, snapshot []remoteChannel) {
+			if err := mirrorRemoteChannels(pid, snapshot, total, walkErr); err != nil {
+				log.Printf("[remote-current] interactive mirror for profile %d failed: %v", pid, err)
+			}
+		}(body.ProfileID, slices.Clone(all))
+	}
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{
 			"error":        err.Error(),
@@ -1516,19 +1625,6 @@ func handleRemoteFetchChannels(c *gin.Context) {
 				}
 			}
 		}
-		// Interactive fetch also feeds both mirrors:
-		//   • remote_channel_snapshot — time-series point for the sparkline.
-		//   • remote_channel_current  — mirror of the live list so page
-		//     reloads render immediately without another remote hit.
-		// Both writes are async so a slow DB doesn't add HTTP latency.
-		go func(pid int64, snapshot []remoteChannel) {
-			if err := writeRemoteSnapshot(pid, snapshot); err != nil {
-				log.Printf("[remote-snapshot] interactive write for profile %d failed: %v", pid, err)
-			}
-			if err := upsertRemoteCurrent(pid, snapshot); err != nil {
-				log.Printf("[remote-current] interactive upsert for profile %d failed: %v", pid, err)
-			}
-		}(body.ProfileID, all)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1583,15 +1679,15 @@ func writeRemoteSnapshot(profileID int64, channels []remoteChannel) error {
 	return tx.Commit()
 }
 
-// upsertRemoteCurrent writes the full current channel state into
-// remote_channel_current: one row per channel. Channels present in the
-// table but absent from `channels` are deleted, so the local mirror stays
-// exactly in sync with what the remote returned.
+// upsertRemoteCurrent writes channel state into remote_channel_current: one
+// row per channel. With reconcile, channels present in the table but absent
+// from `channels` are deleted, so the local mirror stays exactly in sync with
+// what the remote returned.
 //
-// Only call this on a COMPLETE fetch (all pages loaded without error) —
-// otherwise a truncated result would delete rows for channels that still
-// exist but weren't in the partial response.
-func upsertRemoteCurrent(profileID int64, channels []remoteChannel) error {
+// Only reconcile on a COMPLETE fetch (see mirrorRemoteChannels) — otherwise
+// a truncated result would delete rows for channels that still exist but
+// weren't in the partial response.
+func upsertRemoteCurrent(profileID int64, channels []remoteChannel, reconcile bool) error {
 	if profileID <= 0 {
 		return nil
 	}
@@ -1677,20 +1773,22 @@ func upsertRemoteCurrent(profileID int64, channels []remoteChannel) error {
 		}
 	}
 
+	if !reconcile {
+		return tx.Commit()
+	}
 	// Reconcile: delete rows for channels that are no longer on the remote.
-	// Use `NOT IN (…)` since the channel-id set is small enough (<5000) to
-	// fit in a single statement comfortably.
+	// The id set is bound as one array parameter, so tens of thousands of
+	// channels stay a single statement.
 	if len(channels) > 0 {
-		ids := make([]string, len(channels))
+		ids := make([]int64, len(channels))
 		for i, ch := range channels {
-			ids[i] = strconv.FormatInt(ch.ID, 10)
+			ids[i] = ch.ID
 		}
-		q := fmt.Sprintf(
+		if _, err := tx.Exec(
 			`DELETE FROM remote_channel_current
-			  WHERE profile_id=$1 AND remote_channel_id NOT IN (%s)`,
-			strings.Join(ids, ","),
-		)
-		if _, err := tx.Exec(q, profileID); err != nil {
+			  WHERE profile_id=$1 AND NOT (remote_channel_id = ANY($2))`,
+			profileID, pq.Array(ids),
+		); err != nil {
 			return fmt.Errorf("reconcile delete: %v", err)
 		}
 	} else {
@@ -1807,28 +1905,19 @@ func syncAllRemoteProfilesOnce() {
 				log.Printf("[remote-snapshot] decrypt token for profile %d: %v", p.id, err)
 				return
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			// A full walk of a large remote is dozens of spaced pages plus
+			// possible 429 backoff; the in-flight guard above keeps a slow
+			// walk from overlapping the next tick.
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
-			channels, _, fetchErr := iterateRemoteChannels(ctx, p.host, token, p.userID, 100, nil)
+			channels, total, fetchErr := iterateRemoteChannels(ctx, p.host, token, p.userID, 100, nil)
 			if fetchErr != nil {
 				log.Printf("[remote-snapshot] fetch profile %d (%s): %v", p.id, p.host, fetchErr)
-				// Partial snapshot is still worth appending (time series
-				// tolerates gaps), but DO NOT reconcile current — a
-				// truncated list would delete rows for channels that
-				// actually still exist upstream.
 			}
-			if len(channels) == 0 {
-				return
+			if err := mirrorRemoteChannels(p.id, channels, total, fetchErr); err != nil {
+				log.Printf("[remote-current] upsert profile %d: %v", p.id, err)
 			}
-			if err := writeRemoteSnapshot(p.id, channels); err != nil {
-				log.Printf("[remote-snapshot] write profile %d: %v", p.id, err)
-			}
-			if fetchErr == nil {
-				if err := upsertRemoteCurrent(p.id, channels); err != nil {
-					log.Printf("[remote-current] upsert profile %d: %v", p.id, err)
-				}
-			}
-			log.Printf("[remote-snapshot] profile %d: wrote %d rows (complete=%t)", p.id, len(channels), fetchErr == nil)
+			log.Printf("[remote-snapshot] profile %d: wrote %d of %d rows (fetch error=%t)", p.id, len(channels), total, fetchErr != nil)
 		}(p)
 	}
 }
@@ -4034,7 +4123,13 @@ func handleRemoteChannelsRefresh(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
 	defer cancel()
 	channels, total, err := iterateRemoteChannels(ctx, host, token, userID, 100, nil)
+	// Whatever was collected is upserted; the mirror only reconciles
+	// (deletes channels missing from the list) on a complete walk.
+	mirrorErr := mirrorRemoteChannels(profileID, channels, total, err)
 	if err != nil {
+		if mirrorErr != nil {
+			log.Printf("[remote-current] refresh partial upsert for profile %d: %v", profileID, mirrorErr)
+		}
 		// 429 instead of 502: Cloudflare in front of the report swaps a 502
 		// body for its own HTML error page.
 		if isRemoteRateLimited(err) {
@@ -4044,18 +4139,13 @@ func handleRemoteChannelsRefresh(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
-	// Only reconcile the mirror when the fetch completed. upsertRemoteCurrent
-	// DELETEs rows missing from the input, so a partial page would drop
-	// real channels — guard by the same "no error" contract the cron uses.
-	if err := writeRemoteSnapshot(profileID, channels); err != nil {
-		log.Printf("[remote-current] refresh snapshot for profile %d: %v", profileID, err)
-	}
-	if err := upsertRemoteCurrent(profileID, channels); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	if mirrorErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": mirrorErr.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"ok":        true,
+		"complete":  int64(len(channels)) >= total,
 		"fetched":   len(channels),
 		"total":     total,
 		"refreshed": time.Now().Unix(),
@@ -5705,10 +5795,11 @@ func handleRemoteChannelUsageRange(c *gin.Context) {
 	}
 	if len(scopedIDs) == 0 {
 		c.JSON(http.StatusOK, gin.H{
-			"data":            map[string]int64{},
-			"total_used_usd":  0.0,
-			"start_timestamp": body.StartTS,
-			"end_timestamp":   body.EndTS,
+			"data":               map[string]int64{},
+			"failed_channel_ids": []int64{},
+			"total_used_usd":     0.0,
+			"start_timestamp":    body.StartTS,
+			"end_timestamp":      body.EndTS,
 		})
 		return
 	}
@@ -5730,6 +5821,7 @@ func handleRemoteChannelUsageRange(c *gin.Context) {
 	sort.Slice(scopedIDs, func(i, j int) bool { return scopedIDs[i] < scopedIDs[j] })
 
 	results := make(map[int64]int64, len(scopedIDs))
+	failed := make([]int64, 0)
 	var resultsMu sync.Mutex
 	sem := make(chan struct{}, usageRangeMaxConcurrent)
 	var wg sync.WaitGroup
@@ -5757,20 +5849,23 @@ func handleRemoteChannelUsageRange(c *gin.Context) {
 			q.Set("channel", idStr)
 			q.Set("start_timestamp", strconv.FormatInt(body.StartTS, 10))
 			q.Set("end_timestamp", strconv.FormatInt(body.EndTS, 10))
-			data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/stat", token, userID, q, nil)
-			if err != nil {
-				// One failure shouldn't blank the whole table; record 0.
-				resultsMu.Lock()
-				results[chID] = 0
-				resultsMu.Unlock()
-				return
-			}
 			var stat struct {
 				Quota int64 `json:"quota"`
 			}
-			if err := json.Unmarshal(data, &stat); err != nil {
+			err := remoteRetryRateLimited(ctx, func() error {
+				data, err := remoteDoJSON(ctx, http.MethodGet, host, "/api/log/stat", token, userID, q, nil)
+				if err != nil {
+					return err
+				}
+				return json.Unmarshal(data, &stat)
+			})
+			if err != nil {
+				// One failure shouldn't blank the whole table, but it must not
+				// read as "no usage" either: report it and leave it uncached
+				// so the next refresh asks the remote again.
+				log.Printf("[usage-range] profile %d channel %d: %v", body.ProfileID, chID, err)
 				resultsMu.Lock()
-				results[chID] = 0
+				failed = append(failed, chID)
 				resultsMu.Unlock()
 				return
 			}
@@ -5790,11 +5885,15 @@ func handleRemoteChannelUsageRange(c *gin.Context) {
 		dataOut[strconv.FormatInt(id, 10)] = q
 		totalRaw += q
 	}
+	slices.Sort(failed)
 	c.JSON(http.StatusOK, gin.H{
-		"data":            dataOut,
-		"total_used_usd":  float64(totalRaw) / usedQuotaPerUSD,
-		"start_timestamp": body.StartTS,
-		"end_timestamp":   body.EndTS,
+		"data": dataOut,
+		// Channels whose remote stat call failed are absent from data and
+		// from total_used_usd; the total only covers channels in data.
+		"failed_channel_ids": failed,
+		"total_used_usd":     float64(totalRaw) / usedQuotaPerUSD,
+		"start_timestamp":    body.StartTS,
+		"end_timestamp":      body.EndTS,
 	})
 }
 

@@ -611,6 +611,8 @@ export default function RemoteChannelsStudio() {
   const [usageEnd, setUsageEnd] = useState<string>(todayLocalYMD())
   const [usageData, setUsageData] = useState<Record<string, number>>({}) // channel_id → raw quota
   const [usageTotal, setUsageTotal] = useState<number>(0)
+  // Channels whose remote usage query failed; shown as 查询失败, not $0.
+  const [usageFailed, setUsageFailed] = useState<Set<string>>(new Set())
   const [usageLoading, setUsageLoading] = useState(false)
   const [usageErr, setUsageErr] = useState<string | null>(null)
   const [usageFetchedAt, setUsageFetchedAt] = useState<number>(0)
@@ -726,6 +728,7 @@ export default function RemoteChannelsStudio() {
     if (!selectedID) {
       setUsageData({})
       setUsageTotal(0)
+      setUsageFailed(new Set())
       return
     }
     const startEpoch = ymdToLocalEpoch(usageStart, false)
@@ -756,6 +759,7 @@ export default function RemoteChannelsStudio() {
       })
       setUsageData(res.data || {})
       setUsageTotal(res.total_used_usd || 0)
+      setUsageFailed(new Set((res.failed_channel_ids || []).map(String)))
       setUsageFetchedAt(Date.now())
     } catch (e: any) {
       setUsageErr(e?.message || String(e))
@@ -1528,7 +1532,8 @@ export default function RemoteChannelsStudio() {
                     const usedUSD = raw / 500000
                     const quotaUSD = ch.quota_usd ?? 0
                     const pct = quotaUSD > 0 ? Math.min(100, (usedUSD / quotaUSD) * 100) : null
-                    return { ch, usedUSD, quotaUSD, pct }
+                    const failed = usageFailed.has(String(ch.id))
+                    return { ch, usedUSD, quotaUSD, pct, failed }
                   })
                   rows.sort((a, b) => b.usedUSD - a.usedUSD)
                   if (rows.length === 0) {
@@ -1547,13 +1552,21 @@ export default function RemoteChannelsStudio() {
                           <td className="px-4 py-2 font-mono text-[11px]">{r.ch.name}</td>
                           <td className="px-4 py-2 text-[11px] text-gray-600">{r.ch.group || '—'}</td>
                           <td className="px-4 py-2 text-right tabular-nums text-[11px]">
-                            {r.usedUSD > 0 ? `$${r.usedUSD.toFixed(4)}` : <span className="text-gray-300">$0</span>}
+                            {r.failed ? (
+                              <span className="text-red-600 cursor-help" title="远端用量查询失败，请稍后点「刷新」重试">
+                                查询失败
+                              </span>
+                            ) : r.usedUSD > 0 ? (
+                              `$${r.usedUSD.toFixed(4)}`
+                            ) : (
+                              <span className="text-gray-300">$0</span>
+                            )}
                           </td>
                           <td className="px-4 py-2 text-right tabular-nums text-[11px]">
                             {r.quotaUSD > 0 ? `$${r.quotaUSD.toFixed(2)}` : <span className="text-gray-300">—</span>}
                           </td>
                           <td className="px-4 py-2 text-right tabular-nums text-[11px]">
-                            {r.pct != null ? `${r.pct.toFixed(1)}%` : <span className="text-gray-300">—</span>}
+                            {r.pct != null && !r.failed ? `${r.pct.toFixed(1)}%` : <span className="text-gray-300">—</span>}
                           </td>
                         </tr>
                       ))}
@@ -1561,6 +1574,14 @@ export default function RemoteChannelsStudio() {
                         <td className="px-4 py-2 text-xs font-medium text-gray-700" colSpan={2}>合计</td>
                         <td className="px-4 py-2 text-right tabular-nums text-xs font-medium">
                           ${usageTotal.toFixed(4)}
+                          {usageFailed.size > 0 && (
+                            <div
+                              className="text-red-600 font-normal cursor-help"
+                              title="这些渠道的用量未计入合计，请稍后点「刷新」重试"
+                            >
+                              {usageFailed.size} 个渠道查询失败，未计入
+                            </div>
+                          )}
                         </td>
                         <td className="px-4 py-2" colSpan={2}></td>
                       </tr>

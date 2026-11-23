@@ -1075,6 +1075,9 @@ export type RemoteChannelLastHourResponse = {
 // sum already converted to USD so the UI doesn't have to.
 export type RemoteChannelUsageRangeResponse = {
   data: Record<string, number>
+  // Channels whose remote query failed: absent from `data` and from
+  // `total_used_usd`. Missing on older servers.
+  failed_channel_ids?: number[]
   total_used_usd: number
   start_timestamp: number
   end_timestamp: number
