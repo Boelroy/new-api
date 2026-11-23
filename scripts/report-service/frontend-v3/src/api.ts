@@ -2535,6 +2535,16 @@ export const api = {
   tencentStatementPreview: (month: string) =>
     request<TencentStatementPreview>(`/api/tencent/statement?month=${encodeURIComponent(month)}`),
 
+  // Recomputes the month's source cache in the background (202); started is
+  // false when a computation of the month is already running.
+  recomputeTencentStatement: (month: string) =>
+    request<TencentRecomputeResponse>(`/api/tencent/statement/recompute?month=${encodeURIComponent(month)}`, {
+      method: 'POST',
+    }),
+
+  // The daily source-cache refresh time, "HH:MM" Beijing or "off".
+  tencentSourceCacheSettings: () => request<{ time: string; last_day: string }>('/api/tencent/source-cache/settings'),
+
   // A month's statement config (its own, else the latest earlier month's,
   // else the built-in October one); from says which.
   tencentConfig: (month: string) => request<TencentConfigResponse>(`/api/tencent/config?month=${encodeURIComponent(month)}`),
@@ -3067,6 +3077,24 @@ export type TencentStatementPreview = {
   summary: TencentSummaryRow[]
   total_invoice_rmb: number
   warnings: string[]
+  // cache: priced from the daily source cache with the current config;
+  // live: read just now (?live=1).
+  source: 'cache' | 'live'
+  // When the sources were read (unix seconds); 0 = never computed yet.
+  computed_at: number
+  // A background computation of the month is running.
+  computing: boolean
+  // Why the last computation failed (the previous data stays).
+  cache_error?: string
+}
+
+export type TencentRecomputeResponse = {
+  month: string
+  computing: boolean
+  started: boolean
+  computed_at: number
+  duration_ms: number
+  error: string
 }
 
 export type TencentSnapshot = {

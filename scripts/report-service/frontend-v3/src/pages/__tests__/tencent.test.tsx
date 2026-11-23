@@ -185,6 +185,8 @@ function preview(): TencentStatementPreview {
   return {
     month: '2026-10', bill_month: 10, config: octoberConfig, headers: [], summary_headers: [],
     lines: octoberLines, summary: octoberSummary, total_invoice_rmb: 973182.5, warnings: [],
+    // 2026-11-23 04:01 Beijing.
+    source: 'cache', computed_at: 1795377660, computing: false,
   }
 }
 
@@ -204,6 +206,7 @@ function statementRoutes(snap: unknown) {
       default_rate_date: '2026-11-01', boc_rate_source_url: 'https://www.kylc.com/huilv/d-boc-usd.html',
     },
     'GET /api/tencent/settings': { proxy_profile_id: 0, system_fx_rate: 7.2, upload_discount_pct: 88 },
+    'GET /api/tencent/source-cache/settings': { time: '04:00', last_day: '2026-11-23' },
     'GET /api/remote-newapi/profiles': {
       profiles: [
         { id: 1, name: 'aaaasl', host: 'http://a:3000', default_models: '', default_group: '' },
@@ -326,6 +329,80 @@ describe('腾讯一站 · 月对账', () => {
       ],
     })
     await waitFor(() => expect(calls.filter((c) => c.url === '/api/tencent/statement?month=2026-10').length).toBeGreaterThanOrEqual(2))
+  })
+
+  it('says when the data was read and recomputes it by hand, polling until it is in', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      let computing = false
+      let reads = 0
+      const calls = mockApi({
+        ...statementRoutes(404),
+        'GET /api/tencent/statement?month=2026-10': () => {
+          reads++
+          if (!computing) return preview()
+          // The second poll finds the computation done.
+          if (reads >= 2) {
+            computing = false
+            return { ...preview(), computed_at: 1795400000 }
+          }
+          // The cache keeps answering the old sources while it is recomputed.
+          return { ...preview(), computing: true }
+        },
+        'POST /api/tencent/statement/recompute?month=2026-10': () => {
+          computing = true
+          reads = 0
+          return { month: '2026-10', computing: true, started: true, computed_at: 1795377660, duration_ms: 60000, error: '' }
+        },
+      })
+      render(<TencentStatement />)
+      await openOctober()
+      const status = screen.getByLabelText('数据状态')
+      expect(status).toHaveTextContent('数据截至 2026-11-23 04:01（每日 04:00 自动更新）')
+
+      fireEvent.click(within(status).getByRole('button', { name: '立即重算' }))
+      expect(await within(status).findByText(/正在重算源数据/)).toBeInTheDocument()
+      expect(within(status).getByRole('button', { name: '重算中…' })).toBeDisabled()
+      expect(calls.filter((c) => c.method === 'POST').map((c) => c.url)).toEqual(['/api/tencent/statement/recompute?month=2026-10'])
+
+      // First poll: still computing, the old figures stay on the page.
+      await vi.advanceTimersByTimeAsync(5000)
+      await waitFor(() => expect(reads).toBe(1))
+      expect(screen.getByText('全部CCMax账户')).toBeInTheDocument()
+      // Second poll: done, the page shows the new time and stops asking.
+      await vi.advanceTimersByTimeAsync(5000)
+      await waitFor(() => expect(status).toHaveTextContent('数据截至 2026-11-23 10:13'))
+      expect(within(status).getByRole('button', { name: '立即重算' })).toBeEnabled()
+      const done = reads
+      await vi.advanceTimersByTimeAsync(10000)
+      expect(reads).toBe(done)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('computes a month never read before in the background and shows it once in', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      let reads = 0
+      mockApi({
+        ...statementRoutes(404),
+        'GET /api/tencent/statement?month=2026-10': () =>
+          ++reads >= 2
+            ? preview()
+            : { ...preview(), lines: [], summary: [], total_invoice_rmb: 0, computed_at: 0, computing: true },
+      })
+      render(<TencentStatement />)
+      fireEvent.change(screen.getByLabelText('账单月份'), { target: { value: '2026-10' } })
+      const status = await screen.findByLabelText('数据状态')
+      await waitFor(() => expect(status).toHaveTextContent('尚未计算过本月数据（每日 04:00 自动更新）'))
+      expect(status).toHaveTextContent('正在计算本月源数据')
+      await vi.advanceTimersByTimeAsync(5000)
+      await screen.findByText('全部CCMax账户')
+      expect(status).toHaveTextContent('数据截至 2026-11-23 04:01')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('refuses a discount outside 0–1', async () => {
