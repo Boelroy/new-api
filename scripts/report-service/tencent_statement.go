@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"math"
 	"net/http"
 	"net/url"
@@ -191,6 +192,23 @@ var tencentSchemaStatements = []string{
 		created_by BIGINT  NOT NULL DEFAULT 0
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_tencent_push_log_kind ON rs_tencent_push_log(kind, id DESC)`,
+	// Each month's source data (tencentSourceRow JSON from loadTencentSources),
+	// computed daily and on demand (tencent_source_cache.go) so the preview
+	// does not read the slow sources live; it is priced with the current
+	// config when read. computed_at = 0: never computed successfully.
+	// computing_since > 0 claims a running computation; error is the last
+	// failure (the previous rows stay).
+	`CREATE TABLE IF NOT EXISTS rs_tencent_source_cache (
+		month               TEXT PRIMARY KEY,
+		rows                TEXT   NOT NULL DEFAULT '[]',
+		warnings            TEXT   NOT NULL DEFAULT '[]',
+		ccmax_first_account BIGINT NOT NULL DEFAULT 0,
+		computed_at         BIGINT NOT NULL DEFAULT 0,
+		duration_ms         BIGINT NOT NULL DEFAULT 0,
+		computing_since     BIGINT NOT NULL DEFAULT 0,
+		error               TEXT   NOT NULL DEFAULT '',
+		updated_at          BIGINT NOT NULL DEFAULT 0
+	)`,
 }
 
 // tencentConfigSeedMonth is the first settled month; its config (the October
@@ -921,20 +939,31 @@ func tencentCallerID(c *gin.Context) int64 {
 	return uid
 }
 
+// tencentLoadSourcesFn reads a month's source data; tests replace it to count
+// or block the slow live reads.
+var tencentLoadSourcesFn = loadTencentSources
+
 // tencentLiveStatement builds the Beijing month [start, end) statement from
 // the current source data and the month's config.
 func tencentLiveStatement(start, end time.Time) (tencentStatementMeta, []tencentLine, []tencentSummaryRow, []string, error) {
-	cfg, from, inherited, err := loadTencentMonthConfig(start)
+	sources, firstAccount, warnings, err := tencentLoadSourcesFn(start, end)
 	if err != nil {
 		return tencentStatementMeta{}, nil, nil, nil, err
 	}
-	sources, firstAccount, warnings, err := loadTencentSources(start, end)
+	return tencentPriceStatement(start, end, sources, firstAccount, warnings)
+}
+
+// tencentPriceStatement prices a month's source data with the month's current
+// config: the step shared by the live statement and the cached preview, so a
+// config change applies to cached sources at once.
+func tencentPriceStatement(start, end time.Time, sources []tencentSourceRow, firstAccount int64, sourceWarnings []string) (tencentStatementMeta, []tencentLine, []tencentSummaryRow, []string, error) {
+	cfg, from, inherited, err := loadTencentMonthConfig(start)
 	if err != nil {
 		return tencentStatementMeta{}, nil, nil, nil, err
 	}
 	meta := tencentStatementMeta{Month: start.Format("2006-01"), Config: cfg, CCMaxFirstAccount: firstAccount}
 	lines, summary, priceWarnings := buildTencentStatement(sources, cfg, start)
-	warnings = append(warnings, priceWarnings...)
+	warnings := append(slices.Clone(sourceWarnings), priceWarnings...)
 	if want := end.Format("2006-01-02"); cfg.BOCRateDate != want {
 		note := ""
 		if from == "inherit" {
@@ -945,8 +974,11 @@ func tencentLiveStatement(start, end time.Time) (tencentStatementMeta, []tencent
 	return meta, lines, summary, warnings, nil
 }
 
-// handleTencentStatement previews a month's statement (default: last month)
-// from live source data, optionally for one platform.
+// handleTencentStatement previews a month's statement (default: last month),
+// optionally for one platform. It prices the month's cached source data
+// (rs_tencent_source_cache) with the current config; a month without a cache
+// starts a background computation and answers computing with no lines.
+// ?live=1 reads the sources live instead (slow; for troubleshooting).
 func handleTencentStatement(c *gin.Context) {
 	month := c.Query("month")
 	if month == "" {
@@ -963,16 +995,47 @@ func handleTencentStatement(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown platform"})
 		return
 	}
-	meta, lines, summary, warnings, err := tencentLiveStatement(start, end)
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-		return
+	resp := gin.H{"source": "live", "computed_at": time.Now().Unix(), "computing": false}
+	var meta tencentStatementMeta
+	var lines []tencentLine
+	var summary []tencentSummaryRow
+	var warnings []string
+	if c.Query("live") == "1" {
+		meta, lines, summary, warnings, err = tencentLiveStatement(start, end)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+	} else {
+		cache, err := tencentLoadSourceCache(start)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		computing := cache.computing(time.Now())
+		if cache.ComputedAt == 0 && !computing {
+			// Another node may claim it first; either way it is now running.
+			_, err := tencentStartSourceCompute(start)
+			computing = err == nil
+			if err != nil {
+				log.Printf("[tencent-cache] start %s: %v", start.Format("2006-01"), err)
+			}
+		}
+		meta, lines, summary, warnings, err = tencentPriceStatement(start, end, cache.Rows, cache.CCMaxFirstAccount, cache.Warnings)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if cache.Error != "" {
+			warnings = append(warnings, "源数据最近一次计算失败："+cache.Error)
+		}
+		resp = gin.H{"source": "cache", "computed_at": cache.ComputedAt, "computing": computing, "cache_error": cache.Error}
 	}
 	if platform != "" {
 		lines = slices.DeleteFunc(lines, func(l tencentLine) bool { return l.Platform != platform })
 		summary = tencentSummarize(lines, meta.Config)
 	}
-	c.JSON(http.StatusOK, gin.H{
+	maps.Copy(resp, gin.H{
 		"month":             meta.Month,
 		"bill_month":        int(start.Month()),
 		"config":            meta.Config,
@@ -983,6 +1046,7 @@ func handleTencentStatement(c *gin.Context) {
 		"total_invoice_rmb": tencentInvoiceTotal(summary),
 		"warnings":          warnings,
 	})
+	c.JSON(http.StatusOK, resp)
 }
 
 // ---- Month config ----
@@ -1106,6 +1170,9 @@ func handleTencentSettingsSet(c *gin.Context) {
 func registerTencentRoutes(api *gin.RouterGroup) {
 	g := api.Group("/tencent", requireRole(minSuperAdminRole))
 	g.GET("/statement", handleTencentStatement)
+	g.POST("/statement/recompute", handleTencentStatementRecompute)
+	g.GET("/source-cache/settings", handleTencentSourceCacheSettingsGet)
+	g.PUT("/source-cache/settings", handleTencentSourceCacheSettingsSet)
 	g.GET("/config", handleTencentConfigGet)
 	g.PUT("/config", handleTencentConfigSet)
 	g.GET("/settings", handleTencentSettingsGet)

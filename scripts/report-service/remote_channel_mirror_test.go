@@ -329,6 +329,10 @@ func TestRemoteChannelsRefreshAnswersWithinBudget(t *testing.T) {
 	assert.Equal(t, true, second["background"])
 	assert.NoError(t, mock.ExpectationsWereMet())
 	assert.Equal(t, int32(3), remote.requests.Load(), "second refresh does not page the remote")
+	// The first refresh starts the sync in a goroutine that may not have run
+	// yet; wait for it, then make sure no second one follows.
+	require.Eventually(t, func() bool { return syncs.Load() == 1 }, time.Second, 5*time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
 	assert.Equal(t, int32(1), syncs.Load(), "only one background sync")
 
 	close(release)

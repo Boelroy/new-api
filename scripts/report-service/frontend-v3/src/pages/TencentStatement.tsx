@@ -23,6 +23,9 @@ import {
 // shows the snapshot (what is exported); otherwise the live preview. The
 // month's config — company, BOC rate, CCMax divisor and each vendor's
 // pricing / discount — is edited below and inherited by later months.
+// The preview prices the month's sources from a cache refreshed daily (04:00
+// Beijing by default), so config changes show at once; 立即重算 rereads the
+// sources in the background and the page polls until they are in.
 
 const STATEMENT_HEADERS = [
   '供应商名称', '账单月份', '模型厂商名称', '模型名称', '账号ID', 'key',
@@ -45,6 +48,14 @@ function money(v: number, currency: 'USD' | 'RMB'): string {
 }
 const pct = (v: number) => `${Math.round(v * 100)}%`
 
+// How often the page asks again while the month's sources are computed.
+const RECOMPUTE_POLL_MS = 5000
+
+// beijingMinute shows a unix time as YYYY-MM-DD HH:mm, Beijing time.
+function beijingMinute(unix: number): string {
+  return new Date((unix + 8 * 3600) * 1000).toISOString().slice(0, 16).replace('T', ' ')
+}
+
 // The currencies of G and J by pricing: usd rows are USD throughout, CC Max
 // rows turn RMB into USD in J, RMB rows stay RMB.
 function currencies(p: TencentPricing): ['USD' | 'RMB', 'USD' | 'RMB'] {
@@ -60,6 +71,7 @@ export default function TencentStatement() {
   const [snapshot, setSnapshot] = useState<TencentSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [refreshTime, setRefreshTime] = useState('04:00')
   const validMonth = /^\d{4}-\d{2}$/.test(month)
 
   const load = useCallback(async () => {
@@ -79,6 +91,49 @@ export default function TencentStatement() {
   useEffect(() => {
     void load()
   }, [load])
+  useEffect(() => {
+    api
+      .tencentSourceCacheSettings()
+      .then((s) => setRefreshTime(s.time))
+      .catch(() => {})
+  }, [])
+
+  // While the month's sources are computed in the background, ask again every
+  // few seconds; the answer after it finishes carries the new data.
+  const computing = preview?.computing === true && preview.month === month
+  useEffect(() => {
+    if (!computing) return
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      api
+        .tencentStatementPreview(month)
+        .then((p) => {
+          if (cancelled) return
+          setPreview(p)
+          if (!p.computing) toast.success(p.cache_error ? '重算失败，仍显示上次的数据' : '重算完成，已刷新')
+        })
+        .catch((e) => {
+          if (!cancelled) toast.error(e)
+        })
+    }, RECOMPUTE_POLL_MS)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [computing, month, preview])
+
+  async function recompute() {
+    setBusy(true)
+    try {
+      const r = await api.recomputeTencentStatement(month)
+      if (!r.started) toast.success('已在重算中，完成后自动刷新')
+      setPreview((p) => (p && p.month === month ? { ...p, computing: true } : p))
+    } catch (e) {
+      toast.error(e)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const status = snapshot?.statement.status
   const lines = snapshot ? snapshot.lines : (preview?.lines ?? [])
@@ -154,6 +209,25 @@ export default function TencentStatement() {
           {vendor && <ExportLink href={snapshot ? api.tencentExportUrl(month, vendor) : ''}>导出 {vendor}</ExportLink>}
         </div>
       </Card>
+
+      {!snapshot && preview && preview.month === month && (
+        <section className="card mb-4 flex flex-wrap items-center gap-3 p-3 text-xs" aria-label="数据状态">
+          <span className="text-muted-foreground">
+            {preview.computed_at > 0
+              ? `数据截至 ${beijingMinute(preview.computed_at)}`
+              : '尚未计算过本月数据'}
+            {refreshTime === 'off' ? '（每日自动更新已关闭）' : `（每日 ${refreshTime} 自动更新）`}
+          </span>
+          {computing && (
+            <Badge tone="warning">
+              {preview.computed_at > 0 ? '正在重算源数据（约 1 分钟），完成后自动刷新' : '正在计算本月源数据（约 1 分钟），完成后自动显示'}
+            </Badge>
+          )}
+          <Button variant="outline" className="ml-auto" disabled={busy || computing || !validMonth} onClick={() => void recompute()}>
+            {computing ? '重算中…' : '立即重算'}
+          </Button>
+        </section>
+      )}
 
       {warnings.length > 0 && (
         <Card className="mb-4 space-y-1 border-warning/40 p-3 text-xs text-warning">
