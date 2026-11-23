@@ -116,22 +116,25 @@ func TestIterateRemoteChannelsCollectsRemoteTotal(t *testing.T) {
 
 // The mirror only deletes channels missing from the list after a complete
 // walk; a walk cut short by a remote error upserts what it got and leaves
-// every other existing row in remote_channel_current alone.
+// every other existing row in remote_channel_current alone. A remote that
+// reports no channels at all leaves the mirror untouched rather than wiping it.
 func TestMirrorRemoteChannelsDeletesOnlyAfterCompleteWalk(t *testing.T) {
 	cases := []struct {
 		name         string
+		total        int
 		failPage     int
 		wantRows     int
 		wantRequests int
 		wantDelete   bool
 	}{
-		{name: "complete walk reconciles", wantRows: 250, wantRequests: 3, wantDelete: true},
-		{name: "remote error mid walk keeps old rows", failPage: 2, wantRows: 100, wantRequests: 2, wantDelete: false},
+		{name: "complete walk reconciles", total: 250, wantRows: 250, wantRequests: 3, wantDelete: true},
+		{name: "remote error mid walk keeps old rows", total: 250, failPage: 2, wantRows: 100, wantRequests: 2, wantDelete: false},
+		{name: "empty remote list keeps old rows", total: 0, wantRows: 0, wantRequests: 1, wantDelete: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			mock := remoteChannelMirrorFixture(t)
-			srv := httptest.NewServer(&fakeRemoteChannelList{total: 250, failPage: tc.failPage})
+			srv := httptest.NewServer(&fakeRemoteChannelList{total: tc.total, failPage: tc.failPage})
 			t.Cleanup(srv.Close)
 			expectProfileLookups(mock, tc.wantRequests)
 
@@ -139,6 +142,12 @@ func TestMirrorRemoteChannelsDeletesOnlyAfterCompleteWalk(t *testing.T) {
 			require.Len(t, channels, tc.wantRows)
 			assert.Equal(t, tc.failPage != 0, walkErr != nil)
 
+			if tc.wantRows == 0 {
+				// No DB expectations: any write would fail the call.
+				require.NoError(t, mirrorRemoteChannels(7, channels, total, walkErr))
+				assert.NoError(t, mock.ExpectationsWereMet())
+				return
+			}
 			mock.ExpectBegin()
 			mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO remote_channel_snapshot`)).
 				WillReturnResult(sqlmock.NewResult(0, int64(tc.wantRows)))

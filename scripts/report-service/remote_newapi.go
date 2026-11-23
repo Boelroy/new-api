@@ -1519,9 +1519,15 @@ func iterateRemoteChannels(ctx context.Context, host, token string, userID int64
 // is known to be the remote's whole set — no error, no filter, and at least
 // the reported total collected. Anything less only upserts and logs why, so
 // channels the walk never reached (pages past a failure or the page guard)
-// stay visible to their studio instead of looking deleted upstream.
+// stay visible to their studio instead of looking deleted upstream. An empty
+// list is never trusted to wipe the profile's mirror: a remote answering
+// "0 channels" is far more likely misbehaving than emptied.
 func mirrorRemoteChannels(profileID int64, channels []remoteChannel, total int64, walkErr error) error {
 	if profileID <= 0 {
+		return nil
+	}
+	if walkErr == nil && len(channels) == 0 {
+		log.Printf("[remote-current] profile %d: remote returned no channels (total %d); mirror left unchanged", profileID, total)
 		return nil
 	}
 	complete := walkErr == nil && int64(len(channels)) >= total
@@ -1773,29 +1779,23 @@ func upsertRemoteCurrent(profileID int64, channels []remoteChannel, reconcile bo
 		}
 	}
 
-	if !reconcile {
+	// An empty list never reconciles: it would wipe the profile's mirror.
+	if !reconcile || len(channels) == 0 {
 		return tx.Commit()
 	}
 	// Reconcile: delete rows for channels that are no longer on the remote.
 	// The id set is bound as one array parameter, so tens of thousands of
 	// channels stay a single statement.
-	if len(channels) > 0 {
-		ids := make([]int64, len(channels))
-		for i, ch := range channels {
-			ids[i] = ch.ID
-		}
-		if _, err := tx.Exec(
-			`DELETE FROM remote_channel_current
-			  WHERE profile_id=$1 AND NOT (remote_channel_id = ANY($2))`,
-			profileID, pq.Array(ids),
-		); err != nil {
-			return fmt.Errorf("reconcile delete: %v", err)
-		}
-	} else {
-		// Empty result — wipe everything for this profile.
-		if _, err := tx.Exec(`DELETE FROM remote_channel_current WHERE profile_id=$1`, profileID); err != nil {
-			return fmt.Errorf("reconcile wipe: %v", err)
-		}
+	ids := make([]int64, len(channels))
+	for i, ch := range channels {
+		ids[i] = ch.ID
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM remote_channel_current
+		  WHERE profile_id=$1 AND NOT (remote_channel_id = ANY($2))`,
+		profileID, pq.Array(ids),
+	); err != nil {
+		return fmt.Errorf("reconcile delete: %v", err)
 	}
 
 	return tx.Commit()
