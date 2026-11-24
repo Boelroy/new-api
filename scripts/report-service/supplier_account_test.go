@@ -463,6 +463,181 @@ func TestSupplierRecordLogAccountsFilters(t *testing.T) {
 	}
 }
 
+func TestSupplierCFOpenRouterCreate(t *testing.T) {
+	previousDB, previousClient := db, supplierHTTPClient
+	previousOrigin, previousToken := supplierAccountBaseURL, supplierAccountToken
+	previousORBase, previousORClient := openRouterBaseURL, openRouterHTTPClient
+	previousLog := log.Writer()
+	t.Cleanup(func() {
+		db, supplierHTTPClient = previousDB, previousClient
+		supplierAccountBaseURL, supplierAccountToken = previousOrigin, previousToken
+		openRouterBaseURL, openRouterHTTPClient = previousORBase, previousORClient
+		log.SetOutput(previousLog)
+	})
+	supplierAccountBaseURL, supplierAccountToken = "https://portal.invalid", "fixture-token"
+
+	const (
+		mgmtKey = "fixture-mgmt-key-0000"
+		cfKey   = "fixture-cloudflare-token-1234"
+		orKey   = "sk-or-v1-fixture-openrouter-key"
+		orHash  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		byokID  = "11111111-2222-3333-4444-555555555555"
+	)
+
+	for _, tc := range []struct {
+		name        string
+		mgmtKey     string
+		keyStatus   int // OpenRouter POST /keys
+		byokStatus  int // OpenRouter POST /byok
+		portalCode  int // 号池 /openapi/accounts; 0 = never reached
+		wantStatus  int
+		wantORCalls []string
+		wantErr     string
+	}{
+		{name: "success uploads the OR key", mgmtKey: mgmtKey, keyStatus: 201, byokStatus: 201, portalCode: 201, wantStatus: 200,
+			wantORCalls: []string{"POST /keys", "POST /byok", "PATCH /keys/" + orHash, "PATCH /byok/" + byokID}},
+		{name: "management key missing", wantStatus: 503, wantErr: "未配置 OpenRouter 管理 Key"},
+		{name: "OR key creation fails", mgmtKey: mgmtKey, keyStatus: 500, wantStatus: 422,
+			wantORCalls: []string{"POST /keys"}, wantErr: "创建 OpenRouter Key失败（HTTP 500）"},
+		{name: "BYOK fails deletes the OR key", mgmtKey: mgmtKey, keyStatus: 201, byokStatus: 400, wantStatus: 422,
+			wantORCalls: []string{"POST /keys", "POST /byok", "DELETE /keys/" + orHash}, wantErr: "登记 Cloudflare BYOK失败（HTTP 400）"},
+		{name: "号池 rejection deletes BYOK and OR key", mgmtKey: mgmtKey, keyStatus: 201, byokStatus: 201, portalCode: 400, wantStatus: 422,
+			wantORCalls: []string{"POST /keys", "POST /byok", "DELETE /byok/" + byokID, "DELETE /keys/" + orHash}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = pool.Close() })
+			db = pool
+			mock.MatchExpectationsInOrder(false)
+			// Other config reads are left unstubbed and fall back to defaults.
+			if tc.mgmtKey != "" {
+				mock.ExpectQuery("SELECT value FROM report_config").WithArgs(cfgOpenRouterMgmtKey).
+					WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(tc.mgmtKey))
+			}
+			if tc.wantStatus == 200 {
+				mock.ExpectExec("INSERT INTO rs_supplier_account").
+					WithArgs(int64(7), "Studio A", supplierCFOpenRouterProvider, "fixture-model", int64(42), "openrouter-co-01",
+						0, "", orKey[len(orKey)-8:], sqlmock.AnyArg(), sqlmock.AnyArg(), orHash, byokID).
+					WillReturnResult(sqlmock.NewResult(1, 1))
+			}
+
+			var calls []string
+			var byokBody map[string]any
+			or := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls = append(calls, r.Method+" "+r.URL.Path)
+				assert.Equal(t, "Bearer "+mgmtKey, r.Header.Get("Authorization"))
+				switch r.Method + " " + r.URL.Path {
+				case "POST /keys":
+					w.WriteHeader(tc.keyStatus)
+					if tc.keyStatus == 201 {
+						_, _ = io.WriteString(w, `{"data":{"hash":"`+orHash+`","name":"x"},"key":"`+orKey+`"}`)
+					} else {
+						_, _ = io.WriteString(w, `{"error":{"message":"boom"}}`)
+					}
+				case "POST /byok":
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&byokBody))
+					w.WriteHeader(tc.byokStatus)
+					if tc.byokStatus == 201 {
+						_, _ = io.WriteString(w, `{"data":{"id":"`+byokID+`","provider":"cloudflare"}}`)
+					} else {
+						_, _ = io.WriteString(w, `{"error":{"message":"invalid key `+cfKey+`"}}`)
+					}
+				default:
+					w.WriteHeader(http.StatusOK)
+					_, _ = io.WriteString(w, `{}`)
+				}
+			}))
+			t.Cleanup(or.Close)
+			openRouterBaseURL, openRouterHTTPClient = or.URL, or.Client()
+
+			var logs bytes.Buffer
+			log.SetOutput(&logs)
+			portalCalls := 0
+			supplierHTTPClient = &http.Client{Transport: supplierPortalTransport(func(r *http.Request) (*http.Response, error) {
+				portalCalls++
+				var sent map[string]any
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&sent))
+				assert.Equal(t, "openrouter", sent["provider"])
+				assert.Equal(t, orKey, sent["api_key"])
+				w := httptest.NewRecorder()
+				w.WriteHeader(tc.portalCode)
+				if tc.portalCode == 201 {
+					_, _ = w.WriteString(`{"id":42,"alias":"openrouter-co-01","msg":"ok"}`)
+				} else {
+					_, _ = w.WriteString(`{"detail":"duplicate key ` + orKey + `"}`)
+				}
+				return w.Result(), nil
+			})}
+
+			encoded, err := json.Marshal(gin.H{
+				"provider": supplierCFOpenRouterProvider, "model": "fixture-model", "api_key": cfKey,
+				"account_type": 0, "tpm": "1000", "rpm": "10",
+			})
+			require.NoError(t, err)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Set("role", minAdminRole)
+			c.Set("user_id", int64(7))
+			c.Set("username", "alice")
+			c.Set("studio", "Studio A")
+			c.Request = httptest.NewRequest(http.MethodPost, "/api/supplier-account/accounts", bytes.NewReader(encoded))
+			c.Request.Header.Set("Content-Type", "application/json")
+			handleSupplierAccountCreate(c)
+
+			require.Equal(t, tc.wantStatus, w.Code, w.Body.String())
+			assert.Equal(t, tc.wantORCalls, calls)
+			if tc.portalCode != 0 {
+				assert.Equal(t, 1, portalCalls)
+			} else {
+				assert.Zero(t, portalCalls)
+			}
+			if byokBody != nil {
+				assert.Equal(t, "cloudflare", byokBody["provider"])
+				assert.Equal(t, cfKey, byokBody["key"])
+				assert.Equal(t, []any{orHash}, byokBody["allowed_api_key_hashes"])
+				assert.Equal(t, true, byokBody["is_byok_only"])
+				assert.Contains(t, byokBody["name"], "alice")
+			}
+			if tc.wantErr != "" {
+				assert.Contains(t, w.Body.String(), tc.wantErr)
+			}
+			visible := logs.String() + w.Body.String()
+			for _, secret := range []string{cfKey, orKey, mgmtKey} {
+				assert.NotContains(t, visible, secret)
+			}
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestSupplierOpenRouterSettingsMasked(t *testing.T) {
+	previousDB := db
+	t.Cleanup(func() { db = previousDB })
+	pool, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pool.Close() })
+	db = pool
+	mock.MatchExpectationsInOrder(false)
+	mock.ExpectQuery("SELECT value FROM report_config").WithArgs(cfgOpenRouterMgmtKey).
+		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("sk-or-v1-management-secret-9876"))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/supplier-account/settings", nil)
+	handleSupplierSettingsGet(c)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.NotContains(t, w.Body.String(), "management-secret")
+	var resp struct {
+		Set   bool   `json:"openrouter_mgmt_key_set"`
+		Last4 string `json:"openrouter_mgmt_key_last4"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.True(t, resp.Set)
+	assert.Equal(t, "9876", resp.Last4)
+}
+
 func TestSupplierAccountProxyURL(t *testing.T) {
 	for _, address := range []string{
 		"http://proxy.invalid",

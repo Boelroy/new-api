@@ -32,6 +32,10 @@ import {
 // columns are rendered. Uploadable providers: "keyonly" (API key only),
 // "azure" (API key + model URL), and "aws" (API key + per-model ARN, ARN mode).
 
+// Local provider of CF OpenRouter uploads (Cloudflare token -> OpenRouter BYOK
+// key, uploaded under the 号池's openrouter provider).
+const CF_OPENROUTER = 'cf_openrouter'
+
 const ACCOUNT_TYPE_LABELS: Record<number, string> = { 0: '普通', 1: '速刷号' }
 
 // Client-side fallback for the 账号上号 TPM/RPM prefill, used until the server
@@ -227,6 +231,10 @@ export default function SupplierAccounts() {
   const [savingVis, setSavingVis] = useState(false)
   const [webhookInput, setWebhookInput] = useState('')
   const [savingWebhook, setSavingWebhook] = useState(false)
+  // OpenRouter management key (CF OpenRouter uploads) + optional per-key limit.
+  const [orKeyInput, setOrKeyInput] = useState('')
+  const [orLimitInput, setOrLimitInput] = useState('')
+  const [savingOr, setSavingOr] = useState(false)
   const [fxInput, setFxInput] = useState('')
   const [savingFx, setSavingFx] = useState(false)
   const [tickInput, setTickInput] = useState('')
@@ -253,17 +261,24 @@ export default function SupplierAccounts() {
     [providers],
   )
 
+  // A local choice such as CF OpenRouter offers its 号池 provider's models.
   const providerModels = useMemo(() => {
-    const list = models.filter(m => m.provider === provider)
+    const source = providers.find(p => p.name === provider)?.model_provider || provider
+    const list = models.filter(m => m.provider === source)
     const q = modelSearch.trim().toLowerCase()
     if (!q) return list
     return list.filter(m => (m.model_name || m.value || '').toLowerCase().includes(q))
-  }, [models, provider, modelSearch])
+  }, [models, providers, provider, modelSearch])
 
   const selectedProvider = uploadableProviders.find(p => p.name === provider)
   // Azure providers additionally require a model URL; 速刷号 is not supported for
   // them upstream, so the form pins them to 普通号.
   const isAzure = selectedProvider?.shape === 'azure'
+  // CF OpenRouter: the key is a Cloudflare API token; the server turns it into
+  // an OpenRouter key (BYOK) and uploads that. Unusable until the admin sets
+  // the OpenRouter management key (ready=false).
+  const isCFOpenRouter = provider === CF_OPENROUTER
+  const cfOpenRouterOffered = providers.find(p => p.name === CF_OPENROUTER)
   // AWS (aws_third) ARN mode: needs a register region, a per-model ARN map, and
   // AWS region / account id (auto-derived from the first ARN when blank). No 速刷号.
   const isAws = selectedProvider?.shape === 'aws'
@@ -376,6 +391,7 @@ export default function SupplierAccounts() {
           }
           if (s.default_tpm) setTpmInput(s.default_tpm)
           if (s.default_rpm) setRpmInput(s.default_rpm)
+          setOrLimitInput(s.openrouter_key_limit || '')
         } catch {
           /* settings panel just won't prefill */
         }
@@ -424,6 +440,7 @@ export default function SupplierAccounts() {
     setSubmitErr(null)
     const modelList = Array.from(selectedModels)
     if (!provider) return setSubmitErr('请选择厂商')
+    if (selectedProvider?.ready === false) return setSubmitErr('CF OpenRouter 暂不可用：管理员尚未配置 OpenRouter 管理 Key')
     if (modelList.length === 0) return setSubmitErr('请至少选择一个模型')
     // One key per line = batch upload; every key shares the rest of the form.
     const keys = Array.from(new Set(apiKey.split(/\r?\n/).map(k => k.trim()).filter(Boolean)))
@@ -705,6 +722,51 @@ export default function SupplierAccounts() {
     }
   }
 
+  async function handleSaveOpenRouter() {
+    setSettingsMsg(null)
+    setSettingsErr(null)
+    const limit = orLimitInput.trim()
+    if (limit && !(Number(limit) > 0)) {
+      setSettingsErr('OR Key 额度上限必须是正数，留空表示不限')
+      return
+    }
+    setSavingOr(true)
+    try {
+      // An empty key input keeps the stored key; only the limit is saved then.
+      const key = orKeyInput.trim()
+      const s = await api.setSupplierSettings({
+        openrouter_key_limit: limit,
+        ...(key ? { openrouter_mgmt_key: key } : {}),
+      })
+      setSettings(s)
+      setOrKeyInput('')
+      setOrLimitInput(s.openrouter_key_limit || '')
+      setProviders(prev => prev.map(p => (p.name === CF_OPENROUTER ? { ...p, ready: s.openrouter_mgmt_key_set } : p)))
+      setSettingsMsg(s.openrouter_mgmt_key_set ? `OpenRouter 管理 Key 已保存（…${s.openrouter_mgmt_key_last4}）` : 'OpenRouter 设置已保存（管理 Key 未配置）')
+    } catch (e: any) {
+      setSettingsErr(e?.message || String(e))
+    } finally {
+      setSavingOr(false)
+    }
+  }
+
+  async function handleClearOpenRouterKey() {
+    setSettingsMsg(null)
+    setSettingsErr(null)
+    setSavingOr(true)
+    try {
+      const s = await api.setSupplierSettings({ openrouter_mgmt_key: '' })
+      setSettings(s)
+      setOrKeyInput('')
+      setProviders(prev => prev.map(p => (p.name === CF_OPENROUTER ? { ...p, ready: false } : p)))
+      setSettingsMsg('OpenRouter 管理 Key 已清空，CF OpenRouter 上号暂停')
+    } catch (e: any) {
+      setSettingsErr(e?.message || String(e))
+    } finally {
+      setSavingOr(false)
+    }
+  }
+
   async function handleSaveFx() {
     setSettingsMsg(null)
     setSettingsErr(null)
@@ -908,13 +970,61 @@ export default function SupplierAccounts() {
                   uploadableProviders.map(p => (
                     <label key={p.name} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-50 cursor-pointer text-sm">
                       <input type="checkbox" checked={visibleSet.has(p.name)} onChange={() => toggleVisible(p.name)} />
-                      <span>{p.name}</span>
+                      <span>{p.label || p.name}</span>
                     </label>
                   ))
                 )}
               </div>
             </div>
           </div>
+
+          {/* OpenRouter management key for CF OpenRouter uploads. */}
+          {cfOpenRouterOffered && (
+            <div className="mt-6 border-t border-gray-100 pt-4">
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-medium text-gray-600">OpenRouter 管理 Key（CF OpenRouter 上号用）</label>
+                <span className="text-[11px] text-gray-400">
+                  {settings?.openrouter_mgmt_key_set ? `已配置 …${settings.openrouter_mgmt_key_last4}` : '未配置'}
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <input
+                  type="password"
+                  autoComplete="off"
+                  value={orKeyInput}
+                  onChange={e => setOrKeyInput(e.target.value)}
+                  placeholder={settings?.openrouter_mgmt_key_set ? '输入新管理 Key 覆盖，留空则保留原 Key' : '粘贴 OpenRouter Management API Key'}
+                  className="flex-1 min-w-[16rem] border border-gray-300 rounded-md px-2.5 py-2 text-sm font-mono"
+                />
+                <input
+                  value={orLimitInput}
+                  onChange={e => setOrLimitInput(e.target.value)}
+                  inputMode="decimal"
+                  placeholder="单 Key 额度上限 $（空=不限）"
+                  className="w-52 border border-gray-300 rounded-md px-2.5 py-2 text-sm"
+                />
+                <button
+                  onClick={handleSaveOpenRouter}
+                  disabled={savingOr}
+                  className="bg-brand hover:bg-brand-700 disabled:opacity-60 text-white text-xs rounded-md px-3 py-2 whitespace-nowrap"
+                >
+                  {savingOr ? '保存中…' : '保存'}
+                </button>
+                {settings?.openrouter_mgmt_key_set && (
+                  <button
+                    onClick={handleClearOpenRouterKey}
+                    disabled={savingOr}
+                    className="border border-gray-300 hover:bg-gray-50 disabled:opacity-60 text-xs rounded-md px-3 py-2 whitespace-nowrap"
+                  >
+                    清除管理 Key
+                  </button>
+                )}
+              </div>
+              <p className="text-[11px] text-gray-400 mt-1">
+                选「CF OpenRouter」上号时，用此 Key 为每把 CF Key 新建一把 OpenRouter Key 并登记为 Cloudflare BYOK（仅走 CF Key，不花 OpenRouter 余额）。未配置时该选项不可用。
+              </p>
+            </div>
+          )}
 
           {/* Account quota alert webhook + RMB→USD fx rate. */}
           <div className="mt-6 border-t border-gray-100 pt-4 grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -1053,7 +1163,7 @@ export default function SupplierAccounts() {
               <option value="">选择厂商配置默认…</option>
               {uploadableProviders.map(p => {
                 const n = defaultsDraft[p.name]?.models.length ?? 0
-                return <option key={p.name} value={p.name}>{p.name}{n ? ` · 默认 ${n} 模型` : ''}</option>
+                return <option key={p.name} value={p.name}>{p.label || p.name}{n ? ` · 默认 ${n} 模型` : ''}</option>
               })}
             </select>
             {defProvider && (
@@ -1061,11 +1171,11 @@ export default function SupplierAccounts() {
                 <div>
                   <div className="text-[11px] text-gray-400 mb-1">默认模型（可多选）</div>
                   <div className="border border-gray-300 rounded-md max-h-44 overflow-y-auto p-1">
-                    {models.filter(m => m.provider === defProvider).length === 0 ? (
+                    {models.filter(m => m.provider === (providers.find(p => p.name === defProvider)?.model_provider || defProvider)).length === 0 ? (
                       <div className="text-xs text-gray-400 px-2 py-2">该厂商暂无模型</div>
                     ) : (
                       models
-                        .filter(m => m.provider === defProvider)
+                        .filter(m => m.provider === (providers.find(p => p.name === defProvider)?.model_provider || defProvider))
                         .map(m => {
                           const val = m.model_name || m.value
                           const checked = (defaultsDraft[defProvider]?.models ?? []).includes(val)
@@ -1113,9 +1223,19 @@ export default function SupplierAccounts() {
           >
             <option value="">请选择厂商</option>
             {uploadableProviders.map(p => (
-              <option key={p.name} value={p.name}>{p.name}</option>
+              <option key={p.name} value={p.name} disabled={p.ready === false}>
+                {p.label || p.name}{p.ready === false ? '（未配置管理 Key，暂不可用）' : ''}
+              </option>
             ))}
           </select>
+          {cfOpenRouterOffered?.ready === false && (
+            <p className="text-[11px] text-amber-600 -mt-2 mb-3">CF OpenRouter 需要管理员先在「管理员设置」里配置 OpenRouter 管理 Key。</p>
+          )}
+          {isCFOpenRouter && (
+            <p className="text-[11px] text-gray-500 -mt-2 mb-3">
+              填写 Cloudflare API Token，系统会自动新建一把 OpenRouter Key 绑定该 CF Key（BYOK）后上号；模型为号池 OpenRouter 的模型。
+            </p>
+          )}
 
           <label className="block text-xs font-medium text-gray-600 mb-1">
             模型选择 *（可多选，已选 {selectedModels.size}）
@@ -1156,7 +1276,9 @@ export default function SupplierAccounts() {
             value={apiKey}
             onChange={e => setApiKey(e.target.value)}
             placeholder={
-              isAzure
+              isCFOpenRouter
+                ? '请填写 Cloudflare API Token（CF Key），每行一个'
+                : isAzure
                 ? '请填写 Azure OpenAI 的 API Key'
                 : isAws
                   ? '请填写 Bedrock 长 API Key（ARN 方式）'
@@ -1483,7 +1605,11 @@ export default function SupplierAccounts() {
                           {a.remark && <div className="text-[10px] text-gray-400">{a.remark}</div>}
                         </td>
                         <td className="py-2 pr-3">
-                          <div>{a.provider}</div>
+                          {a.provider === CF_OPENROUTER ? (
+                            <span className="inline-block px-2 py-0.5 rounded text-[11px] border bg-orange-50 text-orange-700 border-orange-200">CF OpenRouter</span>
+                          ) : (
+                            <div>{a.provider}</div>
+                          )}
                         </td>
                         {isAdmin && (
                           <td className="py-2 pr-3">

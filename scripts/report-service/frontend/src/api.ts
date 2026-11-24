@@ -780,6 +780,11 @@ export type SupplierProvider = {
   exclusive_model: boolean
   auto_select_all: boolean
   key_min_len: number
+  // Local choices layered on a 号池 provider (cf_openrouter): display label,
+  // the 号池 provider whose models apply, and whether it can be used now.
+  label?: string
+  model_provider?: string
+  ready?: boolean
 }
 
 // Account register region option (label/value) returned alongside the provider
@@ -838,6 +843,11 @@ export type SupplierSettings = {
   // Default TPM/RPM prefilled in the 账号上号 form (non-negative integers).
   default_tpm: string
   default_rpm: string
+  // OpenRouter management key for CF OpenRouter uploads (never returned in
+  // full) and the optional USD limit on each new OR key ('' = no limit).
+  openrouter_mgmt_key_set: boolean
+  openrouter_mgmt_key_last4: string
+  openrouter_key_limit: string
 }
 
 // 账号上号 使用日志 (portal 使用日志查询). Platform account ids: a1_id on 1.0,
@@ -2433,6 +2443,8 @@ export const api = {
     default_discount?: string
     default_tpm?: string
     default_rpm?: string
+    openrouter_mgmt_key?: string
+    openrouter_key_limit?: string
   }) =>
     request<SupplierSettings>('/api/supplier-account/settings', {
       method: 'PUT',
