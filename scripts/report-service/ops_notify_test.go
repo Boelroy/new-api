@@ -1,9 +1,15 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // A model alerts only when the last window clears the floors and its rate is
@@ -76,4 +82,68 @@ func TestFmtUSD(t *testing.T) {
 	assert.Equal(t, "$999.50", fmtUSD(999.5))
 	assert.Equal(t, "$1,234,567.89", fmtUSD(1234567.891))
 	assert.Equal(t, "-$1,000.00", fmtUSD(-1000))
+}
+
+// Muted remote profiles drop out of the 上号 digest — lines and title totals —
+// while the other sources keep reporting; a window with only muted uploads
+// yields no message. The mute list is merged, normalized and cleared through
+// the config endpoint, and a config stored before the field existed loads
+// with nothing muted.
+func TestOpsUploadMuteProfiles(t *testing.T) {
+	tencentTestDB(t)
+	for _, ddl := range []string{
+		`CREATE TABLE rs_notify_event (id BIGSERIAL PRIMARY KEY, kind TEXT NOT NULL, actor_id BIGINT NOT NULL DEFAULT 0,
+		   actor TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL)`,
+		`CREATE TABLE remote_pending_key (id BIGSERIAL PRIMARY KEY, profile_id BIGINT NOT NULL, channel_type INT NOT NULL DEFAULT 14,
+		   uploaded_by BIGINT NOT NULL DEFAULT 0, created_at BIGINT NOT NULL)`,
+		`CREATE TABLE rs_supplier_account (id BIGSERIAL PRIMARY KEY, uploaded_by BIGINT NOT NULL, provider TEXT NOT NULL, created_at BIGINT NOT NULL)`,
+		`CREATE TABLE rs_gynh_account (id BIGSERIAL PRIMARY KEY, uploaded_by BIGINT NOT NULL, provider TEXT NOT NULL, created_at BIGINT NOT NULL)`,
+		`CREATE TABLE rs_ccmax_account (id BIGSERIAL PRIMARY KEY, uploaded_by BIGINT NOT NULL, plan TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL)`,
+		`INSERT INTO rs_auth_user (id, username) VALUES (1, 'alice'), (2, 'bob'), (3, 'carol')`,
+		`INSERT INTO remote_newapi_profile (id, name) VALUES (1, 'aaaasl'), (2, 'p2')`,
+		// Window (100, 200]: alice → aaaasl ×3, bob → p2 ×2, carol CC Max ×1.
+		`INSERT INTO remote_pending_key (profile_id, uploaded_by, created_at) VALUES (1, 1, 150), (1, 1, 150), (1, 1, 150), (2, 2, 150), (2, 2, 150)`,
+		`INSERT INTO rs_ccmax_account (uploaded_by, plan, created_at) VALUES (3, 'max', 150)`,
+		// Window (300, 400]: only aaaasl.
+		`INSERT INTO remote_pending_key (profile_id, uploaded_by, created_at) VALUES (1, 1, 350)`,
+	} {
+		_, err := db.Exec(ddl)
+		require.NoError(t, err)
+	}
+	ctx := context.Background()
+
+	lines, totals, err := opsUploadLines(ctx, 100, 200, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"· alice 远程 aaaasl Anthropic 3 个", "· bob 远程 p2 Anthropic 2 个", "· carol CC Max max 1 个"}, lines)
+	assert.Equal(t, opsTotals{"aaaasl": 3, "p2": 2, "CC Max": 1}, totals)
+
+	lines, totals, err = opsUploadLines(ctx, 100, 200, []int64{1})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"· bob 远程 p2 Anthropic 2 个", "· carol CC Max max 1 个"}, lines)
+	assert.Equal(t, opsTotals{"p2": 2, "CC Max": 1}, totals)
+
+	lines, totals, err = opsUploadLines(ctx, 300, 400, []int64{1})
+	require.NoError(t, err)
+	assert.Empty(t, lines)
+	assert.Empty(t, totals)
+
+	require.NoError(t, supplierConfigSet(cfgOpsNotify, `{"enabled":true,"uploads":true,"window_min":10}`))
+	legacy := loadOpsNotifyConfig()
+	assert.True(t, legacy.Uploads)
+	assert.Equal(t, []int64{}, legacy.UploadMuteProfiles)
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/cfg", handleOpsNotifyConfigSet)
+	post := func(body string) {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/cfg", strings.NewReader(body)))
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	}
+	post(`{"upload_mute_profiles":[2,1,1,0]}`)
+	assert.Equal(t, []int64{1, 2}, loadOpsNotifyConfig().UploadMuteProfiles)
+	post(`{"priority":false}`)
+	assert.Equal(t, []int64{1, 2}, loadOpsNotifyConfig().UploadMuteProfiles, "other fields leave the list alone")
+	post(`{"upload_mute_profiles":[]}`)
+	assert.Equal(t, []int64{}, loadOpsNotifyConfig().UploadMuteProfiles)
 }

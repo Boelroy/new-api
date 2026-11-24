@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import Layout from '../components/Layout'
 import { Button, Card } from '../components/ui'
 import { toast } from '../components/feedback'
-import { api, type OpsNotifyConfig, type OpsNotifyMessage } from '../api'
+import { api, type OpsNotifyConfig, type OpsNotifyMessage, type RemoteProfile } from '../api'
 import { NumField } from './ChannelPriority'
 
 // 运维通知: every window the server compresses who uploaded keys (with OpenAI
@@ -31,6 +31,7 @@ function ConfigCard() {
   const [webhook, setWebhook] = useState('')
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [profiles, setProfiles] = useState<RemoteProfile[]>([])
   // Bumped on every save so the inputs remount with the stored (clamped) value.
   const [rev, setRev] = useState(0)
 
@@ -42,6 +43,7 @@ function ConfigCard() {
 
   useEffect(() => {
     api.opsNotifyConfig().then(apply).catch(e => toast.error(e))
+    api.remoteProfiles().then(r => setProfiles(r.profiles)).catch(e => toast.error(e))
   }, [])
 
   const save = async (patch: Partial<OpsNotifyConfig>) => {
@@ -79,6 +81,9 @@ function ConfigCard() {
     { key: 'daily_spend', label: '每日消耗（主站 / Remote / 第三方）' },
   ]
   const webhookDirty = webhook.trim() !== cfg.webhook
+  const muted = cfg.upload_mute_profiles ?? []
+  const toggleMute = (id: number, mute: boolean) =>
+    void save({ upload_mute_profiles: mute ? [...muted, id] : muted.filter(m => m !== id) })
   return (
     <Card className="p-5">
       <div className="flex items-center justify-between mb-3">
@@ -110,6 +115,18 @@ function ConfigCard() {
           </label>
         ))}
       </div>
+      {profiles.length > 0 && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mb-4 text-xs">
+          <span className="mono-label">上号不通知的远程站点</span>
+          {profiles.map(p => (
+            <label key={p.id} className="flex items-center gap-2">
+              <input type="checkbox" checked={muted.includes(p.id)} disabled={saving || !cfg.uploads}
+                onChange={e => toggleMute(p.id, e.target.checked)} />
+              <span>{p.name || `#${p.id}`}</span>
+            </label>
+          ))}
+        </div>
+      )}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
         <NumField key={`w${rev}`} label="汇总窗口 (分钟)" value={cfg.window_min} min={1} max={60}
           hint="每隔这么久合并推送一次" onSave={n => void save({ window_min: n })} />

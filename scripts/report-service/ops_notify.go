@@ -44,10 +44,13 @@ type opsNotifyConfig struct {
 	Webhook   string `json:"webhook"`
 	WindowMin int    `json:"window_min"`
 
-	Uploads       bool `json:"uploads"`
-	Priority      bool `json:"priority"`
-	StreamRise    bool `json:"stream_rise"`
-	RateLimitRise bool `json:"rate_limit_rise"`
+	Uploads bool `json:"uploads"`
+	// Remote profiles whose uploads are left out of the 上号 digest (lines and
+	// title totals); the other upload sources are still reported.
+	UploadMuteProfiles []int64 `json:"upload_mute_profiles"`
+	Priority           bool    `json:"priority"`
+	StreamRise         bool    `json:"stream_rise"`
+	RateLimitRise      bool    `json:"rate_limit_rise"`
 	// RPM change: overall and per-model successful requests per minute in the
 	// window against the baseline. A drop to (100-RPMDropPct)% or less, or a
 	// rise to RPMRisePct% or more, alerts when the busier side reaches
@@ -110,6 +113,16 @@ func (c opsNotifyConfig) clamp() opsNotifyConfig {
 	c.RPMRisePct = clampInt(c.RPMRisePct, 101, 100000)
 	c.RPMMinBase = clampInt(c.RPMMinBase, 1, 1000000)
 	c.DailySpendHour = clampInt(c.DailySpendHour, 0, 23)
+	// Fresh slice, so the defaults' backing array is never shared; never nil,
+	// so the page always gets a list.
+	mute := make([]int64, 0, len(c.UploadMuteProfiles))
+	for _, id := range c.UploadMuteProfiles {
+		if id > 0 {
+			mute = append(mute, id)
+		}
+	}
+	slices.Sort(mute)
+	c.UploadMuteProfiles = slices.Compact(mute)
 	return c
 }
 
@@ -228,7 +241,9 @@ func opsActor(name string, id int64) string {
 	return "未知用户"
 }
 
-func opsUploadLines(ctx context.Context, from, to int64) ([]string, opsTotals, error) {
+// opsUploadLines digests the uploads of (from, to]. Remote uploads to a
+// profile in muteProfiles are left out of both the lines and the totals.
+func opsUploadLines(ctx context.Context, from, to int64, muteProfiles []int64) ([]string, opsTotals, error) {
 	var agg opsLineAgg
 	totals := opsTotals{}
 
@@ -297,24 +312,30 @@ func opsUploadLines(ctx context.Context, from, to int64) ([]string, opsTotals, e
 	}
 
 	// Uploads the other flows already attribute to their uploader.
-	sources := []struct{ query, label string }{
+	window := []any{from, to}
+	sources := []struct {
+		query, label string
+		args         []any
+	}{
 		{`SELECT p.uploaded_by, COALESCE(u.username,''), '远程 ' || COALESCE(pr.name, '#' || p.profile_id::text), p.channel_type, COUNT(*)
 		  FROM remote_pending_key p
 		  LEFT JOIN rs_auth_user u ON u.id = p.uploaded_by
 		  LEFT JOIN remote_newapi_profile pr ON pr.id = p.profile_id
-		  WHERE p.created_at > $1 AND p.created_at <= $2 GROUP BY 1, 2, 3, 4`, ""},
+		  WHERE p.created_at > $1 AND p.created_at <= $2
+		    AND p.profile_id <> ALL(COALESCE($3::bigint[], '{}'))
+		  GROUP BY 1, 2, 3, 4`, "", []any{from, to, pq.Array(muteProfiles)}},
 		{`SELECT a.uploaded_by, COALESCE(u.username,''), a.provider, -1, COUNT(*)
 		  FROM rs_supplier_account a LEFT JOIN rs_auth_user u ON u.id = a.uploaded_by
-		  WHERE a.created_at > $1 AND a.created_at <= $2 GROUP BY 1, 2, 3`, "账号上号"},
+		  WHERE a.created_at > $1 AND a.created_at <= $2 GROUP BY 1, 2, 3`, "账号上号", window},
 		{`SELECT a.uploaded_by, COALESCE(u.username,''), a.provider, -1, COUNT(*)
 		  FROM rs_gynh_account a LEFT JOIN rs_auth_user u ON u.id = a.uploaded_by
-		  WHERE a.created_at > $1 AND a.created_at <= $2 GROUP BY 1, 2, 3`, "供给台"},
+		  WHERE a.created_at > $1 AND a.created_at <= $2 GROUP BY 1, 2, 3`, "供给台", window},
 		{`SELECT a.uploaded_by, COALESCE(u.username,''), COALESCE(NULLIF(a.plan,''), 'claude'), -1, COUNT(*)
 		  FROM rs_ccmax_account a LEFT JOIN rs_auth_user u ON u.id = a.uploaded_by
-		  WHERE a.created_at > $1 AND a.created_at <= $2 GROUP BY 1, 2, 3`, "CC Max"},
+		  WHERE a.created_at > $1 AND a.created_at <= $2 GROUP BY 1, 2, 3`, "CC Max", window},
 	}
 	for _, src := range sources {
-		rows, err := db.QueryContext(ctx, src.query, from, to)
+		rows, err := db.QueryContext(ctx, src.query, src.args...)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -885,7 +906,7 @@ func runOpsNotifyTick(ctx context.Context, cfg opsNotifyConfig, force bool) (int
 	sent := 0
 	var errs []error
 	if cfg.Uploads {
-		if lines, totals, err := opsUploadLines(ctx, from, to); err != nil {
+		if lines, totals, err := opsUploadLines(ctx, from, to, cfg.UploadMuteProfiles); err != nil {
 			errs = append(errs, fmt.Errorf("uploads: %w", err))
 		} else if len(lines) > 0 {
 			deliverOpsMessage(cfg, "upload", "【上号】"+totals.String(), opsDigestBody(lines, from, to))

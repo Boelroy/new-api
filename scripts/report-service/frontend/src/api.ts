@@ -649,6 +649,8 @@ export type OpsNotifyConfig = {
   webhook: string
   window_min: number
   uploads: boolean
+  // Remote profile ids whose uploads are left out of the 上号 digest.
+  upload_mute_profiles: number[]
   priority: boolean
   stream_rise: boolean
   rate_limit_rise: boolean
