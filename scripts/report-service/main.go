@@ -4427,6 +4427,9 @@ func main() {
 	supplierAccountUsername = strings.TrimSpace(os.Getenv("SUPPLIER_ACCOUNT_USERNAME"))
 	supplierAccountPassword = os.Getenv("SUPPLIER_ACCOUNT_PASSWORD")
 	supplierAccountToken = strings.TrimSpace(os.Getenv("SUPPLIER_ACCOUNT_TOKEN"))
+	if v := strings.TrimRight(strings.TrimSpace(os.Getenv("OPENROUTER_BASE_URL")), "/"); v != "" {
+		openRouterBaseURL = v
+	}
 	ccmaxPortalUsername = strings.TrimSpace(os.Getenv("SUPPLIER_CCMAX_USERNAME"))
 	ccmaxPortalPassword = os.Getenv("SUPPLIER_CCMAX_PASSWORD")
 	ccmaxPortalToken = strings.TrimSpace(os.Getenv("SUPPLIER_CCMAX_TOKEN"))

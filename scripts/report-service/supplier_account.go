@@ -561,31 +561,51 @@ func handleSupplierProviders(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": supplierErr(body)})
 		return
 	}
+	var parsed map[string]json.RawMessage
+	var list []json.RawMessage
+	if json.Unmarshal(body, &parsed) != nil || json.Unmarshal(parsed["list"], &list) != nil {
+		c.Data(http.StatusOK, "application/json", body)
+		return
+	}
+	// CF OpenRouter is a local choice on top of the 号池's openrouter provider:
+	// offered when the 号池 has openrouter, models taken from it (model_provider),
+	// ready once the OpenRouter management key is configured.
+	hasOpenRouter := false
+	for _, raw := range list {
+		var p struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(raw, &p) == nil && p.Name == supplierOpenRouterPortalProvider {
+			hasOpenRouter = true
+		}
+	}
+	if hasOpenRouter {
+		entry, _ := json.Marshal(gin.H{
+			"name": supplierCFOpenRouterProvider, "label": "CF OpenRouter", "shape": "keyonly",
+			"need_region": false, "exclusive_model": false, "auto_select_all": false, "key_min_len": 20,
+			"model_provider": supplierOpenRouterPortalProvider, "ready": openRouterMgmtKey() != "",
+		})
+		list = append(list, entry)
+	}
 	// Admins see every provider (needed to configure the allowlist); suppliers
 	// see only the admin-permitted ones.
 	if !callerIsSupplierAdmin(c) {
 		if allow := supplierVisibleProviders(); len(allow) > 0 {
-			var parsed struct {
-				List []json.RawMessage `json:"list"`
-			}
-			if json.Unmarshal(body, &parsed) == nil {
-				filtered := make([]json.RawMessage, 0, len(parsed.List))
-				for _, raw := range parsed.List {
-					var p struct {
-						Name string `json:"name"`
-					}
-					if json.Unmarshal(raw, &p) == nil && supplierProviderAllowed(allow, p.Name) {
-						filtered = append(filtered, raw)
-					}
+			list = slices.DeleteFunc(list, func(raw json.RawMessage) bool {
+				var p struct {
+					Name string `json:"name"`
 				}
-				if out, err := json.Marshal(gin.H{"list": filtered}); err == nil {
-					c.Data(http.StatusOK, "application/json", out)
-					return
-				}
-			}
+				return json.Unmarshal(raw, &p) != nil || !supplierProviderAllowed(allow, p.Name)
+			})
 		}
 	}
-	c.Data(http.StatusOK, "application/json", body)
+	parsed["list"], _ = json.Marshal(list)
+	out, err := json.Marshal(parsed)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.Data(http.StatusOK, "application/json", out)
 }
 
 func handleSupplierModels(c *gin.Context) {
@@ -722,19 +742,64 @@ func handleSupplierAccountCreate(c *gin.Context) {
 			return
 		}
 	}
+	customProxy := body.ProxyType != "" || body.ProxyRegion != "" || body.ProxyURL != ""
+	if customProxy && (body.ProxyType != "bind_custom" || body.ProxyRegion == "" || !validSupplierAccountProxyURL(body.ProxyURL)) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "自定义代理需要填写有效的代理地址和出口地区"})
+		return
+	}
+
+	uidAny, _ := c.Get("user_id")
+	uid, _ := uidAny.(int64)
+	studioAny, _ := c.Get("studio")
+	studio, _ := studioAny.(string)
+	usernameAny, _ := c.Get("username")
+	username, _ := usernameAny.(string)
+
+	// CF OpenRouter: swap the CF token for a fresh OR key bound to it through
+	// BYOK, and upload that under the 号池's openrouter provider. Until the 号池
+	// accepts the account, any failure deletes what was created.
+	portalProvider := body.Provider
+	var byok *supplierOpenRouterBYOK
+	uploaded := false
+	secrets := []string{}
+	if body.Provider == supplierCFOpenRouterProvider {
+		mgmtKey := openRouterMgmtKey()
+		if mgmtKey == "" {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "未配置 OpenRouter 管理 Key，暂不能上号 CF OpenRouter，请联系管理员"})
+			return
+		}
+		uploader := cmp.Or(username, studio, "uid "+strconv.FormatInt(uid, 10))
+		var err error
+		if byok, err = provisionOpenRouterBYOK(mgmtKey, body.APIKey, openRouterKeyName(uploader, "")); err != nil {
+			log.Printf("[supplier-account] create cf_openrouter/%s: %v", body.Model, err)
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+			return
+		}
+		defer func() {
+			if !uploaded {
+				byok.rollback()
+			}
+		}()
+		secrets = append(secrets, body.APIKey, byok.ORKey)
+		body.APIKey = byok.ORKey
+		portalProvider = supplierOpenRouterPortalProvider
+	}
+	// scrub blanks the CF token / OR key out of portal messages, which may echo
+	// the submitted api_key.
+	scrub := func(s string) string {
+		for _, secret := range secrets {
+			s = strings.ReplaceAll(s, secret, "***")
+		}
+		return s
+	}
 
 	upstreamReq := map[string]any{
-		"provider":     body.Provider,
+		"provider":     portalProvider,
 		"model":        body.Model,
 		"api_key":      body.APIKey,
 		"account_type": body.AccountType,
 	}
-	customProxy := body.ProxyType != "" || body.ProxyRegion != "" || body.ProxyURL != ""
 	if customProxy {
-		if body.ProxyType != "bind_custom" || body.ProxyRegion == "" || !validSupplierAccountProxyURL(body.ProxyURL) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "自定义代理需要填写有效的代理地址和出口地区"})
-			return
-		}
 		upstreamReq["proxy_type"] = body.ProxyType
 		upstreamReq["proxy_region"] = body.ProxyRegion
 		upstreamReq["proxy_url"] = body.ProxyURL
@@ -785,7 +850,7 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	if err != nil {
 		message := "号池接口不可达"
 		if !customProxy {
-			message += ": " + err.Error()
+			message += ": " + scrub(err.Error())
 		}
 		log.Printf("[supplier-account] create %s/%s: %s", body.Provider, body.Model, message)
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": message})
@@ -797,7 +862,7 @@ func handleSupplierAccountCreate(c *gin.Context) {
 		if customProxy {
 			message = fmt.Sprintf("号池拒绝上号请求（HTTP %d）", status)
 		} else {
-			message = supplierErr(respBody)
+			message = scrub(supplierErr(respBody))
 		}
 		log.Printf("[supplier-account] create %s/%s: portal %d: %s", body.Provider, body.Model, status, message)
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": message})
@@ -811,17 +876,19 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	if err := json.Unmarshal(respBody, &upstream); err != nil || upstream.ID == 0 {
 		message := "unexpected upstream response"
 		if !customProxy {
-			message += ": " + strings.TrimSpace(string(respBody))
+			message += ": " + scrub(strings.TrimSpace(string(respBody)))
 		}
 		log.Printf("[supplier-account] create %s/%s: %s", body.Provider, body.Model, message)
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": message})
 		return
 	}
-
-	uidAny, _ := c.Get("user_id")
-	uid, _ := uidAny.(int64)
-	studioAny, _ := c.Get("studio")
-	studio, _ := studioAny.(string)
+	// The 号池 now uses the OR key: keep it and the BYOK credential from here on.
+	uploaded = true
+	orKeyHash, orBYOKID := "", ""
+	if byok != nil {
+		orKeyHash, orBYOKID = byok.KeyHash, byok.BYOKID
+		byok.rename(openRouterKeyName(cmp.Or(username, studio, "uid "+strconv.FormatInt(uid, 10)), upstream.Alias))
+	}
 
 	now := time.Now().Unix()
 	sum := sha256.Sum256([]byte(body.APIKey))
@@ -838,20 +905,28 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	if _, err := db.Exec(
 		`INSERT INTO rs_supplier_account
 		   (uploaded_by, studio, provider, models, remote_account_id, alias,
-		    account_type, remark, key_last8, key_hash, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
+		    account_type, remark, key_last8, key_hash, created_at, updated_at,
+		    or_key_hash, or_byok_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11,$12,$13)
 		 ON CONFLICT (remote_account_id) DO UPDATE SET
 		    studio=EXCLUDED.studio,
 		    provider=EXCLUDED.provider, models=EXCLUDED.models,
 		    alias=EXCLUDED.alias, account_type=EXCLUDED.account_type,
 		    remark=EXCLUDED.remark, key_last8=EXCLUDED.key_last8,
-		    key_hash=EXCLUDED.key_hash, updated_at=EXCLUDED.updated_at`,
+		    key_hash=EXCLUDED.key_hash, updated_at=EXCLUDED.updated_at,
+		    or_key_hash=EXCLUDED.or_key_hash, or_byok_id=EXCLUDED.or_byok_id`,
 		uid, studio, body.Provider, body.Model, upstream.ID, upstream.Alias,
 		body.AccountType, body.Remark, last8, keyHash, now,
+		orKeyHash, orBYOKID,
 	); err != nil {
 		message := "failed to record account"
 		if !customProxy {
-			message += ": " + err.Error()
+			message += ": " + scrub(err.Error())
+		}
+		if byok != nil {
+			// The 号池 account is live on the OR key, so nothing is rolled back;
+			// log the OpenRouter ids for the missing local row.
+			log.Printf("[supplier-account] cf_openrouter account %d not recorded locally (OR key %s, BYOK %s)", upstream.ID, orKeyHash, orBYOKID)
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": message})
 		return
@@ -984,6 +1059,8 @@ func handleSupplierAccountSync(c *gin.Context) {
 
 		// Upsert on remote_account_id. quota_usd / quota_alerted_at are omitted
 		// from the column list so a re-sync preserves any configured quota.
+		// A CF OpenRouter account keeps its local provider (the 号池 lists it as
+		// openrouter).
 		// created_at is preserved on conflict (only updated_at bumps). uploaded_by
 		// is preserved too so a sync never reassigns an account away from the
 		// studio that owns it (a fresh account is still owned by the syncer).
@@ -995,7 +1072,9 @@ func handleSupplierAccountSync(c *gin.Context) {
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 			 ON CONFLICT (remote_account_id) DO UPDATE SET
 			    studio=EXCLUDED.studio,
-			    provider=EXCLUDED.provider, models=EXCLUDED.models,
+			    provider=CASE WHEN rs_supplier_account.or_key_hash <> ''
+			                  THEN rs_supplier_account.provider ELSE EXCLUDED.provider END,
+			    models=EXCLUDED.models,
 			    alias=EXCLUDED.alias, account_type=EXCLUDED.account_type,
 			    remark=EXCLUDED.remark, key_last8=EXCLUDED.key_last8,
 			    key_hash=EXCLUDED.key_hash, updated_at=EXCLUDED.updated_at,
@@ -1545,18 +1624,26 @@ func handleSupplierSettingsGet(c *gin.Context) {
 	if len(webhook) > 4 {
 		whLast4 = webhook[len(webhook)-4:]
 	}
+	mgmtKey := openRouterMgmtKey()
+	mgmtLast4 := ""
+	if len(mgmtKey) > 8 {
+		mgmtLast4 = mgmtKey[len(mgmtKey)-4:]
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"openapi_token_set":   token != "",
-		"openapi_token_last4": last4,
-		"visible_providers":   vp,
-		"provider_defaults":   supplierProviderDefaults(),
-		"quota_webhook_set":   webhook != "",
-		"quota_webhook_last4": whLast4,
-		"fx_rate":             supplierFxRate(),
-		"quota_tick_sec":      supplierQuotaTickSeconds(),
-		"default_discount":    supplierAccountDiscount(),
-		"default_tpm":         supplierAccountDefaultTPM(),
-		"default_rpm":         supplierAccountDefaultRPM(),
+		"openrouter_mgmt_key_set":   mgmtKey != "",
+		"openrouter_mgmt_key_last4": mgmtLast4,
+		"openrouter_key_limit":      strings.TrimSpace(supplierConfigGet(cfgOpenRouterKeyLimit)),
+		"openapi_token_set":         token != "",
+		"openapi_token_last4":       last4,
+		"visible_providers":         vp,
+		"provider_defaults":         supplierProviderDefaults(),
+		"quota_webhook_set":         webhook != "",
+		"quota_webhook_last4":       whLast4,
+		"fx_rate":                   supplierFxRate(),
+		"quota_tick_sec":            supplierQuotaTickSeconds(),
+		"default_discount":          supplierAccountDiscount(),
+		"default_tpm":               supplierAccountDefaultTPM(),
+		"default_rpm":               supplierAccountDefaultRPM(),
 	})
 }
 
@@ -1568,6 +1655,8 @@ func handleSupplierProviderDefaults(c *gin.Context) {
 		"defaults":    supplierProviderDefaults(),
 		"default_tpm": supplierAccountDefaultTPM(),
 		"default_rpm": supplierAccountDefaultRPM(),
+		// Whether CF OpenRouter uploads can run (management key configured).
+		"cf_openrouter_ready": openRouterMgmtKey() != "",
 	})
 }
 
@@ -1584,6 +1673,10 @@ func handleSupplierSettingsSet(c *gin.Context) {
 		DefaultDiscount  *string                             `json:"default_discount"`
 		DefaultTPM       *string                             `json:"default_tpm"`
 		DefaultRPM       *string                             `json:"default_rpm"`
+		// OpenRouter management key for CF OpenRouter uploads ("" clears) and
+		// the optional USD limit put on each new OR key ("" = no limit).
+		OpenRouterMgmtKey  *string `json:"openrouter_mgmt_key"`
+		OpenRouterKeyLimit *string `json:"openrouter_key_limit"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
@@ -1592,6 +1685,25 @@ func handleSupplierSettingsSet(c *gin.Context) {
 	if body.OpenAPIToken != nil {
 		if err := supplierConfigSet(cfgSupplierOpenAPIToken, strings.TrimSpace(*body.OpenAPIToken)); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.OpenRouterKeyLimit != nil {
+		limit := strings.TrimSpace(*body.OpenRouterKeyLimit)
+		if limit != "" {
+			if v, err := strconv.ParseFloat(limit, 64); err != nil || v <= 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "openrouter_key_limit must be a positive number or empty"})
+				return
+			}
+		}
+		if err := supplierConfigSet(cfgOpenRouterKeyLimit, limit); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.OpenRouterMgmtKey != nil {
+		if err := supplierConfigSet(cfgOpenRouterMgmtKey, strings.TrimSpace(*body.OpenRouterMgmtKey)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save OpenRouter management key"})
 			return
 		}
 	}

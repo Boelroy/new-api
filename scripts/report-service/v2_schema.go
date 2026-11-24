@@ -103,6 +103,10 @@ var v2SchemaStatements = []string{
 	// portal's usage-log query filters by these, not by remote_account_id.
 	`ALTER TABLE rs_supplier_account ADD COLUMN IF NOT EXISTS a1_id BIGINT NOT NULL DEFAULT 0`,
 	`ALTER TABLE rs_supplier_account ADD COLUMN IF NOT EXISTS a2_id BIGINT NOT NULL DEFAULT 0`,
+	// CF OpenRouter uploads (supplier_openrouter_byok.go): the OpenRouter key
+	// hash and BYOK credential id created for the account ('' for others).
+	`ALTER TABLE rs_supplier_account ADD COLUMN IF NOT EXISTS or_key_hash TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE rs_supplier_account ADD COLUMN IF NOT EXISTS or_byok_id TEXT NOT NULL DEFAULT ''`,
 	// Local mirror of the portal's request log (supplier_record_log.go), one
 	// row per portal log id per platform; pruned after the retention window.
 	`CREATE TABLE IF NOT EXISTS rs_supplier_record_log (
