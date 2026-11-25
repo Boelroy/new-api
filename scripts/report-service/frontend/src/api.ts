@@ -973,7 +973,25 @@ export type Supplier2Account = {
   supplier_name?: string
   created_at?: string
   key_last8?: string
+  // Admin roster only: the report-service user the account is assigned to.
+  owner_user_id?: number | null
+  owner_username?: string | null
   [field: string]: unknown
+}
+
+export type Supplier2ReportResult = {
+  at: number
+  ok: boolean
+  trigger: 'auto' | 'manual'
+  text?: string
+  error?: string
+}
+
+export type Supplier2ReportSettings = {
+  webhook_set: boolean
+  webhook_last4: string
+  hours: string
+  last: Supplier2ReportResult | null
 }
 
 export type Supplier2Metrics = {
@@ -981,7 +999,7 @@ export type Supplier2Metrics = {
   error?: string
   begin_time?: string
   end_time?: string
-  accounts?: (SupplierMetric & { cost_usd: number | null })[]
+  accounts?: (SupplierMetric & { cost_usd?: number | null })[]
   summary?: SupplierMetricSummary
   total_cost_usd?: number | null
   fx_rate?: number
@@ -2486,6 +2504,39 @@ export const api = {
 
   // begin/end in portal time (UTC+8), "YYYY-MM-DD HH:MM:SS"; >7 days is fetched
   // in segments server-side. cost is RMB, cost_usd at supplier_fx_rate.
+  // Admin-only: assign account :id to a report-service user (null clears).
+  setSupplier2Owner: (id: number, userId: number | null) =>
+    request<{ ok: boolean; owner_user_id: number | null; owner_username: string | null }>(
+      `/api/supplier-account/secondary/accounts/${id}/owner`,
+      { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId }) },
+    ),
+
+  // Admin-only Lark usage report: webhook is never returned (last4 only); a
+  // blank one on save keeps the stored value, clear_webhook turns it off.
+  supplier2Report: () => request<Supplier2ReportSettings>('/api/supplier-account/secondary/report'),
+
+  setSupplier2Report: (payload: { webhook?: string; clear_webhook?: boolean; hours?: string }) =>
+    request<Supplier2ReportSettings>('/api/supplier-account/secondary/report', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  pushSupplier2Report: () =>
+    request<{ last: Supplier2ReportResult }>('/api/supplier-account/secondary/report/push', { method: 'POST' }),
+
+  // Any signed-in user: the 账号 2 accounts an admin assigned to them. Cost
+  // fields are absent unless can_view_cost (admin).
+  supplier2Mine: () =>
+    request<{ accounts: Supplier2Account[]; can_view_cost: boolean }>('/api/supplier-account/secondary/mine'),
+
+  supplier2MineMetrics: (payload: { begin_time?: string; end_time?: string }) =>
+    request<Supplier2Metrics>('/api/supplier-account/secondary/mine/metrics', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
   supplier2Metrics: (payload: { begin_time?: string; end_time?: string }) =>
     request<Supplier2Metrics>('/api/supplier-account/secondary/metrics', {
       method: 'POST',

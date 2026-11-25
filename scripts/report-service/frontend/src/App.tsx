@@ -21,6 +21,7 @@ import LocalChannelSync from './pages/LocalChannelSync'
 import LocalToRemoteSync from './pages/LocalToRemoteSync'
 import PoolUploadStudio from './pages/PoolUploadStudio'
 import SupplierAccounts from './pages/SupplierAccounts'
+import SupplierMine from './pages/SupplierMine'
 import Settings from './pages/Settings'
 import { api, ROLE_ADMIN, ROLE_PROJECT_ADMIN, ROLE_REMOTE_STUDIO_OPERATOR, ROLE_STUDIO_OPERATOR, ROLE_SUPER_ADMIN, ROLE_SUPPLIER_01, ROLE_TESTER } from './api'
 import { Toaster, ConfirmHost } from './components/feedback'
@@ -118,6 +119,8 @@ export default function App() {
         <Route path="/local-remote-sync" element={<RoleGate min={ROLE_ADMIN}><LocalToRemoteSync /></RoleGate>} />
         <Route path="/pool-upload" element={<RoleGate allow={r => r === ROLE_STUDIO_OPERATOR}><PoolUploadStudio /></RoleGate>} />
         <Route path="/supplier-accounts" element={<RoleGate allow={r => r >= ROLE_ADMIN || r === ROLE_SUPPLIER_01}><SupplierAccounts /></RoleGate>} />
+        {/* 账号 2 accounts assigned to the caller; any signed-in user, scoped by the server. */}
+        <Route path="/supplier-accounts/mine" element={<SupplierMine />} />
         <Route path="/settings" element={<RoleGate min={ROLE_SUPER_ADMIN}><Settings /></RoleGate>} />
         <Route path="/sidebar-settings" element={<Navigate to="/settings" replace />} />
         <Route path="/detect" element={<Navigate to="/testing" replace />} />
