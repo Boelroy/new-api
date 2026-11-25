@@ -979,7 +979,7 @@ export type Supplier2Account = {
   [field: string]: unknown
 }
 
-export type Supplier2ReportResult = {
+export type SupplierReportResult = {
   at: number
   ok: boolean
   trigger: 'auto' | 'manual'
@@ -987,11 +987,11 @@ export type Supplier2ReportResult = {
   error?: string
 }
 
-export type Supplier2ReportSettings = {
+export type SupplierReportSettings = {
   webhook_set: boolean
   webhook_last4: string
   hours: string
-  last: Supplier2ReportResult | null
+  last: SupplierReportResult | null
 }
 
 export type Supplier2Metrics = {
@@ -2511,19 +2511,32 @@ export const api = {
       { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId }) },
     ),
 
-  // Admin-only Lark usage report: webhook is never returned (last4 only); a
-  // blank one on save keeps the stored value, clear_webhook turns it off.
-  supplier2Report: () => request<Supplier2ReportSettings>('/api/supplier-account/secondary/report'),
+  // Admin-only Lark usage reports (账号上号 and 账号 2, same shape): webhook is
+  // never returned (last4 only); a blank one on save keeps the stored value,
+  // clear_webhook turns it off.
+  supplierReport: () => request<SupplierReportSettings>('/api/supplier-account/report'),
+
+  setSupplierReport: (payload: { webhook?: string; clear_webhook?: boolean; hours?: string }) =>
+    request<SupplierReportSettings>('/api/supplier-account/report', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  pushSupplierReport: () =>
+    request<{ last: SupplierReportResult }>('/api/supplier-account/report/push', { method: 'POST' }),
+
+  supplier2Report: () => request<SupplierReportSettings>('/api/supplier-account/secondary/report'),
 
   setSupplier2Report: (payload: { webhook?: string; clear_webhook?: boolean; hours?: string }) =>
-    request<Supplier2ReportSettings>('/api/supplier-account/secondary/report', {
+    request<SupplierReportSettings>('/api/supplier-account/secondary/report', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
 
   pushSupplier2Report: () =>
-    request<{ last: Supplier2ReportResult }>('/api/supplier-account/secondary/report/push', { method: 'POST' }),
+    request<{ last: SupplierReportResult }>('/api/supplier-account/secondary/report/push', { method: 'POST' }),
 
   // Any signed-in user: the 账号 2 accounts an admin assigned to them. Cost
   // fields are absent unless can_view_cost (admin).

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import Layout from '../components/Layout'
 import SupplierRecordLog from '../components/SupplierRecordLog'
-import SupplierSecondary from '../components/SupplierSecondary'
+import SupplierSecondary, { SupplierReportCard } from '../components/SupplierSecondary'
 import SummaryCards from '../components/SummaryCards'
 import { withBase } from '../basePath'
 import {
@@ -919,6 +919,15 @@ export default function SupplierAccounts() {
         <div className="mb-4 bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-md px-3 py-2">
           OpenAPI token 尚未配置（<code>SUPPLIER_ACCOUNT_TOKEN</code>）——厂商/模型可正常浏览，但<b>上号与实时用量暂不可用</b>，配置后即可启用。
         </div>
+      )}
+
+      {isAdmin && (
+        <SupplierReportCard
+          confirmLabel="账号上号"
+          load={api.supplierReport}
+          save={api.setSupplierReport}
+          push={api.pushSupplierReport}
+        />
       )}
 
       {isAdmin && (

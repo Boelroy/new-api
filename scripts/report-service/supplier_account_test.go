@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -693,9 +694,9 @@ func TestSupplier2AdminOnly(t *testing.T) {
 		{http.MethodGet, handleSupplier2Accounts},
 		{http.MethodPost, handleSupplier2Metrics},
 		{http.MethodPut, handleSupplier2OwnerSet},
-		{http.MethodGet, handleSupplier2ReportSettingsGet},
-		{http.MethodPut, handleSupplier2ReportSettingsSet},
-		{http.MethodPost, handleSupplier2ReportPush},
+		{http.MethodGet, supplier2ReportLane.handleSettingsGet},
+		{http.MethodPut, supplier2ReportLane.handleSettingsSet},
+		{http.MethodPost, supplier2ReportLane.handlePush},
 	} {
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
@@ -1016,11 +1017,11 @@ func TestSupplier2OwnerSet(t *testing.T) {
 }
 
 func TestSupplier2ReportText(t *testing.T) {
-	text := supplier2ReportText(supplier2Report{
+	text := supplierUsageReportText(supplierUsageReport{
 		Label:  "账号 2",
 		At:     time.Date(2026, 11, 25, 10, 5, 0, 0, supplierPortalLoc),
 		FxRate: 7,
-		Accounts: []supplier2ReportAccount{
+		Accounts: []supplierUsageReportAccount{
 			{ID: 2, Name: "liyinzhang-GW T6-03", Owner: "liyinzhang", TotalCostRMB: 14},
 			{ID: 3, Name: "orphan", TodayRequests: 5, TodayCostRMB: 7, TotalCostRMB: 7},
 			{ID: 1, Name: "liyinzhang-GW T6-02", Owner: "liyinzhang", TodayRequests: 100, TodayCostRMB: 70, TotalCostRMB: 700},
@@ -1046,25 +1047,103 @@ func TestSupplier2ReportText(t *testing.T) {
 注：费用来自号池账单，约有 2 小时延迟；今日从 00:00 (UTC+8) 起，累计为近 90 天；汇率 7`, text)
 }
 
-func TestSupplier2ReportTick(t *testing.T) {
+func TestSupplierReportTick(t *testing.T) {
 	at := time.Date(2026, 11, 25, 10, 5, 0, 0, supplierPortalLoc)
-	config := map[string]string{cfgSupplier2ReportWebhook: "https://lark.invalid/hook/x", cfgSupplier2ReportHours: "10,22"}
+	for name, lane := range map[string]*supplierReportLane{"账号上号": supplierReportLaneMain, "账号 2": supplier2ReportLane} {
+		t.Run(name, func(t *testing.T) {
+			config := map[string]string{lane.cfgWebhook: "https://lark.invalid/hook/x", lane.cfgHours: "10,22"}
+			pushes := 0
+			push := func(time.Time) { pushes++ }
 
-	pushes := 0
-	push := func(time.Time) { pushes++ }
+			mock := supplier2ConfigMock(t, config)
+			mock.ExpectExec("INSERT INTO report_config").WithArgs(lane.cfgLastSlot, "2026-11-25 10", sqlmock.AnyArg()).
+				WillReturnResult(sqlmock.NewResult(0, 1))
+			assert.True(t, lane.tick(at, push), "first tick in a push hour pushes")
+			assert.NoError(t, mock.ExpectationsWereMet())
 
-	mock := supplier2ConfigMock(t, config)
-	mock.ExpectExec("INSERT INTO report_config").WithArgs(cfgSupplier2ReportLastSlot, "2026-11-25 10", sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	assert.True(t, supplier2ReportTick(at, push), "first tick in a push hour pushes")
+			withSlot := maps.Clone(config)
+			withSlot[lane.cfgLastSlot] = "2026-11-25 10"
+			supplier2ConfigMock(t, withSlot)
+			assert.False(t, lane.tick(at.Add(30*time.Minute), push), "the same hour is not pushed twice")
+
+			supplier2ConfigMock(t, config)
+			assert.False(t, lane.tick(at.Add(2*time.Hour), push), "hours not configured are skipped")
+			assert.Equal(t, 1, pushes)
+		})
+	}
+}
+
+func TestSupplierReportAdminOnly(t *testing.T) {
+	for _, tc := range []struct {
+		method  string
+		handler gin.HandlerFunc
+	}{
+		{http.MethodGet, supplierReportLaneMain.handleSettingsGet},
+		{http.MethodPut, supplierReportLaneMain.handleSettingsSet},
+		{http.MethodPost, supplierReportLaneMain.handlePush},
+	} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Set("role", minSupplierRole)
+		c.Request = httptest.NewRequest(tc.method, "/api/supplier-account/report", bytes.NewReader([]byte(`{"webhook":"https://x.invalid/y"}`)))
+		tc.handler(c)
+		assert.Equal(t, http.StatusForbidden, w.Code)
+	}
+}
+
+func TestSupplierBuildReport(t *testing.T) {
+	previousClient, previousOrigin, previousToken := supplierHTTPClient, supplierAccountBaseURL, supplierAccountToken
+	t.Cleanup(func() {
+		supplierHTTPClient, supplierAccountBaseURL, supplierAccountToken = previousClient, previousOrigin, previousToken
+	})
+	supplierAccountBaseURL, supplierAccountToken = "https://portal.invalid", "fixture-main-token"
+	mock := supplier2ConfigMock(t, map[string]string{cfgSupplierFxRate: "7"})
+	// uploaded_by → username; a missing user falls back to the studio; neither
+	// → 未分配.
+	mock.ExpectQuery(`FROM rs_supplier_account a\s+LEFT JOIN rs_auth_user u ON u.id = a.uploaded_by`).
+		WillReturnRows(sqlmock.NewRows([]string{"remote_account_id", "alias", "remark", "username", "studio"}).
+			AddRow(int64(101), "openai-a-01", "", "alice", "Studio A").
+			AddRow(int64(102), "openai-b-02", "", "", "Studio B").
+			AddRow(int64(103), "claude-c-03", "", "", "").
+			AddRow(int64(104), "openai-a-04", "", "alice", "Studio A"))
+
+	now := time.Now().In(supplierPortalLoc)
+	today := now.Format("2006-01-02")
+	supplierHTTPClient = &http.Client{Transport: supplierPortalTransport(func(r *http.Request) (*http.Response, error) {
+		assert.Equal(t, "Bearer fixture-main-token", r.Header.Get("Authorization"))
+		var q map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&q))
+		w := httptest.NewRecorder()
+		switch r.URL.Path {
+		case "/supplier-account/api/openapi/metrics/query":
+			assert.Len(t, q["account_ids"], 4)
+			_, _ = w.WriteString(`{"accounts":[{"aid":9,"account_alias":"openai-a-01","requests":40},
+				{"aid":8,"account_alias":"openai-b-02","requests":5},{"aid":7,"account_alias":"claude-c-03","requests":1}]}`)
+		case "/supplier-account/api/openapi/bill/query":
+			if q["start_ds"] == today {
+				_, _ = w.WriteString(`{"list":[{"id":101,"cost":70},{"id":102,"cost":14},{"id":103,"cost":7}]}`)
+			} else {
+				_, _ = w.WriteString(`{"list":[{"id":101,"cost":700},{"id":102,"cost":14},{"id":103,"cost":7},{"id":104,"cost":21}]}`)
+			}
+		default:
+			t.Errorf("unexpected portal call %s", r.URL.Path)
+		}
+		return w.Result(), nil
+	})}
+
+	r, err := supplierBuildReport(now)
+	require.NoError(t, err)
 	assert.NoError(t, mock.ExpectationsWereMet())
-
-	withSlot := maps.Clone(config)
-	withSlot[cfgSupplier2ReportLastSlot] = "2026-11-25 10"
-	supplier2ConfigMock(t, withSlot)
-	assert.False(t, supplier2ReportTick(at.Add(30*time.Minute), push), "the same hour is not pushed twice")
-
-	supplier2ConfigMock(t, config)
-	assert.False(t, supplier2ReportTick(at.Add(2*time.Hour), push), "hours not configured are skipped")
-	assert.Equal(t, 1, pushes)
+	text := supplierUsageReportText(r)
+	for _, line := range []string{
+		"[账号上号] 用量播报 ",
+		"合计：4 个账号 · 今日 $13.00 · 请求 46 · 累计 $106.00",
+		"【alice】2 个账号 · 今日 $10.00 · 请求 40\n· #101 openai-a-01：今日 $10.00 · 请求 40 · 累计 $100.00\n· 另 1 个账号今日无用量",
+		"【Studio B】1 个账号 · 今日 $2.00 · 请求 5",
+		"【未分配】1 个账号 · 今日 $1.00 · 请求 1\n· #103 claude-c-03：今日 $1.00 · 请求 1 · 累计 $1.00",
+		"汇率 7",
+	} {
+		assert.Contains(t, text, line)
+	}
+	assert.Less(t, strings.Index(text, "【Studio B】"), strings.Index(text, "【未分配】"), "未分配 comes last")
 }

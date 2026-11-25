@@ -4,7 +4,7 @@ import {
   type AuthUser,
   type Supplier2Account,
   type Supplier2Metrics,
-  type Supplier2ReportSettings,
+  type SupplierReportSettings,
   type Supplier2Settings,
 } from '../api'
 
@@ -333,10 +333,21 @@ export function Supplier2AccountTable({
   )
 }
 
-// Supplier2ReportCard is the admin's Lark usage report settings: webhook
-// (masked; blank keeps it), UTC+8 push hours, 立即推送 and the last outcome.
-function Supplier2ReportCard() {
-  const [report, setReport] = useState<Supplier2ReportSettings | null>(null)
+// SupplierReportCard is the admin's Lark usage report settings of one login
+// (账号上号 or 账号 2): webhook (masked; blank keeps it), UTC+8 push hours,
+// 立即推送 and the last outcome.
+export function SupplierReportCard({
+  confirmLabel,
+  load,
+  save: saveSettings,
+  push: pushNow,
+}: {
+  confirmLabel: string
+  load: () => Promise<SupplierReportSettings>
+  save: (payload: { webhook?: string; clear_webhook?: boolean; hours?: string }) => Promise<SupplierReportSettings>
+  push: () => Promise<unknown>
+}) {
+  const [report, setReport] = useState<SupplierReportSettings | null>(null)
   const [open, setOpen] = useState(false)
   const [webhook, setWebhook] = useState('')
   const [hours, setHours] = useState('')
@@ -344,13 +355,14 @@ function Supplier2ReportCard() {
   const [err, setErr] = useState<string | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
 
-  function apply(r: Supplier2ReportSettings) {
+  function apply(r: SupplierReportSettings) {
     setReport(r)
     setHours(r.hours)
   }
 
   useEffect(() => {
-    api.supplier2Report().then(apply).catch((e: any) => setErr(e?.message || String(e)))
+    load().then(apply).catch((e: any) => setErr(e?.message || String(e)))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   async function run(action: () => Promise<void>) {
@@ -369,7 +381,7 @@ function Supplier2ReportCard() {
   const save = (clearWebhook = false) =>
     run(async () => {
       apply(
-        await api.setSupplier2Report(
+        await saveSettings(
           clearWebhook ? { clear_webhook: true } : { webhook: webhook.trim() || undefined, hours: hours.trim() },
         ),
       )
@@ -380,11 +392,11 @@ function Supplier2ReportCard() {
   const push = () =>
     run(async () => {
       try {
-        await api.pushSupplier2Report()
+        await pushNow()
         setMsg('已推送')
       } finally {
         // The outcome (success or failure) is recorded as the last result.
-        apply(await api.supplier2Report())
+        apply(await load())
       }
     })
 
@@ -439,7 +451,7 @@ function Supplier2ReportCard() {
             {report?.webhook_set && (
               <button
                 onClick={() => {
-                  if (window.confirm('关闭账号 2 的 Lark 播报（清除 Webhook）？')) void save(true)
+                  if (window.confirm(`关闭${confirmLabel}的 Lark 播报（清除 Webhook）？`)) void save(true)
                 }}
                 disabled={busy}
                 className="px-3 py-1.5 text-sm rounded-md border border-gray-300 disabled:opacity-50"
@@ -649,7 +661,14 @@ export default function SupplierSecondary({ onLabel }: { onLabel?: (label: strin
         {settingsErr && <p className="mt-2 text-xs text-rose-600">{settingsErr}</p>}
       </section>
 
-      {configured && <Supplier2ReportCard />}
+      {configured && (
+        <SupplierReportCard
+          confirmLabel={settings?.label || '账号 2'}
+          load={api.supplier2Report}
+          save={api.setSupplier2Report}
+          push={api.pushSupplier2Report}
+        />
+      )}
 
       {configured && (
         <>

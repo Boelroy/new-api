@@ -5347,6 +5347,11 @@ func main() {
 	// the group's admin-or-supplier gate to admin+).
 	supplierAPI.GET("/settings", requireRole(minAdminRole), handleSupplierSettingsGet)
 	supplierAPI.PUT("/settings", requireRole(minAdminRole), handleSupplierSettingsSet)
+	// Lark usage report of the 账号上号 accounts — admin-only
+	// (supplier_usage_report.go).
+	supplierAPI.GET("/report", requireRole(minAdminRole), supplierReportLaneMain.handleSettingsGet)
+	supplierAPI.PUT("/report", requireRole(minAdminRole), supplierReportLaneMain.handleSettingsSet)
+	supplierAPI.POST("/report/push", requireRole(minAdminRole), supplierReportLaneMain.handlePush)
 	// 账号 2: a second portal login, read-only and admin-only (see
 	// supplier_account_secondary.go).
 	supplier2API := supplierAPI.Group("/secondary", requireRole(minAdminRole))
@@ -5355,9 +5360,9 @@ func main() {
 	supplier2API.GET("/accounts", handleSupplier2Accounts)
 	supplier2API.POST("/metrics", handleSupplier2Metrics)
 	supplier2API.PUT("/accounts/:id/owner", handleSupplier2OwnerSet)
-	supplier2API.GET("/report", handleSupplier2ReportSettingsGet)
-	supplier2API.PUT("/report", handleSupplier2ReportSettingsSet)
-	supplier2API.POST("/report/push", handleSupplier2ReportPush)
+	supplier2API.GET("/report", supplier2ReportLane.handleSettingsGet)
+	supplier2API.PUT("/report", supplier2ReportLane.handleSettingsSet)
+	supplier2API.POST("/report/push", supplier2ReportLane.handlePush)
 	// Any signed-in user reads the 账号 2 accounts assigned to them (outside
 	// the admin-or-supplier group; the handlers scope by owner and hide cost
 	// from non-admins).
@@ -5742,7 +5747,7 @@ func main() {
 	supplierWeb.startRefresher()
 	ccmaxWeb.startRefresher()
 	startCCMaxReportLoop()
-	startSupplier2ReportLoop()
+	startSupplierReportLoops()
 	startTencentStatementPushLoop()
 	startTencentSourceCacheLoop()
 
