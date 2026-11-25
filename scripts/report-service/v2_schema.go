@@ -248,6 +248,17 @@ var v2SchemaStatements = []string{
 		PRIMARY KEY (remote_account_id, ds)
 	)`,
 
+	// 账号上号「账号 2」: which report-service user (rs_auth_user.id) each
+	// account of the second portal login belongs to, set by an admin
+	// (supplier_account_secondary.go). At most one owner per account; the
+	// accounts themselves are read live from the portal, not stored.
+	`CREATE TABLE IF NOT EXISTS rs_supplier2_owner (
+		remote_account_id BIGINT PRIMARY KEY,
+		user_id           BIGINT NOT NULL,
+		updated_at        BIGINT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_supplier2_owner_user ON rs_supplier2_owner(user_id)`,
+
 	// -- 供给台 (GYNH) -------------------------------------------------------
 	// One row per key a report-service user uploaded through the shared GYNH
 	// portal login (gynh.go). The portal only knows its own supplier account,

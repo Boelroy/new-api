@@ -692,6 +692,10 @@ func TestSupplier2AdminOnly(t *testing.T) {
 		{http.MethodPut, handleSupplier2SettingsSet},
 		{http.MethodGet, handleSupplier2Accounts},
 		{http.MethodPost, handleSupplier2Metrics},
+		{http.MethodPut, handleSupplier2OwnerSet},
+		{http.MethodGet, handleSupplier2ReportSettingsGet},
+		{http.MethodPut, handleSupplier2ReportSettingsSet},
+		{http.MethodPost, handleSupplier2ReportPush},
 	} {
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
@@ -860,4 +864,207 @@ func TestSupplier2Metrics(t *testing.T) {
 	assert.Equal(t, int64(20), resp.Summary.Total.Requests)
 	assert.Equal(t, int64(200), resp.Summary.Total.PromptTokens)
 	assert.InDelta(t, 10, resp.TotalCostUSD, 1e-9)
+}
+
+func TestSupplier2Mine(t *testing.T) {
+	previousClient, previousOrigin := supplierHTTPClient, supplierAccountBaseURL
+	t.Cleanup(func() {
+		supplierHTTPClient, supplierAccountBaseURL = previousClient, previousOrigin
+		supplier2Web.invalidate()
+	})
+	supplierAccountBaseURL = "https://portal.invalid"
+
+	var metricIDs, billIDs []any
+	portalCalls := 0
+	supplierHTTPClient = &http.Client{Transport: supplierPortalTransport(func(r *http.Request) (*http.Response, error) {
+		portalCalls++
+		w := httptest.NewRecorder()
+		var q map[string]any
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&q)
+		}
+		switch r.URL.Path {
+		case "/supplier-account/api/supplier/accounts":
+			_, _ = w.WriteString(`{"list":[
+				{"id":11,"account_alias":"openai-mine-01","provider":"openai","remark":"liyinzhang-GW T6-01","api_key":"sk-full-secret-11112222"},
+				{"id":12,"account_alias":"openai-other-02","provider":"openai","remark":"bob-02","api_key":"sk-full-secret-33334444"}]}`)
+		case "/supplier-account/api/openapi/metrics/query":
+			metricIDs = q["account_ids"].([]any)
+			_, _ = w.WriteString(`{"accounts":[{"aid":901,"account_alias":"openai-mine-01","requests":10,"success_rate":0.5,
+				"prompt_tokens":100,"completion_tokens":20}]}`)
+		case "/supplier-account/api/openapi/bill/query":
+			billIDs = q["account_ids"].([]any)
+			_, _ = w.WriteString(`{"list":[{"id":11,"cost":72}]}`)
+		default:
+			t.Errorf("unexpected portal call %s", r.URL.Path)
+		}
+		return w.Result(), nil
+	})}
+
+	call := func(t *testing.T, role int, owned []int64, handler gin.HandlerFunc, method string) (int, string) {
+		t.Helper()
+		mock := supplier2ConfigMock(t, map[string]string{
+			cfgSupplier2Username: "second-user",
+			cfgSupplier2Password: "fixture-password",
+			cfgSupplier2Token:    "fixture-second-token",
+		})
+		rows := sqlmock.NewRows([]string{"remote_account_id", "user_id", "username"})
+		for _, id := range owned {
+			rows.AddRow(id, int64(7), "liyinzhang")
+		}
+		mock.ExpectQuery(`FROM rs_supplier2_owner o LEFT JOIN rs_auth_user u ON u.id = o.user_id WHERE o.user_id=\$1`).
+			WithArgs(int64(7)).WillReturnRows(rows)
+		supplier2Web.token, supplier2Web.expiry = "web-token", time.Now().Add(time.Hour)
+		metricIDs, billIDs, portalCalls = nil, nil, 0
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Set("role", role)
+		c.Set("user_id", int64(7))
+		c.Request = httptest.NewRequest(method, "/api/supplier-account/secondary/mine", nil)
+		handler(c)
+		return w.Code, w.Body.String()
+	}
+
+	t.Run("lists only the caller's accounts", func(t *testing.T) {
+		code, body := call(t, 1, []int64{11}, handleSupplier2MyAccounts, http.MethodGet)
+		require.Equal(t, http.StatusOK, code, body)
+		var resp struct {
+			Accounts []map[string]any `json:"accounts"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(body), &resp))
+		require.Len(t, resp.Accounts, 1)
+		assert.EqualValues(t, 11, resp.Accounts[0]["id"])
+		assert.NotContains(t, body, "bob-02")
+		assert.NotContains(t, body, "sk-full-secret")
+	})
+
+	t.Run("no assignment means nothing and no portal call", func(t *testing.T) {
+		code, body := call(t, 1, nil, handleSupplier2MyMetrics, http.MethodPost)
+		require.Equal(t, http.StatusOK, code, body)
+		assert.Zero(t, portalCalls)
+		assert.Contains(t, body, `"accounts":[]`)
+	})
+
+	t.Run("non-admin usage covers own accounts without cost", func(t *testing.T) {
+		code, body := call(t, 1, []int64{11}, handleSupplier2MyMetrics, http.MethodPost)
+		require.Equal(t, http.StatusOK, code, body)
+		assert.Equal(t, []any{float64(11)}, metricIDs, "only the caller's account is queried")
+		assert.Equal(t, []any{float64(11)}, billIDs)
+		for _, field := range []string{`"cost"`, `"cost_usd"`, `"total_cost_usd"`, `"fx_rate"`} {
+			assert.NotContains(t, body, field)
+		}
+		var resp struct {
+			Accounts []struct {
+				AID      int64 `json:"aid"`
+				Requests int64 `json:"requests"`
+			} `json:"accounts"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(body), &resp))
+		require.Len(t, resp.Accounts, 1)
+		assert.Equal(t, int64(11), resp.Accounts[0].AID)
+		assert.Equal(t, int64(10), resp.Accounts[0].Requests)
+	})
+
+	t.Run("admin keeps cost on their own view", func(t *testing.T) {
+		code, body := call(t, minAdminRole, []int64{11}, handleSupplier2MyMetrics, http.MethodPost)
+		require.Equal(t, http.StatusOK, code, body)
+		assert.Contains(t, body, `"cost_usd":10`)
+	})
+}
+
+func TestSupplier2OwnerSet(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		body       string
+		setup      func(sqlmock.Sqlmock)
+		wantStatus int
+		wantBody   string
+	}{
+		{name: "assigns an existing user", body: `{"user_id":7}`, wantStatus: 200, wantBody: `"owner_username":"liyinzhang"`,
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery("SELECT username FROM rs_auth_user").WithArgs(int64(7)).
+					WillReturnRows(sqlmock.NewRows([]string{"username"}).AddRow("liyinzhang"))
+				m.ExpectExec("INSERT INTO rs_supplier2_owner").WithArgs(int64(11), int64(7), sqlmock.AnyArg()).
+					WillReturnResult(sqlmock.NewResult(0, 1))
+			}},
+		{name: "unknown user is rejected", body: `{"user_id":99}`, wantStatus: 400, wantBody: "用户不存在",
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery("SELECT username FROM rs_auth_user").WithArgs(int64(99)).
+					WillReturnRows(sqlmock.NewRows([]string{"username"}))
+			}},
+		{name: "null clears the owner", body: `{"user_id":null}`, wantStatus: 200, wantBody: `"owner_user_id":null`,
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectExec("DELETE FROM rs_supplier2_owner").WithArgs(int64(11)).WillReturnResult(sqlmock.NewResult(0, 1))
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := supplier2ConfigMock(t, nil)
+			tc.setup(mock)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Set("role", minAdminRole)
+			c.Params = gin.Params{{Key: "id", Value: "11"}}
+			c.Request = httptest.NewRequest(http.MethodPut, "/api/supplier-account/secondary/accounts/11/owner", bytes.NewReader([]byte(tc.body)))
+			c.Request.Header.Set("Content-Type", "application/json")
+			handleSupplier2OwnerSet(c)
+			require.Equal(t, tc.wantStatus, w.Code, w.Body.String())
+			assert.Contains(t, w.Body.String(), tc.wantBody)
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestSupplier2ReportText(t *testing.T) {
+	text := supplier2ReportText(supplier2Report{
+		Label:  "账号 2",
+		At:     time.Date(2026, 11, 25, 10, 5, 0, 0, supplierPortalLoc),
+		FxRate: 7,
+		Accounts: []supplier2ReportAccount{
+			{ID: 2, Name: "liyinzhang-GW T6-03", Owner: "liyinzhang", TotalCostRMB: 14},
+			{ID: 3, Name: "orphan", TodayRequests: 5, TodayCostRMB: 7, TotalCostRMB: 7},
+			{ID: 1, Name: "liyinzhang-GW T6-02", Owner: "liyinzhang", TodayRequests: 100, TodayCostRMB: 70, TotalCostRMB: 700},
+			{ID: 4, Name: "bob-01", Owner: "bob"},
+			{ID: 5, Name: "broken", Owner: "liyinzhang", TodayRequests: 999, TodayCostRMB: 999, Failed: true},
+		},
+	})
+	assert.Equal(t, `[账号 2] 用量播报 2026-11-25 10:00 (UTC+8)
+合计：4 个账号 · 今日 $11.00 · 请求 105 · 累计 $103.00
+
+【liyinzhang】2 个账号 · 今日 $10.00 · 请求 100
+· #1 liyinzhang-GW T6-02：今日 $10.00 · 请求 100 · 累计 $100.00
+· 另 1 个账号今日无用量
+
+【bob】1 个账号 · 今日 $0.00 · 请求 0
+· 另 1 个账号今日无用量
+
+【未分配】1 个账号 · 今日 $1.00 · 请求 5
+· #3 orphan：今日 $1.00 · 请求 5 · 累计 $1.00
+
+⚠ 1 个账号用量查询失败，未计入合计：#5
+
+注：费用来自号池账单，约有 2 小时延迟；今日从 00:00 (UTC+8) 起，累计为近 90 天；汇率 7`, text)
+}
+
+func TestSupplier2ReportTick(t *testing.T) {
+	at := time.Date(2026, 11, 25, 10, 5, 0, 0, supplierPortalLoc)
+	config := map[string]string{cfgSupplier2ReportWebhook: "https://lark.invalid/hook/x", cfgSupplier2ReportHours: "10,22"}
+
+	pushes := 0
+	push := func(time.Time) { pushes++ }
+
+	mock := supplier2ConfigMock(t, config)
+	mock.ExpectExec("INSERT INTO report_config").WithArgs(cfgSupplier2ReportLastSlot, "2026-11-25 10", sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	assert.True(t, supplier2ReportTick(at, push), "first tick in a push hour pushes")
+	assert.NoError(t, mock.ExpectationsWereMet())
+
+	withSlot := maps.Clone(config)
+	withSlot[cfgSupplier2ReportLastSlot] = "2026-11-25 10"
+	supplier2ConfigMock(t, withSlot)
+	assert.False(t, supplier2ReportTick(at.Add(30*time.Minute), push), "the same hour is not pushed twice")
+
+	supplier2ConfigMock(t, config)
+	assert.False(t, supplier2ReportTick(at.Add(2*time.Hour), push), "hours not configured are skipped")
+	assert.Equal(t, 1, pushes)
 }
