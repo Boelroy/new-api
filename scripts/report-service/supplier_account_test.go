@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"maps"
@@ -1146,4 +1147,82 @@ func TestSupplierBuildReport(t *testing.T) {
 		assert.Contains(t, text, line)
 	}
 	assert.Less(t, strings.Index(text, "【Studio B】"), strings.Index(text, "【未分配】"), "未分配 comes last")
+}
+
+func TestSupplierReportTextMinUSD(t *testing.T) {
+	at := time.Date(2026, 11, 25, 10, 5, 0, 0, supplierPortalLoc)
+	text := supplierUsageReportText(supplierUsageReport{
+		Label: "账号 2", At: at, FxRate: 7, MinUSD: 10,
+		Accounts: []supplierUsageReportAccount{
+			{ID: 1, Name: "big-01", Owner: "alice", TodayRequests: 100, TodayCostRMB: 350, TotalCostRMB: 700},
+			{ID: 2, Name: "big-02", Owner: "alice", TodayRequests: 4, TodayCostRMB: 21, TotalCostRMB: 21},
+			{ID: 3, Name: "big-03", Owner: "alice", TotalCostRMB: 7},
+			{ID: 4, Name: "xiaoc6-01", Owner: "xiaoc6", TodayRequests: 10, TodayCostRMB: 14, TotalCostRMB: 14},
+			{ID: 5, Name: "xiaoc6-02", Owner: "xiaoc6"},
+			{ID: 6, Name: "orphan", TodayRequests: 1, TodayCostRMB: 7, TotalCostRMB: 7},
+			{ID: 7, Name: "bob-01", Owner: "bob", TodayRequests: 5, TodayCostRMB: 140, TotalCostRMB: 140},
+			{ID: 8, Name: "bob-02", Owner: "bob"},
+		},
+	})
+	// The overall line still counts every account; groups under $10 today fold
+	// into one line, and so do accounts under $10 inside the groups shown.
+	assert.Equal(t, `[账号 2] 用量播报 2026-11-25 10:00 (UTC+8)
+合计：8 个账号 · 今日 $76.00 · 请求 120 · 累计 $127.00
+
+【alice】3 个账号 · 今日 $53.00 · 请求 104
+· #1 big-01：今日 $50.00 · 请求 100 · 累计 $100.00
+· 另 2 个账号合计 $3.00 · 请求 4
+
+【bob】2 个账号 · 今日 $20.00 · 请求 5
+· #7 bob-01：今日 $20.00 · 请求 5 · 累计 $20.00
+· 另 1 个账号今日无用量
+
+小额/无用量：2 组 3 个账号，合计 $3.00 · 请求 11（xiaoc6、未分配）
+
+注：费用来自号池账单，约有 2 小时延迟；今日从 00:00 (UTC+8) 起，累计为近 90 天；汇率 7`, text)
+
+	var many []supplierUsageReportAccount
+	for i := range 12 {
+		many = append(many, supplierUsageReportAccount{ID: int64(i + 1), Name: "x", Owner: fmt.Sprintf("g%02d", i+1)})
+	}
+	text = supplierUsageReportText(supplierUsageReport{Label: "账号上号", At: at, FxRate: 7, MinUSD: 10, Accounts: many})
+	assert.Contains(t, text, "小额/无用量：12 组 12 个账号，合计 $0.00 · 请求 0（g01、g02、g03、g04、g05、g06、g07、g08、g09、g10等）")
+	assert.NotContains(t, text, "【")
+}
+
+func TestSupplierReportMinUSDSettings(t *testing.T) {
+	put := func(t *testing.T, body string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Set("role", minAdminRole)
+		c.Request = httptest.NewRequest(http.MethodPut, "/api/supplier-account/report", bytes.NewReader([]byte(body)))
+		c.Request.Header.Set("Content-Type", "application/json")
+		supplierReportLaneMain.handleSettingsSet(c)
+		return w
+	}
+
+	t.Run("negative is rejected and nothing saved", func(t *testing.T) {
+		mock := supplier2ConfigMock(t, nil)
+		w := put(t, `{"min_usd":-1}`)
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "非负数")
+		assert.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("saved per lane and read back", func(t *testing.T) {
+		mock := supplier2ConfigMock(t, nil)
+		mock.ExpectExec("INSERT INTO report_config").WithArgs(cfgSupplierReportMinUSD, "2.5", sqlmock.AnyArg()).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery("SELECT value FROM report_config").WithArgs(cfgSupplierReportMinUSD).
+			WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("2.5"))
+		w := put(t, `{"min_usd":2.5}`)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.Contains(t, w.Body.String(), `"min_usd":2.5`)
+		assert.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("unset defaults to 10", func(t *testing.T) {
+		supplier2ConfigMock(t, nil)
+		assert.InDelta(t, 10, supplier2ReportLane.minUSD(), 1e-9)
+	})
 }
