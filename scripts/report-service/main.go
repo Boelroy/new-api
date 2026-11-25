@@ -5354,6 +5354,15 @@ func main() {
 	supplier2API.PUT("/settings", handleSupplier2SettingsSet)
 	supplier2API.GET("/accounts", handleSupplier2Accounts)
 	supplier2API.POST("/metrics", handleSupplier2Metrics)
+	supplier2API.PUT("/accounts/:id/owner", handleSupplier2OwnerSet)
+	supplier2API.GET("/report", handleSupplier2ReportSettingsGet)
+	supplier2API.PUT("/report", handleSupplier2ReportSettingsSet)
+	supplier2API.POST("/report/push", handleSupplier2ReportPush)
+	// Any signed-in user reads the 账号 2 accounts assigned to them (outside
+	// the admin-or-supplier group; the handlers scope by owner and hide cost
+	// from non-admins).
+	api.GET("/supplier-account/secondary/mine", handleSupplier2MyAccounts)
+	api.POST("/supplier-account/secondary/mine/metrics", handleSupplier2MyMetrics)
 
 	// KHub (pd-maas) proxy — key upload + provider-scoped usage. Gated to
 	// supplier_02 (role=6) and admins; report-service holds ONE shared KHub
@@ -5733,6 +5742,7 @@ func main() {
 	supplierWeb.startRefresher()
 	ccmaxWeb.startRefresher()
 	startCCMaxReportLoop()
+	startSupplier2ReportLoop()
 	startTencentStatementPushLoop()
 	startTencentSourceCacheLoop()
 

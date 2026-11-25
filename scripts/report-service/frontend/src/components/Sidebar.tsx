@@ -18,7 +18,7 @@ const NAV_ORDER = [
   '/', '/profit', '/billing', '/cache', '/errors', '/model-health',
   '/keys', '/allkeys', '/tester', '/remote-channels', '/pool-upload',
   '/local-sync', '/local-remote-sync', '/model-cleanup', '/scheduling', '/notifications', '/users', '/settings', '/testing',
-  '/supplier-accounts',
+  '/supplier-accounts', '/supplier-accounts/mine',
 ]
 function navIndex(to: string): number {
   const i = NAV_ORDER.indexOf(to)
@@ -49,6 +49,7 @@ const NAV_COLORS: Record<string, string> = {
   '/settings': '#64748B',    // Settings — slate
   '/testing': '#14B8A6',     // Provider Testing — teal
   '/supplier-accounts': '#F97316', // Third-party Systems — orange
+  '/supplier-accounts/mine': '#F97316', // Third-party Systems (my 账号 2 accounts) — orange
 }
 function navColor(to: string): string {
   return NAV_COLORS[to] ?? '#687083'
@@ -291,6 +292,14 @@ const SUPPLIER_ACCOUNTS_ITEM: Item = {
   ),
 }
 
+// Read-only 「我的账号」 for a non-admin an admin assigned 账号 2 accounts to.
+// Appended in the render path (never in baselineItemsFor) only when
+// /secondary/mine returns accounts, so users without any see no entry.
+const SUPPLIER_MINE_ITEM: Item = {
+  to: '/supplier-accounts/mine', label: 'Third-party Systems', group: 'other',
+  icon: SUPPLIER_ACCOUNTS_ITEM.icon,
+}
+
 // Super-admin Settings hub (sidebar visibility + site-wide settings).
 // Appended in the render path, never in baselineItemsFor.
 const SETTINGS_ITEM: Item = {
@@ -356,10 +365,14 @@ type SidebarOverrides = Record<string, string[]>
 type SidebarBoot = { role: number; showProfit: boolean; showTesting: boolean; showSupplier: boolean; overrides: SidebarOverrides }
 let cachedBoot: SidebarBoot | null = null
 let inflightBoot: Promise<SidebarBoot> | null = null
+// Whether a non-admin owns any 账号 2 account; fetched apart from the boot so a
+// slow portal never holds up the rest of the nav.
+let cachedHasMine: boolean | null = null
 
 // Drop the boot cache so the next Sidebar mount refetches /api/auth/config.
 export function invalidateSidebarBoot() {
   cachedBoot = null
+  cachedHasMine = null
 }
 
 async function loadSidebarBoot(): Promise<SidebarBoot> {
@@ -393,6 +406,7 @@ export default function Sidebar({ open, onClose }: Props) {
   const [showSupplier, setShowSupplier] = useState(cachedBoot?.showSupplier ?? false)
   const [overrides, setOverrides] = useState<SidebarOverrides>(cachedBoot?.overrides ?? {})
   const [role, setRole] = useState<number | null>(cachedBoot ? cachedBoot.role : null)
+  const [hasMine, setHasMine] = useState(cachedHasMine ?? false)
 
   useEffect(() => {
     if (cachedBoot) return
@@ -406,6 +420,18 @@ export default function Sidebar({ open, onClose }: Props) {
     })()
   }, [])
 
+  useEffect(() => {
+    // Admins reach 账号 2 through its tab; supplier_01 keeps their own page.
+    if (role === null || role >= ROLE_ADMIN || role === ROLE_SUPPLIER_01 || cachedHasMine !== null) return
+    api
+      .supplier2Mine()
+      .then(r => {
+        cachedHasMine = (r.accounts || []).length > 0
+        setHasMine(cachedHasMine)
+      })
+      .catch(() => {})
+  }, [role])
+
   // Compute the role's items: baseline minus per-role hidden keys, plus the
   // (never-hideable) Settings entry for super admins.
   let items: Item[] = []
@@ -413,6 +439,7 @@ export default function Sidebar({ open, onClose }: Props) {
     const hidden = new Set(overrides[String(role)] ?? [])
     items = baselineItemsFor(role, { showProfit, showTesting, showSupplier }).filter(it => !hidden.has(it.to))
     if (role >= ROLE_SUPER_ADMIN) items = [...items, SETTINGS_ITEM]
+    if (hasMine && role < ROLE_ADMIN && role !== ROLE_SUPPLIER_01) items = [...items, SUPPLIER_MINE_ITEM]
   }
   const grouped = role !== null && role >= ROLE_ADMIN
 
