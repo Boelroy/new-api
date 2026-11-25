@@ -5,7 +5,7 @@ package main
 // upload
 //
 //  1. creates a fresh OpenRouter API key (one per CF key, usage isolated);
-//  2. registers the CF token as a BYOK credential (provider cloudflare) that
+//  2. registers the CF Account ID + token as a BYOK credential (provider cloudflare) that
 //     only that OR key may use, with is_byok_only so requests never fall back
 //     to OpenRouter's shared capacity (our OR credits);
 //  3. uploads the OR key to the 号池 under its openrouter provider.
@@ -127,10 +127,31 @@ type supplierOpenRouterBYOK struct {
 	BYOKID  string
 }
 
+// validCloudflareAccountID reports whether id looks like a Cloudflare Account
+// ID: 32 hexadecimal characters.
+func validCloudflareAccountID(id string) bool {
+	if len(id) != 32 {
+		return false
+	}
+	for _, r := range id {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", r) {
+			return false
+		}
+	}
+	return true
+}
+
 // provisionOpenRouterBYOK runs steps 1–2: a new OR key named name, then the CF
-// token as a BYOK credential locked to that key. If step 2 fails the OR key is
-// deleted before returning.
-func provisionOpenRouterBYOK(mgmtKey, cfKey, name string) (*supplierOpenRouterBYOK, error) {
+// account + token as a BYOK credential locked to that key. If step 2 fails the
+// OR key is deleted before returning.
+func provisionOpenRouterBYOK(mgmtKey, cfAccountID, cfKey, name string) (*supplierOpenRouterBYOK, error) {
+	// OpenRouter's cloudflare BYOK key is a JSON string (not a nested object)
+	// holding the account id and the API token.
+	cfCredential, err := json.Marshal(map[string]string{"accountId": cfAccountID, "apiToken": cfKey})
+	if err != nil {
+		return nil, err
+	}
+
 	keyReq := map[string]any{"name": name}
 	if limit := openRouterKeyLimit(); limit != nil {
 		keyReq["limit"] = *limit
@@ -156,7 +177,7 @@ func provisionOpenRouterBYOK(mgmtKey, cfKey, name string) (*supplierOpenRouterBY
 
 	status, body, err = openRouterCall(mgmtKey, http.MethodPost, "/byok", map[string]any{
 		"provider":               "cloudflare",
-		"key":                    cfKey,
+		"key":                    string(cfCredential),
 		"name":                   name,
 		"allowed_api_key_hashes": []string{out.KeyHash},
 		"is_byok_only":           true,

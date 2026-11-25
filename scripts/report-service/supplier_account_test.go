@@ -477,15 +477,17 @@ func TestSupplierCFOpenRouterCreate(t *testing.T) {
 	supplierAccountBaseURL, supplierAccountToken = "https://portal.invalid", "fixture-token"
 
 	const (
-		mgmtKey = "fixture-mgmt-key-0000"
-		cfKey   = "fixture-cloudflare-token-1234"
-		orKey   = "sk-or-v1-fixture-openrouter-key"
-		orHash  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-		byokID  = "11111111-2222-3333-4444-555555555555"
+		mgmtKey   = "fixture-mgmt-key-0000"
+		cfKey     = "fixture-cloudflare-token-1234"
+		cfAccount = "0123456789abcdef0123456789ABCDEF"
+		orKey     = "sk-or-v1-fixture-openrouter-key"
+		orHash    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		byokID    = "11111111-2222-3333-4444-555555555555"
 	)
 
 	for _, tc := range []struct {
 		name        string
+		cfAccountID string
 		mgmtKey     string
 		keyStatus   int // OpenRouter POST /keys
 		byokStatus  int // OpenRouter POST /byok
@@ -494,15 +496,18 @@ func TestSupplierCFOpenRouterCreate(t *testing.T) {
 		wantORCalls []string
 		wantErr     string
 	}{
-		{name: "success uploads the OR key", mgmtKey: mgmtKey, keyStatus: 201, byokStatus: 201, portalCode: 201, wantStatus: 200,
+		{cfAccountID: cfAccount, name: "success uploads the OR key", mgmtKey: mgmtKey, keyStatus: 201, byokStatus: 201, portalCode: 201, wantStatus: 200,
 			wantORCalls: []string{"POST /keys", "POST /byok", "PATCH /keys/" + orHash, "PATCH /byok/" + byokID}},
-		{name: "management key missing", wantStatus: 503, wantErr: "未配置 OpenRouter 管理 Key"},
-		{name: "OR key creation fails", mgmtKey: mgmtKey, keyStatus: 500, wantStatus: 422,
+		{cfAccountID: cfAccount, name: "management key missing", wantStatus: 503, wantErr: "未配置 OpenRouter 管理 Key"},
+		{cfAccountID: cfAccount, name: "OR key creation fails", mgmtKey: mgmtKey, keyStatus: 500, wantStatus: 422,
 			wantORCalls: []string{"POST /keys"}, wantErr: "创建 OpenRouter Key失败（HTTP 500）"},
-		{name: "BYOK fails deletes the OR key", mgmtKey: mgmtKey, keyStatus: 201, byokStatus: 400, wantStatus: 422,
+		{cfAccountID: cfAccount, name: "BYOK fails deletes the OR key", mgmtKey: mgmtKey, keyStatus: 201, byokStatus: 400, wantStatus: 422,
 			wantORCalls: []string{"POST /keys", "POST /byok", "DELETE /keys/" + orHash}, wantErr: "登记 Cloudflare BYOK失败（HTTP 400）"},
-		{name: "号池 rejection deletes BYOK and OR key", mgmtKey: mgmtKey, keyStatus: 201, byokStatus: 201, portalCode: 400, wantStatus: 422,
+		{cfAccountID: cfAccount, name: "号池 rejection deletes BYOK and OR key", mgmtKey: mgmtKey, keyStatus: 201, byokStatus: 201, portalCode: 400, wantStatus: 422,
 			wantORCalls: []string{"POST /keys", "POST /byok", "DELETE /byok/" + byokID, "DELETE /keys/" + orHash}},
+		{name: "Account ID missing is rejected before OpenRouter", mgmtKey: mgmtKey, wantStatus: 400, wantErr: "Cloudflare Account ID"},
+		{cfAccountID: "not-a-cloudflare-account-id-0000", name: "Account ID not 32 hex is rejected", mgmtKey: mgmtKey, wantStatus: 400,
+			wantErr: "32 位十六进制"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool, mock, err := sqlmock.New()
@@ -511,7 +516,7 @@ func TestSupplierCFOpenRouterCreate(t *testing.T) {
 			db = pool
 			mock.MatchExpectationsInOrder(false)
 			// Other config reads are left unstubbed and fall back to defaults.
-			if tc.mgmtKey != "" {
+			if tc.mgmtKey != "" && tc.wantStatus != 400 {
 				mock.ExpectQuery("SELECT value FROM report_config").WithArgs(cfgOpenRouterMgmtKey).
 					WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(tc.mgmtKey))
 			}
@@ -572,7 +577,7 @@ func TestSupplierCFOpenRouterCreate(t *testing.T) {
 
 			encoded, err := json.Marshal(gin.H{
 				"provider": supplierCFOpenRouterProvider, "model": "fixture-model", "api_key": cfKey,
-				"account_type": 0, "tpm": "1000", "rpm": "10",
+				"cf_account_id": " " + tc.cfAccountID + " ", "account_type": 0, "tpm": "1000", "rpm": "10",
 			})
 			require.NoError(t, err)
 			w := httptest.NewRecorder()
@@ -594,7 +599,11 @@ func TestSupplierCFOpenRouterCreate(t *testing.T) {
 			}
 			if byokBody != nil {
 				assert.Equal(t, "cloudflare", byokBody["provider"])
-				assert.Equal(t, cfKey, byokBody["key"])
+				key, ok := byokBody["key"].(string)
+				require.True(t, ok, "BYOK key must be a JSON string, got %T", byokBody["key"])
+				var credential map[string]string
+				require.NoError(t, json.Unmarshal([]byte(key), &credential))
+				assert.Equal(t, map[string]string{"accountId": cfAccount, "apiToken": cfKey}, credential)
 				assert.Equal(t, []any{orHash}, byokBody["allowed_api_key_hashes"])
 				assert.Equal(t, true, byokBody["is_byok_only"])
 				assert.Contains(t, byokBody["name"], "alice")
@@ -654,4 +663,201 @@ func TestSupplierAccountProxyURL(t *testing.T) {
 	} {
 		assert.False(t, validSupplierAccountProxyURL(address), "invalid proxy address %q", address)
 	}
+}
+
+// supplier2ConfigMock stubs one read of each given report_config key; other
+// keys read as unset.
+func supplier2ConfigMock(t *testing.T, values map[string]string) sqlmock.Sqlmock {
+	t.Helper()
+	previousDB := db
+	t.Cleanup(func() { db = previousDB })
+	pool, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pool.Close() })
+	db = pool
+	mock.MatchExpectationsInOrder(false)
+	for key, value := range values {
+		mock.ExpectQuery("SELECT value FROM report_config").WithArgs(key).
+			WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(value))
+	}
+	return mock
+}
+
+func TestSupplier2AdminOnly(t *testing.T) {
+	for _, tc := range []struct {
+		method  string
+		handler gin.HandlerFunc
+	}{
+		{http.MethodGet, handleSupplier2SettingsGet},
+		{http.MethodPut, handleSupplier2SettingsSet},
+		{http.MethodGet, handleSupplier2Accounts},
+		{http.MethodPost, handleSupplier2Metrics},
+	} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Set("role", minAdminRole-1)
+		c.Request = httptest.NewRequest(tc.method, "/api/supplier-account/secondary/x", bytes.NewReader([]byte(`{"password":"p"}`)))
+		tc.handler(c)
+		assert.Equal(t, http.StatusForbidden, w.Code)
+	}
+}
+
+func TestSupplier2Settings(t *testing.T) {
+	t.Run("GET never returns the password or token", func(t *testing.T) {
+		previousOrigin := supplierAccountBaseURL
+		t.Cleanup(func() { supplierAccountBaseURL = previousOrigin })
+		supplierAccountBaseURL = "https://portal.invalid"
+		supplier2ConfigMock(t, map[string]string{
+			cfgSupplier2Username: "second-user",
+			cfgSupplier2Password: "fixture-password-secret",
+			cfgSupplier2Token:    "fixture-openapi-token-7788",
+		})
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Set("role", minAdminRole)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/supplier-account/secondary/settings", nil)
+		handleSupplier2SettingsGet(c)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.NotContains(t, w.Body.String(), "fixture-password-secret")
+		assert.NotContains(t, w.Body.String(), "fixture-openapi-token")
+		var resp map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Equal(t, "账号 2", resp["label"])
+		assert.Equal(t, "second-user", resp["username"])
+		assert.Equal(t, true, resp["password_set"])
+		assert.Equal(t, true, resp["openapi_token_set"])
+		assert.Equal(t, "7788", resp["openapi_token_last4"])
+	})
+
+	t.Run("PUT with blank password and token keeps them", func(t *testing.T) {
+		mock := supplier2ConfigMock(t, nil)
+		mock.ExpectExec("INSERT INTO report_config").WithArgs(cfgSupplier2Username, "second-user", sqlmock.AnyArg()).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec("INSERT INTO report_config").WithArgs(cfgSupplier2Label, "备用号池", sqlmock.AnyArg()).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		supplier2Web.token, supplier2Web.expiry = "cached", time.Now().Add(time.Hour)
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Set("role", minAdminRole)
+		c.Request = httptest.NewRequest(http.MethodPut, "/api/supplier-account/secondary/settings",
+			bytes.NewReader([]byte(`{"label":" 备用号池 ","username":" second-user ","password":"","openapi_token":"  "}`)))
+		c.Request.Header.Set("Content-Type", "application/json")
+		handleSupplier2SettingsSet(c)
+
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.NoError(t, mock.ExpectationsWereMet())
+		assert.Empty(t, supplier2Web.token, "a settings change drops the cached login")
+	})
+}
+
+func TestSupplier2NotConfigured(t *testing.T) {
+	supplier2ConfigMock(t, nil)
+	for _, handler := range []gin.HandlerFunc{handleSupplier2Accounts, handleSupplier2Metrics} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Set("role", minAdminRole)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/supplier-account/secondary/x", nil)
+		handler(c)
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.JSONEq(t, `{"configured":false,"error":"账号 2 未配置：请先填写用户名和密码"}`, w.Body.String())
+	}
+}
+
+func TestSupplier2Metrics(t *testing.T) {
+	previousClient, previousOrigin := supplierHTTPClient, supplierAccountBaseURL
+	t.Cleanup(func() {
+		supplierHTTPClient, supplierAccountBaseURL = previousClient, previousOrigin
+		supplier2Web.invalidate()
+	})
+	supplierAccountBaseURL = "https://portal.invalid"
+	supplier2ConfigMock(t, map[string]string{
+		cfgSupplier2Username: "second-user",
+		cfgSupplier2Password: "fixture-password",
+		cfgSupplier2Token:    "fixture-second-token",
+	})
+	supplier2Web.token, supplier2Web.expiry = "web-token", time.Now().Add(time.Hour)
+	// An 8.5-day range ending in the past, in portal time.
+	day := time.Now().In(supplierPortalLoc).AddDate(0, 0, -10)
+	begin := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, supplierPortalLoc)
+	split, end := begin.AddDate(0, 0, 7), begin.Add(204*time.Hour)
+
+	var windows [][2]string
+	supplierHTTPClient = &http.Client{Transport: supplierPortalTransport(func(r *http.Request) (*http.Response, error) {
+		w := httptest.NewRecorder()
+		switch r.URL.Path {
+		case "/supplier-account/api/supplier/accounts":
+			assert.Equal(t, "Bearer web-token", r.Header.Get("Authorization"))
+			_, _ = w.WriteString(`{"list":[
+				{"id":11,"account_alias":"openai-co-01","provider":"openai","status":"active","api_key":"sk-full-secret-11112222"},
+				{"id":12,"account_alias":"claude-co-02","provider":"claude","status":"disabled","api_key":"sk-full-secret-33334444"}]}`)
+		case "/supplier-account/api/openapi/metrics/query":
+			assert.Equal(t, "Bearer fixture-second-token", r.Header.Get("Authorization"))
+			var q struct {
+				IDs   []int64 `json:"account_ids"`
+				Begin string  `json:"begin_time"`
+				End   string  `json:"end_time"`
+			}
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&q))
+			assert.Equal(t, []int64{11, 12}, q.IDs)
+			windows = append(windows, [2]string{q.Begin, q.End})
+			// The portal keys rows by its internal aid; alias maps them back.
+			_, _ = w.WriteString(`{"accounts":[{"aid":901,"account_alias":"openai-co-01","status":"ok","requests":10,
+				"success_rate":0.5,"prompt_tokens":100,"completion_tokens":20}]}`)
+		case "/supplier-account/api/openapi/bill/query":
+			var q map[string]any
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&q))
+			assert.Equal(t, begin.Format("2006-01-02"), q["start_ds"])
+			_, _ = w.WriteString(`{"list":[{"id":11,"cost":72}]}`)
+		default:
+			t.Errorf("unexpected portal call %s", r.URL.Path)
+		}
+		return w.Result(), nil
+	})}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("role", minAdminRole)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/supplier-account/secondary/metrics",
+		bytes.NewReader([]byte(`{"begin_time":"`+begin.Format(supplier2TimeLayout)+`","end_time":"`+end.Format(supplier2TimeLayout)+`"}`)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	handleSupplier2Metrics(c)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, [][2]string{
+		{begin.Format(supplier2TimeLayout), split.Format(supplier2TimeLayout)},
+		{split.Format(supplier2TimeLayout), end.Format(supplier2TimeLayout)},
+	}, windows, "an 8.5-day range is fetched in ≤7-day windows")
+	assert.NotContains(t, w.Body.String(), "sk-full-secret")
+	var resp struct {
+		Accounts []struct {
+			AID         int64    `json:"aid"`
+			Requests    int64    `json:"requests"`
+			SuccessRate float64  `json:"success_rate"`
+			Cost        *float64 `json:"cost"`
+			CostUSD     *float64 `json:"cost_usd"`
+		} `json:"accounts"`
+		Summary struct {
+			Total struct {
+				Accounts     int   `json:"accounts"`
+				Requests     int64 `json:"requests"`
+				PromptTokens int64 `json:"prompt_tokens"`
+			} `json:"total"`
+		} `json:"summary"`
+		TotalCostUSD float64 `json:"total_cost_usd"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Accounts, 1)
+	assert.Equal(t, int64(11), resp.Accounts[0].AID)
+	assert.Equal(t, int64(20), resp.Accounts[0].Requests)
+	assert.InDelta(t, 0.5, resp.Accounts[0].SuccessRate, 1e-9)
+	require.NotNil(t, resp.Accounts[0].Cost)
+	assert.InDelta(t, 72, *resp.Accounts[0].Cost, 1e-9)
+	require.NotNil(t, resp.Accounts[0].CostUSD)
+	assert.InDelta(t, 10, *resp.Accounts[0].CostUSD, 1e-9)
+	assert.Equal(t, 2, resp.Summary.Total.Accounts)
+	assert.Equal(t, int64(20), resp.Summary.Total.Requests)
+	assert.Equal(t, int64(200), resp.Summary.Total.PromptTokens)
+	assert.InDelta(t, 10, resp.TotalCostUSD, 1e-9)
 }

@@ -5347,6 +5347,13 @@ func main() {
 	// the group's admin-or-supplier gate to admin+).
 	supplierAPI.GET("/settings", requireRole(minAdminRole), handleSupplierSettingsGet)
 	supplierAPI.PUT("/settings", requireRole(minAdminRole), handleSupplierSettingsSet)
+	// 账号 2: a second portal login, read-only and admin-only (see
+	// supplier_account_secondary.go).
+	supplier2API := supplierAPI.Group("/secondary", requireRole(minAdminRole))
+	supplier2API.GET("/settings", handleSupplier2SettingsGet)
+	supplier2API.PUT("/settings", handleSupplier2SettingsSet)
+	supplier2API.GET("/accounts", handleSupplier2Accounts)
+	supplier2API.POST("/metrics", handleSupplier2Metrics)
 
 	// KHub (pd-maas) proxy — key upload + provider-scoped usage. Gated to
 	// supplier_02 (role=6) and admins; report-service holds ONE shared KHub
