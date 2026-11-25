@@ -1549,16 +1549,35 @@ func summarizeSupplierMetrics(accounts []supplierMetricAccount, metrics []suppli
 // ids with an OpenAPI token, re-keys rows onto the queried ids (via alias) and
 // fills cost from the offline bill. Shared by 账号上号 and CC Max.
 func supplierQueryMetrics(token string, ids []int64, aliasToRemoteID map[string]int64, beginTime, endTime string) ([]supplierMetric, error) {
-	// The portal caps a query at 100 account ids; batch and merge.
+	merged, err := supplierFetchRealtimeMetrics(token, ids, beginTime, endTime)
+	if err != nil {
+		return nil, err
+	}
+
+	// Re-key each row onto the queried remote_account_id (via the shared alias)
+	// so the client can join metrics to accounts, then mask the supplier name
+	// embedded in the alias.
+	for i := range merged {
+		if rid, ok := aliasToRemoteID[merged[i].AccountAlias]; ok {
+			merged[i].AID = rid
+		}
+		merged[i].AccountAlias = maskSupplierAlias(merged[i].AccountAlias)
+	}
+
+	supplierFillBillCost(token, ids, merged,
+		parsePortalCreatedAt(beginTime, time.Now().Unix()), parsePortalCreatedAt(endTime, time.Now().Unix()))
+	return merged, nil
+}
+
+// supplierFetchRealtimeMetrics runs /openapi/metrics/query for one time window,
+// batching the portal's 100-account-id cap. Rows come back keyed by the
+// portal's internal aid with the account alias; callers re-key them.
+func supplierFetchRealtimeMetrics(token string, ids []int64, beginTime, endTime string) ([]supplierMetric, error) {
 	merged := make([]supplierMetric, 0, len(ids))
 	for start := 0; start < len(ids); start += 100 {
-		end := start + 100
-		if end > len(ids) {
-			end = len(ids)
-		}
-		chunk := ids[start:end]
+		end := min(start+100, len(ids))
 		reqBytes, _ := json.Marshal(map[string]any{
-			"account_ids": chunk,
+			"account_ids": ids[start:end],
 			"begin_time":  beginTime,
 			"end_time":    endTime,
 			"aggregate":   false,
@@ -1578,41 +1597,30 @@ func supplierQueryMetrics(token string, ids []int64, aliasToRemoteID map[string]
 		}
 		merged = append(merged, parsed.Accounts...)
 	}
-
-	// Re-key each row onto the queried remote_account_id (via the shared alias)
-	// so the client can join metrics to accounts, then mask the supplier name
-	// embedded in the alias.
-	for i := range merged {
-		if rid, ok := aliasToRemoteID[merged[i].AccountAlias]; ok {
-			merged[i].AID = rid
-		}
-		merged[i].AccountAlias = maskSupplierAlias(merged[i].AccountAlias)
-	}
-
-	// Cost comes from the offline bill endpoint (the realtime `cost` is no longer
-	// reliable). Bill is date-granular in portal TZ and ~2h delayed, so it won't
-	// line up exactly with the realtime request window — this is the intended
-	// tradeoff. Bill rows are keyed by remote_account_id, matching merged[i].AID.
-	// A bill failure only drops cost (nil), leaving the realtime stats intact.
-	startDs := supplierBillStartDate(parsePortalCreatedAt(beginTime, time.Now().Unix()))
-	endDs := supplierBillDate(parsePortalCreatedAt(endTime, time.Now().Unix()))
-	if billCost, err := supplierBillCostRMB(token, ids, startDs, endDs); err != nil {
-		log.Printf("[supplier] bill cost query failed, cost omitted: %v", err)
-		for i := range merged {
-			merged[i].Cost = nil
-		}
-	} else {
-		for i := range merged {
-			if v, ok := billCost[merged[i].AID]; ok {
-				cost := v
-				merged[i].Cost = &cost
-			} else {
-				merged[i].Cost = nil
-			}
-		}
-	}
-
 	return merged, nil
+}
+
+// supplierFillBillCost sets each row's cost (RMB) from the offline bill over
+// the portal-TZ dates spanning [beginUnix, endUnix]. Rows must already be keyed
+// by portal account id.
+//
+// Cost comes from the offline bill endpoint (the realtime `cost` is no longer
+// reliable). Bill is date-granular in portal TZ and ~2h delayed, so it won't
+// line up exactly with the realtime request window — this is the intended
+// tradeoff. A bill failure only drops cost (nil), leaving the realtime stats
+// intact.
+func supplierFillBillCost(token string, ids []int64, rows []supplierMetric, beginUnix, endUnix int64) {
+	billCost, err := supplierBillCostRMB(token, ids, supplierBillStartDate(beginUnix), supplierBillDate(endUnix))
+	if err != nil {
+		log.Printf("[supplier] bill cost query failed, cost omitted: %v", err)
+	}
+	for i := range rows {
+		rows[i].Cost = nil
+		if v, ok := billCost[rows[i].AID]; ok && err == nil {
+			cost := v
+			rows[i].Cost = &cost
+		}
+	}
 }
 
 // ---- Admin settings: OpenAPI token + provider visibility ----
