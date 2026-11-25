@@ -2395,6 +2395,8 @@ export const api = {
     aws_region?: string
     aws_project_id?: string
     arns?: Record<string, string>
+    // CF OpenRouter only: Cloudflare Account ID, registered with the token as the BYOK key.
+    cf_account_id?: string
   }) =>
     request<{ id: number; alias: string; msg: string }>('/api/supplier-account/accounts', {
       method: 'POST',

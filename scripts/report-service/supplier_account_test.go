@@ -477,15 +477,17 @@ func TestSupplierCFOpenRouterCreate(t *testing.T) {
 	supplierAccountBaseURL, supplierAccountToken = "https://portal.invalid", "fixture-token"
 
 	const (
-		mgmtKey = "fixture-mgmt-key-0000"
-		cfKey   = "fixture-cloudflare-token-1234"
-		orKey   = "sk-or-v1-fixture-openrouter-key"
-		orHash  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-		byokID  = "11111111-2222-3333-4444-555555555555"
+		mgmtKey   = "fixture-mgmt-key-0000"
+		cfKey     = "fixture-cloudflare-token-1234"
+		cfAccount = "0123456789abcdef0123456789ABCDEF"
+		orKey     = "sk-or-v1-fixture-openrouter-key"
+		orHash    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		byokID    = "11111111-2222-3333-4444-555555555555"
 	)
 
 	for _, tc := range []struct {
 		name        string
+		cfAccountID string
 		mgmtKey     string
 		keyStatus   int // OpenRouter POST /keys
 		byokStatus  int // OpenRouter POST /byok
@@ -494,15 +496,18 @@ func TestSupplierCFOpenRouterCreate(t *testing.T) {
 		wantORCalls []string
 		wantErr     string
 	}{
-		{name: "success uploads the OR key", mgmtKey: mgmtKey, keyStatus: 201, byokStatus: 201, portalCode: 201, wantStatus: 200,
+		{cfAccountID: cfAccount, name: "success uploads the OR key", mgmtKey: mgmtKey, keyStatus: 201, byokStatus: 201, portalCode: 201, wantStatus: 200,
 			wantORCalls: []string{"POST /keys", "POST /byok", "PATCH /keys/" + orHash, "PATCH /byok/" + byokID}},
-		{name: "management key missing", wantStatus: 503, wantErr: "未配置 OpenRouter 管理 Key"},
-		{name: "OR key creation fails", mgmtKey: mgmtKey, keyStatus: 500, wantStatus: 422,
+		{cfAccountID: cfAccount, name: "management key missing", wantStatus: 503, wantErr: "未配置 OpenRouter 管理 Key"},
+		{cfAccountID: cfAccount, name: "OR key creation fails", mgmtKey: mgmtKey, keyStatus: 500, wantStatus: 422,
 			wantORCalls: []string{"POST /keys"}, wantErr: "创建 OpenRouter Key失败（HTTP 500）"},
-		{name: "BYOK fails deletes the OR key", mgmtKey: mgmtKey, keyStatus: 201, byokStatus: 400, wantStatus: 422,
+		{cfAccountID: cfAccount, name: "BYOK fails deletes the OR key", mgmtKey: mgmtKey, keyStatus: 201, byokStatus: 400, wantStatus: 422,
 			wantORCalls: []string{"POST /keys", "POST /byok", "DELETE /keys/" + orHash}, wantErr: "登记 Cloudflare BYOK失败（HTTP 400）"},
-		{name: "号池 rejection deletes BYOK and OR key", mgmtKey: mgmtKey, keyStatus: 201, byokStatus: 201, portalCode: 400, wantStatus: 422,
+		{cfAccountID: cfAccount, name: "号池 rejection deletes BYOK and OR key", mgmtKey: mgmtKey, keyStatus: 201, byokStatus: 201, portalCode: 400, wantStatus: 422,
 			wantORCalls: []string{"POST /keys", "POST /byok", "DELETE /byok/" + byokID, "DELETE /keys/" + orHash}},
+		{name: "Account ID missing is rejected before OpenRouter", mgmtKey: mgmtKey, wantStatus: 400, wantErr: "Cloudflare Account ID"},
+		{cfAccountID: "not-a-cloudflare-account-id-0000", name: "Account ID not 32 hex is rejected", mgmtKey: mgmtKey, wantStatus: 400,
+			wantErr: "32 位十六进制"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool, mock, err := sqlmock.New()
@@ -511,7 +516,7 @@ func TestSupplierCFOpenRouterCreate(t *testing.T) {
 			db = pool
 			mock.MatchExpectationsInOrder(false)
 			// Other config reads are left unstubbed and fall back to defaults.
-			if tc.mgmtKey != "" {
+			if tc.mgmtKey != "" && tc.wantStatus != 400 {
 				mock.ExpectQuery("SELECT value FROM report_config").WithArgs(cfgOpenRouterMgmtKey).
 					WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(tc.mgmtKey))
 			}
@@ -572,7 +577,7 @@ func TestSupplierCFOpenRouterCreate(t *testing.T) {
 
 			encoded, err := json.Marshal(gin.H{
 				"provider": supplierCFOpenRouterProvider, "model": "fixture-model", "api_key": cfKey,
-				"account_type": 0, "tpm": "1000", "rpm": "10",
+				"cf_account_id": " " + tc.cfAccountID + " ", "account_type": 0, "tpm": "1000", "rpm": "10",
 			})
 			require.NoError(t, err)
 			w := httptest.NewRecorder()
@@ -594,7 +599,11 @@ func TestSupplierCFOpenRouterCreate(t *testing.T) {
 			}
 			if byokBody != nil {
 				assert.Equal(t, "cloudflare", byokBody["provider"])
-				assert.Equal(t, cfKey, byokBody["key"])
+				key, ok := byokBody["key"].(string)
+				require.True(t, ok, "BYOK key must be a JSON string, got %T", byokBody["key"])
+				var credential map[string]string
+				require.NoError(t, json.Unmarshal([]byte(key), &credential))
+				assert.Equal(t, map[string]string{"accountId": cfAccount, "apiToken": cfKey}, credential)
 				assert.Equal(t, []any{orHash}, byokBody["allowed_api_key_hashes"])
 				assert.Equal(t, true, byokBody["is_byok_only"])
 				assert.Contains(t, byokBody["name"], "alice")

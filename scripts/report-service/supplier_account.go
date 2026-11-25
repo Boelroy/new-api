@@ -690,6 +690,9 @@ func handleSupplierAccountCreate(c *gin.Context) {
 		AWSRegion    string            `json:"aws_region"`
 		AWSProjectID string            `json:"aws_project_id"`
 		Arns         map[string]string `json:"arns"`
+		// CFAccountID is the Cloudflare Account ID of a CF OpenRouter upload,
+		// registered with the token as the BYOK credential (never sent to the 号池).
+		CFAccountID string `json:"cf_account_id"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
@@ -763,6 +766,11 @@ func handleSupplierAccountCreate(c *gin.Context) {
 	uploaded := false
 	secrets := []string{}
 	if body.Provider == supplierCFOpenRouterProvider {
+		cfAccountID := strings.TrimSpace(body.CFAccountID)
+		if !validCloudflareAccountID(cfAccountID) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "请填写正确的 Cloudflare Account ID（32 位十六进制）"})
+			return
+		}
 		mgmtKey := openRouterMgmtKey()
 		if mgmtKey == "" {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "未配置 OpenRouter 管理 Key，暂不能上号 CF OpenRouter，请联系管理员"})
@@ -770,7 +778,7 @@ func handleSupplierAccountCreate(c *gin.Context) {
 		}
 		uploader := cmp.Or(username, studio, "uid "+strconv.FormatInt(uid, 10))
 		var err error
-		if byok, err = provisionOpenRouterBYOK(mgmtKey, body.APIKey, openRouterKeyName(uploader, "")); err != nil {
+		if byok, err = provisionOpenRouterBYOK(mgmtKey, cfAccountID, body.APIKey, openRouterKeyName(uploader, "")); err != nil {
 			log.Printf("[supplier-account] create cf_openrouter/%s: %v", body.Model, err)
 			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			return

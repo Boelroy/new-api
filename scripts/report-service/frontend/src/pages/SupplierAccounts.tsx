@@ -176,6 +176,7 @@ export default function SupplierAccounts() {
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set())
   const [modelSearch, setModelSearch] = useState('')
   const [apiKey, setApiKey] = useState('')
+  const [cfAccountId, setCfAccountId] = useState('')
   const [proxyUrl, setProxyUrl] = useState('')
   const [proxyRegion, setProxyRegion] = useState('')
   // Azure model endpoint URL, shared by every selected model. resource_name is
@@ -445,6 +446,10 @@ export default function SupplierAccounts() {
     // One key per line = batch upload; every key shares the rest of the form.
     const keys = Array.from(new Set(apiKey.split(/\r?\n/).map(k => k.trim()).filter(Boolean)))
     if (keys.length === 0) return setSubmitErr('请填写 API Key')
+    const cfAccountIdVal = cfAccountId.trim()
+    if (isCFOpenRouter && !/^[0-9a-fA-F]{32}$/.test(cfAccountIdVal)) {
+      return setSubmitErr('请填写正确的 Cloudflare Account ID（32 位十六进制）')
+    }
     if (selectedProvider) {
       const shortIdx = keys.findIndex(k => k.length < selectedProvider.key_min_len)
       if (shortIdx >= 0) {
@@ -533,6 +538,7 @@ export default function SupplierAccounts() {
             aws_region: isAws ? awsRegionVal : undefined,
             aws_project_id: isAws ? awsProjectVal : undefined,
             arns: isAws ? arnMap : undefined,
+            cf_account_id: isCFOpenRouter ? cfAccountIdVal : undefined,
           })
           okLines.push(keys.length > 1 ? `${tail}：${res.msg}（别名：${res.alias}）` : `${res.msg}（别名：${res.alias}）`)
         } catch (e: any) {
@@ -1233,7 +1239,7 @@ export default function SupplierAccounts() {
           )}
           {isCFOpenRouter && (
             <p className="text-[11px] text-gray-500 -mt-2 mb-3">
-              填写 Cloudflare API Token，系统会自动新建一把 OpenRouter Key 绑定该 CF Key（BYOK）后上号；模型为号池 OpenRouter 的模型。
+              填写 Cloudflare Account ID 和 API Token，系统会自动新建一把 OpenRouter Key 绑定该 CF Key（BYOK）后上号；模型为号池 OpenRouter 的模型。
             </p>
           )}
 
@@ -1269,6 +1275,19 @@ export default function SupplierAccounts() {
             <div className="text-xs text-gray-400 border border-dashed border-gray-200 rounded-md px-2.5 py-3 mb-3">
               请先选择厂商
             </div>
+          )}
+
+          {isCFOpenRouter && (
+            <>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Cloudflare Account ID *</label>
+              <input
+                value={cfAccountId}
+                onChange={e => setCfAccountId(e.target.value)}
+                placeholder="32 位十六进制，Cloudflare 控制台右侧「Account ID」"
+                className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm mb-1 font-mono"
+              />
+              <p className="text-[11px] text-gray-500 mb-3">多行 Token 时共用这个 Account ID，Token 需属于该账号。</p>
+            </>
           )}
 
           <label className="block text-xs font-medium text-gray-600 mb-1">API Key *（每行一个，多行即批量提交，其余配置共用）</label>
