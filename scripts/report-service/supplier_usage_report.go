@@ -350,7 +350,7 @@ func (l *supplierReportLane) push(now time.Time, trigger string) supplierReportR
 // unreadable.
 func (l *supplierReportLane) minUSD() float64 {
 	v, err := strconv.ParseFloat(strings.TrimSpace(supplierConfigGet(l.cfgMinUSD)), 64)
-	if err != nil || v < 0 || math.IsInf(v, 0) {
+	if err != nil || v < 0 || math.IsInf(v, 0) || math.IsNaN(v) {
 		return supplierReportDefaultMinUSD
 	}
 	return v
