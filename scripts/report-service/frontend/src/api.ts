@@ -948,6 +948,45 @@ export type SupplierMetricSummary = {
   by_provider: (SupplierMetricTotals & { provider: string })[]
 }
 
+export type Supplier2Settings = {
+  label: string
+  username: string
+  password_set: boolean
+  openapi_token_set: boolean
+  openapi_token_last4: string
+  portal_configured: boolean
+  web_configured: boolean
+  openapi_configured: boolean
+  fx_rate: number
+}
+
+// One portal /supplier/accounts row of 账号 2; secrets are stripped server-side
+// (key_last8 only). Other portal fields pass through.
+export type Supplier2Account = {
+  id: number
+  account_alias?: string
+  provider?: string
+  model?: string
+  status?: string
+  account_type?: number
+  remark?: string
+  supplier_name?: string
+  created_at?: string
+  key_last8?: string
+  [field: string]: unknown
+}
+
+export type Supplier2Metrics = {
+  configured: boolean
+  error?: string
+  begin_time?: string
+  end_time?: string
+  accounts?: (SupplierMetric & { cost_usd: number | null })[]
+  summary?: SupplierMetricSummary
+  total_cost_usd?: number | null
+  fx_rate?: number
+}
+
 export type RemoteProfile = {
   id: number
   name: string
@@ -2425,6 +2464,30 @@ export const api = {
   // own uploads. Empty/omitted providers = all.
   supplierMetrics: (payload: { begin_time: string; end_time: string; uploaded_by?: number; providers?: string[] }) =>
     request<{ accounts: SupplierMetric[]; summary?: SupplierMetricSummary; fx_rate?: number }>('/api/supplier-account/metrics', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  // 账号 2 (second portal login): admin-only, read-only. Password / token are
+  // never returned; a blank one on save keeps the stored value.
+  supplier2Settings: () =>
+    request<Supplier2Settings>('/api/supplier-account/secondary/settings'),
+
+  setSupplier2Settings: (payload: { label?: string; username?: string; password?: string; openapi_token?: string; clear?: boolean }) =>
+    request<{ ok: boolean }>('/api/supplier-account/secondary/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+
+  supplier2Accounts: () =>
+    request<{ configured: boolean; error?: string; accounts?: Supplier2Account[] }>('/api/supplier-account/secondary/accounts'),
+
+  // begin/end in portal time (UTC+8), "YYYY-MM-DD HH:MM:SS"; >7 days is fetched
+  // in segments server-side. cost is RMB, cost_usd at supplier_fx_rate.
+  supplier2Metrics: (payload: { begin_time?: string; end_time?: string }) =>
+    request<Supplier2Metrics>('/api/supplier-account/secondary/metrics', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),

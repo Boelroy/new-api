@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import Layout from '../components/Layout'
 import SupplierRecordLog from '../components/SupplierRecordLog'
+import SupplierSecondary from '../components/SupplierSecondary'
 import SummaryCards from '../components/SummaryCards'
 import { withBase } from '../basePath'
 import {
@@ -95,12 +96,15 @@ function statusBadge(status: string) {
   return <span className={`inline-block px-2 py-0.5 rounded text-[11px] border ${tone}`}>{label}</span>
 }
 
-type Tab = 'accounts' | 'logs'
+type Tab = 'accounts' | 'logs' | 'secondary'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'accounts', label: '账号上号' },
   { id: 'logs', label: '使用日志' },
 ]
+
+// 账号 2 (second portal login) tab: admin-only, label set by the admin.
+const SECONDARY_TAB = 'secondary'
 
 // Bill cost arrives in RMB; the page shows USD like the per-account column.
 function fmtUsd(costRMB: number | null, fxRate: number): string {
@@ -163,8 +167,10 @@ function MetricTotalsTable({
 
 export default function SupplierAccounts() {
   const [params, setParams] = useSearchParams()
-  const tab = (TABS.some(t => t.id === params.get('tab')) ? params.get('tab') : 'accounts') as Tab
   const [isAdmin, setIsAdmin] = useState(false)
+  const [secondaryLabel, setSecondaryLabel] = useState('账号 2')
+  const visibleTabs = isAdmin ? [...TABS, { id: SECONDARY_TAB as Tab, label: secondaryLabel }] : TABS
+  const tab = (visibleTabs.some(t => t.id === params.get('tab')) ? params.get('tab') : 'accounts') as Tab
   const [openapiReady, setOpenapiReady] = useState(true)
   const [providers, setProviders] = useState<SupplierProvider[]>([])
   const [accountRegions, setAccountRegions] = useState<SupplierRegion[]>([])
@@ -351,6 +357,9 @@ export default function SupplierAccounts() {
         const me = await api.getAuthMe()
         admin = (me?.role ?? 0) >= ROLE_ADMIN
         setIsAdmin(admin)
+        if (admin) {
+          api.supplier2Settings().then(s => setSecondaryLabel(s.label || '账号 2')).catch(() => {})
+        }
       } catch {
         /* role defaults to non-admin */
       }
@@ -880,7 +889,7 @@ export default function SupplierAccounts() {
       subtitle={isAdmin ? '管理员视角：可见所有工作室的账号与用量' : '仅展示你上传的账号与实时用量'}
     >
       <div className="flex items-center gap-1 border-b border-gray-200 mb-4">
-        {TABS.map(t => (
+        {visibleTabs.map(t => (
           <button
             key={t.id}
             onClick={() => setParams({ tab: t.id }, { replace: true })}
@@ -896,6 +905,8 @@ export default function SupplierAccounts() {
       </div>
 
       {tab === 'logs' && <SupplierRecordLog isAdmin={isAdmin} />}
+
+      {tab === SECONDARY_TAB && isAdmin && <SupplierSecondary onLabel={l => setSecondaryLabel(l || '账号 2')} />}
 
       {tab === 'accounts' && (<>
       {bootErr && (
