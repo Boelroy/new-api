@@ -344,13 +344,14 @@ export function SupplierReportCard({
 }: {
   confirmLabel: string
   load: () => Promise<SupplierReportSettings>
-  save: (payload: { webhook?: string; clear_webhook?: boolean; hours?: string }) => Promise<SupplierReportSettings>
+  save: (payload: { webhook?: string; clear_webhook?: boolean; hours?: string; min_usd?: number }) => Promise<SupplierReportSettings>
   push: () => Promise<unknown>
 }) {
   const [report, setReport] = useState<SupplierReportSettings | null>(null)
   const [open, setOpen] = useState(false)
   const [webhook, setWebhook] = useState('')
   const [hours, setHours] = useState('')
+  const [minUsd, setMinUsd] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
@@ -358,6 +359,7 @@ export function SupplierReportCard({
   function apply(r: SupplierReportSettings) {
     setReport(r)
     setHours(r.hours)
+    setMinUsd(String(r.min_usd ?? ''))
   }
 
   useEffect(() => {
@@ -380,9 +382,13 @@ export function SupplierReportCard({
 
   const save = (clearWebhook = false) =>
     run(async () => {
+      const min = Number(minUsd.trim())
+      if (!clearWebhook && (minUsd.trim() === '' || !Number.isFinite(min) || min < 0)) {
+        throw new Error('最小播报金额须为非负数（0 = 不合并）')
+      }
       apply(
         await saveSettings(
-          clearWebhook ? { clear_webhook: true } : { webhook: webhook.trim() || undefined, hours: hours.trim() },
+          clearWebhook ? { clear_webhook: true } : { webhook: webhook.trim() || undefined, hours: hours.trim(), min_usd: min },
         ),
       )
       setWebhook('')
@@ -431,6 +437,17 @@ export function SupplierReportCard({
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">推送时间（UTC+8 整点，逗号分隔）</label>
               <input value={hours} onChange={e => setHours(e.target.value)} placeholder="如 10,22；留空只手动推送" className={inputCls} />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">最小播报金额（$）</label>
+              <input
+                value={minUsd}
+                onChange={e => setMinUsd(e.target.value)}
+                inputMode="decimal"
+                placeholder="10"
+                className={inputCls}
+              />
+              <p className="mt-1 text-[11px] text-gray-500">按今日费用：低于此金额的分组合并成末尾一行，组内低于此金额的账号合并成一行；0 = 不合并。</p>
             </div>
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-2">

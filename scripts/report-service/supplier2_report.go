@@ -17,6 +17,7 @@ const (
 	cfgSupplier2ReportHours    = "supplier2_report_hours"
 	cfgSupplier2ReportLast     = "supplier2_report_last"
 	cfgSupplier2ReportLastSlot = "supplier2_report_last_slot"
+	cfgSupplier2ReportMinUSD   = "supplier2_report_min_usd"
 )
 
 var supplier2ReportLane = &supplierReportLane{
@@ -25,6 +26,7 @@ var supplier2ReportLane = &supplierReportLane{
 	cfgHours:    cfgSupplier2ReportHours,
 	cfgLast:     cfgSupplier2ReportLast,
 	cfgLastSlot: cfgSupplier2ReportLastSlot,
+	cfgMinUSD:   cfgSupplier2ReportMinUSD,
 	build:       supplier2BuildReport,
 }
 

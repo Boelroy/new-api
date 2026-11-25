@@ -991,6 +991,8 @@ export type SupplierReportSettings = {
   webhook_set: boolean
   webhook_last4: string
   hours: string
+  // Today's-cost threshold (USD): smaller groups / accounts fold into one line.
+  min_usd: number
   last: SupplierReportResult | null
 }
 
@@ -2516,7 +2518,7 @@ export const api = {
   // clear_webhook turns it off.
   supplierReport: () => request<SupplierReportSettings>('/api/supplier-account/report'),
 
-  setSupplierReport: (payload: { webhook?: string; clear_webhook?: boolean; hours?: string }) =>
+  setSupplierReport: (payload: { webhook?: string; clear_webhook?: boolean; hours?: string; min_usd?: number }) =>
     request<SupplierReportSettings>('/api/supplier-account/report', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -2528,7 +2530,7 @@ export const api = {
 
   supplier2Report: () => request<SupplierReportSettings>('/api/supplier-account/secondary/report'),
 
-  setSupplier2Report: (payload: { webhook?: string; clear_webhook?: boolean; hours?: string }) =>
+  setSupplier2Report: (payload: { webhook?: string; clear_webhook?: boolean; hours?: string; min_usd?: number }) =>
     request<SupplierReportSettings>('/api/supplier-account/secondary/report', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -36,6 +37,12 @@ const (
 	cfgSupplierReportHours    = "supplier_report_hours"
 	cfgSupplierReportLast     = "supplier_report_last"
 	cfgSupplierReportLastSlot = "supplier_report_last_slot"
+	cfgSupplierReportMinUSD   = "supplier_report_min_usd"
+
+	// supplierReportDefaultMinUSD applies until an admin saves a threshold.
+	supplierReportDefaultMinUSD = 10.0
+	// supplierReportSmallNames caps the group names on the 小额 line.
+	supplierReportSmallNames = 10
 
 	supplierReportLabel      = "账号上号"
 	supplierReportUnassigned = "未分配"
@@ -53,9 +60,13 @@ type supplierUsageReportAccount struct {
 }
 
 type supplierUsageReport struct {
-	Label    string
-	At       time.Time // UTC+8
-	FxRate   float64
+	Label  string
+	At     time.Time // UTC+8
+	FxRate float64
+	// MinUSD is the today's-cost threshold (USD): groups below it fold into
+	// one 小额 line, accounts below it into one line per group. 0 = list
+	// every account that ran today.
+	MinUSD   float64
 	Accounts []supplierUsageReportAccount
 }
 
@@ -69,8 +80,9 @@ type supplierUsageReportGroup struct {
 
 // supplierUsageReportText renders a report: a title, the overall line, one
 // block per owner (most cost today first, 未分配 last) with a line per account
-// that ran today and one count line for the idle rest, then failed accounts
-// and the data notes.
+// at or above MinUSD today and one line for the rest, one line for the groups
+// below MinUSD, then failed accounts and the data notes. With MinUSD 0 every
+// group shows and every account that ran today gets its own line.
 func supplierUsageReportText(r supplierUsageReport) string {
 	fx := r.FxRate
 	if fx <= 0 {
@@ -123,7 +135,16 @@ func supplierUsageReportText(r supplierUsageReport) string {
 	fmt.Fprintf(&b, "[%s] 用量播报 %s (UTC+8)\n", r.Label, r.At.In(supplierPortalLoc).Format("2006-01-02 15:00"))
 	fmt.Fprintf(&b, "合计：%d 个账号 · 今日 %s · 请求 %d · 累计 %s\n",
 		len(total.Accounts), usd(total.TodayRMB), total.Requests, usd(totalRMB))
+	var small supplierUsageReportGroup
+	var smallNames []string
 	for _, g := range order {
+		if r.MinUSD > 0 && g.TodayRMB/fx < r.MinUSD {
+			small.Accounts = append(small.Accounts, g.Accounts...)
+			small.Requests += g.Requests
+			small.TodayRMB += g.TodayRMB
+			smallNames = append(smallNames, g.Owner)
+			continue
+		}
 		fmt.Fprintf(&b, "\n【%s】%d 个账号 · 今日 %s · 请求 %d\n", g.Owner, len(g.Accounts), usd(g.TodayRMB), g.Requests)
 		slices.SortStableFunc(g.Accounts, func(x, y supplierUsageReportAccount) int {
 			if c := cmp.Compare(y.TodayCostRMB, x.TodayCostRMB); c != 0 {
@@ -134,17 +155,32 @@ func supplierUsageReportText(r supplierUsageReport) string {
 			}
 			return cmp.Compare(x.ID, y.ID)
 		})
-		idle := 0
+		var rest supplierUsageReportGroup
 		for _, a := range g.Accounts {
-			if a.TodayRequests == 0 && a.TodayCostRMB == 0 {
-				idle++
+			ran := a.TodayRequests != 0 || a.TodayCostRMB != 0
+			if (r.MinUSD > 0 && a.TodayCostRMB/fx >= r.MinUSD) || (r.MinUSD <= 0 && ran) {
+				fmt.Fprintf(&b, "· #%d %s：今日 %s · 请求 %d · 累计 %s\n", a.ID, a.Name, usd(a.TodayCostRMB), a.TodayRequests, usd(a.TotalCostRMB))
 				continue
 			}
-			fmt.Fprintf(&b, "· #%d %s：今日 %s · 请求 %d · 累计 %s\n", a.ID, a.Name, usd(a.TodayCostRMB), a.TodayRequests, usd(a.TotalCostRMB))
+			rest.Accounts = append(rest.Accounts, a)
+			rest.Requests += a.TodayRequests
+			rest.TodayRMB += a.TodayCostRMB
 		}
-		if idle > 0 {
-			fmt.Fprintf(&b, "· 另 %d 个账号今日无用量\n", idle)
+		switch {
+		case len(rest.Accounts) == 0:
+		case rest.Requests == 0 && rest.TodayRMB == 0:
+			fmt.Fprintf(&b, "· 另 %d 个账号今日无用量\n", len(rest.Accounts))
+		default:
+			fmt.Fprintf(&b, "· 另 %d 个账号合计 %s · 请求 %d\n", len(rest.Accounts), usd(rest.TodayRMB), rest.Requests)
 		}
+	}
+	if len(smallNames) > 0 {
+		names := strings.Join(smallNames[:min(len(smallNames), supplierReportSmallNames)], "、")
+		if len(smallNames) > supplierReportSmallNames {
+			names += "等"
+		}
+		fmt.Fprintf(&b, "\n小额/无用量：%d 组 %d 个账号，合计 %s · 请求 %d（%s）\n",
+			len(smallNames), len(small.Accounts), usd(small.TodayRMB), small.Requests, names)
 	}
 	if len(failed) > 0 {
 		ids := make([]string, len(failed))
@@ -258,9 +294,9 @@ func supplierBuildReport(now time.Time) (supplierUsageReport, error) {
 // supplierReportLane is one login's report: its report_config keys and how
 // to build it.
 type supplierReportLane struct {
-	tag                                        string // log prefix
-	cfgWebhook, cfgHours, cfgLast, cfgLastSlot string
-	build                                      func(now time.Time) (supplierUsageReport, error)
+	tag                                                   string // log prefix
+	cfgWebhook, cfgHours, cfgLast, cfgLastSlot, cfgMinUSD string
+	build                                                 func(now time.Time) (supplierUsageReport, error)
 }
 
 var supplierReportLaneMain = &supplierReportLane{
@@ -269,6 +305,7 @@ var supplierReportLaneMain = &supplierReportLane{
 	cfgHours:    cfgSupplierReportHours,
 	cfgLast:     cfgSupplierReportLast,
 	cfgLastSlot: cfgSupplierReportLastSlot,
+	cfgMinUSD:   cfgSupplierReportMinUSD,
 	build:       supplierBuildReport,
 }
 
@@ -291,6 +328,7 @@ func (l *supplierReportLane) push(now time.Time, trigger string) supplierReportR
 	} else if r, err := l.build(now); err != nil {
 		res.Error = err.Error()
 	} else {
+		r.MinUSD = l.minUSD()
 		res.Text = supplierUsageReportText(r)
 		if err := postLark(webhook, res.Text); err != nil {
 			res.Error = err.Error()
@@ -306,6 +344,16 @@ func (l *supplierReportLane) push(now time.Time, trigger string) supplierReportR
 		log.Printf("[%s] save last result: %v", l.tag, err)
 	}
 	return res
+}
+
+// minUSD is the configured threshold (USD, ≥ 0); the default when unset or
+// unreadable.
+func (l *supplierReportLane) minUSD() float64 {
+	v, err := strconv.ParseFloat(strings.TrimSpace(supplierConfigGet(l.cfgMinUSD)), 64)
+	if err != nil || v < 0 || math.IsInf(v, 0) {
+		return supplierReportDefaultMinUSD
+	}
+	return v
 }
 
 // hours is the configured push hours (UTC+8); empty = manual only.
@@ -379,21 +427,23 @@ func (l *supplierReportLane) handleSettingsGet(c *gin.Context) {
 		"webhook_set":   webhook != "",
 		"webhook_last4": last4,
 		"hours":         supplierConfigGet(l.cfgHours),
+		"min_usd":       l.minUSD(),
 		"last":          last,
 	})
 }
 
 // handleSettingsSet saves the webhook (blank keeps the stored one,
 // clear_webhook turns the push off) and the UTC+8 push hours (empty = manual
-// only). Omitted fields stay unchanged.
+// only) and min_usd (≥ 0, 0 = no folding). Omitted fields stay unchanged.
 func (l *supplierReportLane) handleSettingsSet(c *gin.Context) {
 	if !requireReportAdmin(c) {
 		return
 	}
 	var body struct {
-		Webhook      *string `json:"webhook"`
-		ClearWebhook bool    `json:"clear_webhook"`
-		Hours        *string `json:"hours"`
+		Webhook      *string  `json:"webhook"`
+		ClearWebhook bool     `json:"clear_webhook"`
+		Hours        *string  `json:"hours"`
+		MinUSD       *float64 `json:"min_usd"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
@@ -405,6 +455,10 @@ func (l *supplierReportLane) handleSettingsSet(c *gin.Context) {
 	}
 	if webhook != "" && !strings.HasPrefix(webhook, "https://") {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Webhook 须以 https:// 开头"})
+		return
+	}
+	if body.MinUSD != nil && (*body.MinUSD < 0 || math.IsInf(*body.MinUSD, 0)) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "最小播报金额须为非负数"})
 		return
 	}
 	var hours []string
@@ -427,6 +481,12 @@ func (l *supplierReportLane) handleSettingsSet(c *gin.Context) {
 	}
 	if hours != nil {
 		if err := supplierConfigSet(l.cfgHours, strings.Join(hours, ",")); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if body.MinUSD != nil {
+		if err := supplierConfigSet(l.cfgMinUSD, strconv.FormatFloat(*body.MinUSD, 'f', -1, 64)); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
